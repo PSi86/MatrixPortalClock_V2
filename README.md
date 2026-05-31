@@ -6,6 +6,9 @@ Fetches the time from the local network via NTP and offers a WiFi configuration 
 ## Features
 
 - Animated digits (fly-in, direction configurable per digit)
+- **Automatic orientation** via the onboard accelerometer: the display rotates in
+  90° steps to match how the panel is held (both portrait and both landscape
+  positions)
 - NTP time synchronization with a daily resync
 - **User button** (UP button, D2):
   - **1x short** -> toggle daylight saving / standard time (+/- 1 h)
@@ -50,7 +53,27 @@ colors and animation speed preview live** while you change them in the web UI.
 The timezone is chosen from a dropdown. "Save & Restart" stores everything to
 flash and reboots.
 
+## Orientation
+
+The onboard **LIS3DH** accelerometer detects gravity and rotates the display in
+90° increments so the clock is always upright:
+
+- **Portrait** (32 wide × 64 tall): the hours/minutes/seconds digits are stacked
+  vertically (the original layout).
+- **Landscape** (64 wide × 32 tall): hours and minutes are shown large
+  side-by-side with the seconds small underneath. The per-digit fly-in
+  directions are swapped (`from right ↔ from top`, `from left ↔ from bottom`) so
+  digits enter across the short edge instead of sweeping the full width.
+
+The rotation switches with a short debounce and ignores near-45° tilts to avoid
+flicker. If the accelerometer is not found, the clock stays in portrait.
+
+If the panel rotates the "wrong" way for your build, adjust the single
+`ORIENT_MAP` table in `updateOrientation()` — the serial console prints the raw
+axes and the chosen rotation to make calibration easy.
+
 ## Libraries
 
 Resolved automatically by PlatformIO from `platformio.ini`:
-Adafruit Protomatter, Adafruit GFX, WiFiNINA, Time (TimeLib), FlashStorage_SAMD.
+Adafruit Protomatter, Adafruit GFX, WiFiNINA, Time (TimeLib), FlashStorage_SAMD,
+Adafruit LIS3DH, Adafruit Unified Sensor.

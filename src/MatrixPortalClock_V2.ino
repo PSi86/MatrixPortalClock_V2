@@ -35,6 +35,10 @@ Todo Concept:
 #include <FlashStorage_SAMD.h> // Library Manager: "FlashStorage_SAMD" (Khoi Hoang) - stores settings in flash
 #include <math.h>              // powf() for perceptual brightness fade
 
+#include <Wire.h>              // I2C for the onboard accelerometer
+#include <Adafruit_Sensor.h>  // sensor base class
+#include <Adafruit_LIS3DH.h>  // MatrixPortal M4 onboard LIS3DH accelerometer
+
 /* ----------------------------------------------------------------------
 The RGB matrix must be wired to VERY SPECIFIC pins, different for each
 microcontroller board. This first section sets that up for a number of
@@ -136,12 +140,36 @@ bool animTrigger[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [
 bool animShow[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
 int8_t animXPos[6] = {0, 0, 0, 0, 0, 0};
 int8_t animYPos[6] = {0, 0, 0, 0, 0, 0};
+// Active (runtime) layout - populated by applyOrientation() from the source tables
+// below. Initialised to the portrait layout so the very first frames look right
+// even before the first accelerometer read.
 int8_t timeXPos[6] = {0, 13, 6, 19, 6, 17};
-int8_t timeYPos[6] = {16, 16, 35, 35, 50, 50}; 
+int8_t timeYPos[6] = {16, 16, 35, 35, 50, 50};
 int8_t animXTarget[6] = {0, 13, 6, 19, 6, 17}; // Todo check 25 abd 31 value
 int8_t animYTarget[6] = {16, 16, 35, 35, 50, 50};
 int8_t animDirection[6] = {3, 1, 3, 1, 1, 1}; //0=from the top, 1=from the right, 2=from the bottom, 3=from the left
-//int8_t animDirection[6] = {0, 0, 0, 0, 0, 0}; //0=from the top, 1=from the right, 2=from the bottom, 3=from the left
+
+// Source layouts. The active tables above are copied from one of these whenever
+// the orientation changes. Portrait = 32 wide x 64 tall (digits stacked
+// HH/MM/SS); landscape = 64 wide x 32 tall (HH/MM large side by side, SS small
+// centered below). Landscape positions are starting values, easy to fine-tune.
+const int8_t portXTarget[6] = {0, 13, 6, 19, 6, 17};
+const int8_t portYTarget[6] = {16, 16, 35, 35, 50, 50};
+const int8_t landXTarget[6] = {2, 15, 36, 49, 22, 32}; // HH | MM big, SS small
+const int8_t landYTarget[6] = {18, 18, 18, 18, 30, 30}; // HH/MM baseline 18, SS baseline 30
+
+// Orientation handling -----------------------------------------------------
+// The MatrixPortal M4 has an onboard LIS3DH accelerometer. We read gravity and
+// rotate the display in 90 deg steps so the clock always shows the right way up.
+Adafruit_LIS3DH lis = Adafruit_LIS3DH();
+bool    accelOK = false;          // true once the LIS3DH was found on I2C
+uint8_t curRotation = 3;          // active matrix rotation (3 = portrait, today's default)
+bool    isLandscape = false;      // true for rotations 0/2 (64 wide x 32 tall)
+unsigned long orientLast = 0;     // last accelerometer poll (throttle)
+uint8_t orientCandidate = 3;      // debounce: rotation the sensor currently favours
+uint8_t orientStable = 0;         // consecutive polls the candidate has held
+const unsigned long ORIENT_POLL_MS = 250; // ~4 Hz orientation polling
+const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persist
 
 int16_t bgBrightness, counter;
 uint16_t color, colorBg;
@@ -184,6 +212,18 @@ void setup(void) {
 
   pinMode(USER_BUTTON_PIN, INPUT_PULLUP);
   loadSettings(); // pulls brightness/colors/animation/tz from flash (or writes defaults)
+
+  // Onboard LIS3DH accelerometer -> automatic screen rotation. If it is not
+  // found the clock simply stays in the default portrait orientation.
+  Wire.begin();
+  accelOK = lis.begin(0x19); // MatrixPortal M4 onboard I2C address
+  if (accelOK) {
+    lis.setRange(LIS3DH_RANGE_2_G);
+    lis.setDataRate(LIS3DH_DATARATE_10_HZ);
+    Serial.println("LIS3DH found");
+  } else {
+    Serial.println("LIS3DH not found - orientation locked to portrait");
+  }
 
   // Initialize matrix...
   matrix.setRotation(3); //1
@@ -266,6 +306,7 @@ void loop(void) {
   }
 
   timeSync_WifiLib();
+  updateOrientation(); // rotate the display to match how the panel is held
   drawClock();
 }
 
@@ -273,7 +314,7 @@ void loop(void) {
 void apShowClock() {
   if (apClientConnected) { return; }
   apClientConnected = true;
-  matrix.setRotation(3); // back to portrait for the clock preview
+  applyOrientation(3); // back to portrait (with matching layout) for the clock preview
 }
 
 // While the AP is up: show connection info until a client appears, then switch to
@@ -288,6 +329,88 @@ void updateApDisplay() {
   } else if (millisNow - apClockLast >= 40) { // ~25 fps preview; leaves time for the web server
     apClockLast = millisNow;
     drawClock();
+  }
+}
+
+/* ======================================================================
+   Orientation: read the accelerometer and rotate the display in 90 deg steps
+   ====================================================================== */
+
+// Map a portrait fly-in direction to its landscape equivalent so digits enter
+// across the short (32 px) edge instead of sweeping the full 64 px width:
+// from right(1) <-> from top(0), from left(3) <-> from bottom(2).
+uint8_t swapDir(uint8_t d) {
+  switch (d) {
+    case 0: return 1;
+    case 1: return 0;
+    case 2: return 3;
+    case 3: return 2;
+  }
+  return d;
+}
+
+// Switch the matrix to rotation "rot" and load the matching digit layout into
+// the active runtime tables. Rotations 1/3 are portrait (32x64, stacked
+// HH/MM/SS); rotations 0/2 are landscape (64x32, HH/MM large + SS small below)
+// with the fly-in directions swapped. Digits snap to the new layout so an
+// in-flight animation never streaks across the screen during a rotation.
+void applyOrientation(uint8_t rot) {
+  matrix.setRotation(rot);
+  curRotation = rot;
+  isLandscape = (rot == 0 || rot == 2);
+
+  for (uint8_t i = 0; i < 6; i++) {
+    if (isLandscape) {
+      animXTarget[i]   = landXTarget[i];
+      animYTarget[i]   = landYTarget[i];
+      animDirection[i] = (int8_t)swapDir(settings.dir[i]);
+    } else {
+      animXTarget[i]   = portXTarget[i];
+      animYTarget[i]   = portYTarget[i];
+      animDirection[i] = (int8_t)settings.dir[i];
+    }
+    timeXPos[i] = animXTarget[i];
+    timeYPos[i] = animYTarget[i];
+    animXPos[i] = animXTarget[i];
+    animYPos[i] = animYTarget[i];
+    animShow[i] = false;
+  }
+}
+
+// Poll the LIS3DH (throttled) and rotate the display to match how the panel is
+// physically held. Gravity in the panel plane picks one of four quadrants; a
+// debounce + diagonal-rejection keeps the orientation from flickering near 45.
+void updateOrientation() {
+  if (!accelOK) { return; }                                  // no sensor -> stay portrait
+  if (millisNow - orientLast < ORIENT_POLL_MS) { return; }   // throttle to ~4 Hz
+  orientLast = millisNow;
+
+  lis.read();
+  int16_t ax = lis.x, ay = lis.y;
+  int16_t axAbs = abs(ax), ayAbs = abs(ay);
+  int16_t hi = max(axAbs, ayAbs), lo = min(axAbs, ayAbs);
+  // Too flat (panel face up/down) or too close to the diagonal -> undecided.
+  // Require the dominant axis to be >25% larger: hi > lo*1.25  <=>  hi*4 > lo*5.
+  if (hi < 2000 || (int32_t)hi * 4 <= (int32_t)lo * 5) { return; }
+
+  // Gravity quadrant: 0=+X down, 1=-X down, 2=+Y down, 3=-Y down.
+  uint8_t quadrant;
+  if (axAbs > ayAbs) { quadrant = (ax > 0) ? 0 : 1; }
+  else               { quadrant = (ay > 0) ? 2 : 3; }
+  // quadrant -> matrix rotation. Re-order these four values if the panel turns
+  // the wrong way during on-device calibration (this is the one line to tweak).
+  static const uint8_t ORIENT_MAP[4] = {3, 1, 0, 2};
+  uint8_t wanted = ORIENT_MAP[quadrant];
+
+  // Debounce: a new orientation must persist a few polls before we commit.
+  if (wanted == orientCandidate) { if (orientStable < 255) { orientStable++; } }
+  else { orientCandidate = wanted; orientStable = 1; }
+
+  if (wanted != curRotation && orientStable >= ORIENT_DEBOUNCE) {
+    Serial.print("Orientation x="); Serial.print(ax);
+    Serial.print(" y="); Serial.print(ay);
+    Serial.print(" -> rotation "); Serial.println(wanted);
+    applyOrientation(wanted);
   }
 }
 
@@ -322,15 +445,20 @@ void drawClock(void) {
       animShow[i] = false;
     }    
     if(animTrigger[i] == true) {
-      animShow[i] = true; 
+      animShow[i] = true;
+      // Fly-in start offset = the off-screen edge the digit comes from. The
+      // vertical offset shrinks in landscape (short edge is 32 px) so the
+      // swapped top/bottom entries don't sit far off-screen for many frames.
+      int8_t vOff = isLandscape ? 32 : 50;
+      int8_t hOff = 32;
       //animDirection: 0=from the top, 1=from the right, 2=from the bottom, 3=from the left
-      if(animDirection[i]==0)       { animXPos[i] = animXTarget[i]; 
-                                      animYPos[i] = animYTarget[i]-50; }
-      else if(animDirection[i]==1)  { animXPos[i] = animXTarget[i]+32;
+      if(animDirection[i]==0)       { animXPos[i] = animXTarget[i];
+                                      animYPos[i] = animYTarget[i]-vOff; }
+      else if(animDirection[i]==1)  { animXPos[i] = animXTarget[i]+hOff;
                                       animYPos[i] = animYTarget[i]; }
       else if(animDirection[i]==2)  { animXPos[i] = animXTarget[i];
-                                      animYPos[i] = animYTarget[i]+50; }
-      else if(animDirection[i]==3)  { animXPos[i] = animXTarget[i]-32; 
+                                      animYPos[i] = animYTarget[i]+vOff; }
+      else if(animDirection[i]==3)  { animXPos[i] = animXTarget[i]-hOff;
                                       animYPos[i] = animYTarget[i]; }
     }
     else if (animShow[i]) { 
