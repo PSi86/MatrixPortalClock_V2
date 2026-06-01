@@ -175,7 +175,7 @@ int8_t animDirection[6] = {3, 1, 3, 1, 1, 1}; //0=from the top, 1=from the right
 const int8_t portXTarget[6] = {0, 13, 6, 19, 6, 17};
 const int8_t portYTarget[6] = {16, 16, 35, 35, 50, 50};
 const int8_t landXTarget[6] = {2, 15, 36, 49, 22, 32}; // HH | MM big, SS small
-const int8_t landYTarget[6] = {18, 18, 18, 18, 30, 30}; // HH/MM baseline 18, SS baseline 30
+const int8_t landYTarget[6] = {17, 17, 17, 17, 30, 30}; // HH/MM baseline 17, SS baseline 30
 
 // Orientation handling -----------------------------------------------------
 // The MatrixPortal M4 has an onboard LIS3DH accelerometer. We read gravity and
