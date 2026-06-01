@@ -947,6 +947,15 @@ uint16_t scaledColor(uint8_t r, uint8_t g, uint8_t b) {
   return scaledColorB(r, g, b, effectiveBrightness);
 }
 
+// Like scaledColor(), but never dims below a floor that keeps the color visible
+// on the 5-bit panel. Used for the critical AP info (SSID/PW/IP) so it can never
+// quantise to black even when the clock brightness is very low.
+const uint8_t AP_INFO_MIN_BRIGHT = 24;
+uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b) {
+  uint8_t br = (effectiveBrightness < AP_INFO_MIN_BRIGHT) ? AP_INFO_MIN_BRIGHT : effectiveBrightness;
+  return scaledColorB(r, g, b, br);
+}
+
 // Effective brightness of the fly-in (trail) color. The eye is roughly gamma
 // 2.2, so a *linear* fraction of the master brightness hardly looks dimmer
 // (50% linear ~= 73% perceived). We dim perceptually instead - using the same
@@ -1098,11 +1107,12 @@ void drawAPScreen() {
   curRotation = r;
   matrix.fillScreen(0);
   matrix.setFont(&Picopixel);
-  matrix.setTextColor(scaledColor(0, 0, 200));
+  // Full-saturation colors + a brightness floor so SSID/PW/IP never go black.
+  matrix.setTextColor(scaledColorVisible(0, 0, 255));
   matrix.setCursor(0, 8);  matrix.print("SSID "); matrix.print(AP_SSID);
-  matrix.setTextColor(scaledColor(0, 140, 0));
+  matrix.setTextColor(scaledColorVisible(0, 220, 0));
   matrix.setCursor(0, 18); matrix.print("PW "); matrix.print(AP_PASS);
-  matrix.setTextColor(scaledColor(150, 70, 0));
+  matrix.setTextColor(scaledColorVisible(255, 140, 0));
   matrix.setCursor(0, 28); matrix.print("IP "); matrix.print(apIP);
   matrix.show();
 }
