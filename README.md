@@ -9,13 +9,17 @@ Fetches the time from the local network via NTP and offers a WiFi configuration 
 - **Automatic orientation** via the onboard accelerometer: the display rotates in
   90° steps to match how the panel is held (both portrait and both landscape
   positions)
+- **Automatic brightness** via an external BH1750 light sensor: a configurable
+  lux → brightness mapping dims the clock once per second to match the room
 - NTP time synchronization with a daily resync
 - **User button** (UP button, D2):
   - **1x short** -> toggle daylight saving / standard time (+/- 1 h)
+  - **2x short** -> toggle auto-brightness (light sensor) on/off
   - **3x short** -> open the WiFi access point for settings
   - **hold long** -> fade brightness cyclically (perceptually linear); releasing saves it
 - **AP config page** (`http://192.168.4.1`): timezone, daylight saving, brightness, animation speed, colors, fly-in directions, NTP sync time
-- All settings are stored in flash (survive a restart)
+- All settings are stored in flash at a fixed address outside the program image,
+  so they survive a restart **and a firmware re-upload**
 - Recovery: hold the user button during boot -> the AP opens even without the home WiFi
 
 ## Setup
@@ -53,6 +57,11 @@ colors and animation speed preview live** while you change them in the web UI.
 The timezone is chosen from a dropdown. "Save & Restart" stores everything to
 flash and reboots.
 
+The color palette offers **full colors only** for both the digit and the fly-in
+color. The fly-in (trail) is automatically dimmed relative to the master
+brightness — floored so it never quantises to black — so the fly-in animation
+stays visible at any brightness instead of disappearing.
+
 ## Orientation
 
 The onboard **LIS3DH** accelerometer detects gravity and rotates the display in
@@ -72,8 +81,30 @@ If the panel rotates the "wrong" way for your build, adjust the single
 `ORIENT_MAP` table in `updateOrientation()` — the serial console prints the raw
 axes and the chosen rotation to make calibration easy.
 
+## Auto-brightness (BH1750 light sensor)
+
+An external **BH1750** ambient light sensor (I²C, default address `0x23`) can
+drive the master brightness automatically. Wire it to the board's I²C pins
+(SDA/SCL, 3V3, GND — e.g. via the STEMMA QT connector); it shares the bus with
+the accelerometer.
+
+The sensor is read **once per second** and mapped to a brightness through a
+configurable linear curve, set on the AP config page:
+
+| Field | Meaning |
+|---|---|
+| Dark lux | at/below this lux → **Min brightness** |
+| Bright lux | at/above this lux → **Max brightness** |
+| Min / Max brightness | brightness endpoints (0–255) |
+
+Between the two lux values the brightness is interpolated linearly and clamped.
+Toggle the feature with the **Auto brightness** checkbox or a **double click** of
+the user button. When it is off (or the sensor is missing) the manual brightness
+slider / long-press fade apply as before. The serial console logs the measured
+lux and resulting brightness.
+
 ## Libraries
 
 Resolved automatically by PlatformIO from `platformio.ini`:
 Adafruit Protomatter, Adafruit GFX, WiFiNINA, Time (TimeLib), FlashStorage_SAMD,
-Adafruit LIS3DH, Adafruit Unified Sensor.
+Adafruit LIS3DH, Adafruit Unified Sensor, BH1750.

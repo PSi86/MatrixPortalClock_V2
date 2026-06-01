@@ -35,9 +35,10 @@ Todo Concept:
 #include <FlashStorage_SAMD.h> // Library Manager: "FlashStorage_SAMD" (Khoi Hoang) - stores settings in flash
 #include <math.h>              // powf() for perceptual brightness fade
 
-#include <Wire.h>              // I2C for the onboard accelerometer
+#include <Wire.h>              // I2C for the onboard accelerometer + light sensor
 #include <Adafruit_Sensor.h>  // sensor base class
 #include <Adafruit_LIS3DH.h>  // MatrixPortal M4 onboard LIS3DH accelerometer
+#include <BH1750.h>            // external BH1750 ambient light sensor (auto-brightness)
 
 /* ----------------------------------------------------------------------
 The RGB matrix must be wired to VERY SPECIFIC pins, different for each
@@ -63,7 +64,7 @@ Adafruit_Protomatter matrix(
 
 // Persistent settings ------------------------------------------------------
 // Configurable at runtime via the WLAN AP config page and the user button.
-#define SETTINGS_MAGIC 0xC10D   // bump this to force a reset to defaults after a struct change
+#define SETTINGS_MAGIC 0xC10E   // bump this to force a reset to defaults after a struct change
 
 struct Settings {
   uint16_t magic;        // validity marker
@@ -76,6 +77,11 @@ struct Settings {
   uint8_t  dir[6];       // fly-in direction per digit (0=top,1=right,2=bottom,3=left)
   uint8_t  syncHour;     // hour of daily NTP resync
   uint8_t  syncMinute;   // minute of daily NTP resync
+  uint8_t  autoBright;   // 1 = BH1750 light sensor controls the master brightness
+  uint16_t luxDark;      // lux at/below which brightness = brightMin
+  uint16_t luxBright;    // lux at/above which brightness = brightMax
+  uint8_t  brightMin;    // master brightness in darkness
+  uint8_t  brightMax;    // master brightness in bright light
 };
 
 // Factory defaults reproduce the original hard-coded behaviour.
@@ -86,13 +92,26 @@ const Settings DEFAULTS = {
   255,             // full brightness
   12,              // original loopTime
   0, 0, 255,       // blue digits
-  10, 10, 10,      // dim grey trail
+  255, 255, 255,   // fly-in trail (full color; dimmed relative to brightness at render time)
   {3, 1, 3, 1, 1, 1},
-  5, 11            // original sync time 05:11
+  5, 11,           // original sync time 05:11
+  1,               // auto-brightness on (BH1750)
+  1, 400,          // lux mapping range: 1 lux (dark) .. 400 lux (bright)
+  8, 255           // brightness 8 (dark) .. 255 (bright)
 };
 
 Settings settings;
-FlashStorage(clockStore, Settings); // flash-backed storage for "settings"
+
+// Persist the settings at a FIXED address in the top 8 KB block of the 512 KB
+// flash, OUTSIDE the program image. The upload (bossac --write --offset 0x4000,
+// no --erase) only touches the sketch region from 0x4000 up, so this block is
+// left untouched and the settings survive a firmware upload. The FlashStorage()
+// macro instead reserves a zero-initialised array *inside* the image, which
+// every upload overwrites - that was why all settings reset to defaults (e.g.
+// brightness back to 255) on each flash.
+#define SETTINGS_FLASH_ADDR 0x0007E000UL   // last 8 KB erase block of the 512 KB flash
+static_assert(sizeof(Settings) <= 8192, "Settings must fit in one 8 KB flash block");
+FlashStorageClass<Settings> clockStore((const void *)SETTINGS_FLASH_ADDR);
 
 // User button / interaction ------------------------------------------------
 // MatrixPortal M4: UP button = D2, DOWN button = D3, both active LOW (INPUT_PULLUP).
@@ -171,6 +190,13 @@ uint8_t orientStable = 0;         // consecutive polls the candidate has held
 const unsigned long ORIENT_POLL_MS = 250; // ~4 Hz orientation polling
 const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persist
 
+// Ambient light sensor -----------------------------------------------------
+// External BH1750 on I2C (default address 0x23). When enabled it drives the
+// master brightness once per second via a configurable lux->brightness mapping.
+BH1750        lightMeter;        // default I2C address 0x23
+bool          luxOK = false;     // true once the BH1750 was found on I2C
+unsigned long luxLast = 0;       // last light-sensor poll (1 Hz throttle)
+
 int16_t bgBrightness, counter;
 uint16_t color, colorBg;
 bool directionSwitch;
@@ -181,7 +207,7 @@ uint8_t hourNow, minuteNow, secondNow;
 long timeOffset;
 bool secondTrigger, minuteTrigger, hourTrigger;
 uint8_t syncTimeHour = 5, syncTimeMinute = 11;
-unsigned long millisNow, deltaT, lastSync, ntpTimeout = 10000;
+unsigned long millisNow, deltaT, lastSync, ntpTimeout = 3000; // ms between NTP fetch retries while unsynced
 
 bool ntpRequestActive, ntpSuccess, wifiEnabled;
 bool firstSync=true;
@@ -223,6 +249,15 @@ void setup(void) {
     Serial.println("LIS3DH found");
   } else {
     Serial.println("LIS3DH not found - orientation locked to portrait");
+  }
+
+  // External BH1750 ambient light sensor -> auto-brightness. Shares the I2C bus
+  // (default address 0x23). If absent, brightness stays under manual control.
+  luxOK = lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
+  if (luxOK) {
+    Serial.println("BH1750 found");
+  } else {
+    Serial.println("BH1750 not found - auto-brightness disabled");
   }
 
   // Initialize matrix...
@@ -306,7 +341,8 @@ void loop(void) {
   }
 
   timeSync_WifiLib();
-  updateOrientation(); // rotate the display to match how the panel is held
+  updateOrientation();     // rotate the display to match how the panel is held
+  updateAutoBrightness();  // light sensor -> master brightness (once per second)
   drawClock();
 }
 
@@ -414,6 +450,40 @@ void updateOrientation() {
   }
 }
 
+/* ======================================================================
+   Auto-brightness: BH1750 ambient light sensor drives the master brightness
+   ====================================================================== */
+
+// Map a measured lux value to a master brightness using the configurable
+// endpoints: lux <= luxDark -> brightMin, lux >= luxBright -> brightMax, linear
+// in between. Tune luxDark/luxBright/brightMin/brightMax on the AP config page.
+uint8_t mapLuxToBrightness(float lux) {
+  uint16_t dl = settings.luxDark;
+  uint16_t bl = settings.luxBright;
+  int16_t  bmin = settings.brightMin;
+  int16_t  bmax = settings.brightMax;
+  if (bl <= dl) { bl = dl + 1; }                   // guard against an empty/inverted range
+  if (lux <= dl) { return (uint8_t)bmin; }
+  if (lux >= bl) { return (uint8_t)bmax; }
+  float t = (lux - (float)dl) / (float)(bl - dl);  // 0..1 across the configured lux range
+  int v = bmin + (int)lroundf(t * (bmax - bmin));
+  return (uint8_t)constrain(v, 0, 255);
+}
+
+// Poll the light sensor once per second and set the master brightness from it.
+// Skipped when the sensor is absent or auto-brightness is off; a read error
+// leaves the current brightness untouched. Called from the normal loop path so
+// it is paused during AP config (where the brightness slider previews manually).
+void updateAutoBrightness() {
+  if (!luxOK || !settings.autoBright) { return; }
+  if (millisNow - luxLast < 1000) { return; }      // once per second
+  luxLast = millisNow;
+  float lux = lightMeter.readLightLevel();
+  if (lux < 0) { return; }                         // -1/-2 = not ready / read error
+  settings.brightness = mapLuxToBrightness(lux);
+  Serial.print("Lux "); Serial.print(lux); Serial.print(" -> brightness "); Serial.println(settings.brightness);
+}
+
 // Renders one frame of the animated clock using the current settings.
 void drawClock(void) {
 /*
@@ -481,7 +551,7 @@ void drawClock(void) {
     if(animShow[i] == true) {
       //Serial.println(animXPos[i]);
       if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i]) { matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB)); } // digit has arrived
-      else { matrix.setTextColor(scaledColor(settings.trailR, settings.trailG, settings.trailB)); } // dim trail while flying in
+      else { matrix.setTextColor(scaledColorB(settings.trailR, settings.trailG, settings.trailB, trailBrightness())); } // dim trail (relative to brightness, never black)
       matrix.setCursor(animXPos[i], animYPos[i]);
       matrix.print(animStr[i]);
     }
@@ -616,13 +686,16 @@ void timeSync_WifiLib() {
       printWifiStatus();
       Serial.println("Renew NTP sync");
     }
-    if(ntpRequestActive && millisNow-lastSync > ntpTimeout) { // NTP Request Timed out
-      ntpRequestActive=false; // Timeout time reched  - trigger new try
-      Serial.println("NTP Retry");
-    }
   }
 
-
+  // Retry a failed NTP fetch promptly, independent of the minute change above.
+  // WiFi.getTime() returns 0 until the NINA's SNTP completes (a few seconds after
+  // associating); gating this retry behind minuteTrigger left the clock stuck at
+  // 1970 (00:00:00) for up to a minute after boot even though WiFi was connected.
+  if(ntpRequestActive && millisNow-lastSync > ntpTimeout) { // time to try getTime() again
+    ntpRequestActive=false; // allow a fresh getTime() on the next iteration
+    Serial.println("NTP Retry");
+  }
 }
 
 /*
@@ -779,16 +852,52 @@ void applySettings() {
   for (uint8_t i = 0; i < 6; i++) { animDirection[i] = (int8_t)settings.dir[i]; }
   syncTimeHour   = settings.syncHour;
   syncTimeMinute = settings.syncMinute;
+  // Enforce full colors (the trail is dimmed at render time, not by the swatch).
+  normalizeColorFull(settings.digitR, settings.digitG, settings.digitB);
+  normalizeColorFull(settings.trailR, settings.trailG, settings.trailB);
 }
 
-// Scale a base color by the master brightness (0..255). Linear scaling keeps the
+// Scale a base color by an explicit brightness (0..255). Linear scaling keeps the
 // hue (channel ratios); rounding (+127) instead of truncating reduces drift when
 // dimming into the low end of the panel's 5-bit range.
+uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright) {
+  return matrix.color565(((uint16_t)r * bright + 127) / 255,
+                         ((uint16_t)g * bright + 127) / 255,
+                         ((uint16_t)b * bright + 127) / 255);
+}
+
+// Scale a base color by the master brightness.
 uint16_t scaledColor(uint8_t r, uint8_t g, uint8_t b) {
-  uint16_t br = settings.brightness;
-  return matrix.color565(((uint16_t)r * br + 127) / 255,
-                         ((uint16_t)g * br + 127) / 255,
-                         ((uint16_t)b * br + 127) / 255);
+  return scaledColorB(r, g, b, settings.brightness);
+}
+
+// Effective brightness of the fly-in (trail) color. The eye is roughly gamma
+// 2.2, so a *linear* fraction of the master brightness hardly looks dimmer
+// (50% linear ~= 73% perceived). We dim perceptually instead - using the same
+// FADE_GAMMA as the brightness fade - so the trail actually appears at
+// TRAIL_BRIGHTNESS_PCT of the digit's perceived brightness. Floored so it never
+// quantises to black, capped so it is never brighter than the digit.
+const uint8_t TRAIL_BRIGHTNESS_PCT = 50; // trail = ~50% of the digit's PERCEIVED brightness
+const uint8_t TRAIL_BRIGHTNESS_MIN = 24; // absolute floor that keeps the LEDs on
+uint8_t trailBrightness() {
+  float frac = TRAIL_BRIGHTNESS_PCT / 100.0f;                 // desired perceived fraction
+  uint16_t t = (uint16_t)lroundf(powf(frac, FADE_GAMMA) * settings.brightness); // -> linear light
+  if (t < TRAIL_BRIGHTNESS_MIN) { t = TRAIL_BRIGHTNESS_MIN; }
+  if (t > settings.brightness)  { t = settings.brightness; } // very low master brightness -> match the digit
+  return (uint8_t)t;
+}
+
+// Snap a color to a "full" color (largest channel = 255) while preserving hue.
+// Digit and fly-in colors are always full colors now; the trail's dimness comes
+// from trailBrightness(), not from a pre-dimmed swatch. This also migrates any
+// previously-stored dark/grey color so old settings never render near-black.
+void normalizeColorFull(uint8_t &r, uint8_t &g, uint8_t &b) {
+  uint8_t m = max(r, max(g, b));
+  if (m == 0)   { r = g = b = 255; return; } // black -> white
+  if (m == 255) { return; }                  // already a full color
+  r = (uint16_t)r * 255 / m;
+  g = (uint16_t)g * 255 / m;
+  b = (uint16_t)b * 255 / m;
 }
 
 /* ======================================================================
@@ -829,8 +938,8 @@ void handleButton() {
   // Evaluate the click sequence once no further click arrived within the window.
   if (!pressed && btnClicks > 0 && (t - btnLastRelease >= BTN_MULTI_GAP_MS)) {
     if (btnClicks >= 3)      { startAPMode(); }
+    else if (btnClicks == 2) { toggleAutoBright(); }
     else if (btnClicks == 1) { toggleDST(); }
-    // 2 clicks: reserved / ignored
     btnClicks = 0;
   }
 
@@ -843,6 +952,14 @@ void toggleDST() {
   else              { adjustTime( 3600); settings.dst = 1; }
   saveSettings();
   Serial.print("DST toggled -> "); Serial.println(settings.dst);
+}
+
+// Double click: toggle the BH1750 auto-brightness on/off (lets you fall back to
+// the manual brightness / long-press fade without opening the config page).
+void toggleAutoBright() {
+  settings.autoBright = settings.autoBright ? 0 : 1;
+  saveSettings();
+  Serial.print("Auto-brightness -> "); Serial.println(settings.autoBright);
 }
 
 /* ======================================================================
@@ -1069,6 +1186,11 @@ void applyParams(const String &q) {
   }
   v = getParam(q, "synch");  if (v.length()) { settings.syncHour   = constrain(v.toInt(), 0, 23); }
   v = getParam(q, "syncm");  if (v.length()) { settings.syncMinute = constrain(v.toInt(), 0, 59); }
+  settings.autoBright = (getParam(q, "autob") == "on") ? 1 : 0; // checkbox: absent when unchecked
+  v = getParam(q, "luxd");   if (v.length()) { settings.luxDark   = (uint16_t)constrain(v.toInt(), 0, 65535); }
+  v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
+  v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
+  v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
 }
 
 // Live preview (/live): apply only the visual settings to RAM, no flash write,
@@ -1158,11 +1280,24 @@ void sendFormPage(WiFiClient &c) {
   if (settings.dst) { c.print("checked"); }
   c.println("> Daylight saving (+1h)</label>");
 
-  // Brightness (live)
+  // Brightness (live) - manual master brightness / fallback when auto is off
   c.print("<label>Brightness (0-255)</label>");
   c.print("<input type=range min=0 max=255 name=bright value="); c.print(settings.brightness);
   c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\">");
   c.print("<output>"); c.print(settings.brightness); c.println("</output>");
+
+  // Auto-brightness (BH1750 light sensor). Maps lux -> brightness; when on, the
+  // sensor overrides the manual brightness above once per second.
+  c.print("<label><input type=checkbox name=autob ");
+  if (settings.autoBright) { c.print("checked"); }
+  c.println("> Auto brightness (light sensor)</label>");
+  c.println("<div class=row>");
+  c.print("<div><label>Dark lux</label><input type=number min=0 max=65535 name=luxd value="); c.print(settings.luxDark); c.println("></div>");
+  c.print("<div><label>Bright lux</label><input type=number min=1 max=65535 name=luxb value="); c.print(settings.luxBright); c.println("></div>");
+  c.println("</div><div class=row>");
+  c.print("<div><label>Min brightness</label><input type=number min=0 max=255 name=brmin value="); c.print(settings.brightMin); c.println("></div>");
+  c.print("<div><label>Max brightness</label><input type=number min=0 max=255 name=brmax value="); c.print(settings.brightMax); c.println("></div>");
+  c.println("</div>");
 
   // Animation speed (live)
   c.print("<label>Animation speed (frame time ms, small=fast)</label>");
@@ -1172,7 +1307,7 @@ void sendFormPage(WiFiClient &c) {
   // Colors (live) - palette swatches instead of a free color picker (5-bit panel)
   c.print("<label>Digit color</label><div class=swbox id=swDigit></div><input type=hidden name=digit value=");
   c.print(toHex(settings.digitR, settings.digitG, settings.digitB)); c.println(">");
-  c.print("<label>Fly-in color (trail)</label><div class=swbox id=swTrail></div><input type=hidden name=trail value=");
+  c.print("<label>Fly-in color (auto-dimmed)</label><div class=swbox id=swTrail></div><input type=hidden name=trail value=");
   c.print(toHex(settings.trailR, settings.trailG, settings.trailB)); c.println(">");
 
   // Animation directions
@@ -1203,8 +1338,9 @@ void sendFormPage(WiFiClient &c) {
   c.println("function _send(){var g=function(n){return document.getElementsByName(n)[0].value;};");
   c.println("fetch('/live?bright='+g('bright')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))).catch(function(){});}");
   c.println("function live(){clearTimeout(_p);var n=Date.now();if(n-_t>=120){_t=n;_send();}else{_p=setTimeout(function(){_t=Date.now();_send();},120);}}");
-  // Palette swatches: 16 colors that stay clean across the dimming range (incl. neutrals for a subtle trail).
-  c.println("var PAL=['#ffffff','#808080','#303030','#ff0000','#ff8000','#ffff00','#80ff00','#00ff00','#00ff80','#00ffff','#00c0ff','#0000ff','#8000ff','#ff00ff','#ff0080','#ff80c0'];");
+  // Palette swatches: full colors only. The pre-dimmed greys are gone; the fly-in
+  // color now dims itself relative to the master brightness so it never goes black.
+  c.println("var PAL=['#ffffff','#ff0000','#ff8000','#ffff00','#80ff00','#00ff00','#00ff80','#00ffff','#00c0ff','#0000ff','#8000ff','#ff00ff','#ff0080','#ff80c0'];");
   c.println("function mkSw(boxId,name){var box=document.getElementById(boxId),cur=document.getElementsByName(name)[0].value.toLowerCase();");
   c.println("PAL.forEach(function(col){var s=document.createElement('span');s.className='sw'+(col===cur?' sel':'');s.style.background=col;");
   c.println("s.onclick=function(){document.getElementsByName(name)[0].value=col;box.querySelectorAll('.sw').forEach(function(e){e.className='sw';});s.className='sw sel';live();};");
