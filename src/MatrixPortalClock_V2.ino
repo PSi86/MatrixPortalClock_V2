@@ -89,7 +89,7 @@ const Settings DEFAULTS = {
   SETTINGS_MAGIC,
   3600,            // CET base (UTC+1)
   1,               // DST on -> effective UTC+2 like the original adjustTime(7200)
-  255,             // full brightness
+  128,             // neutral: absolute half in manual mode, sensor-as-is trim in auto mode
   12,              // original loopTime
   0, 0, 255,       // blue digits
   255, 255, 255,   // fly-in trail (full color; dimmed relative to brightness at render time)
@@ -196,6 +196,25 @@ const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persis
 BH1750        lightMeter;        // default I2C address 0x23
 bool          luxOK = false;     // true once the BH1750 was found on I2C
 unsigned long luxLast = 0;       // last light-sensor poll (1 Hz throttle)
+// Moving average of the lux readings so brightness changes are gentle, not
+// jumpy. At the 1 Hz sampling rate a 10-sample window equals a 10 s average.
+const uint8_t LUX_AVG_SAMPLES = 10;
+float         luxHistory[LUX_AVG_SAMPLES]; // ring buffer of recent lux readings
+uint8_t       luxHistIdx = 0;              // next write position
+uint8_t       luxHistCount = 0;            // valid samples (ramps up to LUX_AVG_SAMPLES)
+// The averaged lux sets a brightness TARGET once per second; the actual master
+// brightness is eased toward it every frame so the change is a continuous fade
+// instead of a once-per-second step.
+uint8_t       autoBrightTarget = 255;       // brightness the fade is easing toward
+float         autoBrightCurrent = 255.0f;   // smoothly-eased brightness (sub-unit precision)
+bool          autoBrightInit = false;       // false until the fade has been seeded
+unsigned long autoFadeLastMs = 0;           // last fade step time
+const float   AUTOBRIGHT_TAU_MS = 1200.0f;  // fade time constant (~1.2 s to 63% of a step)
+// Brightness actually used for rendering. In manual mode it equals
+// settings.brightness (absolute). In auto-brightness mode settings.brightness is
+// instead a RELATIVE trim around the sensor value (128 = neutral, 0 = much
+// darker, 255 = much brighter) and effectiveBrightness is the result.
+uint8_t       effectiveBrightness = 128;
 
 int16_t bgBrightness, counter;
 uint16_t color, colorBg;
@@ -470,18 +489,46 @@ uint8_t mapLuxToBrightness(float lux) {
   return (uint8_t)constrain(v, 0, 255);
 }
 
-// Poll the light sensor once per second and set the master brightness from it.
-// Skipped when the sensor is absent or auto-brightness is off; a read error
-// leaves the current brightness untouched. Called from the normal loop path so
-// it is paused during AP config (where the brightness slider previews manually).
+// Poll the light sensor once per second and set the master brightness from a
+// 10 s moving average of the readings, so the brightness eases gently instead of
+// jumping with every measurement. Skipped when the sensor is absent or
+// auto-brightness is off; a read error leaves the current brightness untouched.
+// Called from the normal loop path so it is paused during AP config (where the
+// brightness slider previews manually).
 void updateAutoBrightness() {
-  if (!luxOK || !settings.autoBright) { return; }
-  if (millisNow - luxLast < 1000) { return; }      // once per second
-  luxLast = millisNow;
-  float lux = lightMeter.readLightLevel();
-  if (lux < 0) { return; }                         // -1/-2 = not ready / read error
-  settings.brightness = mapLuxToBrightness(lux);
-  Serial.print("Lux "); Serial.print(lux); Serial.print(" -> brightness "); Serial.println(settings.brightness);
+  if (!luxOK || !settings.autoBright) { autoBrightInit = false; return; } // manual mode: drawClock uses settings.brightness
+
+  // Once per second: read the sensor, update the 10 s moving average, and derive
+  // the sensor brightness from the averaged lux.
+  if (millisNow - luxLast >= 1000) {
+    luxLast = millisNow;
+    float lux = lightMeter.readLightLevel();
+    if (lux >= 0) {                                  // ignore -1/-2 not-ready/read errors
+      luxHistory[luxHistIdx] = lux;
+      luxHistIdx = (luxHistIdx + 1) % LUX_AVG_SAMPLES;
+      if (luxHistCount < LUX_AVG_SAMPLES) { luxHistCount++; }
+      float sum = 0;
+      for (uint8_t i = 0; i < luxHistCount; i++) { sum += luxHistory[i]; }
+      float avgLux = sum / luxHistCount;
+      autoBrightTarget = mapLuxToBrightness(avgLux);
+      Serial.print("Lux "); Serial.print(lux); Serial.print(" avg "); Serial.print(avgLux);
+      Serial.print(" -> sensor "); Serial.println(autoBrightTarget);
+    }
+  }
+
+  // Apply the user's relative trim around the sensor value: settings.brightness
+  // 128 = neutral (sensor as-is), 0 = much darker, 255 = ~2x brighter (clamped).
+  float relTarget = (float)autoBrightTarget * (float)settings.brightness / 128.0f;
+  if (relTarget > 255.0f) { relTarget = 255.0f; }
+
+  // Every frame: ease toward the trimmed target (frame-rate independent
+  // exponential approach) so it fades smoothly instead of stepping once per
+  // second. Seeded on first activation to avoid a jump.
+  if (!autoBrightInit) { autoBrightCurrent = relTarget; autoBrightInit = true; autoFadeLastMs = millisNow; }
+  float dt = (float)(millisNow - autoFadeLastMs);
+  autoFadeLastMs = millisNow;
+  autoBrightCurrent += (relTarget - autoBrightCurrent) * (1.0f - expf(-dt / AUTOBRIGHT_TAU_MS));
+  effectiveBrightness = (uint8_t)lroundf(autoBrightCurrent);
 }
 
 // Renders one frame of the animated clock using the current settings.
@@ -493,6 +540,11 @@ void drawClock(void) {
   textX = (matrix.width()-w)/2-1;
   textY = matrix.height() / 2 - (y1 + h / 2); // Center text vertically
 */
+
+  // When auto-brightness is not actively driving the display (manual mode, no
+  // sensor, or AP config preview), the rendered brightness is just the absolute
+  // setting. In active auto mode updateAutoBrightness() already set it this frame.
+  if (apActive || !luxOK || !settings.autoBright) { effectiveBrightness = settings.brightness; }
 
   if (secondTrigger) {
     sprintf(timeStr, "%02d%02d%02d", hour(sysTime), minute(sysTime), second(sysTime));
@@ -565,7 +617,7 @@ void drawClock(void) {
   }
 
   // NTP sync status pixel (green = synced, red = not), dimmed with the master brightness but kept visible
-  uint8_t statusInt = settings.brightness / 6;
+  uint8_t statusInt = effectiveBrightness / 6;
   if (statusInt < 3) { statusInt = 3; }
   if (ntpSuccess) { color=matrix.color565(0, statusInt, 0); }
   else { color=matrix.color565(statusInt, 0, 0); }
@@ -866,9 +918,9 @@ uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright) {
                          ((uint16_t)b * bright + 127) / 255);
 }
 
-// Scale a base color by the master brightness.
+// Scale a base color by the brightness actually used for rendering.
 uint16_t scaledColor(uint8_t r, uint8_t g, uint8_t b) {
-  return scaledColorB(r, g, b, settings.brightness);
+  return scaledColorB(r, g, b, effectiveBrightness);
 }
 
 // Effective brightness of the fly-in (trail) color. The eye is roughly gamma
@@ -881,9 +933,9 @@ const uint8_t TRAIL_BRIGHTNESS_PCT = 50; // trail = ~50% of the digit's PERCEIVE
 const uint8_t TRAIL_BRIGHTNESS_MIN = 24; // absolute floor that keeps the LEDs on
 uint8_t trailBrightness() {
   float frac = TRAIL_BRIGHTNESS_PCT / 100.0f;                 // desired perceived fraction
-  uint16_t t = (uint16_t)lroundf(powf(frac, FADE_GAMMA) * settings.brightness); // -> linear light
+  uint16_t t = (uint16_t)lroundf(powf(frac, FADE_GAMMA) * effectiveBrightness); // -> linear light
   if (t < TRAIL_BRIGHTNESS_MIN) { t = TRAIL_BRIGHTNESS_MIN; }
-  if (t > settings.brightness)  { t = settings.brightness; } // very low master brightness -> match the digit
+  if (t > effectiveBrightness)  { t = effectiveBrightness; } // very low brightness -> match the digit
   return (uint8_t)t;
 }
 
@@ -1280,8 +1332,9 @@ void sendFormPage(WiFiClient &c) {
   if (settings.dst) { c.print("checked"); }
   c.println("> Daylight saving (+1h)</label>");
 
-  // Brightness (live) - manual master brightness / fallback when auto is off
-  c.print("<label>Brightness (0-255)</label>");
+  // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
+  // around the sensor value (128 = neutral, lower = darker, higher = brighter).
+  c.print("<label>Brightness (0-255; auto mode: 128 = neutral)</label>");
   c.print("<input type=range min=0 max=255 name=bright value="); c.print(settings.brightness);
   c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\">");
   c.print("<output>"); c.print(settings.brightness); c.println("</output>");

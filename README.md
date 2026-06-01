@@ -16,7 +16,9 @@ Fetches the time from the local network via NTP and offers a WiFi configuration 
   - **1x short** -> toggle daylight saving / standard time (+/- 1 h)
   - **2x short** -> toggle auto-brightness (light sensor) on/off
   - **3x short** -> open the WiFi access point for settings
-  - **hold long** -> fade brightness cyclically (perceptually linear); releasing saves it
+  - **hold long** -> adjust brightness (cyclic, perceptually linear); releasing
+    saves it. With auto-brightness on, this trims the brightness *relative* to the
+    measured ambient level (neutral in the middle) instead of setting an absolute level
 - **AP config page** (`http://192.168.4.1`): timezone, daylight saving, brightness, animation speed, colors, fly-in directions, NTP sync time
 - All settings are stored in flash at a fixed address outside the program image,
   so they survive a restart **and a firmware re-upload**
@@ -88,8 +90,10 @@ drive the master brightness automatically. Wire it to the board's I²C pins
 (SDA/SCL, 3V3, GND — e.g. via the STEMMA QT connector); it shares the bus with
 the accelerometer.
 
-The sensor is read **once per second** and mapped to a brightness through a
-configurable linear curve, set on the AP config page:
+The sensor is read **once per second** and feeds a **10 s moving average**; the
+averaged lux sets a brightness target that the display **fades to smoothly every
+frame** instead of stepping once per second. The averaged lux is mapped to a
+brightness through a configurable linear curve, set on the AP config page:
 
 | Field | Meaning |
 |---|---|
@@ -102,6 +106,13 @@ Toggle the feature with the **Auto brightness** checkbox or a **double click** o
 the user button. When it is off (or the sensor is missing) the manual brightness
 slider / long-press fade apply as before. The serial console logs the measured
 lux and resulting brightness.
+
+In auto mode the **brightness value (0–255) becomes a relative trim** around the
+sensor-derived brightness rather than an absolute level: **128 = neutral** (use
+the sensor value as-is), lower = darker, higher = brighter (up to ~2×, clamped).
+So the long-press fade (or the slider) lets you quickly nudge the clock brighter
+or darker without touching the lux mapping. The detailed lux range / mapping
+fields stay available for finer control.
 
 ## Libraries
 
