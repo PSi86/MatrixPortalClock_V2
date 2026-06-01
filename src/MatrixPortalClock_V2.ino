@@ -518,8 +518,10 @@ void updateAutoBrightness() {
 
   // Apply the user's relative trim around the sensor value: settings.brightness
   // 128 = neutral (sensor as-is), 0 = much darker, 255 = ~2x brighter (clamped).
+  // The configured Min brightness is a hard floor the manual trim cannot undercut.
   float relTarget = (float)autoBrightTarget * (float)settings.brightness / 128.0f;
-  if (relTarget > 255.0f) { relTarget = 255.0f; }
+  if (relTarget > 255.0f)              { relTarget = 255.0f; }
+  if (relTarget < settings.brightMin)  { relTarget = settings.brightMin; }
 
   // Every frame: ease toward the trimmed target (frame-rate independent
   // exponential approach) so it fades smoothly instead of stepping once per

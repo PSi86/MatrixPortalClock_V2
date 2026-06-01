@@ -111,8 +111,9 @@ In auto mode the **brightness value (0–255) becomes a relative trim** around t
 sensor-derived brightness rather than an absolute level: **128 = neutral** (use
 the sensor value as-is), lower = darker, higher = brighter (up to ~2×, clamped).
 So the long-press fade (or the slider) lets you quickly nudge the clock brighter
-or darker without touching the lux mapping. The detailed lux range / mapping
-fields stay available for finer control.
+or darker without touching the lux mapping. The configured **Min brightness is a
+hard floor** that the manual trim can never undercut. The detailed lux range /
+mapping fields stay available for finer control.
 
 ## Libraries
 
