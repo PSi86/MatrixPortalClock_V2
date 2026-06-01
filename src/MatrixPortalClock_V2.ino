@@ -130,6 +130,7 @@ const float FADE_GAMMA     = 2.2f;    // perceptual -> linear-light exponent
 float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the human eye)
 int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
+unsigned long dstMsgUntil = 0;        // show the summer/winter banner until this millis()
 
 // WLAN access point config mode --------------------------------------------
 #define AP_SSID "MatrixClock"
@@ -205,8 +206,8 @@ uint8_t       luxHistCount = 0;            // valid samples (ramps up to LUX_AVG
 // The averaged lux sets a brightness TARGET once per second; the actual master
 // brightness is eased toward it every frame so the change is a continuous fade
 // instead of a once-per-second step.
-uint8_t       autoBrightTarget = 255;       // brightness the fade is easing toward
-float         autoBrightCurrent = 255.0f;   // smoothly-eased brightness (sub-unit precision)
+uint8_t       autoBrightTarget = 128;       // sensor brightness the fade is easing toward
+float         autoBrightCurrent = 128.0f;   // smoothly-eased brightness (sub-unit precision)
 bool          autoBrightInit = false;       // false until the fade has been seeded
 unsigned long autoFadeLastMs = 0;           // last fade step time
 const float   AUTOBRIGHT_TAU_MS = 1200.0f;  // fade time constant (~1.2 s to 63% of a step)
@@ -291,16 +292,8 @@ void setup(void) {
     for(;;);
   }
 
-  //matrix.setFont(&FreeSansBold12pt7b); // Use nice bitmap font
-  //matrix.setFont(&FreeMonoBold12pt7b); // Use nice bitmap font
-  //matrix.setFont(&FreeSans12pt7b); // Use nice bitmap font
   matrix.setTextWrap(false);           // Allow text off edge
-  matrix.setTextColor(0xFFFF);         // White
-  matrix.setFont(&Picopixel); // Use nice bitmap font
-  matrix.fillScreen(0); // Fill background black
-  matrix.setCursor(4, 25);
-  matrix.print("CLOCK");
-  matrix.show();
+  bootStatus("CLOCK");
 
   // Recovery / manual entry: hold the user button during boot to open the config AP
   // even when the home WiFi is unavailable.
@@ -325,10 +318,7 @@ void setup(void) {
 
   // attempt to connect to WiFi network:
   // Connect to WPA/WPA2 network.
-  //matrix.fillScreen(0); // Fill background black
-  matrix.setCursor(4, 35);
-  matrix.print("WLAN?");
-  matrix.show();
+  bootStatus("WLAN?");
 
   WiFi.setTimeout(100);
   
@@ -339,9 +329,7 @@ void setup(void) {
     WiFi.begin(ssid, pass); // synchronous call takes several seconds
     delay(7000);
   }
-  matrix.setCursor(4, 45);
-  matrix.print("WLAN!");
-  matrix.show();
+  bootStatus("WLAN!");
   Serial.println("Connected to WiFi");
   printWifiStatus();
   delay(1000);
@@ -355,21 +343,23 @@ void loop(void) {
 
   if (apActive) {      // config AP running
     handleAP();        // captive-portal DNS + web UI + live settings updates
+    updateBrightness();// same brightness logic during AP (info screen + clock preview)
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
     return;
   }
 
   timeSync_WifiLib();
-  updateOrientation();     // rotate the display to match how the panel is held
-  updateAutoBrightness();  // light sensor -> master brightness (once per second)
-  drawClock();
+  updateOrientation();  // rotate the display to match how the panel is held
+  updateBrightness();   // resolve the brightness for every screen (manual or auto)
+  if (millisNow < dstMsgUntil) { drawDstMessage(); } // brief summer/winter banner after a DST toggle
+  else                         { drawClock(); }
 }
 
 // Leave the AP-info screen and show the live clock (called once a client appears).
 void apShowClock() {
   if (apClientConnected) { return; }
   apClientConnected = true;
-  applyOrientation(3); // back to portrait (with matching layout) for the clock preview
+  applyOrientation(detectRotation()); // start the clock preview in the current orientation
 }
 
 // While the AP is up: show connection info until a client appears, then switch to
@@ -379,10 +369,12 @@ void updateApDisplay() {
   if (!apClientConnected) {
     if (millisNow - apStatusLast >= 500) { // periodically check whether a station joined
       apStatusLast = millisNow;
-      if (WiFi.status() == WL_AP_CONNECTED) { apShowClock(); }
+      if (WiFi.status() == WL_AP_CONNECTED) { apShowClock(); return; }
+      if (apInfoRotation() != curRotation) { drawAPScreen(); } // re-orient the info if turned
     }
   } else if (millisNow - apClockLast >= 40) { // ~25 fps preview; leaves time for the web server
     apClockLast = millisNow;
+    updateOrientation(); // clock preview follows the accelerometer (all four rotations)
     drawClock();
   }
 }
@@ -435,19 +427,19 @@ void applyOrientation(uint8_t rot) {
 // Poll the LIS3DH (throttled) and rotate the display to match how the panel is
 // physically held. Gravity in the panel plane picks one of four quadrants; a
 // debounce + diagonal-rejection keeps the orientation from flickering near 45.
-void updateOrientation() {
-  if (!accelOK) { return; }                                  // no sensor -> stay portrait
-  if (millisNow - orientLast < ORIENT_POLL_MS) { return; }   // throttle to ~4 Hz
-  orientLast = millisNow;
-
+// One-shot orientation read: returns the desired rotation (0..3) from gravity, or
+// the current rotation when the reading is undecided (panel flat / near the 45 deg
+// diagonal) or no sensor is present. Shared by the live updateOrientation() and by
+// the boot / AP screens so every screen aligns to the panel the same way.
+uint8_t detectRotation() {
+  if (!accelOK) { return curRotation; }
   lis.read();
   int16_t ax = lis.x, ay = lis.y;
   int16_t axAbs = abs(ax), ayAbs = abs(ay);
   int16_t hi = max(axAbs, ayAbs), lo = min(axAbs, ayAbs);
-  // Too flat (panel face up/down) or too close to the diagonal -> undecided.
+  // Too flat (panel face up/down) or too close to the diagonal -> keep current.
   // Require the dominant axis to be >25% larger: hi > lo*1.25  <=>  hi*4 > lo*5.
-  if (hi < 2000 || (int32_t)hi * 4 <= (int32_t)lo * 5) { return; }
-
+  if (hi < 2000 || (int32_t)hi * 4 <= (int32_t)lo * 5) { return curRotation; }
   // Gravity quadrant: 0=+X down, 1=-X down, 2=+Y down, 3=-Y down.
   uint8_t quadrant;
   if (axAbs > ayAbs) { quadrant = (ax > 0) ? 0 : 1; }
@@ -455,16 +447,21 @@ void updateOrientation() {
   // quadrant -> matrix rotation. Re-order these four values if the panel turns
   // the wrong way during on-device calibration (this is the one line to tweak).
   static const uint8_t ORIENT_MAP[4] = {3, 1, 0, 2};
-  uint8_t wanted = ORIENT_MAP[quadrant];
+  return ORIENT_MAP[quadrant];
+}
 
+// Poll the LIS3DH (throttled) and rotate the clock to match how the panel is held,
+// with a debounce so it doesn't flicker near 45 deg.
+void updateOrientation() {
+  if (!accelOK) { return; }
+  if (millisNow - orientLast < ORIENT_POLL_MS) { return; }   // throttle to ~4 Hz
+  orientLast = millisNow;
+  uint8_t wanted = detectRotation();
   // Debounce: a new orientation must persist a few polls before we commit.
   if (wanted == orientCandidate) { if (orientStable < 255) { orientStable++; } }
   else { orientCandidate = wanted; orientStable = 1; }
-
   if (wanted != curRotation && orientStable >= ORIENT_DEBOUNCE) {
-    Serial.print("Orientation x="); Serial.print(ax);
-    Serial.print(" y="); Serial.print(ay);
-    Serial.print(" -> rotation "); Serial.println(wanted);
+    Serial.print("Orientation -> rotation "); Serial.println(wanted);
     applyOrientation(wanted);
   }
 }
@@ -489,18 +486,21 @@ uint8_t mapLuxToBrightness(float lux) {
   return (uint8_t)constrain(v, 0, 255);
 }
 
-// Poll the light sensor once per second and set the master brightness from a
-// 10 s moving average of the readings, so the brightness eases gently instead of
-// jumping with every measurement. Skipped when the sensor is absent or
-// auto-brightness is off; a read error leaves the current brightness untouched.
-// Called from the normal loop path so it is paused during AP config (where the
-// brightness slider previews manually).
-void updateAutoBrightness() {
-  if (!luxOK || !settings.autoBright) { autoBrightInit = false; return; } // manual mode: drawClock uses settings.brightness
+// Resolve the brightness used for ALL rendering (clock, boot, AP info, banner)
+// with one shared rule, so every screen shows the same brightness as the clock.
+// Manual mode / no sensor: the absolute setting. Auto-brightness: the sensor's
+// 10 s moving average, mapped, trimmed by settings.brightness (128 = neutral) and
+// clamped to >= Min, then eased smoothly. Call once per frame in every path.
+void updateBrightness() {
+  if (!luxOK || !settings.autoBright) { // manual mode (or no sensor)
+    effectiveBrightness = settings.brightness;
+    autoBrightInit = false;             // re-seed the ease when auto resumes
+    return;
+  }
 
-  // Once per second: read the sensor, update the 10 s moving average, and derive
-  // the sensor brightness from the averaged lux.
-  if (millisNow - luxLast >= 1000) {
+  // Sensor read at ~1 Hz (forced on the first call so the first frame, e.g. boot,
+  // already has a real value). Updates the 10 s moving average and its mapping.
+  if (!autoBrightInit || millisNow - luxLast >= 1000) {
     luxLast = millisNow;
     float lux = lightMeter.readLightLevel();
     if (lux >= 0) {                                  // ignore -1/-2 not-ready/read errors
@@ -516,21 +516,48 @@ void updateAutoBrightness() {
     }
   }
 
-  // Apply the user's relative trim around the sensor value: settings.brightness
-  // 128 = neutral (sensor as-is), 0 = much darker, 255 = ~2x brighter (clamped).
-  // The configured Min brightness is a hard floor the manual trim cannot undercut.
+  // Relative trim around the sensor value: settings.brightness 128 = neutral,
+  // 0 = much darker, 255 = ~2x brighter. Min brightness is a hard floor.
   float relTarget = (float)autoBrightTarget * (float)settings.brightness / 128.0f;
   if (relTarget > 255.0f)              { relTarget = 255.0f; }
   if (relTarget < settings.brightMin)  { relTarget = settings.brightMin; }
 
-  // Every frame: ease toward the trimmed target (frame-rate independent
-  // exponential approach) so it fades smoothly instead of stepping once per
-  // second. Seeded on first activation to avoid a jump.
+  // Ease toward the trimmed target (frame-rate independent) for a smooth fade;
+  // seeded to the target on the first call to avoid a jump.
   if (!autoBrightInit) { autoBrightCurrent = relTarget; autoBrightInit = true; autoFadeLastMs = millisNow; }
   float dt = (float)(millisNow - autoFadeLastMs);
   autoFadeLastMs = millisNow;
   autoBrightCurrent += (relTarget - autoBrightCurrent) * (1.0f - expf(-dt / AUTOBRIGHT_TAU_MS));
   effectiveBrightness = (uint8_t)lroundf(autoBrightCurrent);
+}
+
+// Draw a short text centred in the current rotation's canvas. Used by the boot
+// status screens and the summer/winter banner so they align like the clock.
+void drawCenteredText(const char *msg, uint16_t color) {
+  matrix.setFont(&Picopixel);
+  int16_t x1, y1; uint16_t w, h;
+  matrix.getTextBounds(msg, 0, 0, &x1, &y1, &w, &h);
+  matrix.fillScreen(0);
+  matrix.setTextColor(color);
+  matrix.setCursor((matrix.width() - (int)w) / 2 - x1, (matrix.height() - (int)h) / 2 - y1);
+  matrix.print(msg);
+  matrix.show();
+}
+
+// Boot status line: oriented to the panel and dimmed to the live clock brightness
+// (sensor-driven when auto-brightness is on), exactly like every other screen.
+void bootStatus(const char *msg) {
+  millisNow = millis();                // setup() runs before timekeeper(), so refresh the clock
+  applyOrientation(detectRotation());  // follow the accelerometer
+  updateBrightness();                  // same brightness logic as the clock
+  drawCenteredText(msg, scaledColor(255, 255, 255));
+}
+
+// Brief banner shown for ~3 s after a daylight-saving toggle: the new setting as
+// text - summer in orange, winter in ice-blue - aligned to the accelerometer.
+void drawDstMessage() {
+  if (settings.dst) { drawCenteredText("summer", scaledColor(255, 165, 0)); }
+  else              { drawCenteredText("winter", scaledColor(120, 200, 255)); }
 }
 
 // Renders one frame of the animated clock using the current settings.
@@ -542,11 +569,6 @@ void drawClock(void) {
   textX = (matrix.width()-w)/2-1;
   textY = matrix.height() / 2 - (y1 + h / 2); // Center text vertically
 */
-
-  // When auto-brightness is not actively driving the display (manual mode, no
-  // sensor, or AP config preview), the rendered brightness is just the absolute
-  // setting. In active auto mode updateAutoBrightness() already set it this frame.
-  if (apActive || !luxOK || !settings.autoBright) { effectiveBrightness = settings.brightness; }
 
   if (secondTrigger) {
     sprintf(timeStr, "%02d%02d%02d", hour(sysTime), minute(sysTime), second(sysTime));
@@ -1005,6 +1027,7 @@ void toggleDST() {
   if (settings.dst) { adjustTime(-3600); settings.dst = 0; }
   else              { adjustTime( 3600); settings.dst = 1; }
   saveSettings();
+  dstMsgUntil = millisNow + 3000; // show the summer/winter banner for ~3 s
   Serial.print("DST toggled -> "); Serial.println(settings.dst);
 }
 
@@ -1043,6 +1066,10 @@ void fadeStep() {
 void startAPMode() {
   if (apActive) { return; }
   Serial.println("Starting config AP...");
+  apActive = true;
+  millisNow = millis();
+  updateBrightness(); // resolve the live brightness for the immediate info screen
+  drawAPScreen(); // show SSID/PW/IP immediately, before the slow radio bring-up freezes the loop
   WiFi.end();
   delay(100);
   WiFi.beginAP(AP_SSID, AP_PASS);
@@ -1050,23 +1077,32 @@ void startAPMode() {
   while (WiFi.status() != WL_AP_LISTENING && millis() - t0 < 6000) { delay(100); }
   apServer.begin();
   dnsUdp.begin(DNS_PORT); // captive portal DNS
-  apActive = true;
-  drawAPScreen();
   Serial.print("AP status: "); Serial.println(WiFi.status());
 }
 
-// Show AP connection info on the matrix. Switches to landscape (64x32) because
-// the portrait width is too narrow for the SSID/password text.
-// Use setRotation(2) instead of (0) if the text appears upside down.
+// AP info is always shown landscape (the SSID/PW text is too wide for portrait).
+// Pick rotation 0 or 2 from the accelerometer so it is never upside down; a
+// portrait hold maps to the matching landscape rotation.
+uint8_t apInfoRotation() {
+  uint8_t r = detectRotation();
+  if (r == 3) { return 0; }   // portrait-normal  -> landscape-normal
+  if (r == 1) { return 2; }   // portrait-flipped -> landscape-flipped
+  return r;                   // already 0 or 2
+}
+
+// Show AP connection info on the matrix, landscape (64x32) and oriented upright
+// per the accelerometer, because the portrait width is too narrow for the text.
 void drawAPScreen() {
-  matrix.setRotation(0); // landscape, 64 wide x 32 tall
+  uint8_t r = apInfoRotation();
+  matrix.setRotation(r);
+  curRotation = r;
   matrix.fillScreen(0);
   matrix.setFont(&Picopixel);
-  matrix.setTextColor(matrix.color565(0, 0, 200));
+  matrix.setTextColor(scaledColor(0, 0, 200));
   matrix.setCursor(0, 8);  matrix.print("SSID "); matrix.print(AP_SSID);
-  matrix.setTextColor(matrix.color565(0, 140, 0));
+  matrix.setTextColor(scaledColor(0, 140, 0));
   matrix.setCursor(0, 18); matrix.print("PW "); matrix.print(AP_PASS);
-  matrix.setTextColor(matrix.color565(150, 70, 0));
+  matrix.setTextColor(scaledColor(150, 70, 0));
   matrix.setCursor(0, 28); matrix.print("IP "); matrix.print(apIP);
   matrix.show();
 }

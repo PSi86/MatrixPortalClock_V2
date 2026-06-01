@@ -13,7 +13,8 @@ Fetches the time from the local network via NTP and offers a WiFi configuration 
   lux → brightness mapping dims the clock once per second to match the room
 - NTP time synchronization with a daily resync
 - **User button** (UP button, D2):
-  - **1x short** -> toggle daylight saving / standard time (+/- 1 h)
+  - **1x short** -> toggle daylight saving / standard time (+/- 1 h); shows a 3 s
+    `summer` (orange) / `winter` (ice-blue) banner
   - **2x short** -> toggle auto-brightness (light sensor) on/off
   - **3x short** -> open the WiFi access point for settings
   - **hold long** -> adjust brightness (cyclic, perceptually linear); releasing
@@ -53,11 +54,12 @@ A built-in **captive portal** (DNS hijack + portal page) makes the config page p
 up automatically on most phones right after connecting to the AP. If it does not,
 open `http://192.168.4.1` manually.
 
-The matrix shows SSID, password and IP in landscape orientation until a client
-connects; after that it switches back to the normal clock so that **brightness,
-colors and animation speed preview live** while you change them in the web UI.
-The timezone is chosen from a dropdown. "Save & Restart" stores everything to
-flash and reboots.
+The matrix shows SSID, password and IP **immediately** when the AP opens (before
+the radio has finished coming up, so there is no frozen display), in landscape
+orientation, until a client connects; after that it switches to the live clock
+preview so that **brightness, colors and animation speed preview live** while you
+change them in the web UI. The timezone is chosen from a dropdown. "Save &
+Restart" stores everything to flash and reboots.
 
 The color palette offers **full colors only** for both the digit and the fly-in
 color. The fly-in (trail) is automatically dimmed relative to the master
@@ -78,6 +80,11 @@ The onboard **LIS3DH** accelerometer detects gravity and rotates the display in
 
 The rotation switches with a short debounce and ignores near-45° tilts to avoid
 flicker. If the accelerometer is not found, the clock stays in portrait.
+
+Every screen aligns the same way: the **boot status text**, the **DST banner**,
+and the **AP clock preview** all follow the accelerometer. The **AP info screen**
+(SSID/PW/IP) is always landscape because the text is too wide for portrait, but
+it auto-flips (rotation 0/2) so it is never upside down.
 
 If the panel rotates the "wrong" way for your build, adjust the single
 `ORIENT_MAP` table in `updateOrientation()` — the serial console prints the raw
