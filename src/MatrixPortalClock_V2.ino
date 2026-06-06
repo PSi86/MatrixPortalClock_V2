@@ -139,6 +139,9 @@ bool        apActive = false;
 bool        apClientConnected = false; // true once a client talks to us (station joined / HTTP hit)
 unsigned long apStatusLast = 0;        // last time the AP connection status was polled
 unsigned long apClockLast = 0;         // last live-preview clock frame (throttled in AP mode)
+// While a client is connected the slow WiFiNINA web server is the priority, so the
+// clock preview is throttled hard (5 fps) to leave the CPU/radio free for serving.
+const unsigned long AP_PREVIEW_MS = 200; // 5 fps clock preview while a client is connected
 WiFiServer  apServer(80);
 // Captive portal: a tiny DNS server answers every lookup with the AP IP so the
 // phone's connectivity check is hijacked and the config page pops up by itself.
@@ -197,6 +200,7 @@ const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persis
 BH1750        lightMeter;        // default I2C address 0x23
 bool          luxOK = false;     // true once the BH1750 was found on I2C
 unsigned long luxLast = 0;       // last light-sensor poll (1 Hz throttle)
+float         lastLux = -1.0f;   // most recent UNFILTERED lux reading (web UI), -1 = none yet
 // Moving average of the lux readings so brightness changes are gentle, not
 // jumpy. At the 1 Hz sampling rate a 10-sample window equals a 10 s average.
 const uint8_t LUX_AVG_SAMPLES = 10;
@@ -372,10 +376,17 @@ void updateApDisplay() {
       if (WiFi.status() == WL_AP_CONNECTED) { apShowClock(); return; }
       if (apInfoRotation() != curRotation) { drawAPScreen(); } // re-orient the info if turned
     }
-  } else if (millisNow - apClockLast >= 40) { // ~25 fps preview; leaves time for the web server
+    return;
+  }
+  // A client is connected. Keep the animation advancing every loop so it runs at
+  // real time (stepClockAnim is cheap, no panel I/O), but only push the latest
+  // state to the panel at 5 fps: intermediate frames are computed and skipped, not
+  // slowed down. This leaves the radio free for the slow WiFiNINA web server.
+  updateOrientation(); // clock preview follows the accelerometer (all four rotations)
+  stepClockAnim();
+  if (millisNow - apClockLast >= AP_PREVIEW_MS) {
     apClockLast = millisNow;
-    updateOrientation(); // clock preview follows the accelerometer (all four rotations)
-    drawClock();
+    renderClock();
   }
 }
 
@@ -492,18 +503,15 @@ uint8_t mapLuxToBrightness(float lux) {
 // 10 s moving average, mapped, trimmed by settings.brightness (128 = neutral) and
 // clamped to >= Min, then eased smoothly. Call once per frame in every path.
 void updateBrightness() {
-  if (!luxOK || !settings.autoBright) { // manual mode (or no sensor)
-    effectiveBrightness = settings.brightness;
-    autoBrightInit = false;             // re-seed the ease when auto resumes
-    return;
-  }
-
-  // Sensor read at ~1 Hz (forced on the first call so the first frame, e.g. boot,
-  // already has a real value). Updates the 10 s moving average and its mapping.
-  if (!autoBrightInit || millisNow - luxLast >= 1000) {
+  // Sample the raw ambient light at ~1 Hz whenever a sensor is present, in BOTH
+  // modes, so the config UI can always show the live lux value. The first call is
+  // forced (luxLast == 0) so the very first frame, e.g. boot, has a real reading.
+  // In auto mode the same reading also feeds the 10 s moving average + mapping.
+  if (luxOK && (luxLast == 0 || millisNow - luxLast >= 1000)) {
     luxLast = millisNow;
     float lux = lightMeter.readLightLevel();
     if (lux >= 0) {                                  // ignore -1/-2 not-ready/read errors
+      lastLux = lux;                                 // unfiltered reading shown in the web UI
       luxHistory[luxHistIdx] = lux;
       luxHistIdx = (luxHistIdx + 1) % LUX_AVG_SAMPLES;
       if (luxHistCount < LUX_AVG_SAMPLES) { luxHistCount++; }
@@ -514,6 +522,12 @@ void updateBrightness() {
       Serial.print("Lux "); Serial.print(lux); Serial.print(" avg "); Serial.print(avgLux);
       Serial.print(" -> sensor "); Serial.println(autoBrightTarget);
     }
+  }
+
+  if (!luxOK || !settings.autoBright) { // manual mode (or no sensor)
+    effectiveBrightness = settings.brightness;
+    autoBrightInit = false;             // re-seed the ease when auto resumes
+    return;
   }
 
   // Relative trim around the sensor value: settings.brightness 128 = neutral,
@@ -560,16 +574,12 @@ void drawDstMessage() {
   else              { drawCenteredText("winter", scaledColor(120, 200, 255)); }
 }
 
-// Renders one frame of the animated clock using the current settings.
-void drawClock(void) {
-/*
-  int16_t  x1, y1;
-  uint16_t w, h;
-  matrix.getTextBounds(message, 0, 0, &x1, &y1, &w, &h); // How big is it?
-  textX = (matrix.width()-w)/2-1;
-  textY = matrix.height() / 2 - (y1 + h / 2); // Center text vertically
-*/
-
+// Advance the clock animation state by one step. This is the cheap part - no
+// matrix I/O at all - so it can run on EVERY loop iteration to keep the animation
+// at real time regardless of how often the panel is actually redrawn. On a second
+// tick it rebuilds the digit strings; per digit it starts a fly-in (animTrigger),
+// steps an in-flight digit one pixel toward its target, or retires an arrived one.
+void stepClockAnim(void) {
   if (secondTrigger) {
     sprintf(timeStr, "%02d%02d%02d", hour(sysTime), minute(sysTime), second(sysTime));
     sprintf(animStr, "%02d%02d%02d", hour(sysTime+1), minute(sysTime+1), second(sysTime+1));
@@ -579,17 +589,15 @@ void drawClock(void) {
  // if (minuteTrigger) { animShow[2]=false; animShow[3]=false; }
  // if (hourTrigger) { animShow[0]=false; animShow[1]=false; }
 
-  matrix.fillScreen(0); // Fill background black
-
   // Concept: Iterate through the digits of the time display. If the animTrigger[i] is true, then create an location offset for the digit according to the fly-in direction that is configured for that digit.
   for (uint i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
     // check each second if animation digit has reached its target location
-    if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i] && animShow[i] == true && secondTrigger) { 
+    if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i] && animShow[i] == true && secondTrigger) {
       // reset time position as animation digit is now in the exact place where current time digit is when not animating
-      timeXPos[i]=animXTarget[i]; 
-      timeYPos[i]=animYTarget[i]; 
+      timeXPos[i]=animXTarget[i];
+      timeYPos[i]=animYTarget[i];
       animShow[i] = false;
-    }    
+    }
     if(animTrigger[i] == true) {
       animShow[i] = true;
       // Fly-in start offset = the off-screen edge the digit comes from. The
@@ -607,23 +615,34 @@ void drawClock(void) {
       else if(animDirection[i]==3)  { animXPos[i] = animXTarget[i]-hOff;
                                       animYPos[i] = animYTarget[i]; }
     }
-    else if (animShow[i]) { 
+    else if (animShow[i]) {
       // as long as animShow is true, we need to update the position / do the animation of the corresponding digit (i)
-      // 
+      //
       //Serial.println(i);
       if      (animYPos[i] < animYTarget[i]) { animYPos[i]++; timeYPos[i]++; } // move animation digit and current time digit at the same time in the same direction
       else if (animYPos[i] > animYTarget[i]) { animYPos[i]--; timeYPos[i]--; }
-      //else if (animYPos[i] == animYTarget[i]) { timeYPos[i]=animYTarget[i];   }      
-      
+      //else if (animYPos[i] == animYTarget[i]) { timeYPos[i]=animYTarget[i];   }
+
       if      (animXPos[i] < animXTarget[i]) { animXPos[i]++; timeXPos[i]++; }
       else if (animXPos[i] > animXTarget[i]) { animXPos[i]--; timeXPos[i]--; }
       //else if (animXPos[i] == animXTarget[i]) { timeXPos[i]=animXTarget[i];   }
     }
-    
+  }
+  if(secondTrigger) { Serial.println(deltaT); } // Debugging //timeOffset //deltaT //animTrigger[4] //animShow[i]
+}
+
+// Draw the current clock state to the panel. This is the expensive part (clears
+// the framebuffer, prints all six digits and pushes via matrix.show()). In the AP
+// preview it is throttled to 5 fps while stepClockAnim() keeps the state moving, so
+// frames are skipped (latest state shown) instead of the animation slowing down.
+void renderClock(void) {
+  matrix.fillScreen(0); // Fill background black
+
+  for (uint i = 0; i < 6; i++) {
     // Animate future digits BEGIN
     if(i>3) { matrix.setFont(&FreeSansBold9pt7b); }  // Smaller Font for displaying Seconds
     else    { matrix.setFont(&FreeSansBold12pt7b); } // Bigger Font for displaying Minutes and Hours
-    
+
     if(animShow[i] == true) {
       //Serial.println(animXPos[i]);
       if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i]) { matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB)); } // digit has arrived
@@ -637,7 +656,6 @@ void drawClock(void) {
     matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB));
     matrix.setCursor(timeXPos[i], timeYPos[i]);
     matrix.print(timeStr[i]);
-
   }
 
   // NTP sync status pixel (green = synced, red = not), dimmed with the master brightness but kept visible
@@ -647,14 +665,13 @@ void drawClock(void) {
   else { color=matrix.color565(statusInt, 0, 0); }
   matrix.drawPixel(0, 63, color); // NTP sync status Pixel
 
-  /*
-  matrix.setFont(&Picopixel);
-  matrix.setCursor(25, 62);
-  matrix.print(timeOffset);  
-  */
-
   matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
-  if(secondTrigger) { Serial.println(deltaT); } // Debugging //timeOffset //deltaT //animTrigger[4] //animShow[i]
+}
+
+// Live (non-AP) mode: advance and draw the clock every loop iteration.
+void drawClock(void) {
+  stepClockAnim();
+  renderClock();
 }
 
 /* Updates millisNow, sysTime. Keeps track of the looptime using delay(). Updates the animTrigger[] array. */
@@ -1160,6 +1177,19 @@ void sendNoContent(WiFiClient &c) {
   c.println();
 }
 
+// Tiny plain-text response "<brightness> <lux>" for the config page poll:
+// effectiveBrightness (slider value in manual mode, sensor-driven in auto mode)
+// and the raw unfiltered lux reading (-1 when no sensor / not read yet).
+void sendBrightness(WiFiClient &c) {
+  c.println("HTTP/1.1 200 OK");
+  c.println("Content-Type: text/plain");
+  c.println("Connection: close");
+  c.println();
+  c.print(effectiveBrightness);
+  c.print(' ');
+  if (lastLux >= 0) { c.print(lastLux, 1); } else { c.print("-1"); }
+}
+
 // Lightweight 302 to the portal. Used for captive-portal probe URLs so the OS
 // shows the "sign in to network" prompt without us shipping the whole form for
 // every probe (which floods the few NINA sockets).
@@ -1205,6 +1235,9 @@ void handleAP() {
   } else if (path.startsWith("/live")) {
     applyLiveParams(query); // live preview: apply to RAM only, no save, no reboot
     sendNoContent(client);
+    client.stop();
+  } else if (path == "/b") {
+    sendBrightness(client); // tiny plain-text poll of the currently rendered brightness
     client.stop();
   } else if (path == "/" || path.startsWith("/index")) {
     sendFormPage(client); // the actual config UI (only served on explicit navigation)
@@ -1298,6 +1331,11 @@ void applyParams(const String &q) {
 void applyLiveParams(const String &q) {
   String v;
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
+  v = getParam(q, "autob");  if (v.length()) { settings.autoBright = (v == "on") ? 1 : 0; } // updateBrightness() re-seeds the fade
+  v = getParam(q, "luxd");   if (v.length()) { settings.luxDark   = (uint16_t)constrain(v.toInt(), 0, 65535); }
+  v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
+  v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
+  v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.animSpeed = constrain(v.toInt(), 4, 60); loopTime = settings.animSpeed; }
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
   v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
@@ -1384,26 +1422,32 @@ void sendFormPage(WiFiClient &c) {
   // around the sensor value (128 = neutral, lower = darker, higher = brighter).
   c.print("<label>Brightness (0-255; auto mode: 128 = neutral)</label>");
   c.print("<input type=range min=0 max=255 name=bright value="); c.print(settings.brightness);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\">");
+  // oninput throttles to <=1 update/s while dragging; onchange (release) always sends the final value.
+  c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\" onchange=\"this.nextElementSibling.value=this.value;liveNow()\">");
   c.print("<output>"); c.print(settings.brightness); c.println("</output>");
+  // Live readout: brightness actually being rendered + the raw sensor lux; polled 1x/s.
+  c.print("<div style=\"color:#8c8;font-size:13px\">Current brightness: <span id=cb>"); c.print(effectiveBrightness);
+  c.print("</span> &middot; sensor <span id=cl>");
+  if (lastLux >= 0) { c.print(lastLux, 1); } else { c.print("--"); }
+  c.println("</span> lux</div>");
 
   // Auto-brightness (BH1750 light sensor). Maps lux -> brightness; when on, the
   // sensor overrides the manual brightness above once per second.
-  c.print("<label><input type=checkbox name=autob ");
+  c.print("<label><input type=checkbox name=autob onchange=liveNow() ");
   if (settings.autoBright) { c.print("checked"); }
   c.println("> Auto brightness (light sensor)</label>");
   c.println("<div class=row>");
-  c.print("<div><label>Dark lux</label><input type=number min=0 max=65535 name=luxd value="); c.print(settings.luxDark); c.println("></div>");
-  c.print("<div><label>Bright lux</label><input type=number min=1 max=65535 name=luxb value="); c.print(settings.luxBright); c.println("></div>");
+  c.print("<div><label>Dark lux</label><input type=number min=0 max=65535 name=luxd onchange=liveNow() value="); c.print(settings.luxDark); c.println("></div>");
+  c.print("<div><label>Bright lux</label><input type=number min=1 max=65535 name=luxb onchange=liveNow() value="); c.print(settings.luxBright); c.println("></div>");
   c.println("</div><div class=row>");
-  c.print("<div><label>Min brightness</label><input type=number min=0 max=255 name=brmin value="); c.print(settings.brightMin); c.println("></div>");
-  c.print("<div><label>Max brightness</label><input type=number min=0 max=255 name=brmax value="); c.print(settings.brightMax); c.println("></div>");
+  c.print("<div><label>Min brightness</label><input type=number min=0 max=255 name=brmin onchange=liveNow() value="); c.print(settings.brightMin); c.println("></div>");
+  c.print("<div><label>Max brightness</label><input type=number min=0 max=255 name=brmax onchange=liveNow() value="); c.print(settings.brightMax); c.println("></div>");
   c.println("</div>");
 
   // Animation speed (live)
   c.print("<label>Animation speed (frame time ms, small=fast)</label>");
   c.print("<input type=number min=4 max=60 name=speed value="); c.print(settings.animSpeed);
-  c.println(" oninput=live() onchange=live()>");
+  c.println(" oninput=live() onchange=liveNow()>");
 
   // Colors (live) - palette swatches instead of a free color picker (5-bit panel)
   c.print("<label>Digit color</label><div class=swbox id=swDigit></div><input type=hidden name=digit value=");
@@ -1437,14 +1481,24 @@ void sendFormPage(WiFiClient &c) {
   c.println("<script>");
   c.println("var _t=0,_p=null;");
   c.println("function _send(){var g=function(n){return document.getElementsByName(n)[0].value;};");
-  c.println("fetch('/live?bright='+g('bright')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))).catch(function(){});}");
-  c.println("function live(){clearTimeout(_p);var n=Date.now();if(n-_t>=120){_t=n;_send();}else{_p=setTimeout(function(){_t=Date.now();_send();},120);}}");
+  c.println("var ab=document.getElementsByName('autob')[0].checked?'on':'off';");
+  c.println("fetch('/live?bright='+g('bright')+'&autob='+ab+'&luxd='+g('luxd')+'&luxb='+g('luxb')+'&brmin='+g('brmin')+'&brmax='+g('brmax')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))).catch(function(){});}");
+  // Throttle the live stream to <=1 request/s while a slider is dragged (leading +
+  // a single trailing send at the 1 s boundary). liveNow() bypasses it on release /
+  // discrete changes so the final value always lands at once.
+  c.println("function live(){var n=Date.now();if(n-_t>=1000){_t=n;if(_p){clearTimeout(_p);_p=null;}_send();}else if(!_p){_p=setTimeout(function(){_t=Date.now();_p=null;_send();},1000-(n-_t));}}");
+  c.println("function liveNow(){if(_p){clearTimeout(_p);_p=null;}_t=Date.now();_send();}");
+  // Live brightness readout: poll the rendered brightness once a second, with a
+  // single in-flight request so the slow WiFiNINA server is never stacked up.
+  c.println("var _bf=false;");
+  c.println("function poll(){if(_bf){return;}_bf=true;fetch('/b').then(function(r){return r.text();}).then(function(t){var p=t.split(' ');document.getElementById('cb').textContent=p[0];var lx=parseFloat(p[1]);document.getElementById('cl').textContent=(isNaN(lx)||lx<0)?'--':p[1];_bf=false;}).catch(function(){_bf=false;});}");
+  c.println("setInterval(poll,1000);");
   // Palette swatches: full colors only. The pre-dimmed greys are gone; the fly-in
   // color now dims itself relative to the master brightness so it never goes black.
   c.println("var PAL=['#ffffff','#ff0000','#ff8000','#ffff00','#80ff00','#00ff00','#00ff80','#00ffff','#00c0ff','#0000ff','#8000ff','#ff00ff','#ff0080','#ff80c0'];");
   c.println("function mkSw(boxId,name){var box=document.getElementById(boxId),cur=document.getElementsByName(name)[0].value.toLowerCase();");
   c.println("PAL.forEach(function(col){var s=document.createElement('span');s.className='sw'+(col===cur?' sel':'');s.style.background=col;");
-  c.println("s.onclick=function(){document.getElementsByName(name)[0].value=col;box.querySelectorAll('.sw').forEach(function(e){e.className='sw';});s.className='sw sel';live();};");
+  c.println("s.onclick=function(){document.getElementsByName(name)[0].value=col;box.querySelectorAll('.sw').forEach(function(e){e.className='sw';});s.className='sw sel';liveNow();};");
   c.println("box.appendChild(s);});}");
   c.println("mkSw('swDigit','digit');mkSw('swTrail','trail');");
   c.println("</script>");
