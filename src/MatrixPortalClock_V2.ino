@@ -150,6 +150,71 @@ WiFiUDP        dnsUdp;
 const uint16_t DNS_PORT = 53;
 byte           dnsBuffer[512];
 
+// Compile-time switch: buffer each HTTP response in RAM and push it to the NINA
+// in a few big client.write() chunks instead of ~100 tiny print() calls. Every
+// write() is a full SPI round trip to the ESP32 (further slowed by the matrix
+// refresh interrupt), so unbuffered serving takes many seconds per page load.
+// Set to 0 to fall back to direct, unbuffered writes.
+#define AP_BUFFERED_SEND 1
+
+// Compile-time switch: watchdog that re-creates the AP when the module status
+// says it is gone (ESP32 crash/reboot under captive-portal load).
+// DISABLED: on nina-fw 3.3.0 / WiFiNINA 2.0.1 the status reads are so
+// unreliable in AP mode (SPI timeouts return 255 while the module is busy)
+// that the watchdog tears down a healthy AP over and over - the phone gets
+// kicked before the captive-portal check ever completes. Set to 1 to re-enable.
+#define AP_WATCHDOG_ENABLE 0
+
+// CAUTION: WiFi.status() is unreliable as the sole signal - the driver returns
+// 255 whenever the SPI reply times out, which happens sporadically while the
+// ESP32 is busy serving a client. So a restart additionally requires several
+// bad reads in a row AND no recent DNS/HTTP traffic (traffic = proof of life).
+const unsigned long AP_WATCHDOG_MS       = 2000; // status poll interval
+const unsigned long AP_ACTIVITY_GRACE_MS = 8000; // recent traffic vetoes a restart
+const uint8_t       AP_BAD_STATUS_LIMIT  = 3;    // consecutive bad polls before restart
+unsigned long apWatchdogLast = 0;
+unsigned long apLastActivity = 0; // last DNS packet or HTTP client seen
+uint8_t       apBadStatus    = 0; // consecutive unhealthy status reads
+
+#if AP_BUFFERED_SEND
+// Print adapter that collects the many small print() calls of one HTTP response
+// and forwards them to the client in large chunks (one SPI transfer each).
+class BufferedWriter : public Print {
+ public:
+  explicit BufferedWriter(WiFiClient &c) : _c(c), _len(0) {}
+  size_t write(uint8_t b) override {
+    if (_len >= sizeof(_buf)) { flushBuf(); }
+    _buf[_len++] = b;
+    return 1;
+  }
+  size_t write(const uint8_t *data, size_t size) override {
+    size_t left = size;
+    while (left > 0) {
+      if (_len >= sizeof(_buf)) { flushBuf(); }
+      size_t n = sizeof(_buf) - _len;
+      if (n > left) { n = left; }
+      memcpy(_buf + _len, data, n);
+      _len += n; data += n; left -= n;
+    }
+    return size;
+  }
+  void flushBuf() { // send the buffered bytes, honoring partial writes
+    size_t off = 0;
+    while (off < _len && _c.connected()) {
+      size_t sent = _c.write(_buf + off, _len - off);
+      if (sent == 0) { break; }
+      off += sent;
+    }
+    _len = 0;
+  }
+ private:
+  WiFiClient &_c;
+  size_t _len;
+  static uint8_t _buf[2000]; // fits one NINA SPI transfer; only one response is built at a time
+};
+uint8_t BufferedWriter::_buf[2000];
+#endif
+
 // Sundry globals used for animation ---------------------------------------
 
 int16_t  textX, // Current text position (X)
@@ -343,9 +408,10 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
-  handleButton(); // single click = DST toggle, 3 clicks = config AP, long press = brightness fade
+  handleButton(); // single click = DST toggle, 3 clicks = config AP on/off, long press = brightness fade
 
   if (apActive) {      // config AP running
+    apWatchdog();      // re-create the AP if the ESP32 silently rebooted
     handleAP();        // captive-portal DNS + web UI + live settings updates
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
@@ -1003,11 +1069,11 @@ void normalizeColorFull(uint8_t &r, uint8_t &g, uint8_t &b) {
 }
 
 /* ======================================================================
-   User button: single click = DST, triple click = AP, long press = fade
+   User button: single click = DST, triple click = AP on/off, long press = fade.
+   While the AP is running only the triple click (leave config mode) is active,
+   so DST/auto-brightness/fade cannot be changed accidentally while configuring.
    ====================================================================== */
 void handleButton() {
-  if (apActive) { return; } // button disabled while configuring; exit AP via the web page
-
   bool pressed = (digitalRead(USER_BUTTON_PIN) == LOW);
   unsigned long t = millisNow;
 
@@ -1016,12 +1082,14 @@ void handleButton() {
     btnLong = false;
   }
 
-  if (pressed && !btnLong && (t - btnPressStart >= BTN_LONGPRESS_MS)) { // becomes a long press
-    btnLong = true;
-    fadeStart();
-  }
-  if (pressed && btnLong) {            // hold -> keep fading the brightness
-    fadeStep();
+  if (!apActive) { // long-press fade only in normal mode (AP: web page drives brightness)
+    if (pressed && !btnLong && (t - btnPressStart >= BTN_LONGPRESS_MS)) { // becomes a long press
+      btnLong = true;
+      fadeStart();
+    }
+    if (pressed && btnLong) {          // hold -> keep fading the brightness
+      fadeStep();
+    }
   }
 
   if (!pressed && btnPrev) {           // release
@@ -1039,7 +1107,8 @@ void handleButton() {
 
   // Evaluate the click sequence once no further click arrived within the window.
   if (!pressed && btnClicks > 0 && (t - btnLastRelease >= BTN_MULTI_GAP_MS)) {
-    if (btnClicks >= 3)      { startAPMode(); }
+    if (btnClicks >= 3)      { if (apActive) { stopAPMode(); } else { startAPMode(); } }
+    else if (apActive)       { } // 1x/2x do nothing while configuring
     else if (btnClicks == 2) { toggleAutoBright(); }
     else if (btnClicks == 1) { toggleDST(); }
     btnClicks = 0;
@@ -1089,6 +1158,25 @@ void fadeStep() {
 /* ======================================================================
    WLAN access point configuration mode
    ====================================================================== */
+// Bring the AP radio and its servers up (initial start and watchdog restart).
+void apRadioUp() {
+  WiFi.end();
+  delay(100);
+  WiFi.beginAP(AP_SSID, AP_PASS);
+  unsigned long t0 = millis();
+  while (millis() - t0 < 6000) { // wait for the radio (a station may rejoin instantly)
+    uint8_t st = WiFi.status();
+    if (st == WL_AP_LISTENING || st == WL_AP_CONNECTED) { break; }
+    delay(100);
+  }
+  apServer.begin();
+  dnsUdp.begin(DNS_PORT); // captive portal DNS
+  apWatchdogLast = millis(); // fresh grace period before the watchdog polls again
+  apLastActivity = millis();
+  apBadStatus = 0;
+  Serial.print("AP status: "); Serial.println(WiFi.status());
+}
+
 void startAPMode() {
   if (apActive) { return; }
   Serial.println("Starting config AP...");
@@ -1096,14 +1184,61 @@ void startAPMode() {
   millisNow = millis();
   updateBrightness(); // resolve the live brightness for the immediate info screen
   drawAPScreen(); // show SSID/PW/IP immediately, before the slow radio bring-up freezes the loop
-  WiFi.end();
-  delay(100);
-  WiFi.beginAP(AP_SSID, AP_PASS);
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_AP_LISTENING && millis() - t0 < 6000) { delay(100); }
-  apServer.begin();
-  dnsUdp.begin(DNS_PORT); // captive portal DNS
-  Serial.print("AP status: "); Serial.println(WiFi.status());
+  apRadioUp();
+}
+
+// Triple click while the AP is running: leave config mode and return to the
+// normal clock. WiFi.end() is useless for this - wifiDriverDeinit() is an empty
+// function in this driver, so the ESP32 would keep beaconing the AP forever.
+// What actually tears the softAP down is switching the module back to station
+// mode via WiFi.begin(); whether the home-WiFi join succeeds does not matter.
+void stopAPMode() {
+  if (!apActive) { return; }
+  Serial.println("Stopping config AP...");
+  apActive = false;
+  apClientConnected = false;
+  dnsUdp.stop();
+  apServer.end(); // release the listening socket (a fresh begin() would leak one)
+  WiFi.setTimeout(100); // non-blocking begin: don't stall the clock while it joins
+  netStatus = WiFi.begin(ssid, pass); // STA mode -> the ESP32 drops the AP
+  if (!ntpSuccess) {
+    // The clock has never been NTP-synced (AP opened via the boot button):
+    // leave the station side marked active so the pending sync can complete.
+    wifiEnabled = true;
+    Serial.println("Enabled Wifi for pending NTP sync");
+  } else {
+    wifiEnabled = false; // same state as after a regular daily sync
+  }
+  applyOrientation(detectRotation()); // back to the normal clock in the current orientation
+}
+
+// Re-create the AP when the ESP32 dropped it: the NINA firmware can crash and
+// reboot under captive-portal probe load, and after its reboot the SSID stays
+// gone for good while the sketch would keep serving into the void.
+// A restart is only triggered by AP_BAD_STATUS_LIMIT consecutive bad status
+// reads with no DNS/HTTP traffic - a single 255 read is just an SPI timeout
+// while the module is busy, and tearing down a healthy AP every 2 s freezes
+// the clock and keeps the phone from ever finishing its captive-portal check.
+void apWatchdog() {
+#if AP_WATCHDOG_ENABLE
+  if (millisNow - apWatchdogLast < AP_WATCHDOG_MS) { return; }
+  apWatchdogLast = millisNow;
+  uint8_t st = WiFi.status();
+  bool healthy = (st == WL_AP_LISTENING || st == WL_AP_CONNECTED);
+  if (healthy || (millisNow - apLastActivity < AP_ACTIVITY_GRACE_MS)) {
+    apBadStatus = 0;
+    return;
+  }
+  apBadStatus++;
+  Serial.print("AP watchdog: module status "); Serial.print(st);
+  Serial.print(" without traffic ("); Serial.print(apBadStatus); Serial.println("x)");
+  if (apBadStatus < AP_BAD_STATUS_LIMIT) { return; }
+  apBadStatus = 0;
+  Serial.println("AP watchdog: restarting AP");
+  apRadioUp();
+  apClientConnected = false; // any station is gone after the restart
+  drawAPScreen();            // back to the SSID/PW/IP info screen
+#endif
 }
 
 // AP info is always shown landscape (the SSID/PW text is too wide for portrait).
@@ -1141,6 +1276,7 @@ void handleDNS() {
   for (uint8_t guard = 0; guard < 10; guard++) {
     int pktLen = dnsUdp.parsePacket();
     if (pktLen <= 0) { break; }
+    apLastActivity = millisNow; // traffic = the AP is alive (watchdog proof of life)
     int n = dnsUdp.read(dnsBuffer, sizeof(dnsBuffer));
     if (n < 12) { continue; } // smaller than a DNS header -> ignore
 
@@ -1152,17 +1288,25 @@ void handleDNS() {
 
     // Turn the request into a response in place.
     dnsBuffer[2] = 0x81; dnsBuffer[3] = 0x80; // QR=1, RD copied, RA=1
-    dnsBuffer[6] = 0x00; dnsBuffer[7] = 0x01; // ANCOUNT = 1
     dnsBuffer[8] = 0x00; dnsBuffer[9] = 0x00; // NSCOUNT = 0
     dnsBuffer[10] = 0x00; dnsBuffer[11] = 0x00; // ARCOUNT = 0 (drop any EDNS/extra records)
 
-    int p = qpos;                                  // append the answer right after the question
-    dnsBuffer[p++] = 0xC0; dnsBuffer[p++] = 0x0C;  // NAME -> pointer to QNAME at offset 12
-    dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x01;  // TYPE  A
-    dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x01;  // CLASS IN
-    dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x3C; // TTL 60s
-    dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x04;  // RDLENGTH 4
-    dnsBuffer[p++] = apIP[0]; dnsBuffer[p++] = apIP[1]; dnsBuffer[p++] = apIP[2]; dnsBuffer[p++] = apIP[3];
+    int p = qpos; // response ends after the question unless an answer is appended
+    uint16_t qtype = ((uint16_t)dnsBuffer[qpos - 4] << 8) | dnsBuffer[qpos - 3];
+    if (qtype == 0x0001) {                           // A query -> answer with the AP IP
+      dnsBuffer[6] = 0x00; dnsBuffer[7] = 0x01;      // ANCOUNT = 1
+      dnsBuffer[p++] = 0xC0; dnsBuffer[p++] = 0x0C;  // NAME -> pointer to QNAME at offset 12
+      dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x01;  // TYPE  A
+      dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x01;  // CLASS IN
+      dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x3C; // TTL 60s
+      dnsBuffer[p++] = 0x00; dnsBuffer[p++] = 0x04;  // RDLENGTH 4
+      dnsBuffer[p++] = apIP[0]; dnsBuffer[p++] = apIP[1]; dnsBuffer[p++] = apIP[2]; dnsBuffer[p++] = apIP[3];
+    } else {
+      // AAAA/HTTPS(65)/... queries: NOERROR with zero answers. Answering these
+      // with an A record is malformed and makes phones retry for seconds before
+      // falling back to a plain A lookup.
+      dnsBuffer[6] = 0x00; dnsBuffer[7] = 0x00;      // ANCOUNT = 0
+    }
 
     dnsUdp.beginPacket(dnsUdp.remoteIP(), dnsUdp.remotePort());
     dnsUdp.write(dnsBuffer, p);
@@ -1171,7 +1315,7 @@ void handleDNS() {
 }
 
 // Tiny 204 response for the /live AJAX preview requests (no body needed).
-void sendNoContent(WiFiClient &c) {
+void sendNoContent(Print &c) {
   c.println("HTTP/1.1 204 No Content");
   c.println("Connection: close");
   c.println();
@@ -1180,7 +1324,7 @@ void sendNoContent(WiFiClient &c) {
 // Tiny plain-text response "<brightness> <lux>" for the config page poll:
 // effectiveBrightness (slider value in manual mode, sensor-driven in auto mode)
 // and the raw unfiltered lux reading (-1 when no sensor / not read yet).
-void sendBrightness(WiFiClient &c) {
+void sendBrightness(Print &c) {
   c.println("HTTP/1.1 200 OK");
   c.println("Content-Type: text/plain");
   c.println("Connection: close");
@@ -1193,7 +1337,7 @@ void sendBrightness(WiFiClient &c) {
 // Lightweight 302 to the portal. Used for captive-portal probe URLs so the OS
 // shows the "sign in to network" prompt without us shipping the whole form for
 // every probe (which floods the few NINA sockets).
-void sendCaptiveRedirect(WiFiClient &c) {
+void sendCaptiveRedirect(Print &c) {
   c.println("HTTP/1.1 302 Found");
   c.print("Location: http://"); c.print(apIP); c.println("/");
   c.println("Content-Length: 0");
@@ -1207,6 +1351,10 @@ void handleAP() {
 
   WiFiClient client = apServer.available();
   if (!client) { return; }
+  apLastActivity = millisNow; // traffic = the AP is alive (watchdog proof of life)
+  // Don't let a slow/silent client stall the loop (and the captive-portal DNS)
+  // for the 1 s Stream default per readStringUntil() call.
+  client.setTimeout(100);
 
   apShowClock(); // a client is talking to us -> reliably switch to the live clock
 
@@ -1225,28 +1373,38 @@ void handleAP() {
   int q = target.indexOf('?');
   if (q >= 0) { path = target.substring(0, q); query = target.substring(q + 1); }
 
+#if AP_BUFFERED_SEND
+  BufferedWriter out(client); // batch the many small prints into few big SPI writes
+#else
+  WiFiClient &out = client;
+#endif
+
+  bool reboot = false;
   if (path.startsWith("/save")) {
     applyParams(query);
     saveSettings();
-    sendSavedPage(client);
-    client.stop();
-    delay(300);
-    NVIC_SystemReset(); // reboot so the new timezone/WiFi settings take full effect
+    sendSavedPage(out);
+    reboot = true;
   } else if (path.startsWith("/live")) {
     applyLiveParams(query); // live preview: apply to RAM only, no save, no reboot
-    sendNoContent(client);
-    client.stop();
+    sendNoContent(out);
   } else if (path == "/b") {
-    sendBrightness(client); // tiny plain-text poll of the currently rendered brightness
-    client.stop();
+    sendBrightness(out); // tiny plain-text poll of the currently rendered brightness
   } else if (path == "/" || path.startsWith("/index")) {
-    sendFormPage(client); // the actual config UI (only served on explicit navigation)
-    client.stop();
+    sendFormPage(out); // the actual config UI (only served on explicit navigation)
   } else {
     // Every captive-portal probe (/generate_204, /hotspot-detect.html, /ncsi.txt,
     // ...) gets a small redirect to "/", which triggers the OS "sign in" prompt.
-    sendCaptiveRedirect(client);
-    client.stop();
+    sendCaptiveRedirect(out);
+  }
+
+#if AP_BUFFERED_SEND
+  out.flushBuf();
+#endif
+  client.stop();
+  if (reboot) {
+    delay(300);
+    NVIC_SystemReset(); // reboot so the new timezone/WiFi settings take full effect
   }
 }
 
@@ -1341,7 +1499,7 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
 }
 
-void sendHttpHeader(WiFiClient &c) {
+void sendHttpHeader(Print &c) {
   c.println("HTTP/1.1 200 OK");
   c.println("Content-Type: text/html; charset=utf-8");
   c.println("Connection: close");
@@ -1349,7 +1507,7 @@ void sendHttpHeader(WiFiClient &c) {
 }
 
 // Helper: print one <option> with the right "selected" attribute.
-void printDirOption(WiFiClient &c, uint8_t cur, uint8_t val, const char *label) {
+void printDirOption(Print &c, uint8_t cur, uint8_t val, const char *label) {
   c.print("<option value=\""); c.print(val); c.print("\"");
   if (cur == val) { c.print(" selected"); }
   c.print(">"); c.print(label); c.println("</option>");
@@ -1387,7 +1545,7 @@ const TzOption TZONES[] = {
   {  43200, "(UTC+12:00) Auckland"},
 };
 
-void printTzOptions(WiFiClient &c) {
+void printTzOptions(Print &c) {
   for (unsigned int i = 0; i < sizeof(TZONES) / sizeof(TZONES[0]); i++) {
     c.print("<option value="); c.print(TZONES[i].off);
     if (TZONES[i].off == settings.tzOffset) { c.print(" selected"); }
@@ -1395,7 +1553,7 @@ void printTzOptions(WiFiClient &c) {
   }
 }
 
-void sendFormPage(WiFiClient &c) {
+void sendFormPage(Print &c) {
   sendHttpHeader(c);
   c.println("<!DOCTYPE html><html><head><meta charset=utf-8>");
   c.println("<meta name=viewport content=\"width=device-width,initial-scale=1\">");
@@ -1505,7 +1663,7 @@ void sendFormPage(WiFiClient &c) {
   c.println("</body></html>");
 }
 
-void sendSavedPage(WiFiClient &c) {
+void sendSavedPage(Print &c) {
   sendHttpHeader(c);
   c.println("<!DOCTYPE html><html><head><meta charset=utf-8>");
   c.println("<meta name=viewport content=\"width=device-width,initial-scale=1\">");
