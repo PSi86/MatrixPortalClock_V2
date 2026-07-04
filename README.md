@@ -16,7 +16,7 @@ Fetches the time from the local network via NTP and offers a WiFi configuration 
   - **1x short** -> toggle daylight saving / standard time (+/- 1 h); shows a 3 s
     `summer` (orange) / `winter` (ice-blue) banner
   - **2x short** -> toggle auto-brightness (light sensor) on/off
-  - **3x short** -> open the WiFi access point for settings
+  - **3x short** -> open the WiFi access point for settings (3x again closes it)
   - **hold long** -> adjust brightness (cyclic, perceptually linear); releasing
     saves it. With auto-brightness on, this trims the brightness *relative* to the
     measured ambient level (neutral in the middle) instead of setting an absolute level
@@ -42,7 +42,8 @@ Fetches the time from the local network via NTP and offers a WiFi configuration 
 
 ## AP configuration
 
-Press the user button 3x short -> the board opens the access point:
+Press the user button 3x short -> the board opens the access point (another
+3x short closes it again and returns to the normal clock):
 
 | | |
 |---|---|
