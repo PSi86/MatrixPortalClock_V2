@@ -19,9 +19,7 @@ Todo Concept:
 
 ------------------------------------------------------------------------- */
 
-#include <SPI.h>
-#include <WiFiNINA.h>
-//#include <WiFiUdp.h>
+#include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
 #include <TimeLib.h>
 
 #include <Adafruit_Protomatter.h>
@@ -32,27 +30,24 @@ Todo Concept:
 #include <Fonts/FreeSansBold9pt7b.h> // Large friendly font
 #include <Fonts/Picopixel.h>
 
-#include <FlashStorage_SAMD.h> // Library Manager: "FlashStorage_SAMD" (Khoi Hoang) - stores settings in flash
 #include <math.h>              // powf() for perceptual brightness fade
 
 #include <Wire.h>              // I2C for the onboard accelerometer + light sensor
 #include <Adafruit_Sensor.h>  // sensor base class
-#include <Adafruit_LIS3DH.h>  // MatrixPortal M4 onboard LIS3DH accelerometer
+#include <Adafruit_LIS3DH.h>  // onboard LIS3DH accelerometer (both boards)
 #include <BH1750.h>            // external BH1750 ambient light sensor (auto-brightness)
 
 /* ----------------------------------------------------------------------
 The RGB matrix must be wired to VERY SPECIFIC pins, different for each
-microcontroller board. This first section sets that up for a number of
-supported boards.
+microcontroller board. board_hal.h picks the set that belongs to the board
+being built for (MatrixPortal M4 or MatrixPortal S3).
 ------------------------------------------------------------------------- */
 
-#if defined(_VARIANT_MATRIXPORTAL_M4_) // MatrixPortal M4
-  uint8_t rgbPins[]  = {7, 8, 9, 10, 11, 12};
-  uint8_t addrPins[] = {17, 18, 19, 20, 21};
-  uint8_t clockPin   = 14;
-  uint8_t latchPin   = 15;
-  uint8_t oePin      = 16;
-#endif
+uint8_t rgbPins[]  = MATRIX_RGB_PINS;
+uint8_t addrPins[] = MATRIX_ADDR_PINS;
+uint8_t clockPin   = MATRIX_CLOCK_PIN;
+uint8_t latchPin   = MATRIX_LATCH_PIN;
+uint8_t oePin      = MATRIX_OE_PIN;
 
 Adafruit_Protomatter matrix(
   64,          // Matrix width in pixels
@@ -102,20 +97,14 @@ const Settings DEFAULTS = {
 
 Settings settings;
 
-// Persist the settings at a FIXED address in the top 8 KB block of the 512 KB
-// flash, OUTSIDE the program image. The upload (bossac --write --offset 0x4000,
-// no --erase) only touches the sketch region from 0x4000 up, so this block is
-// left untouched and the settings survive a firmware upload. The FlashStorage()
-// macro instead reserves a zero-initialised array *inside* the image, which
-// every upload overwrites - that was why all settings reset to defaults (e.g.
-// brightness back to 255) on each flash.
-#define SETTINGS_FLASH_ADDR 0x0007E000UL   // last 8 KB erase block of the 512 KB flash
-static_assert(sizeof(Settings) <= 8192, "Settings must fit in one 8 KB flash block");
-FlashStorageClass<Settings> clockStore((const void *)SETTINGS_FLASH_ADDR);
+// The settings are stored OUTSIDE the program image so they survive a firmware
+// upload, not just a restart: a fixed flash block on the M4, NVS on the S3.
+// See board_hal.h for why each board needs its own backend.
+SettingsStore<Settings> clockStore;
 
 // User button / interaction ------------------------------------------------
-// MatrixPortal M4: UP button = D2, DOWN button = D3, both active LOW (INPUT_PULLUP).
-#define USER_BUTTON_PIN 2
+// USER_BUTTON_PIN comes from board_hal.h (M4: D2, S3: GPIO6) - the S3 drives the
+// matrix clock on D2. Active LOW with the internal pull-up on both boards.
 const unsigned long BTN_DEBOUNCE_MS  = 25;   // ignore bounces shorter than this
 const unsigned long BTN_LONGPRESS_MS = 600;  // hold longer than this -> brightness fade
 const unsigned long BTN_MULTI_GAP_MS = 400;  // window to collect a click sequence
@@ -123,6 +112,24 @@ bool          btnPrev = false;
 unsigned long btnPressStart = 0, btnLastRelease = 0;
 uint8_t       btnClicks = 0;
 bool          btnLong = false;
+
+// Button feedback ----------------------------------------------------------
+// The red board LED (FEEDBACK_LED_PIN) - and, if enabled, a small square in the
+// bottom-right corner of the matrix - is lit while the button is held. Once a
+// click sequence has triggered its function it blinks once per click, so 1x /
+// 2x / 3x can be told apart. A sequence that triggers nothing (1x/2x while the
+// config AP is up) gets no confirmation.
+#define BUTTON_FEEDBACK_ON_MATRIX 1          // 0 = board LED only
+// Dark pause before the first confirmation blink, on top of BTN_MULTI_GAP_MS
+// (the function itself still triggers after the gap). Separates the blinks
+// clearly from the last button press so they are easy to count.
+const unsigned long FB_LEAD_IN_MS   = 250;
+const unsigned long FB_BLINK_ON_MS  = 150;
+const unsigned long FB_BLINK_OFF_MS = 250;
+uint8_t       fbBlinkCount = 0;              // confirmation blinks of the running sequence
+unsigned long fbBlinkStart = 0;              // millis() when that sequence started
+bool          fbLit = false;                 // feedback state of this loop (LED and matrix)
+bool          apScreenFbLit = false;         // feedback state the static AP info screen shows
 
 // Perceptual brightness fade (long press) ----------------------------------
 const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep
@@ -139,36 +146,41 @@ bool        apActive = false;
 bool        apClientConnected = false; // true once a client talks to us (station joined / HTTP hit)
 unsigned long apStatusLast = 0;        // last time the AP connection status was polled
 unsigned long apClockLast = 0;         // last live-preview clock frame (throttled in AP mode)
-// While a client is connected the slow WiFiNINA web server is the priority, so the
-// clock preview is throttled hard (5 fps) to leave the CPU/radio free for serving.
-const unsigned long AP_PREVIEW_MS = 200; // 5 fps clock preview while a client is connected
+// While a client is connected serving the web UI has priority, so the clock
+// preview is throttled to the rate the board's radio can spare (board_hal.h:
+// 5 fps on the M4's SPI-attached NINA, 30 fps on the S3).
+const unsigned long AP_PREVIEW_MS = AP_PREVIEW_INTERVAL_MS;
 WiFiServer  apServer(80);
 // Captive portal: a tiny DNS server answers every lookup with the AP IP so the
 // phone's connectivity check is hijacked and the config page pops up by itself.
-IPAddress      apIP(192, 168, 4, 1); // WiFiNINA default AP address
+IPAddress      apIP(AP_IP_ADDR);    // 4.3.2.1 on both boards, see board_hal.h; re-read once the radio is up
 WiFiUDP        dnsUdp;
 const uint16_t DNS_PORT = 53;
 byte           dnsBuffer[512];
 
-// Compile-time switch: buffer each HTTP response in RAM and push it to the NINA
-// in a few big client.write() chunks instead of ~100 tiny print() calls. Every
-// write() is a full SPI round trip to the ESP32 (further slowed by the matrix
-// refresh interrupt), so unbuffered serving takes many seconds per page load.
+// Compile-time switch: buffer each HTTP response in RAM and push it out in a few
+// big client.write() chunks instead of ~100 tiny print() calls. On the M4 every
+// write() is a full SPI round trip to the NINA co-processor (further slowed by
+// the matrix refresh interrupt), so unbuffered serving takes many seconds per
+// page load; on the S3 it still saves one lwIP send per line.
 // Set to 0 to fall back to direct, unbuffered writes.
 #define AP_BUFFERED_SEND 1
 
-// Compile-time switch: watchdog that re-creates the AP when the module status
-// says it is gone (ESP32 crash/reboot under captive-portal load).
+// Compile-time switch: watchdog that re-creates the AP when the radio status
+// says it is gone. This only ever mattered on the M4, whose NINA co-processor
+// can crash and reboot under captive-portal probe load; the S3 hosts the AP on
+// the main MCU, so there is no separate module to lose.
 // DISABLED: on nina-fw 3.3.0 / WiFiNINA 2.0.1 the status reads are so
 // unreliable in AP mode (SPI timeouts return 255 while the module is busy)
 // that the watchdog tears down a healthy AP over and over - the phone gets
 // kicked before the captive-portal check ever completes. Set to 1 to re-enable.
 #define AP_WATCHDOG_ENABLE 0
 
-// CAUTION: WiFi.status() is unreliable as the sole signal - the driver returns
-// 255 whenever the SPI reply times out, which happens sporadically while the
-// ESP32 is busy serving a client. So a restart additionally requires several
-// bad reads in a row AND no recent DNS/HTTP traffic (traffic = proof of life).
+// CAUTION: on the M4 the radio status is unreliable as the sole signal - the
+// driver returns 255 whenever the SPI reply times out, which happens
+// sporadically while the module is busy serving a client. So a restart
+// additionally requires several bad reads in a row AND no recent DNS/HTTP
+// traffic (traffic = proof of life).
 const unsigned long AP_WATCHDOG_MS       = 2000; // status poll interval
 const unsigned long AP_ACTIVITY_GRACE_MS = 8000; // recent traffic vetoes a restart
 const uint8_t       AP_BAD_STATUS_LIMIT  = 3;    // consecutive bad polls before restart
@@ -303,7 +315,6 @@ bool firstSync=true;
 time_t sysTime, ntpTime;
 
 // Network Stuff
-int netStatus = WL_IDLE_STATUS;
 #include "arduino_secrets.h" 
 ///////please enter your sensitive data in the Secret tab/arduino_secrets.h
 char ssid[] = SECRET_SSID;        // your network SSID (name)
@@ -323,15 +334,17 @@ WiFiUDP Udp;
 
 // SETUP
 void setup(void) {
-  Serial.begin(115200);
+  boardSerialBegin(115200);
 
   pinMode(USER_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(FEEDBACK_LED_PIN, OUTPUT);
+  digitalWrite(FEEDBACK_LED_PIN, LOW);
   loadSettings(); // pulls brightness/colors/animation/tz from flash (or writes defaults)
 
   // Onboard LIS3DH accelerometer -> automatic screen rotation. If it is not
   // found the clock simply stays in the default portrait orientation.
   Wire.begin();
-  accelOK = lis.begin(0x19); // MatrixPortal M4 onboard I2C address
+  accelOK = lis.begin(ACCEL_I2C_ADDR); // onboard, non-standard address on both boards
   if (accelOK) {
     lis.setRange(LIS3DH_RANGE_2_G);
     lis.setDataRate(LIS3DH_DATARATE_10_HZ);
@@ -357,8 +370,10 @@ void setup(void) {
   Serial.print("Protomatter status: ");
   Serial.println((int)matrixstatus);
   if(matrixstatus != PROTOMATTER_OK) {
-    // DO NOT CONTINUE if matrix setup encountered an error.
-    for(;;);
+    // DO NOT CONTINUE if matrix setup encountered an error. The delay keeps the
+    // ESP32's task watchdog fed so the board reports the error instead of
+    // rebooting in a loop.
+    for(;;) { delay(1000); }
   }
 
   matrix.setTextWrap(false);           // Allow text off edge
@@ -372,36 +387,24 @@ void setup(void) {
 
   // Initialize Network...... (skipped while the config AP is running)
   if (!apActive) {
-  WiFi.status();
- // while (WiFi.status() != WL_NO_MODULE) {
- //   Serial.println("Communication with WiFi module failed!");
+    netRadioInit();
+    netPrintRadioInfo();
+
+    // attempt to connect to WiFi network: Connect to WPA/WPA2 network.
+    bootStatus("WLAN?");
+    Serial.print("Attempting to connect to SSID: ");
+    Serial.println(ssid);
+
+    netStaBegin(ssid, pass);
+    uint8_t waited = 0;
+    while (!netStaConnected()) {
+      delay(500);
+      if (++waited >= 14) { waited = 0; netStaBegin(ssid, pass); } // re-issue the join every 7 s
+    }
+    bootStatus("WLAN!");
+    Serial.println("Connected to WiFi");
+    printWifiStatus();
     delay(1000);
- // }
-
-  String fv = WiFi.firmwareVersion();
-  Serial.print("ESP32 FW: ");
-  Serial.println(fv);
-  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
-    Serial.println("Please upgrade the firmware");
-  }
-
-  // attempt to connect to WiFi network:
-  // Connect to WPA/WPA2 network.
-  bootStatus("WLAN?");
-
-  WiFi.setTimeout(100);
-  
-  Serial.print("Attempting to connect to SSID: ");
-  Serial.println(ssid);
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    WiFi.begin(ssid, pass); // synchronous call takes several seconds
-    delay(7000);
-  }
-  bootStatus("WLAN!");
-  Serial.println("Connected to WiFi");
-  printWifiStatus();
-  delay(1000);
   } // end if(!apActive)
 }
 
@@ -439,9 +442,13 @@ void updateApDisplay() {
   if (!apClientConnected) {
     if (millisNow - apStatusLast >= 500) { // periodically check whether a station joined
       apStatusLast = millisNow;
-      if (WiFi.status() == WL_AP_CONNECTED) { apShowClock(); return; }
+      if (netApHasStation()) { apShowClock(); return; }
       if (apInfoRotation() != curRotation) { drawAPScreen(); } // re-orient the info if turned
     }
+#if BUTTON_FEEDBACK_ON_MATRIX
+    // The info screen is static, so redraw it whenever the button indicator flips.
+    if (fbLit != apScreenFbLit) { drawAPScreen(); }
+#endif
     return;
   }
   // A client is connected. Keep the animation advancing every loop so it runs at
@@ -621,6 +628,7 @@ void drawCenteredText(const char *msg, uint16_t color) {
   matrix.setTextColor(color);
   matrix.setCursor((matrix.width() - (int)w) / 2 - x1, (matrix.height() - (int)h) / 2 - y1);
   matrix.print(msg);
+  drawFeedbackIndicator();
   matrix.show();
 }
 
@@ -656,7 +664,7 @@ void stepClockAnim(void) {
  // if (hourTrigger) { animShow[0]=false; animShow[1]=false; }
 
   // Concept: Iterate through the digits of the time display. If the animTrigger[i] is true, then create an location offset for the digit according to the fly-in direction that is configured for that digit.
-  for (uint i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
+  for (uint8_t i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
     // check each second if animation digit has reached its target location
     if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i] && animShow[i] == true && secondTrigger) {
       // reset time position as animation digit is now in the exact place where current time digit is when not animating
@@ -704,7 +712,7 @@ void stepClockAnim(void) {
 void renderClock(void) {
   matrix.fillScreen(0); // Fill background black
 
-  for (uint i = 0; i < 6; i++) {
+  for (uint8_t i = 0; i < 6; i++) {
     // Animate future digits BEGIN
     if(i>3) { matrix.setFont(&FreeSansBold9pt7b); }  // Smaller Font for displaying Seconds
     else    { matrix.setFont(&FreeSansBold12pt7b); } // Bigger Font for displaying Minutes and Hours
@@ -731,6 +739,7 @@ void renderClock(void) {
   else { color=matrix.color565(statusInt, 0, 0); }
   matrix.drawPixel(0, 63, color); // NTP sync status Pixel
 
+  drawFeedbackIndicator();
   matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
 }
 
@@ -786,16 +795,17 @@ void timekeeper(void) {
       // TODO: maybe there is another check necessary for the hours: 23 to 00 change
   }
   else {
-    for (uint i = 0; i < sizeof(animTrigger); i++) {
+    for (uint8_t i = 0; i < sizeof(animTrigger); i++) {
       animTrigger[i] = false;
     }
   }
 }
 
-// Updates sysTime using NTP of the WiFi library. Uses hardcoded timeserver (eg: time.nist.gov). Enables/Disables WiFi when necessary.
+// Updates sysTime from NTP (board_hal.h: the NINA's own SNTP client on the M4,
+// lwIP's on the S3). Enables/Disables WiFi when necessary.
 void timeSync_WifiLib() {
   if (!ntpSuccess && !ntpRequestActive) {
-    ntpTime=WiFi.getTime();
+    ntpTime=netNtpEpoch();
     lastSync=millisNow;
     if(ntpTime != 0) {
       if(timeStatus()==timeSet) { timeOffset=ntpTime+tzTotalOffset()-sysTime; } // timeOffset will be positive if acutal time is ahead of sysTime (=sysTime/ system clock is slow) and negative if acutal time is behind sysTime (=sysTime/ system clock is fast)
@@ -807,7 +817,7 @@ void timeSync_WifiLib() {
       Serial.println(timeOffset);
       ntpSuccess = true;
       ntpRequestActive = false;
-      WiFi.end();
+      netRadioOff();
       wifiEnabled = false;
       Serial.println("Disabled Wifi");
     }
@@ -836,7 +846,7 @@ void timeSync_WifiLib() {
     }
     */
     if(!wifiEnabled && hourNow == syncTimeHour && minuteNow == syncTimeMinute-1) { // 1 minute before next Sync
-      netStatus = WiFi.begin(ssid, pass); // Connect to wifi
+      netStaBegin(ssid, pass); // Connect to wifi (and arm a fresh NTP sync)
       wifiEnabled = true;
       Serial.println("Enabled Wifi");
     }
@@ -848,7 +858,7 @@ void timeSync_WifiLib() {
   }
 
   // Retry a failed NTP fetch promptly, independent of the minute change above.
-  // WiFi.getTime() returns 0 until the NINA's SNTP completes (a few seconds after
+  // netNtpEpoch() returns 0 until SNTP completes (a few seconds after
   // associating); gating this retry behind minuteTrigger left the clock stuck at
   // 1970 (00:00:00) for up to a minute after boot even though WiFi was connected.
   if(ntpRequestActive && millisNow-lastSync > ntpTimeout) { // time to try getTime() again
@@ -943,24 +953,11 @@ void sendNTPpacket(IPAddress& address) {
 }
 */
 
-// Prints Wifi connection status, SSID, IP and RSSI to console
+// Prints Wifi connection status, SSID, IP and RSSI to console.
+// The numeric status is wl_status_t: 0 = idle, 3 = connected, 6 = disconnected.
+// The M4's WiFiNINA adds the AP-mode values 8 = listening, 9 = station joined
+// (and returns 255 when the SPI reply to the co-processor timed out).
 void printWifiStatus() {
-  /*
-    typedef enum {
-      WL_NO_SHIELD = 255,
-            WL_NO_MODULE = WL_NO_SHIELD,
-            WL_IDLE_STATUS = 0,
-            WL_NO_SSID_AVAIL,
-            WL_SCAN_COMPLETED,
-            WL_CONNECTED,
-            WL_CONNECT_FAILED,
-            WL_CONNECTION_LOST,
-            WL_DISCONNECTED,
-            WL_AP_LISTENING,
-            WL_AP_CONNECTED,
-            WL_AP_FAILED
-    } wl_status_t;
-  */
   Serial.print("WiFi Status: ");
   Serial.println(WiFi.status());
 
@@ -990,6 +987,7 @@ long tzTotalOffset() {
 
 // Load settings from flash; fall back to factory defaults on first run / struct change.
 void loadSettings() {
+  clockStore.begin();
   clockStore.read(settings);
   if (settings.magic != SETTINGS_MAGIC) {
     settings = DEFAULTS;
@@ -1080,6 +1078,7 @@ void handleButton() {
   if (pressed && !btnPrev) {           // press starts
     btnPressStart = t;
     btnLong = false;
+    fbBlinkCount = 0;                  // a new interaction cancels a pending confirmation
   }
 
   if (!apActive) { // long-press fade only in normal mode (AP: web page drives brightness)
@@ -1107,14 +1106,59 @@ void handleButton() {
 
   // Evaluate the click sequence once no further click arrived within the window.
   if (!pressed && btnClicks > 0 && (t - btnLastRelease >= BTN_MULTI_GAP_MS)) {
-    if (btnClicks >= 3)      { if (apActive) { stopAPMode(); } else { startAPMode(); } }
-    else if (apActive)       { } // 1x/2x do nothing while configuring
-    else if (btnClicks == 2) { toggleAutoBright(); }
-    else if (btnClicks == 1) { toggleDST(); }
+    uint8_t clicks = (btnClicks > 3) ? 3 : btnClicks; // 4+ clicks run the 3x function
+    bool triggered = true;
+    if (clicks == 3)         { if (apActive) { stopAPMode(); } else { startAPMode(); } }
+    else if (apActive)       { triggered = false; } // 1x/2x do nothing while configuring
+    else if (clicks == 2)    { toggleAutoBright(); }
+    else                     { toggleDST(); }
     btnClicks = 0;
+    if (triggered) { feedbackConfirm(clicks); }
   }
 
   btnPrev = pressed;
+  updateFeedbackLed();
+}
+
+// Start the confirmation for a triggered n-click function. Timed from now rather
+// than from the loop's millisNow, so a function that blocked for a while
+// (bringing up the AP radio) does not swallow the blinks.
+void feedbackConfirm(uint8_t clicks) {
+  fbBlinkCount = clicks;
+  fbBlinkStart = millis();
+}
+
+// Lit while the button is held, or during an "on" phase of the confirmation.
+bool feedbackLit() {
+  if (btnPrev) { return true; }
+  if (fbBlinkCount == 0) { return false; }
+  const unsigned long period = FB_BLINK_ON_MS + FB_BLINK_OFF_MS;
+  unsigned long elapsed = millis() - fbBlinkStart;
+  if (elapsed < FB_LEAD_IN_MS) { return false; }  // pause before the first blink
+  elapsed -= FB_LEAD_IN_MS;
+  if (elapsed >= fbBlinkCount * period) { fbBlinkCount = 0; return false; }
+  return (elapsed % period) < FB_BLINK_ON_MS;
+}
+
+// Resolve the feedback state once per loop and drive the board LED with it. The
+// matrix screens draw the same state (fbLit), so LED and matrix stay in step.
+void updateFeedbackLed() {
+  bool lit = feedbackLit();
+  if (lit != fbLit) {
+    fbLit = lit;
+    digitalWrite(FEEDBACK_LED_PIN, lit ? HIGH : LOW);
+  }
+}
+
+// Matrix copy of the feedback LED: a 2x2 square in the bottom-right corner of
+// the current rotation, clear of the digits in both orientations. Every screen
+// calls this right before matrix.show().
+void drawFeedbackIndicator() {
+#if BUTTON_FEEDBACK_ON_MATRIX
+  if (fbLit) {
+    matrix.fillRect(matrix.width() - 2, matrix.height() - 2, 2, 2, scaledColorVisible(255, 255, 255));
+  }
+#endif
 }
 
 // Toggle daylight saving and shift the running clock by +/- 1 hour immediately.
@@ -1160,21 +1204,18 @@ void fadeStep() {
    ====================================================================== */
 // Bring the AP radio and its servers up (initial start and watchdog restart).
 void apRadioUp() {
-  WiFi.end();
-  delay(100);
-  WiFi.beginAP(AP_SSID, AP_PASS);
-  unsigned long t0 = millis();
-  while (millis() - t0 < 6000) { // wait for the radio (a station may rejoin instantly)
-    uint8_t st = WiFi.status();
-    if (st == WL_AP_LISTENING || st == WL_AP_CONNECTED) { break; }
-    delay(100);
-  }
+  bool up = netApBegin(AP_SSID, AP_PASS);
+  IPAddress ip = netApIP();
+  // Keep the compiled-in AP_IP_ADDR if the radio could not tell us an address
+  // yet - the info screen and the DNS answers need a usable one either way.
+  if ((uint32_t)ip != 0) { apIP = ip; }
   apServer.begin();
   dnsUdp.begin(DNS_PORT); // captive portal DNS
   apWatchdogLast = millis(); // fresh grace period before the watchdog polls again
   apLastActivity = millis();
   apBadStatus = 0;
-  Serial.print("AP status: "); Serial.println(WiFi.status());
+  Serial.print("AP "); Serial.print(up ? "up" : "NOT up");
+  Serial.print(" at "); Serial.println(apIP);
 }
 
 void startAPMode() {
@@ -1188,10 +1229,8 @@ void startAPMode() {
 }
 
 // Triple click while the AP is running: leave config mode and return to the
-// normal clock. WiFi.end() is useless for this - wifiDriverDeinit() is an empty
-// function in this driver, so the ESP32 would keep beaconing the AP forever.
-// What actually tears the softAP down is switching the module back to station
-// mode via WiFi.begin(); whether the home-WiFi join succeeds does not matter.
+// normal clock. How the softAP is actually torn down differs per board, see
+// netApEnd() in board_hal.h.
 void stopAPMode() {
   if (!apActive) { return; }
   Serial.println("Stopping config AP...");
@@ -1199,8 +1238,7 @@ void stopAPMode() {
   apClientConnected = false;
   dnsUdp.stop();
   apServer.end(); // release the listening socket (a fresh begin() would leak one)
-  WiFi.setTimeout(100); // non-blocking begin: don't stall the clock while it joins
-  netStatus = WiFi.begin(ssid, pass); // STA mode -> the ESP32 drops the AP
+  netApEnd(ssid, pass); // drop the softAP and rejoin the home WiFi
   if (!ntpSuccess) {
     // The clock has never been NTP-synced (AP opened via the boot button):
     // leave the station side marked active so the pending sync can complete.
@@ -1212,9 +1250,9 @@ void stopAPMode() {
   applyOrientation(detectRotation()); // back to the normal clock in the current orientation
 }
 
-// Re-create the AP when the ESP32 dropped it: the NINA firmware can crash and
-// reboot under captive-portal probe load, and after its reboot the SSID stays
-// gone for good while the sketch would keep serving into the void.
+// Re-create the AP when the radio dropped it: the M4's NINA firmware can crash
+// and reboot under captive-portal probe load, and after its reboot the SSID
+// stays gone for good while the sketch would keep serving into the void.
 // A restart is only triggered by AP_BAD_STATUS_LIMIT consecutive bad status
 // reads with no DNS/HTTP traffic - a single 255 read is just an SPI timeout
 // while the module is busy, and tearing down a healthy AP every 2 s freezes
@@ -1223,15 +1261,13 @@ void apWatchdog() {
 #if AP_WATCHDOG_ENABLE
   if (millisNow - apWatchdogLast < AP_WATCHDOG_MS) { return; }
   apWatchdogLast = millisNow;
-  uint8_t st = WiFi.status();
-  bool healthy = (st == WL_AP_LISTENING || st == WL_AP_CONNECTED);
-  if (healthy || (millisNow - apLastActivity < AP_ACTIVITY_GRACE_MS)) {
+  if (netApHealthy() || (millisNow - apLastActivity < AP_ACTIVITY_GRACE_MS)) {
     apBadStatus = 0;
     return;
   }
   apBadStatus++;
-  Serial.print("AP watchdog: module status "); Serial.print(st);
-  Serial.print(" without traffic ("); Serial.print(apBadStatus); Serial.println("x)");
+  Serial.print("AP watchdog: radio reports no AP without traffic (");
+  Serial.print(apBadStatus); Serial.println("x)");
   if (apBadStatus < AP_BAD_STATUS_LIMIT) { return; }
   apBadStatus = 0;
   Serial.println("AP watchdog: restarting AP");
@@ -1266,8 +1302,24 @@ void drawAPScreen() {
   matrix.setCursor(0, 18); matrix.print("PW "); matrix.print(AP_PASS);
   matrix.setTextColor(scaledColorVisible(255, 140, 0));
   matrix.setCursor(0, 28); matrix.print("IP "); matrix.print(apIP);
+  drawFeedbackIndicator();
+  apScreenFbLit = fbLit;
   matrix.show();
 }
+
+#if defined(CLOCK_DEBUG)
+// Debug build only: the queried host name of a DNS request as text.
+String dnsQueryName(const byte *buf, int len) {
+  String name;
+  int i = 12;
+  while (i < len && buf[i] != 0) {
+    int labelLen = buf[i++];
+    if (name.length()) { name += '.'; }
+    for (int k = 0; k < labelLen && i < len; k++) { name += (char)buf[i++]; }
+  }
+  return name;
+}
+#endif
 
 // Minimal DNS server: answer every query with the AP IP so any hostname the
 // phone looks up (e.g. its connectivity-check host) resolves to us. Drains the
@@ -1284,7 +1336,10 @@ void handleDNS() {
     int qpos = 12;
     while (qpos < n && dnsBuffer[qpos] != 0) { qpos += dnsBuffer[qpos] + 1; }
     qpos += 1 + 4; // null label + QTYPE(2) + QCLASS(2)
-    if (qpos > n || qpos + 16 > (int)sizeof(dnsBuffer)) { continue; }
+    if (qpos > n || qpos + 16 > (int)sizeof(dnsBuffer)) {
+      DEBUG_LOG("dns: malformed query (%d bytes) dropped\n", n);
+      continue;
+    }
 
     // Turn the request into a response in place.
     dnsBuffer[2] = 0x81; dnsBuffer[3] = 0x80; // QR=1, RD copied, RA=1
@@ -1293,6 +1348,8 @@ void handleDNS() {
 
     int p = qpos; // response ends after the question unless an answer is appended
     uint16_t qtype = ((uint16_t)dnsBuffer[qpos - 4] << 8) | dnsBuffer[qpos - 3];
+    DEBUG_LOG("dns: %s type %u from %s\n", dnsQueryName(dnsBuffer, n).c_str(), qtype,
+              dnsUdp.remoteIP().toString().c_str());
     if (qtype == 0x0001) {                           // A query -> answer with the AP IP
       dnsBuffer[6] = 0x00; dnsBuffer[7] = 0x01;      // ANCOUNT = 1
       dnsBuffer[p++] = 0xC0; dnsBuffer[p++] = 0x0C;  // NAME -> pointer to QNAME at offset 12
@@ -1350,20 +1407,42 @@ void handleAP() {
   handleDNS(); // keep the captive-portal DNS responsive
 
   WiFiClient client = apServer.available();
+#if defined(CLOCK_DEBUG)
+  // Every accepted socket, before the connected() check below can drop it.
+  if (client.fd() >= 0) {
+    int errBefore = errno;
+    bool isConnected = client.connected();
+    DEBUG_LOG("http: accepted socket %d from %s, connected %d (errno %d), %d bytes waiting\n",
+              client.fd(), client.remoteIP().toString().c_str(), isConnected, errBefore,
+              client.available());
+  }
+#endif
   if (!client) { return; }
   apLastActivity = millisNow; // traffic = the AP is alive (watchdog proof of life)
   // Don't let a slow/silent client stall the loop (and the captive-portal DNS)
   // for the 1 s Stream default per readStringUntil() call.
-  client.setTimeout(100);
+  netClientTimeoutMs(client, 100);
 
   apShowClock(); // a client is talking to us -> reliably switch to the live clock
 
   String reqLine = client.readStringUntil('\n'); // "GET /path?query HTTP/1.1\r"
+#if defined(CLOCK_DEBUG)
+  String host; // which host the client thinks it is talking to (probe detection)
+#endif
   // discard the remaining request headers
   while (client.connected()) {
     String h = client.readStringUntil('\n');
     if (h.length() == 0 || h == "\r") { break; }
+#if defined(CLOCK_DEBUG)
+    if (h.startsWith("Host:")) { host = h.substring(5); host.trim(); }
+#endif
   }
+#if defined(CLOCK_DEBUG)
+  String shown = reqLine;
+  shown.trim();
+  DEBUG_LOG("http: %s | host %s | from %s\n", shown.c_str(), host.c_str(),
+            client.remoteIP().toString().c_str());
+#endif
 
   // Parse the request target out of "METHOD <target> HTTP/1.1"
   int sp1 = reqLine.indexOf(' ');
@@ -1404,7 +1483,7 @@ void handleAP() {
   client.stop();
   if (reboot) {
     delay(300);
-    NVIC_SystemReset(); // reboot so the new timezone/WiFi settings take full effect
+    boardReset(); // reboot so the new timezone/WiFi settings take full effect
   }
 }
 
