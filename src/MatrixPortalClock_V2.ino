@@ -737,7 +737,10 @@ void renderClock(void) {
   if (statusInt < 3) { statusInt = 3; }
   if (ntpSuccess) { color=matrix.color565(0, statusInt, 0); }
   else { color=matrix.color565(statusInt, 0, 0); }
-  matrix.drawPixel(0, 63, color); // NTP sync status Pixel
+  // Bottom-left corner of the current rotation: (0,63) in portrait, (0,31) in
+  // landscape. A fixed (0,63) lies outside the 32 px tall landscape canvas and
+  // was silently clipped, so landscape never showed the sync status.
+  matrix.drawPixel(0, matrix.height() - 1, color); // NTP sync status Pixel
 
   drawFeedbackIndicator();
   matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
@@ -845,7 +848,15 @@ void timeSync_WifiLib() {
       }
     }
     */
-    if(!wifiEnabled && hourNow == syncTimeHour && minuteNow == syncTimeMinute-1) { // 1 minute before next Sync
+    // Switch the radio on one minute before the sync time, counted in minutes
+    // since midnight so it wraps across the hour and midnight (sync 05:00 ->
+    // 04:59, 00:00 -> 23:59). "syncTimeMinute-1" alone is -1 for minute 00 and
+    // never matches: the radio stayed off, the sync at hh:00 failed and, with
+    // ntpSuccess then false for good, no daily resync ever happened again.
+    const uint16_t minutesPerDay = 24 * 60;
+    uint16_t nowMinute  = hourNow * 60 + minuteNow;
+    uint16_t syncMinute = syncTimeHour * 60 + syncTimeMinute;
+    if(!wifiEnabled && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay) { // 1 minute before next Sync
       netStaBegin(ssid, pass); // Connect to wifi (and arm a fresh NTP sync)
       wifiEnabled = true;
       Serial.println("Enabled Wifi");
