@@ -23,7 +23,7 @@ reset instruction - so the sketch itself is board independent.
 
 The S3 was added because the M4's WiFiNINA link kept causing WiFi trouble; on the S3
 the radio sits on the main MCU, which also lets the AP config page preview the clock at
-30 fps instead of 5. The onboard LIS3DH accelerometer (I2C `0x19`) and the external
+the full frame rate instead of 5 fps. The onboard LIS3DH accelerometer (I2C `0x19`) and the external
 BH1750 light sensor are identical on both boards.
 
 **Caution on the S3:** `D2` is the matrix clock line, not the UP button - the M4's
@@ -127,8 +127,8 @@ The matrix shows SSID, password and IP **immediately** when the AP opens (before
 the radio has finished coming up, so there is no frozen display), in landscape
 orientation, until a client connects; after that it switches to the live clock
 preview so that **brightness, colors and animation speed preview live** while you
-change them in the web UI (at 30 fps on the S3, 5 fps on the M4 - every WiFiNINA
-socket write is an SPI round trip there). The timezone is chosen from a dropdown. "Save &
+change them in the web UI (at the full frame rate on the S3, 5 fps on the M4 - every
+WiFiNINA socket write is an SPI round trip there). The timezone is chosen from a dropdown. "Save &
 Restart" stores everything to flash and reboots.
 
 The color palette offers **full colors only** for both the digit and the fly-in
@@ -191,6 +191,24 @@ So the long-press fade (or the slider) lets you quickly nudge the clock brighter
 or darker without touching the lux mapping. The configured **Min brightness is a
 hard floor** that the manual trim can never undercut. The detailed lux range /
 mapping fields stay available for finer control.
+
+## Animation timing
+
+The digits fly in one pixel per step; the **animation speed** setting is the time
+per pixel in ms (default 12).
+
+On the S3 the loop runs in step with the panel refresh (about 165 Hz with the
+current 5 bit planes): `show()` waits for the refresh that takes the new frame, and
+a digit moves one pixel every whole number of refreshes. The speed setting is
+therefore rounded to steps of about 6 ms (12 ms = 2 refreshes per pixel), and every
+pixel step stays on the panel equally long. Drawing a frame takes about 0.5 ms, so
+the S3 has plenty of headroom. With a fixed millisecond loop, as before, the loop
+drifted against the refresh and single steps stayed on screen for 1, 2 or 3
+refreshes, which showed as a slight judder. The M4 keeps the fixed loop time.
+
+Debug builds (`CLOCK_DEBUG`, e.g. the `adafruit_matrixportal_s3_debug` env) print
+the frame rate, the measured panel refresh rate and the draw and `show()` times once
+per second.
 
 ## Libraries
 

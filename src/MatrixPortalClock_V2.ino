@@ -66,7 +66,7 @@ struct Settings {
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
   uint8_t  dst;          // 1 = daylight saving active (adds +3600s)
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
-  uint8_t  animSpeed;    // frame/loop time in ms (lower = faster animation)
+  uint8_t  animSpeed;    // ms per animation pixel (lower = faster animation)
   uint8_t  digitR, digitG, digitB; // color of the time digits
   uint8_t  trailR, trailG, trailB; // color of a digit while it is flying in
   uint8_t  dir[6];       // fly-in direction per digit (0=top,1=right,2=bottom,3=left)
@@ -148,7 +148,7 @@ unsigned long apStatusLast = 0;        // last time the AP connection status was
 unsigned long apClockLast = 0;         // last live-preview clock frame (throttled in AP mode)
 // While a client is connected serving the web UI has priority, so the clock
 // preview is throttled to the rate the board's radio can spare (board_hal.h:
-// 5 fps on the M4's SPI-attached NINA, 30 fps on the S3).
+// 5 fps on the M4's SPI-attached NINA, not throttled on the S3).
 const unsigned long AP_PREVIEW_MS = AP_PREVIEW_INTERVAL_MS;
 WiFiServer  apServer(80);
 // Captive portal: a tiny DNS server answers every lookup with the AP IP so the
@@ -303,7 +303,9 @@ uint16_t color, colorBg;
 bool directionSwitch;
 
 //Time Related Variables
-uint8_t loopTime = 12; // in ms
+uint8_t loopTime = 12; // ms per animation pixel (PANEL_PACED_LOOP: rounded to whole panel refreshes)
+uint16_t panelHz = 0;            // measured panel refresh rate, 0 until the first measurement
+unsigned long panelRateLast = 0; // start of the running refresh-rate measurement
 uint8_t hourNow, minuteNow, secondNow;
 long timeOffset;
 bool secondTrigger, minuteTrigger, hourTrigger;
@@ -416,6 +418,7 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
+  updatePanelRate();
   handleButton(); // single click = DST toggle, 3 clicks = config AP on/off, long press = brightness fade
 
   if (apActive) {      // config AP running
@@ -458,8 +461,9 @@ void updateApDisplay() {
   }
   // A client is connected. Keep the animation advancing every loop so it runs at
   // real time (stepClockAnim is cheap, no panel I/O), but only push the latest
-  // state to the panel at 5 fps: intermediate frames are computed and skipped, not
-  // slowed down. This leaves the radio free for the slow WiFiNINA web server.
+  // state to the panel at the board's preview rate (5 fps on the M4): skipped
+  // frames are computed, not slowed down. This leaves the radio free for the
+  // slow WiFiNINA web server; the S3 draws every frame.
   updateOrientation(); // clock preview follows the accelerometer (all four rotations)
   stepClockAnim();
   if (millisNow - apClockLast >= AP_PREVIEW_MS) {
@@ -653,12 +657,40 @@ void drawDstMessage() {
   else              { drawCenteredText("winter", scaledColor(120, 200, 255)); }
 }
 
+// Measure the panel refresh rate once per second (Protomatter counts refreshes).
+void updatePanelRate() {
+  if (millisNow - panelRateLast < 1000) { return; }
+  uint32_t refreshes = matrix.getFrameCount();
+  if (panelRateLast != 0) { panelHz = refreshes * 1000UL / (millisNow - panelRateLast); }
+  panelRateLast = millisNow;
+}
+
+// Loop iterations per animation pixel. With PANEL_PACED_LOOP every iteration is
+// one panel refresh, so loopTime (ms per pixel) is rounded to whole refreshes and
+// every step stays on the panel equally long. Otherwise the loop itself runs
+// every loopTime ms and moves one pixel each time.
+uint8_t framesPerStep() {
+#if PANEL_PACED_LOOP
+  uint32_t hz = panelHz ? panelHz : 166;   // before the first measurement: typical S3 rate
+  uint32_t frames = ((uint32_t)loopTime * hz + 500) / 1000;
+  return frames ? frames : 1;
+#else
+  return 1;
+#endif
+}
+
 // Advance the clock animation state by one step. This is the cheap part - no
 // matrix I/O at all - so it can run on EVERY loop iteration to keep the animation
 // at real time regardless of how often the panel is actually redrawn. On a second
 // tick it rebuilds the digit strings; per digit it starts a fly-in (animTrigger),
-// steps an in-flight digit one pixel toward its target, or retires an arrived one.
+// moves an in-flight digit one pixel toward its target every framesPerStep()
+// calls, or retires an arrived one.
 void stepClockAnim(void) {
+  static uint8_t framesInStep = 0;
+  if (secondTrigger) { framesInStep = 0; } // fly-ins start on the second tick: step from there
+  bool moveNow = (++framesInStep >= framesPerStep());
+  if (moveNow) { framesInStep = 0; }
+
   if (secondTrigger) {
     sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime), clockMinute(sysTime), clockSecond(sysTime));
     sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
@@ -694,7 +726,7 @@ void stepClockAnim(void) {
       else if(animDirection[i]==3)  { animXPos[i] = animXTarget[i]-hOff;
                                       animYPos[i] = animYTarget[i]; }
     }
-    else if (animShow[i]) {
+    else if (animShow[i] && moveNow) {
       // as long as animShow is true, we need to update the position / do the animation of the corresponding digit (i)
       //
       //Serial.println(i);
@@ -710,11 +742,38 @@ void stepClockAnim(void) {
   if(secondTrigger) { Serial.println(deltaT); } // Debugging //timeOffset //deltaT //animTrigger[4] //animShow[i]
 }
 
+#if defined(CLOCK_DEBUG)
+// Debug build only: frame timing, printed once per second. "frames" is how often
+// the clock was rendered, "panel" the refresh rate Protomatter actually reached
+// (updatePanelRate()), "draw" the time to build a frame and "show" the time
+// show() spent handing it over (with double buffering it waits for the next
+// panel refresh).
+struct FrameStats { uint32_t frames, drawSum, drawMax, showSum, showMax, since; };
+FrameStats frameStats = {};
+
+void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
+  FrameStats &f = frameStats;
+  f.frames++;
+  f.drawSum += drawUs; if (drawUs > f.drawMax) { f.drawMax = drawUs; }
+  f.showSum += showUs; if (showUs > f.showMax) { f.showMax = showUs; }
+  if (millis() - f.since < 1000) { return; }
+  Serial.printf("frames %lu/s panel %lu Hz draw avg %lu max %lu us show avg %lu max %lu us\n",
+                (unsigned long)f.frames, (unsigned long)panelHz,
+                (unsigned long)(f.drawSum / f.frames), (unsigned long)f.drawMax,
+                (unsigned long)(f.showSum / f.frames), (unsigned long)f.showMax);
+  f = FrameStats{};
+  f.since = millis();
+}
+#endif
+
 // Draw the current clock state to the panel. This is the expensive part (clears
-// the framebuffer, prints all six digits and pushes via matrix.show()). In the AP
-// preview it is throttled to 5 fps while stepClockAnim() keeps the state moving, so
-// frames are skipped (latest state shown) instead of the animation slowing down.
+// the framebuffer, prints all six digits and pushes via matrix.show()). In the M4's
+// AP preview it is throttled to 5 fps while stepClockAnim() keeps the state moving,
+// so frames are skipped (latest state shown) instead of the animation slowing down.
 void renderClock(void) {
+#if defined(CLOCK_DEBUG)
+  uint32_t drawStart = micros();
+#endif
   matrix.fillScreen(0); // Fill background black
 
   for (uint8_t i = 0; i < 6; i++) {
@@ -748,7 +807,13 @@ void renderClock(void) {
   matrix.drawPixel(0, matrix.height() - 1, color); // NTP sync status Pixel
 
   drawFeedbackIndicator();
+#if defined(CLOCK_DEBUG)
+  uint32_t showStart = micros();
+#endif
   matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
+#if defined(CLOCK_DEBUG)
+  frameStatsAdd(showStart - drawStart, micros() - showStart);
+#endif
 }
 
 // Live (non-AP) mode: advance and draw the clock every loop iteration.
@@ -774,7 +839,11 @@ void timekeeper(void) {
   deltaT=millisNow;
   millisNow=millis();
   deltaT=millisNow-deltaT; // duration of last iteration in ms
+#if PANEL_PACED_LOOP
+  delay(1); // show() paces the loop to the panel refresh; just give other tasks a turn
+#else
   if(deltaT<loopTime) { delay(loopTime-deltaT); } //delay start of execution until we have the right iteration interval
+#endif
   
   millisNow=millis();
   sysTime=clockNow();
@@ -1697,7 +1766,7 @@ void sendFormPage(Print &c) {
   c.println("</div>");
 
   // Animation speed (live)
-  c.print("<label>Animation speed (frame time ms, small=fast)</label>");
+  c.print("<label>Animation speed (ms per pixel, small=fast)</label>");
   c.print("<input type=number min=4 max=60 name=speed value="); c.print(settings.animSpeed);
   c.println(" oninput=live() onchange=liveNow()>");
 

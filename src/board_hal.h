@@ -76,13 +76,22 @@
 #define AP_IP_ADDR 4, 3, 2, 1
 
 /* ======================================================================
-   Clock preview frame rate while a config-AP client is connected
+   Frame pacing, and the clock preview while a config-AP client is connected
    ====================================================================== */
 #if BOARD_MATRIXPORTAL_S3
-  // The ESP32-S3 serves the page from its own RAM over lwIP, so redrawing the
-  // panel at 30 fps does not get in the web server's way.
-  #define AP_PREVIEW_INTERVAL_MS 33
+  // Drawing a frame takes about 0.5 ms on the S3, far less than one panel
+  // refresh (about 6 ms at the measured 166 Hz). So the loop runs in step with
+  // the panel: show() waits for the refresh that takes over the new frame, and
+  // the animation moves one pixel every whole number of refreshes, which keeps
+  // every step equally long. A fixed millisecond loop drifts against the
+  // refresh and shows steps for 1, 2 or 3 refreshes instead.
+  #define PANEL_PACED_LOOP 1
+  // The ESP32-S3 serves the page from its own RAM over lwIP, so the preview
+  // runs at the full frame rate without getting in the web server's way.
+  #define AP_PREVIEW_INTERVAL_MS 0
 #else
+  // The M4 keeps its fixed millisecond loop time.
+  #define PANEL_PACED_LOOP 0
   // Every WiFiNINA socket write is an SPI round trip to the co-processor (and
   // is further slowed by the matrix refresh interrupt), so the preview has to
   // stay at 5 fps to leave the radio enough CPU to serve a page at all.
