@@ -64,7 +64,7 @@ Adafruit_Protomatter matrix(
 struct Settings {
   uint16_t magic;        // validity marker
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
-  uint8_t  dst;          // 1 = daylight saving active (adds +3600s)
+  uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
   uint8_t  animSpeed;    // ms per animation pixel (lower = faster animation)
   uint8_t  digitR, digitG, digitB; // color of the time digits
@@ -79,11 +79,17 @@ struct Settings {
   uint8_t  brightMax;    // master brightness in bright light
 };
 
+// Daylight saving modes (Settings::dst). 0 and 1 keep the meaning the byte had
+// before the automatic mode existed, so stored settings stay valid.
+const uint8_t DST_WINTER = 0;  // standard time, fixed
+const uint8_t DST_SUMMER = 1;  // daylight saving time (+1 h), fixed
+const uint8_t DST_AUTO   = 2;  // follow the daylight-saving rule of the selected timezone
+
 // Factory defaults reproduce the original hard-coded behaviour.
 const Settings DEFAULTS = {
   SETTINGS_MAGIC,
   3600,            // CET base (UTC+1)
-  1,               // DST on -> effective UTC+2 like the original adjustTime(7200)
+  DST_AUTO,        // CET/CEST switched automatically (the original was a fixed UTC+2)
   128,             // neutral: absolute half in manual mode, sensor-as-is trim in auto mode
   12,              // original loopTime
   0, 0, 255,       // blue digits
@@ -137,7 +143,8 @@ const float FADE_GAMMA     = 2.2f;    // perceptual -> linear-light exponent
 float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the human eye)
 int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
-unsigned long dstMsgUntil = 0;        // show the summer/winter banner until this millis()
+unsigned long dstMsgUntil = 0;        // show the daylight-saving banner until this millis()
+bool dstAutoActive = false;           // DST_AUTO: whether summer time is in effect now (derived from UTC, not stored)
 
 // WLAN access point config mode --------------------------------------------
 #define AP_SSID "MatrixClock"
@@ -334,6 +341,141 @@ byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing pack
 // A UDP instance to let us send and receive packets over UDP
 WiFiUDP Udp;
 
+/* ======================================================================
+   Timezones
+   ====================================================================== */
+
+// Common timezone choices. value = base UTC offset in seconds, which is what the
+// settings store, so every offset appears only once. rule = the zone's POSIX TZ
+// string from the IANA tz database (tzdata 2026.4) for zones with daylight saving,
+// used by DST_AUTO; nullptr = no daylight saving. The current setting is pre-selected.
+struct TzOption { int32_t off; const char *label; const char *rule; };
+const TzOption TZONES[] = {
+  {-39600, "(UTC-11:00) Midway",              nullptr},
+  {-36000, "(UTC-10:00) Hawaii",              nullptr},
+  {-32400, "(UTC-09:00) Alaska",              "AKST9AKDT,M3.2.0,M11.1.0"},
+  {-28800, "(UTC-08:00) Pacific (LA)",        "PST8PDT,M3.2.0,M11.1.0"},
+  {-25200, "(UTC-07:00) Mountain (Denver)",   "MST7MDT,M3.2.0,M11.1.0"},
+  {-21600, "(UTC-06:00) Central (Chicago)",   "CST6CDT,M3.2.0,M11.1.0"},
+  {-18000, "(UTC-05:00) Eastern (New York)",  "EST5EDT,M3.2.0,M11.1.0"},
+  {-14400, "(UTC-04:00) Atlantic (Halifax)",  "AST4ADT,M3.2.0,M11.1.0"},
+  {-10800, "(UTC-03:00) Buenos Aires",        nullptr},
+  {  -3600, "(UTC-01:00) Azores",             "<-01>1<+00>,M3.5.0/0,M10.5.0/1"},
+  {      0, "(UTC+00:00) London, Lisbon",     "GMT0BST,M3.5.0/1,M10.5.0"},
+  {   3600, "(UTC+01:00) Berlin, Paris",      "CET-1CEST,M3.5.0,M10.5.0/3"},
+  {   7200, "(UTC+02:00) Athens, Helsinki",   "EET-2EEST,M3.5.0/3,M10.5.0/4"},
+  {  10800, "(UTC+03:00) Moscow, Istanbul",   nullptr},
+  {  12600, "(UTC+03:30) Tehran",             nullptr},
+  {  14400, "(UTC+04:00) Dubai",              nullptr},
+  {  18000, "(UTC+05:00) Karachi",            nullptr},
+  {  19800, "(UTC+05:30) India",              nullptr},
+  {  21600, "(UTC+06:00) Dhaka",              nullptr},
+  {  25200, "(UTC+07:00) Bangkok",            nullptr},
+  {  28800, "(UTC+08:00) Beijing, Singapore", nullptr},
+  {  32400, "(UTC+09:00) Tokyo, Seoul",       nullptr},
+  {  34200, "(UTC+09:30) Adelaide",           "ACST-9:30ACDT,M10.1.0,M4.1.0/3"},
+  {  36000, "(UTC+10:00) Sydney",             "AEST-10AEDT,M10.1.0,M4.1.0/3"},
+  {  39600, "(UTC+11:00) Solomon Is.",        nullptr},
+  {  43200, "(UTC+12:00) Auckland",           "NZST-12NZDT,M9.5.0,M4.1.0/3"},
+};
+
+/* ======================================================================
+   Daylight saving
+   ====================================================================== */
+
+// POSIX TZ rule of the timezone row with this base offset, or nullptr when the
+// zone has no daylight saving (or the offset matches no row).
+const char *tzRule(int32_t offset) {
+  for (unsigned int i = 0; i < sizeof(TZONES) / sizeof(TZONES[0]); i++) {
+    if (TZONES[i].off == offset) { return TZONES[i].rule; }
+  }
+  return nullptr;
+}
+
+// Whether daylight saving is in effect at this UTC instant under a POSIX TZ rule,
+// decided by the C library. TZ is set on every call because Arduino's configTime()
+// (SNTP start on the S3) resets it to UTC.
+bool dstActiveAt(const char *rule, time_t utc) {
+  if (!rule) { return false; }
+  setenv("TZ", rule, 1);
+  tzset();
+  struct tm local;
+  localtime_r(&utc, &local);
+  return local.tm_isdst > 0;
+}
+
+bool dstInEffect() {
+  if (settings.dst == DST_AUTO) { return dstAutoActive; }
+  return settings.dst == DST_SUMMER;
+}
+
+// Switch the daylight-saving mode and shift the running clock by the change in
+// the effective offset (none, or one hour).
+void setDstMode(uint8_t mode) {
+  long before = tzTotalOffset();
+  time_t utc = clockNow() - before;
+  settings.dst = mode;
+  if (mode == DST_AUTO) { dstAutoActive = clockIsSet() && dstActiveAt(tzRule(settings.tzOffset), utc); }
+  long after = tzTotalOffset();
+  if (after != before) { clockAdjust(after - before); }
+}
+
+// DST_AUTO, once a minute: follow the rule's changes by shifting the running clock
+// (EU: 01:00 UTC on the last Sunday of March and October). Decided on UTC, so the
+// hour repeated in autumn does not switch back again.
+void updateAutoDst() {
+  if (settings.dst != DST_AUTO || !clockIsSet()) { return; }
+  bool active = dstActiveAt(tzRule(settings.tzOffset), clockNow() - tzTotalOffset());
+  if (active == dstAutoActive) { return; }
+  dstAutoActive = active;
+  clockAdjust(active ? 3600 : -3600);
+  time_t now = clockNow();
+  Serial.print(active ? "DST auto -> summer, clock " : "DST auto -> winter, clock ");
+  Serial.print(clockHour(now)); Serial.print(':'); Serial.println(clockMinute(now));
+}
+
+#if defined(CLOCK_DEBUG)
+// Debug build only: check dstActiveAt() against the 2026 changes from the IANA tz
+// database (tzdata 2026.4), one second before and at each change, and print the
+// result once, 10 s after boot.
+void dstSelfTest() {
+  struct Check { int32_t off; uint32_t utc; bool dst; };
+  static const Check checks[] = {
+    // Berlin, London, Azores and Athens all change at 01:00 UTC
+    {  3600, 1774745999UL, false }, {  3600, 1774746000UL, true  },
+    {  3600, 1792889999UL, true  }, {  3600, 1792890000UL, false },
+    {     0, 1774745999UL, false }, {     0, 1774746000UL, true  },
+    {     0, 1792889999UL, true  }, {     0, 1792890000UL, false },
+    { -3600, 1774745999UL, false }, { -3600, 1774746000UL, true  },
+    { -3600, 1792889999UL, true  }, { -3600, 1792890000UL, false },
+    {  7200, 1774745999UL, false }, {  7200, 1774746000UL, true  },
+    {  7200, 1792889999UL, true  }, {  7200, 1792890000UL, false },
+    // New York, Los Angeles: 02:00 local
+    {-18000, 1772953199UL, false }, {-18000, 1772953200UL, true  },
+    {-18000, 1793512799UL, true  }, {-18000, 1793512800UL, false },
+    {-28800, 1772963999UL, false }, {-28800, 1772964000UL, true  },
+    {-28800, 1793523599UL, true  }, {-28800, 1793523600UL, false },
+    // Sydney, Adelaide, Auckland: southern hemisphere, summer time over New Year
+    { 36000, 1775318399UL, true  }, { 36000, 1775318400UL, false },
+    { 36000, 1791043199UL, false }, { 36000, 1791043200UL, true  },
+    { 34200, 1775320199UL, true  }, { 34200, 1775320200UL, false },
+    { 34200, 1791044999UL, false }, { 34200, 1791045000UL, true  },
+    { 43200, 1775311199UL, true  }, { 43200, 1775311200UL, false },
+    { 43200, 1790431199UL, false }, { 43200, 1790431200UL, true  },
+    // Tokyo: no daylight saving
+    { 32400, 1774746000UL, false }, { 32400, 1792890000UL, false },
+  };
+  unsigned int ok = 0, total = 0;
+  for (const Check &c : checks) {
+    total++;
+    if (dstActiveAt(tzRule(c.off), (time_t)c.utc) == c.dst) { ok++; continue; }
+    Serial.print("DST self-test FAIL offset "); Serial.print(c.off);
+    Serial.print(" utc "); Serial.println(c.utc);
+  }
+  Serial.print("DST self-test: "); Serial.print(ok); Serial.print('/'); Serial.print(total); Serial.println(" ok");
+}
+#endif
+
 // SETUP
 void setup(void) {
   boardSerialBegin(115200);
@@ -419,7 +561,11 @@ void setup(void) {
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
   updatePanelRate();
-  handleButton(); // single click = DST toggle, 3 clicks = config AP on/off, long press = brightness fade
+#if defined(CLOCK_DEBUG)
+  static bool dstTested = false;
+  if (!dstTested && millisNow > 10000) { dstTested = true; dstSelfTest(); }
+#endif
+  handleButton(); // single click = daylight-saving mode, 3 clicks = config AP on/off, long press = brightness fade
 
   if (apActive) {      // config AP running
     apWatchdog();      // re-create the AP if the ESP32 silently rebooted
@@ -430,9 +576,10 @@ void loop(void) {
   }
 
   timeSync_WifiLib();
+  if (minuteTrigger) { updateAutoDst(); } // follow the timezone's summer/winter time changes
   updateOrientation();  // rotate the display to match how the panel is held
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
-  if (millisNow < dstMsgUntil) { drawDstMessage(); } // brief summer/winter banner after a DST toggle
+  if (millisNow < dstMsgUntil) { drawDstMessage(); } // brief banner after a daylight-saving mode change
   else                         { drawClock(); }
 }
 
@@ -650,11 +797,14 @@ void bootStatus(const char *msg) {
   drawCenteredText(msg, scaledColor(255, 255, 255));
 }
 
-// Brief banner shown for ~3 s after a daylight-saving toggle: the new setting as
-// text - summer in orange, winter in ice-blue - aligned to the accelerometer.
+// Brief banner shown for ~3 s after the daylight-saving mode changed: "auto",
+// "summer" or "winter", in orange while summer time is in effect and in ice-blue
+// otherwise, aligned to the accelerometer.
 void drawDstMessage() {
-  if (settings.dst) { drawCenteredText("summer", scaledColor(255, 165, 0)); }
-  else              { drawCenteredText("winter", scaledColor(120, 200, 255)); }
+  const char *mode = (settings.dst == DST_AUTO)   ? "auto"
+                   : (settings.dst == DST_SUMMER) ? "summer" : "winter";
+  if (dstInEffect()) { drawCenteredText(mode, scaledColor(255, 165, 0)); }
+  else               { drawCenteredText(mode, scaledColor(120, 200, 255)); }
 }
 
 // Measure the panel refresh rate once per second (Protomatter counts refreshes).
@@ -885,8 +1035,13 @@ void timeSync_WifiLib() {
     ntpTime=netNtpEpoch();
     lastSync=millisNow;
     if(ntpTime != 0) {
+#if defined(CLOCK_DEBUG) && defined(DST_TEST_UTC)
+      ntpTime = DST_TEST_UTC;   // debug test: start just before a daylight-saving change
+      settings.dst = DST_AUTO;  // in RAM only
+#endif
       if(clockIsSet()) { timeOffset=ntpTime+tzTotalOffset()-sysTime; } // timeOffset will be positive if acutal time is ahead of sysTime (=sysTime/ system clock is slow) and negative if acutal time is behind sysTime (=sysTime/ system clock is fast)
       else { timeOffset=0; }
+      if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), ntpTime); }
       clockSet(ntpTime + tzTotalOffset()); // local time: UTC + configurable timezone + daylight saving offset
       Serial.println("NTP success");
       Serial.print("NTP offset: ");
@@ -1066,7 +1221,7 @@ void printWifiStatus() {
 
 // Effective timezone offset in seconds, including daylight saving.
 long tzTotalOffset() {
-  return (long)settings.tzOffset + (settings.dst ? 3600L : 0L);
+  return (long)settings.tzOffset + (dstInEffect() ? 3600L : 0L);
 }
 
 // Load settings from flash; fall back to factory defaults on first run / struct change.
@@ -1089,6 +1244,7 @@ void saveSettings() {
 
 // Push settings into the runtime globals that drive the clock.
 void applySettings() {
+  if (settings.dst > DST_AUTO) { settings.dst = DST_AUTO; }
   loopTime = settings.animSpeed;
   for (uint8_t i = 0; i < 6; i++) { animDirection[i] = (int8_t)settings.dir[i]; }
   syncTimeHour   = settings.syncHour;
@@ -1151,7 +1307,8 @@ void normalizeColorFull(uint8_t &r, uint8_t &g, uint8_t &b) {
 }
 
 /* ======================================================================
-   User button: single click = DST, triple click = AP on/off, long press = fade.
+   User button: single click = daylight-saving mode, triple click = AP on/off,
+   long press = fade.
    While the AP is running only the triple click (leave config mode) is active,
    so DST/auto-brightness/fade cannot be changed accidentally while configuring.
    ====================================================================== */
@@ -1195,7 +1352,7 @@ void handleButton() {
     if (clicks == 3)         { if (apActive) { stopAPMode(); } else { startAPMode(); } }
     else if (apActive)       { triggered = false; } // 1x/2x do nothing while configuring
     else if (clicks == 2)    { toggleAutoBright(); }
-    else                     { toggleDST(); }
+    else                     { cycleDstMode(); }
     btnClicks = 0;
     if (triggered) { feedbackConfirm(clicks); }
   }
@@ -1245,13 +1402,15 @@ void drawFeedbackIndicator() {
 #endif
 }
 
-// Toggle daylight saving and shift the running clock by +/- 1 hour immediately.
-void toggleDST() {
-  if (settings.dst) { clockAdjust(-3600); settings.dst = 0; }
-  else              { clockAdjust( 3600); settings.dst = 1; }
+// Single click: cycle the daylight-saving mode automatic -> summer -> winter ->
+// automatic, shift the running clock to match and show the new mode for ~3 s.
+void cycleDstMode() {
+  uint8_t next = (settings.dst == DST_AUTO)   ? DST_SUMMER
+               : (settings.dst == DST_SUMMER) ? DST_WINTER : DST_AUTO;
+  setDstMode(next);
   saveSettings();
-  dstMsgUntil = millisNow + 3000; // show the summer/winter banner for ~3 s
-  Serial.print("DST toggled -> "); Serial.println(settings.dst);
+  dstMsgUntil = millisNow + 3000;
+  Serial.print("DST mode -> "); Serial.println(settings.dst);
 }
 
 // Double click: toggle the BH1750 auto-brightness on/off (lets you fall back to
@@ -1629,7 +1788,7 @@ String toHex(uint8_t r, uint8_t g, uint8_t b) {
 void applyParams(const String &q) {
   String v;
   v = getParam(q, "tz");     if (v.length()) { settings.tzOffset = (int32_t)v.toInt(); } // seconds, from the dropdown
-  settings.dst = (getParam(q, "dst") == "on") ? 1 : 0; // checkbox: absent when unchecked
+  v = getParam(q, "dst");    if (v.length()) { settings.dst = constrain(v.toInt(), DST_WINTER, DST_AUTO); }
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.animSpeed  = constrain(v.toInt(), 4, 60); }
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
@@ -1670,43 +1829,11 @@ void sendHttpHeader(Print &c) {
 }
 
 // Helper: print one <option> with the right "selected" attribute.
-void printDirOption(Print &c, uint8_t cur, uint8_t val, const char *label) {
+void printOption(Print &c, uint8_t cur, uint8_t val, const char *label) {
   c.print("<option value=\""); c.print(val); c.print("\"");
   if (cur == val) { c.print(" selected"); }
   c.print(">"); c.print(label); c.println("</option>");
 }
-
-// Common timezone choices. value = base UTC offset in seconds (DST is a separate
-// checkbox). The current setting is pre-selected.
-struct TzOption { int32_t off; const char *label; };
-const TzOption TZONES[] = {
-  {-39600, "(UTC-11:00) Midway"},
-  {-36000, "(UTC-10:00) Hawaii"},
-  {-32400, "(UTC-09:00) Alaska"},
-  {-28800, "(UTC-08:00) Pacific (LA)"},
-  {-25200, "(UTC-07:00) Mountain (Denver)"},
-  {-21600, "(UTC-06:00) Central (Chicago)"},
-  {-18000, "(UTC-05:00) Eastern (New York)"},
-  {-14400, "(UTC-04:00) Atlantic"},
-  {-10800, "(UTC-03:00) Buenos Aires"},
-  {  -3600, "(UTC-01:00) Azores"},
-  {      0, "(UTC+00:00) London, Lisbon"},
-  {   3600, "(UTC+01:00) Berlin, Paris"},
-  {   7200, "(UTC+02:00) Athens, Cairo"},
-  {  10800, "(UTC+03:00) Moscow, Istanbul"},
-  {  12600, "(UTC+03:30) Tehran"},
-  {  14400, "(UTC+04:00) Dubai"},
-  {  18000, "(UTC+05:00) Karachi"},
-  {  19800, "(UTC+05:30) India"},
-  {  21600, "(UTC+06:00) Dhaka"},
-  {  25200, "(UTC+07:00) Bangkok"},
-  {  28800, "(UTC+08:00) Beijing, Singapore"},
-  {  32400, "(UTC+09:00) Tokyo, Seoul"},
-  {  34200, "(UTC+09:30) Adelaide"},
-  {  36000, "(UTC+10:00) Sydney"},
-  {  39600, "(UTC+11:00) Solomon Is."},
-  {  43200, "(UTC+12:00) Auckland"},
-};
 
 void printTzOptions(Print &c) {
   for (unsigned int i = 0; i < sizeof(TZONES) / sizeof(TZONES[0]); i++) {
@@ -1735,9 +1862,11 @@ void sendFormPage(Print &c) {
   c.print("<label>Timezone</label><select name=tz>");
   printTzOptions(c);
   c.println("</select>");
-  c.print("<label><input type=checkbox name=dst ");
-  if (settings.dst) { c.print("checked"); }
-  c.println("> Daylight saving (+1h)</label>");
+  c.println("<label>Daylight saving</label><select name=dst>");
+  printOption(c, settings.dst, DST_AUTO,   "Automatic (rules of the timezone)");
+  printOption(c, settings.dst, DST_SUMMER, "Summer time (+1h)");
+  printOption(c, settings.dst, DST_WINTER, "Standard / winter time");
+  c.println("</select>");
 
   // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
   // around the sensor value (128 = neutral, lower = darker, higher = brighter).
@@ -1782,10 +1911,10 @@ void sendFormPage(Print &c) {
   for (int i = 0; i < 6; i++) {
     c.print("<div style=\"margin-bottom:6px\">"); c.print(names[i]);
     c.print(" <select name=dir"); c.print(i); c.println(">");
-    printDirOption(c, settings.dir[i], 0, "from top");
-    printDirOption(c, settings.dir[i], 1, "from right");
-    printDirOption(c, settings.dir[i], 2, "from bottom");
-    printDirOption(c, settings.dir[i], 3, "from left");
+    printOption(c, settings.dir[i], 0, "from top");
+    printOption(c, settings.dir[i], 1, "from right");
+    printOption(c, settings.dir[i], 2, "from bottom");
+    printOption(c, settings.dir[i], 3, "from left");
     c.println("</select></div>");
   }
 

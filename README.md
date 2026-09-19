@@ -38,9 +38,13 @@ button pin cannot be carried over.
 - **Automatic brightness** via an external BH1750 light sensor: a configurable
   lux → brightness mapping dims the clock once per second to match the room
 - NTP time synchronization with a daily resync
+- **Automatic summer/winter time** for every timezone in the menu (rules from the
+  IANA tz database), or a fixed summer or winter time
 - **User button** (UP button; S3: GPIO6, M4: D2):
-  - **1x short** -> toggle daylight saving / standard time (+/- 1 h); shows a 3 s
-    `summer` (orange) / `winter` (ice-blue) banner
+  - **1x short** -> cycle the daylight-saving mode: automatic -> summer time ->
+    winter time -> automatic; the clock shifts by 1 h where needed and shows a 3 s
+    `auto` / `summer` / `winter` banner (orange while summer time is in effect,
+    ice-blue otherwise)
   - **2x short** -> toggle auto-brightness (light sensor) on/off
   - **3x short** -> open the WiFi access point for settings (3x again closes it)
   - **hold long** -> adjust brightness (cyclic, perceptually linear); releasing
@@ -51,7 +55,7 @@ button pin cannot be carried over.
     3x), starting after a short dark pause (~0.65 s after the last release). A sequence that triggers nothing (1x/2x while the config AP is open) gets
     no blink. A 2x2 square in the bottom-right matrix corner mirrors the LED
     (compile-time switch `BUTTON_FEEDBACK_ON_MATRIX`)
-- **AP config page** (`http://4.3.2.1`): timezone, daylight saving, brightness, animation speed, colors, fly-in directions, NTP sync time
+- **AP config page** (`http://4.3.2.1`): timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time
 - All settings are stored outside the program image, so they survive a restart
   **and a firmware re-upload** (S3: the NVS partition, which a normal upload does
   not touch - `pio run -t erase` does; M4: a fixed flash block at 0x7E000)
@@ -191,6 +195,27 @@ So the long-press fade (or the slider) lets you quickly nudge the clock brighter
 or darker without touching the lux mapping. The configured **Min brightness is a
 hard floor** that the manual trim can never undercut. The detailed lux range /
 mapping fields stay available for finer control.
+
+## Daylight saving
+
+The daylight-saving setting has three modes: **automatic** (factory default),
+**summer time** and **winter time**. Automatic uses the rule of the selected
+timezone, taken from the IANA tz database (tzdata 2026.4) as a POSIX TZ string in
+the `TZONES` table; zones without daylight saving never switch. The C library
+decides from UTC whether summer time is in effect, once at every NTP sync and then
+once a minute, and the clock shifts by one hour at the exact moment (EU: 01:00 UTC
+on the last Sunday of March and of October). Deciding on UTC means the hour that
+repeats in autumn does not switch back again.
+
+The timezone setting stores only the base UTC offset, so every offset appears
+once in the menu. Where zones with the same offset follow different rules, the
+menu names the one it uses (e.g. "Athens, Helsinki", not Cairo).
+
+Debug builds run a self-test 10 s after boot: 38 checks, one second before and at
+each 2026 change of nine zones, printed as `DST self-test: 38/38 ok`. To watch a
+real change, build with `-D DST_TEST_UTC=<utc seconds>` in addition to
+`CLOCK_DEBUG`: every NTP sync then sets the clock to that instant, e.g.
+`1792889940` = 2026-10-25 00:59 UTC, one minute before the EU autumn change.
 
 ## Animation timing
 
