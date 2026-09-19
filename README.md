@@ -195,8 +195,12 @@ mapping fields stay available for finer control.
 
 Resolved automatically by PlatformIO from `platformio.ini`.
 
-Both boards: Adafruit Protomatter, Adafruit GFX, Time (TimeLib), Adafruit LIS3DH,
-Adafruit Unified Sensor, BH1750.
+Both boards: Adafruit Protomatter, Adafruit GFX, Adafruit BusIO, Adafruit LIS3DH,
+Adafruit Unified Sensor, BH1750FVI_RT (Rob Tillaart). All versions are pinned.
+
+Timekeeping lives in `src/clock_time.h` and only uses the C library's `<time.h>`.
+It replaced the Time library (TimeLib), which is unmaintained since 2021 and does
+not build against picolibc, the default C library from ESP-IDF 6 on.
 
 MatrixPortal M4 only: WiFiNINA, FlashStorage_SAMD. On the S3 the WiFi stack and the
 NVS settings storage come from the ESP32 Arduino core, so no extra library is needed.

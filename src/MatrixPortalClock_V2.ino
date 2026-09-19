@@ -20,7 +20,7 @@ Todo Concept:
 ------------------------------------------------------------------------- */
 
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
-#include <TimeLib.h>
+#include "clock_time.h"     // software clock: seconds since 1970 (local time), C library only
 
 #include <Adafruit_Protomatter.h>
 //#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font works
@@ -35,7 +35,7 @@ Todo Concept:
 #include <Wire.h>              // I2C for the onboard accelerometer + light sensor
 #include <Adafruit_Sensor.h>  // sensor base class
 #include <Adafruit_LIS3DH.h>  // onboard LIS3DH accelerometer (both boards)
-#include <BH1750.h>            // external BH1750 ambient light sensor (auto-brightness)
+#include <BH1750FVI.h>         // external BH1750 ambient light sensor (auto-brightness)
 
 /* ----------------------------------------------------------------------
 The RGB matrix must be wired to VERY SPECIFIC pins, different for each
@@ -274,7 +274,7 @@ const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persis
 // Ambient light sensor -----------------------------------------------------
 // External BH1750 on I2C (default address 0x23). When enabled it drives the
 // master brightness once per second via a configurable lux->brightness mapping.
-BH1750        lightMeter;        // default I2C address 0x23
+BH1750FVI     lightMeter(BH1750FVI_DEFAULT_ADDRESS); // I2C address 0x23 (ADDR pin low)
 bool          luxOK = false;     // true once the BH1750 was found on I2C
 unsigned long luxLast = 0;       // last light-sensor poll (1 Hz throttle)
 float         lastLux = -1.0f;   // most recent UNFILTERED lux reading (web UI), -1 = none yet
@@ -355,7 +355,12 @@ void setup(void) {
 
   // External BH1750 ambient light sensor -> auto-brightness. Shares the I2C bus
   // (default address 0x23). If absent, brightness stays under manual control.
-  luxOK = lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
+  luxOK = lightMeter.begin();          // true if the sensor answers on I2C
+  if (luxOK) {
+    lightMeter.powerOn();
+    lightMeter.setContHighRes();       // 1 lx resolution, a new value every ~120 ms
+    luxOK = (lightMeter.getError() == BH1750FVI_OK);
+  }
   if (luxOK) {
     Serial.println("BH1750 found");
   } else {
@@ -582,8 +587,8 @@ void updateBrightness() {
   // In auto mode the same reading also feeds the 10 s moving average + mapping.
   if (luxOK && (luxLast == 0 || millisNow - luxLast >= 1000)) {
     luxLast = millisNow;
-    float lux = lightMeter.readLightLevel();
-    if (lux >= 0) {                                  // ignore -1/-2 not-ready/read errors
+    float lux = lightMeter.getLux();
+    if (lightMeter.getError() == BH1750FVI_OK) {     // skip failed I2C reads
       lastLux = lux;                                 // unfiltered reading shown in the web UI
       luxHistory[luxHistIdx] = lux;
       luxHistIdx = (luxHistIdx + 1) % LUX_AVG_SAMPLES;
@@ -655,8 +660,8 @@ void drawDstMessage() {
 // steps an in-flight digit one pixel toward its target, or retires an arrived one.
 void stepClockAnim(void) {
   if (secondTrigger) {
-    sprintf(timeStr, "%02d%02d%02d", hour(sysTime), minute(sysTime), second(sysTime));
-    sprintf(animStr, "%02d%02d%02d", hour(sysTime+1), minute(sysTime+1), second(sysTime+1));
+    sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime), clockMinute(sysTime), clockSecond(sysTime));
+    sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
       //sprintf(animStr, "%02d%02d%02d", hourNow+1, minuteNow+1, secondNow+1 );
     //animShow[4]=false; //right number [5] will be set true on the secondTrigger everytime so resetting it is not necessary
   }
@@ -755,7 +760,7 @@ void drawClock(void) {
 /* Updates millisNow, sysTime. Keeps track of the looptime using delay(). Updates the animTrigger[] array. */
 void timekeeper(void) { 
   /*Call this always in the beginning of an iteration in loop()
-    for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain sysTime with TimeLib functions eg: day(sysTime)
+    for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain sysTime with the clock_time.h helpers eg: clockHour(sysTime)
     Triggers are only active for one iteration: hourTrigger -> when the hour has changed
     animTrigger[]: for each individual clock digit (6) the corresponding bool goes high if this digit will change in one second. This gives enough time for the entry animation of the digit.
 
@@ -772,15 +777,15 @@ void timekeeper(void) {
   if(deltaT<loopTime) { delay(loopTime-deltaT); } //delay start of execution until we have the right iteration interval
   
   millisNow=millis();
-  sysTime=now();
+  sysTime=clockNow();
  
-  if(secondNow != second(sysTime)) { secondNow=second(sysTime); secondTrigger=true; }
+  if(secondNow != clockSecond(sysTime)) { secondNow=clockSecond(sysTime); secondTrigger=true; }
   else { secondTrigger=false; }
  
-  if(secondTrigger && minuteNow != minute(sysTime)) { minuteNow=minute(sysTime); minuteTrigger=true; }
+  if(secondTrigger && minuteNow != clockMinute(sysTime)) { minuteNow=clockMinute(sysTime); minuteTrigger=true; }
   else { minuteTrigger=false; }
 
-  if(minuteTrigger && hourNow != hour(sysTime)) { hourNow=hour(sysTime); hourTrigger=true; }
+  if(minuteTrigger && hourNow != clockHour(sysTime)) { hourNow=clockHour(sysTime); hourTrigger=true; }
   else { hourTrigger=false; }
 
   if(secondTrigger) { 
@@ -811,10 +816,9 @@ void timeSync_WifiLib() {
     ntpTime=netNtpEpoch();
     lastSync=millisNow;
     if(ntpTime != 0) {
-      if(timeStatus()==timeSet) { timeOffset=ntpTime+tzTotalOffset()-sysTime; } // timeOffset will be positive if acutal time is ahead of sysTime (=sysTime/ system clock is slow) and negative if acutal time is behind sysTime (=sysTime/ system clock is fast)
+      if(clockIsSet()) { timeOffset=ntpTime+tzTotalOffset()-sysTime; } // timeOffset will be positive if acutal time is ahead of sysTime (=sysTime/ system clock is slow) and negative if acutal time is behind sysTime (=sysTime/ system clock is fast)
       else { timeOffset=0; }
-      setTime(ntpTime);
-      adjustTime(tzTotalOffset()); // configurable timezone + daylight saving offset
+      clockSet(ntpTime + tzTotalOffset()); // local time: UTC + configurable timezone + daylight saving offset
       Serial.println("NTP success");
       Serial.print("NTP offset: ");
       Serial.println(timeOffset);
@@ -831,20 +835,20 @@ void timeSync_WifiLib() {
     }
   }
   if(minuteTrigger) {
-    /* This code should to a smooth transition between shown time and NTP time but adjustTime works on seconds as smallest increment. Need to find way to make the clock work not on systemtime directly or adjus system time in another way
+    /* This code should to a smooth transition between shown time and NTP time but clockAdjust works on seconds as smallest increment. Need to find way to make the clock work not on systemtime directly or adjus system time in another way
     if(timeOffset != 0) {
       if(abs(timeOffset)<100 || firstSync) {
-        adjustTime(timeOffset);
+        clockAdjust(timeOffset);
         timeOffset=0;
         firstSync=false;
       }
       else if(timeOffset>0) {
         timeOffset-=100;
-        adjustTime(100);
+        clockAdjust(100);
       }
       else if(timeOffset<0) {
         timeOffset+=100;
-        adjustTime(-100);
+        clockAdjust(-100);
       }
     }
     */
@@ -1174,8 +1178,8 @@ void drawFeedbackIndicator() {
 
 // Toggle daylight saving and shift the running clock by +/- 1 hour immediately.
 void toggleDST() {
-  if (settings.dst) { adjustTime(-3600); settings.dst = 0; }
-  else              { adjustTime( 3600); settings.dst = 1; }
+  if (settings.dst) { clockAdjust(-3600); settings.dst = 0; }
+  else              { clockAdjust( 3600); settings.dst = 1; }
   saveSettings();
   dstMsgUntil = millisNow + 3000; // show the summer/winter banner for ~3 s
   Serial.print("DST toggled -> "); Serial.println(settings.dst);
