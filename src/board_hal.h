@@ -76,13 +76,22 @@
 #define AP_IP_ADDR 4, 3, 2, 1
 
 /* ======================================================================
-   Clock preview frame rate while a config-AP client is connected
+   Frame pacing, and the clock preview while a config-AP client is connected
    ====================================================================== */
 #if BOARD_MATRIXPORTAL_S3
-  // The ESP32-S3 serves the page from its own RAM over lwIP, so redrawing the
-  // panel at 30 fps does not get in the web server's way.
-  #define AP_PREVIEW_INTERVAL_MS 33
+  // Drawing a frame takes about 0.5 ms on the S3, far less than one panel
+  // refresh (about 6 ms at the measured 166 Hz). So the loop runs in step with
+  // the panel: show() waits for the refresh that takes over the new frame, and
+  // the animation moves one pixel every whole number of refreshes, which keeps
+  // every step equally long. A fixed millisecond loop drifts against the
+  // refresh and shows steps for 1, 2 or 3 refreshes instead.
+  #define PANEL_PACED_LOOP 1
+  // The ESP32-S3 serves the page from its own RAM over lwIP, so the preview
+  // runs at the full frame rate without getting in the web server's way.
+  #define AP_PREVIEW_INTERVAL_MS 0
 #else
+  // The M4 keeps its fixed millisecond loop time.
+  #define PANEL_PACED_LOOP 0
   // Every WiFiNINA socket write is an SPI round trip to the co-processor (and
   // is further slowed by the matrix refresh interrupt), so the preview has to
   // stay at 5 fps to leave the radio enough CPU to serve a page at all.
@@ -258,7 +267,11 @@ inline void netStaBegin(const char *ssid, const char *pass) {
 inline bool netStaConnected() { return WiFi.status() == WL_CONNECTED; }
 
 inline void netRadioOff() {
-  sntp_stop();
+#if ESP_IDF_VERSION_MAJOR >= 5
+  esp_sntp_stop();          // ESP-IDF 5 renamed it (Arduino-ESP32 3.x)
+#else
+  sntp_stop();              // ESP-IDF 4.4 has no esp_ alias for it
+#endif
   netSntpRunning() = false;
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
@@ -324,12 +337,21 @@ inline bool netApHasStation() { return WiFi.softAPgetStationNum() > 0; }
 inline bool netApHealthy()    { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
 inline IPAddress netApIP()    { return WiFi.softAPIP(); }
 
-// The ESP32's WiFiClient::setTimeout() takes SECONDS (it feeds SO_RCVTIMEO), so
-// the millisecond read timeout has to be set on the Stream base separately.
+// Read timeout for one HTTP client, in milliseconds.
 inline void netClientTimeoutMs(WiFiClient &c, uint16_t ms) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  c.setTimeout(ms);         // 3.x: NetworkClient uses Stream's millisecond timeout
+#else
+  // 2.x: WiFiClient::setTimeout() takes SECONDS (it feeds SO_RCVTIMEO), so the
+  // millisecond read timeout has to be set on the Stream base separately.
   c.setTimeout(1);
   c.Stream::setTimeout(ms);
+#endif
 }
+
+// Next pending HTTP connection. accept() is the 3.x name (available() is
+// deprecated there); in 2.x both are the same function.
+inline WiFiClient netServerAccept(WiFiServer &s) { return s.accept(); }
 
 inline void netPrintRadioInfo() {
   Serial.print("ESP-IDF SDK: ");
@@ -400,6 +422,11 @@ inline bool netApHealthy() {
 inline IPAddress netApIP() { return WiFi.localIP(); }
 
 inline void netClientTimeoutMs(WiFiClient &c, uint16_t ms) { c.setTimeout(ms); }
+
+// Keep available() here: in WiFiNINA it only hands out a client once its request
+// bytes have arrived, while accept() returns every new connection immediately -
+// over the slow SPI link that would turn late requests into empty ones.
+inline WiFiClient netServerAccept(WiFiServer &s) { return s.available(); }
 
 inline void netPrintRadioInfo() {
   String fv = WiFi.firmwareVersion();
