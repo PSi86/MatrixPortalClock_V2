@@ -1417,7 +1417,7 @@ void sendCaptiveRedirect(Print &c) {
 void handleAP() {
   handleDNS(); // keep the captive-portal DNS responsive
 
-  WiFiClient client = apServer.available();
+  WiFiClient client = netServerAccept(apServer);
 #if defined(CLOCK_DEBUG)
   // Every accepted socket, before the connected() check below can drop it.
   if (client.fd() >= 0) {
