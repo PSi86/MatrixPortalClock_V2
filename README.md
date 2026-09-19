@@ -14,6 +14,7 @@ reset instruction - so the sketch itself is board independent.
 |---|---|---|
 | PlatformIO env | `adafruit_matrixportal_s3` (default) | `adafruit_matrix_portal_m4` |
 | MCU | ESP32-S3, 8 MB flash | SAMD51, 512 KB flash |
+| Arduino core | Arduino-ESP32 3.3.11 on ESP-IDF 5.5 (pioarduino platform) | Adafruit SAMD (`atmelsam` 8.3.0) |
 | WiFi | on-chip | WiFiNINA co-processor over SPI |
 | NTP | lwIP SNTP client | the NINA firmware's own SNTP |
 | Settings stored in | NVS partition (0x9000) | flash block at 0x7E000 |
@@ -204,3 +205,24 @@ not build against picolibc, the default C library from ESP-IDF 6 on.
 
 MatrixPortal M4 only: WiFiNINA, FlashStorage_SAMD. On the S3 the WiFi stack and the
 NVS settings storage come from the ESP32 Arduino core, so no extra library is needed.
+
+## Toolchain (S3)
+
+PlatformIO's own `espressif32` platform still ships Arduino-ESP32 2.0.17, built on
+ESP-IDF 4.4, which has been end-of-life (no bug or security fixes) since July 2024.
+The S3 therefore builds with the **pioarduino** platform, which packages Espressif's
+unmodified Arduino-ESP32 releases for PlatformIO (the same core the Arduino IDE
+installs). Two things to know on the build machine:
+
+- This project keeps its PlatformIO platforms and packages in its own core dir,
+  `~/.platformio-pioarduino` (`core_dir` in `platformio.ini`), about 7 GB for
+  both boards (pioarduino alone is about 6 GB, mostly prebuilt ESP-IDF libraries
+  for every ESP32 chip and the toolchain).
+  pioarduino deletes every other Arduino-ESP32 framework version in the packages
+  dir it runs in and sets up its own Python env there; in the shared
+  `~/.platformio` that would break the other ESP32 projects on the machine.
+  The regular PlatformIO IDE extension in VS Code handles the separate dir by
+  itself.
+- Command-line builds must run from PowerShell or cmd. ESP-IDF's tool installer
+  refuses to start under Git Bash (it checks for the `MSYSTEM` variable). The
+  build and upload buttons in VS Code are not affected.
