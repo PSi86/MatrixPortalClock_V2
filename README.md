@@ -87,11 +87,26 @@ button pin cannot be carried over.
      `pio run -t upload --upload-port <port>`. Afterwards esptool cannot restart
      the board over USB - press **RESET** to start the clock.
 
-   **Power:** WiFi transmit bursts draw about 0.3-0.5 A. On a weak USB port or
-   cable the supply dips far enough to reset the board (reset reason *brownout*
-   or *power-on* in the serial log) right when WiFi starts. Because that reset
-   falls into TinyUF2's double-reset window, it can look as if the board only
-   ever boots into `MATRXS3BOOT`. Use a good cable and port, or a power supply.
+   **Console:** the normal build uses the board's TinyUSB console (239A:8125).
+   The debug environment switches to the chip's USB-Serial-JTAG controller
+   (`ARDUINO_USB_MODE=1`, 303A:1001), which is the port the ROM bootloader uses,
+   so its output survives from reset into the running clock.
+
+   **Power:** WiFi transmit bursts are the clock's highest current draw. At the
+   core's default transmit power of 19.5 dBm the S3 reset while joining the
+   WiFi on every power supply tried (5 V/2 A and a 65 W PD charger, several
+   cables) while working on a PC USB port; at 11 dBm it runs through. The build
+   therefore sets `WIFI_TX_POWER` to 11 dBm (board_hal.h). A charger that drops
+   VBUS altogether cannot be fixed that way: with the PD charger on a C-to-C
+   cable the board still resets at random moments, so use an A-to-C cable with
+   it. Because such a reset can fall into TinyUF2's double-reset window, it may
+   look as if the board only ever boots into `MATRXS3BOOT`.
+
+   **Diagnosis without a console:** the clock shows the cause of an abnormal
+   reset (`BROWN`, `PANIC`, `TWDT`, ...) for 2 s at boot, and remembers how far
+   the previous start got: `DIED1` before the panel, `DIED2` after panel and
+   sensors, `DIED3` while joining WiFi, `DIED4` in normal operation. The
+   breadcrumb lives in flash, so it survives the detour through the bootloader.
 
    For the MatrixPortal M4, select its environment and put the board into the
    bootloader via **double reset** first:

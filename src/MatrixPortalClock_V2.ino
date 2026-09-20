@@ -144,6 +144,14 @@ float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the
 int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
 unsigned long dstMsgUntil = 0;        // show the daylight-saving banner until this millis()
+// Boot breadcrumb stages, written to flash while starting (see board_hal.h).
+const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
+const uint8_t BOOT_STAGE_START = 1;   // setup() entered
+const uint8_t BOOT_STAGE_PANEL = 2;   // panel and sensors up
+const uint8_t BOOT_STAGE_WIFI  = 3;   // joining the WiFi
+const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined, clock running
+uint8_t prevBootStage = BOOT_STAGE_CLEAR;
+bool bootStageCleared = false;        // breadcrumb cleared after the first healthy seconds
 bool dstAutoActive = false;           // DST_AUTO: whether summer time is in effect now (derived from UTC, not stored)
 
 // WLAN access point config mode --------------------------------------------
@@ -480,6 +488,11 @@ void dstSelfTest() {
 void setup(void) {
   boardSerialBegin(115200);
 
+  // Boot breadcrumb: what the previous run reached before it ended (see
+  // board_hal.h). Read it first, then mark this run as "started".
+  prevBootStage = boardBootStageRead();
+  boardBootStageWrite(BOOT_STAGE_START);
+
   pinMode(USER_BUTTON_PIN, INPUT_PULLUP);
   pinMode(FEEDBACK_LED_PIN, OUTPUT);
   digitalWrite(FEEDBACK_LED_PIN, LOW);
@@ -526,6 +539,25 @@ void setup(void) {
   }
 
   matrix.setTextWrap(false);           // Allow text off edge
+
+  // Why did the previous run end? Shown on the panel for 2 s when it was not a
+  // normal power-up or reset button, so a crash is visible without a console
+  // (e.g. while the clock runs on a power supply).
+  Serial.print("Reset reason: "); Serial.println(boardResetReasonText());
+  if (!boardResetWasNormal()) {
+    bootStatus(boardResetReasonText());
+    delay(2000);
+  }
+  // The previous run did not get far enough to clear its breadcrumb.
+  if (prevBootStage != BOOT_STAGE_CLEAR) {
+    Serial.print("Previous boot died in stage "); Serial.println(prevBootStage);
+    char msg[8];
+    snprintf(msg, sizeof(msg), "DIED%u", (unsigned)prevBootStage);
+    bootStatus(msg);
+    delay(2000);
+  }
+  boardBootStageWrite(BOOT_STAGE_PANEL);
+
   bootStatus("CLOCK");
 
   // Recovery / manual entry: hold the user button during boot to open the config AP
@@ -540,6 +572,7 @@ void setup(void) {
     netPrintRadioInfo();
 
     // attempt to connect to WiFi network: Connect to WPA/WPA2 network.
+    boardBootStageWrite(BOOT_STAGE_WIFI);
     bootStatus("WLAN?");
     Serial.print("Attempting to connect to SSID: ");
     Serial.println(ssid);
@@ -550,6 +583,7 @@ void setup(void) {
       delay(500);
       if (++waited >= 14) { waited = 0; netStaBegin(ssid, pass); } // re-issue the join every 7 s
     }
+    boardBootStageWrite(BOOT_STAGE_RUN);
     bootStatus("WLAN!");
     Serial.println("Connected to WiFi");
     printWifiStatus();
@@ -561,6 +595,8 @@ void setup(void) {
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
   updatePanelRate();
+  // Ran fine for 15 s: clear the breadcrumb, so only a real early death leaves one.
+  if (!bootStageCleared && millisNow > 15000) { bootStageCleared = true; boardBootStageWrite(BOOT_STAGE_CLEAR); }
 #if defined(CLOCK_DEBUG)
   static bool dstTested = false;
   if (!dstTested && millisNow > 10000) { dstTested = true; dstSelfTest(); }
