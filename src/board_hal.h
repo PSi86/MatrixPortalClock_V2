@@ -89,9 +89,9 @@
   // The ESP32-S3 serves the page from its own RAM over lwIP, so the preview
   // runs at the full frame rate without getting in the web server's way.
   #define AP_PREVIEW_INTERVAL_MS 0
-  // The Tetris watchface needs the TetrisAnimation library, which platformio.ini
-  // only pulls into the S3 environment (its library.properties limits it to
-  // architectures=esp32).
+  // The Tetris watchface. Nothing in it is board specific any more, but it has
+  // only been tested on the S3, so it stays switched off elsewhere until the M4
+  // gets a hardware test.
   #define WATCHFACE_TETRIS 1
 #else
   // The M4 keeps its fixed millisecond loop time.
@@ -100,8 +100,9 @@
   // is further slowed by the matrix refresh interrupt), so the preview has to
   // stay at 5 fps to leave the radio enough CPU to serve a page at all.
   #define AP_PREVIEW_INTERVAL_MS 200
-  // No TetrisAnimation library in this environment, so only the classic
-  // watchface exists here.
+  // Untested on this board, so only the classic watchface exists here. Turning
+  // it on also needs the AP preview to keep respecting AP_PREVIEW_INTERVAL_MS,
+  // or the Tetris face would out-draw what WiFiNINA can serve around.
   #define WATCHFACE_TETRIS 0
 #endif
 
