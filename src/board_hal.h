@@ -191,12 +191,83 @@ inline void boardSerialBegin(unsigned long baud) {
   while (millis() < 3000) { delay(10); }
 #endif
   Serial.flush();
-#elif BOARD_MATRIXPORTAL_S3
+#elif BOARD_MATRIXPORTAL_S3 && ARDUINO_USB_CDC_ON_BOOT
   // The S3 console is native USB CDC. Without this, every write blocks for up
   // to 100 ms whenever the port is enumerated but nothing is reading it, which
   // would stutter the animation as soon as the clock is plugged into a PC.
+  // (Built with -D ARDUINO_USB_CDC_ON_BOOT=0 the console is UART0 instead and
+  // the board brings up no USB device at all.)
   Serial.setTxTimeoutMs(0);
 #endif
+}
+
+/* ======================================================================
+   Why did the last run end?
+   ====================================================================== */
+// Short label for the reset cause, meant to be readable on the panel when the
+// clock runs without a serial console (e.g. on a power supply). "POWER" is a
+// normal power-up, "BUTTON" the reset button; "BROWN" (supply voltage dipped),
+// "PANIC" (crash) and the watchdogs point at a real problem.
+inline const char *boardResetReasonText() {
+#if BOARD_MATRIXPORTAL_S3
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "POWER";
+    case ESP_RST_EXT:      return "BUTTON";
+    case ESP_RST_SW:       return "SOFT";
+    case ESP_RST_PANIC:    return "PANIC";
+    case ESP_RST_INT_WDT:  return "IWDT";
+    case ESP_RST_TASK_WDT: return "TWDT";
+    case ESP_RST_WDT:      return "WDT";
+    case ESP_RST_BROWNOUT: return "BROWN";
+    case ESP_RST_DEEPSLEEP: return "SLEEP";
+    default:               return "OTHER";
+  }
+#else
+  // SAMD51 reset cause register (RSTC->RCAUSE), one bit per source.
+  uint8_t cause = RSTC->RCAUSE.reg;
+  if (cause & RSTC_RCAUSE_POR)    { return "POWER"; }
+  if (cause & RSTC_RCAUSE_EXT)    { return "BUTTON"; }
+  if (cause & RSTC_RCAUSE_SYST)   { return "SOFT"; }
+  if (cause & RSTC_RCAUSE_WDT)    { return "WDT"; }
+  if (cause & RSTC_RCAUSE_BODCORE) { return "BROWN"; }
+  if (cause & RSTC_RCAUSE_BODVDD) { return "BROWN"; }
+  return "OTHER";
+#endif
+}
+
+/* ======================================================================
+   Boot breadcrumb
+   ====================================================================== */
+// How far the boot got, kept in flash so it survives a crash AND the trip
+// through the UF2 bootloader (which swallows the reset reason). The clock
+// writes a stage while starting and clears it once it has run for a while;
+// a value left behind therefore names the step the previous run died in.
+// M4: no breadcrumb, its settings block is a single fixed struct.
+inline void boardBootStageWrite(uint8_t stage) {
+#if BOARD_MATRIXPORTAL_S3
+  Preferences p;
+  if (p.begin("matrixclock", false)) { p.putUChar("bootstage", stage); p.end(); }
+#else
+  (void)stage;
+#endif
+}
+
+inline uint8_t boardBootStageRead() {
+#if BOARD_MATRIXPORTAL_S3
+  Preferences p;
+  if (!p.begin("matrixclock", true)) { return 0; }
+  uint8_t stage = p.getUChar("bootstage", 0);
+  p.end();
+  return stage;
+#else
+  return 0;
+#endif
+}
+
+// True for the two harmless causes, so a normal start shows no extra screen.
+inline bool boardResetWasNormal() {
+  const char *r = boardResetReasonText();
+  return (strcmp(r, "POWER") == 0) || (strcmp(r, "BUTTON") == 0);
 }
 
 /* ======================================================================
@@ -251,15 +322,27 @@ inline void netNtpRequestFresh() {
   netSntpRunning()  = false;   // SNTP is (re)started on the next poll
 }
 
+// Radio transmit power, set after every mode change because a mode change resets
+// it. Transmit bursts are the clock's highest current draw: at the default
+// 19.5 dBm the board reset while joining the WiFi on every power supply tried
+// (boot breadcrumb DIED3, sometimes reset reason BROWN), while it ran through
+// at 11 dBm; on a PC USB port both work. 11 dBm roughly halves the peak and is
+// plenty for a home network (measured -56 dBm there).
+#ifndef WIFI_TX_POWER
+  #define WIFI_TX_POWER WIFI_POWER_11dBm
+#endif
+
 inline void netRadioInit() {
   WiFi.persistent(false);   // don't rewrite the stored credentials on every boot
   BOOT_TRACE("net: WiFi.mode(WIFI_STA) ...");
   WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_TX_POWER);
   BOOT_TRACE("net: WiFi.mode(WIFI_STA) done");
 }
 
 inline void netStaBegin(const char *ssid, const char *pass) {
   WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_TX_POWER);
   WiFi.begin(ssid, pass);   // non-blocking on the ESP32
   netNtpRequestFresh();
 }
@@ -319,6 +402,7 @@ inline bool netApBegin(const char *ssid, const char *pass) {
   WiFi.persistent(false);   // also needed here: the recovery AP starts before netRadioInit()
   WiFi.disconnect(true);    // stop the station side from retrying underneath us
   WiFi.mode(WIFI_AP);
+  WiFi.setTxPower(WIFI_TX_POWER);
   const IPAddress apAddr(AP_IP_ADDR);
   bool cfgOk = WiFi.softAPConfig(apAddr, apAddr, IPAddress(255, 255, 255, 0));
   DEBUG_LOG("ap: softAPConfig(%s) %s\n", apAddr.toString().c_str(), cfgOk ? "ok" : "FAILED");
