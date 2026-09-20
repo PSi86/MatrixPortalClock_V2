@@ -30,6 +30,10 @@ Todo Concept:
 #include <Fonts/FreeSansBold9pt7b.h> // Large friendly font
 #include <Fonts/Picopixel.h>
 
+#if WATCHFACE_TETRIS
+#include <TetrisMatrixDraw.h>  // Tetris watchface renderer (draws through Adafruit_GFX)
+#endif
+
 #include <math.h>              // powf() for perceptual brightness fade
 
 #include <Wire.h>              // I2C for the onboard accelerometer + light sensor
@@ -60,9 +64,15 @@ Adafruit_Protomatter matrix(
 // Persistent settings ------------------------------------------------------
 // Configurable at runtime via the WLAN AP config page and the user button.
 #define SETTINGS_MAGIC 0xC10E   // bump this to force a reset to defaults after a struct change
+// Layout revision inside a valid blob. Fields added later go into spare bytes and
+// are migrated in loadSettings() by revision, so the magic can stay the same and
+// an older firmware keeps reading (and round-tripping) the settings it knows.
+#define SETTINGS_REV   1        // 0 = before the watchface byte existed
 
 struct Settings {
   uint16_t magic;        // validity marker
+  uint8_t  settingsRev;  // layout revision, see SETTINGS_REV (was padding in rev 0)
+  uint8_t  watchface;    // WATCHFACE_CLASSIC or WATCHFACE_TETRIS_ID
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
   uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
@@ -79,6 +89,18 @@ struct Settings {
   uint8_t  brightMax;    // master brightness in bright light
 };
 
+// settingsRev and watchface went into the two padding bytes that sat between
+// magic and tzOffset, so the struct keeps the size the stored blobs have. That
+// matters: SettingsStore::read() on the S3 accepts an NVS entry only at exactly
+// sizeof(Settings), and a mismatch would silently reset EVERY setting.
+static_assert(sizeof(Settings) == 32,
+              "Settings must stay 32 bytes - stored blobs are read back by exact size");
+
+// Watchfaces (Settings::watchface).
+const uint8_t WATCHFACE_CLASSIC   = 0;  // six flying GFX-font digits, HH MM SS
+const uint8_t WATCHFACE_TETRIS_ID = 1;  // HH:MM built from falling tetromino blocks
+const uint8_t WATCHFACE_COUNT     = 2;
+
 // Daylight saving modes (Settings::dst). 0 and 1 keep the meaning the byte had
 // before the automatic mode existed, so stored settings stay valid.
 const uint8_t DST_WINTER = 0;  // standard time, fixed
@@ -88,6 +110,8 @@ const uint8_t DST_AUTO   = 2;  // follow the daylight-saving rule of the selecte
 // Factory defaults reproduce the original hard-coded behaviour.
 const Settings DEFAULTS = {
   SETTINGS_MAGIC,
+  SETTINGS_REV,
+  WATCHFACE_CLASSIC,
   3600,            // CET base (UTC+1)
   DST_AUTO,        // CET/CEST switched automatically (the original was a fixed UTC+2)
   128,             // neutral: absolute half in manual mode, sensor-as-is trim in auto mode
@@ -144,6 +168,11 @@ float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the
 int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
 unsigned long dstMsgUntil = 0;        // show the daylight-saving banner until this millis()
+// Set by every screen that puts something other than the Tetris watchface on the
+// panel (boot messages, the daylight-saving banner, the AP info screen, the
+// classic watchface). The Tetris watchface skips redrawing a picture that has
+// not changed, so it needs to know when someone else has overwritten it.
+bool tetrisPanelStale = true;
 // Boot breadcrumb stages, written to flash while starting (see board_hal.h).
 const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
 const uint8_t BOOT_STAGE_START = 1;   // setup() entered
@@ -648,6 +677,13 @@ void updateApDisplay() {
   // frames are computed, not slowed down. This leaves the radio free for the
   // slow WiFiNINA web server; the S3 draws every frame.
   updateOrientation(); // clock preview follows the accelerometer (all four rotations)
+#if WATCHFACE_TETRIS
+  // The Tetris watchface throttles itself (it only repaints on an animation step
+  // or a visible change), so it needs no preview rate on top of that.
+  if (activeWatchface() == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
+#else
+  activeWatchface();
+#endif
   stepClockAnim();
   if (millisNow - apClockLast >= AP_PREVIEW_MS) {
     apClockLast = millisNow;
@@ -822,6 +858,7 @@ void drawCenteredText(const char *msg, uint16_t color) {
   matrix.print(msg);
   drawFeedbackIndicator();
   matrix.show();
+  tetrisPanelStale = true;
 }
 
 // Boot status line: oriented to the panel and dimmed to the live clock brightness
@@ -952,6 +989,205 @@ void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
 }
 #endif
 
+// NTP sync status pixel (green = synced, red = not), dimmed with the master
+// brightness but kept visible. It sits in the bottom-left corner of the current
+// rotation: (0,63) in portrait, (0,31) in landscape. A fixed (0,63) lies outside
+// the 32 px tall landscape canvas and was silently clipped, so landscape never
+// showed the sync status. Every watchface draws it the same way.
+void drawStatusPixel() {
+  uint8_t statusInt = effectiveBrightness / 6;
+  if (statusInt < 3) { statusInt = 3; }
+  matrix.drawPixel(0, matrix.height() - 1,
+                   ntpSuccess ? matrix.color565(0, statusInt, 0)
+                              : matrix.color565(statusInt, 0, 0));
+}
+
+/* ======================================================================
+   Tetris watchface
+
+   HH:MM built from falling tetromino blocks. The rendering comes from the
+   TetrisAnimation library, which draws through Adafruit_GFX and therefore
+   straight into Protomatter. Three things it does not do by itself and that
+   are handled here:
+     - master brightness: its block colors are fixed 565 constants, so they get
+       recomputed from effectiveBrightness before a frame is drawn,
+     - the colon: drawNumbers() would paint it in hard-coded white and only
+       knows the four-digit landscape layout,
+     - pacing: drawNumbers() advances the animation by one step AND draws it, so
+       it must not be called more often than the animation is meant to move.
+   ====================================================================== */
+#if WATCHFACE_TETRIS
+
+// Landscape (64x32) fits all four digits on one line; portrait (32x64) puts the
+// hours above the minutes, which is the only case where the second instance is
+// used. Both draw at the same block size, so the two orientations look alike.
+TetrisMatrixDraw tetrisTop(matrix);
+TetrisMatrixDraw tetrisBot(matrix);
+
+const uint8_t TETRIS_SCALE = 2;   // one tetromino cell = 2x2 px -> digit 12x20 px
+const uint8_t TETRIS_PITCH = 14;  // TETRIS_DISTANCE_BETWEEN_DIGITS (7) * TETRIS_SCALE
+const uint8_t TETRIS_DOT   = 2 * TETRIS_SCALE;  // colon dot edge length
+// One fall step every animSpeed * TETRIS_STEP_MULT ms, so the existing speed
+// setting covers 16..240 ms and the default (12) lands at 48 ms. The original
+// Tetris clock runs at 100 ms, which is animSpeed 25 here. The slowest setting
+// takes 172 steps * 240 ms = 41 s for the longest digit (8) - still inside the
+// minute, so a digit always settles before the next change.
+const uint8_t TETRIS_STEP_MULT = 4;
+
+// The library's eight block colors, expanded from its 565 constants, so the hues
+// stay exactly the same while the clock's master brightness scales them.
+const uint8_t TETRIS_RGB[8][3] = {
+  {255,   0,   0},   // red
+  {  0, 255,   0},   // green
+  { 49,  73, 255},   // blue    (0x325F)
+  {255, 255, 255},   // white
+  {255, 255,   0},   // yellow
+  {  0, 255, 255},   // cyan
+  {255,   0, 255},   // magenta
+  {255,  97,   0}    // orange  (0xFB00)
+};
+
+int8_t        tetrisDigit[4]    = {-1, -1, -1, -1}; // digits currently loaded in the instances
+uint8_t       tetrisRotation    = 0xFF;   // rotation the layout was built for (0xFF = none yet)
+bool          tetrisLandscape   = false;  // orientation the layout was built for
+bool          tetrisSettled     = false;  // true once every block has landed
+unsigned long tetrisStepLast    = 0;      // millis() of the last animation step
+uint8_t       tetrisBrightDrawn = 0xFF;   // effectiveBrightness of the frame on the panel
+bool          tetrisColonDrawn  = false;  // colon state of the frame on the panel
+bool          tetrisFbDrawn     = false;  // button indicator state of the frame on the panel
+int           tetrisXHour = 0, tetrisXMin = 0;  // left edge of each digit group
+int           tetrisYHour = 0, tetrisYMin = 0;  // baseline the blocks of each group land on
+
+// Place the digits for the current rotation and make all of them drop again.
+// The geometry is the settled extent of the blocks, worked out from the
+// library's fall tables: a digit is 12 px wide and 20 px tall at this scale, and
+// the groups are 26 px wide.
+//
+// The orientation is taken from curRotation, not from the global isLandscape:
+// drawAPScreen() rotates the panel and updates curRotation without going through
+// applyOrientation(), so isLandscape can be one step behind.
+void tetrisLayout() {
+  tetrisRotation  = curRotation;
+  tetrisLandscape = (curRotation == 0 || curRotation == 2);
+  if (tetrisLandscape) {
+    // 64x32: one line. Hours x 2..27, minutes x 36..61, both rows 6..25 - the
+    // same positions the library's own four-digit layout produces.
+    tetrisXHour = 2;   tetrisXMin = 36;
+    tetrisYHour = 26;  tetrisYMin = 26;
+  } else {
+    // 32x64: hours above minutes, x 3..28, rows 8..27 and 36..55.
+    tetrisXHour = 3;   tetrisXMin = 3;
+    tetrisYHour = 28;  tetrisYMin = 56;
+  }
+  // setNumState() does not touch the library's private sizeOfValue, and the
+  // constructor leaves it at zero, so drawNumbers() would loop over no digits at
+  // all. setNumbers() is the only public way to set it; the two digits it writes
+  // are replaced by the first tetrisPushTime() below.
+  tetrisTop.scale = TETRIS_SCALE;
+  tetrisBot.scale = TETRIS_SCALE;
+  tetrisTop.setNumbers(10, true);
+  tetrisBot.setNumbers(10, true);
+  for (uint8_t i = 0; i < 4; i++) { tetrisDigit[i] = -1; }
+  tetrisSettled = false;
+}
+
+// Hand the current HH:MM to the instances, restarting only the digits that
+// really changed - an untouched digit keeps its settled blocks. setNumState()
+// takes plain ints, so unlike setTime() this needs no Arduino String and
+// allocates nothing.
+void tetrisPushTime() {
+  uint8_t h = clockHour(sysTime), m = clockMinute(sysTime);
+  int8_t  d[4] = { (int8_t)(h / 10), (int8_t)(h % 10), (int8_t)(m / 10), (int8_t)(m % 10) };
+  for (uint8_t i = 0; i < 4; i++) {
+    if (d[i] == tetrisDigit[i]) { continue; }
+    tetrisDigit[i] = d[i];
+    int xShift = (i & 1) ? TETRIS_PITCH : 0;
+    if (i < 2) { tetrisTop.setNumState(i, d[i], xShift); }
+    else       { tetrisBot.setNumState(i - 2, d[i], xShift); }
+    tetrisSettled = false;
+  }
+}
+
+// Rescale the block palette to the master brightness, so the watchface follows
+// the light sensor and the brightness slider like the classic one does.
+void tetrisApplyBrightness() {
+  for (uint8_t i = 0; i < 8; i++) {
+    uint16_t c = scaledColorB(TETRIS_RGB[i][0], TETRIS_RGB[i][1], TETRIS_RGB[i][2],
+                              effectiveBrightness);
+    tetrisTop.tetrisColors[i] = c;
+    tetrisBot.tetrisColors[i] = c;
+  }
+}
+
+// The separator between hours and minutes: vertically stacked next to the digits
+// in landscape, a horizontal pair in the gap between the two rows in portrait.
+void tetrisDrawColon() {
+  uint16_t c = scaledColorVisible(255, 255, 255);
+  if (tetrisLandscape) {
+    int x = tetrisXHour + TETRIS_PITCH * 2;   // x 30..33, between the two groups
+    matrix.fillRect(x, tetrisYHour - 16, TETRIS_DOT, TETRIS_DOT, c);  // y 10..13
+    matrix.fillRect(x, tetrisYHour - 8,  TETRIS_DOT, TETRIS_DOT, c);  // y 18..21
+  } else {
+    int y = tetrisYHour + 2;                  // y 30..33, in the 8 px gap between rows
+    matrix.fillRect(tetrisXHour + 5,  y, TETRIS_DOT, TETRIS_DOT, c);  // x 8..11
+    matrix.fillRect(tetrisXHour + 17, y, TETRIS_DOT, TETRIS_DOT, c);  // x 20..23
+  }
+}
+
+// One pass of the watchface. While blocks are falling this runs at the animation
+// step interval; once everything has landed it only repaints when something it
+// shows has actually changed, so an idle clock costs almost nothing. Skipping
+// matrix.show() is safe: Protomatter keeps refreshing the last frame it was given.
+void drawTetrisFace() {
+  if (curRotation != tetrisRotation) { tetrisLayout(); }
+  tetrisPushTime();
+
+  bool colonOn = (sysTime % 2) == 0;   // 1 Hz blink, in step with the seconds
+#if BUTTON_FEEDBACK_ON_MATRIX
+  bool fbNow = fbLit;
+#else
+  bool fbNow = false;
+#endif
+
+  if (!tetrisSettled) {
+    // Between steps there is nothing new to show - unless another screen has
+    // just overwritten the panel, in which case repaint at once and accept the
+    // single extra fall step that costs.
+    if (!tetrisPanelStale &&
+        millisNow - tetrisStepLast < (unsigned long)loopTime * TETRIS_STEP_MULT) { return; }
+    tetrisStepLast = millisNow;
+  } else if (!tetrisPanelStale && colonOn == tetrisColonDrawn &&
+             effectiveBrightness == tetrisBrightDrawn && fbNow == tetrisFbDrawn) {
+    return;   // nothing on screen would change - leave the last frame standing
+  }
+
+  tetrisApplyBrightness();
+  matrix.fillScreen(0);
+  // A block starts falling 32 px above the line it lands on, so in portrait the
+  // minutes spawn inside the hours row (their envelope reaches up to y 16, the
+  // hours occupy 8..27). Draw the minutes first, wipe everything above the hours
+  // baseline, then draw the hours on top: minute blocks then appear from under
+  // the hours row instead of crossing through it. Hour blocks never reach below
+  // their own baseline, so the wipe cannot cut them. Landscape needs none of
+  // this - the two groups do not overlap in x.
+  bool doneMin = tetrisBot.drawNumbers(tetrisXMin, tetrisYMin, false);
+  if (!tetrisLandscape) { matrix.fillRect(0, 0, matrix.width(), tetrisYHour, 0); }
+  bool doneHour = tetrisTop.drawNumbers(tetrisXHour, tetrisYHour, false);
+  tetrisSettled = doneHour && doneMin;
+  if (colonOn) { tetrisDrawColon(); }
+
+  // Same overlays the classic watchface draws, so both behave alike.
+  drawStatusPixel();
+  drawFeedbackIndicator();
+  matrix.show();
+
+  tetrisColonDrawn  = colonOn;
+  tetrisBrightDrawn = effectiveBrightness;
+  tetrisFbDrawn     = fbNow;
+  tetrisPanelStale  = false;
+}
+#endif  // WATCHFACE_TETRIS
+
 // Draw the current clock state to the panel. This is the expensive part (clears
 // the framebuffer, prints all six digits and pushes via matrix.show()). In the M4's
 // AP preview it is throttled to 5 fps while stepClockAnim() keeps the state moving,
@@ -982,28 +1218,46 @@ void renderClock(void) {
     matrix.print(timeStr[i]);
   }
 
-  // NTP sync status pixel (green = synced, red = not), dimmed with the master brightness but kept visible
-  uint8_t statusInt = effectiveBrightness / 6;
-  if (statusInt < 3) { statusInt = 3; }
-  if (ntpSuccess) { color=matrix.color565(0, statusInt, 0); }
-  else { color=matrix.color565(statusInt, 0, 0); }
-  // Bottom-left corner of the current rotation: (0,63) in portrait, (0,31) in
-  // landscape. A fixed (0,63) lies outside the 32 px tall landscape canvas and
-  // was silently clipped, so landscape never showed the sync status.
-  matrix.drawPixel(0, matrix.height() - 1, color); // NTP sync status Pixel
-
+  drawStatusPixel();
   drawFeedbackIndicator();
 #if defined(CLOCK_DEBUG)
   uint32_t showStart = micros();
 #endif
   matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
+  tetrisPanelStale = true;
 #if defined(CLOCK_DEBUG)
   frameStatsAdd(showStart - drawStart, micros() - showStart);
 #endif
 }
 
-// Live (non-AP) mode: advance and draw the clock every loop iteration.
+// The watchface to draw. It can change at runtime (the config page previews the
+// choice live), and only the visible face is stepped, so whichever takes over is
+// resynchronised here: the classic one gets fresh digit strings, which
+// stepClockAnim() would otherwise only rebuild on the next second tick, plus
+// digits snapped onto their targets; the Tetris one rebuilds its layout and
+// drops its digits again.
+uint8_t activeWatchface() {
+  static uint8_t shown = 0xFF;
+  if (settings.watchface == shown) { return shown; }
+  shown = settings.watchface;
+  sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime),   clockMinute(sysTime),   clockSecond(sysTime));
+  sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
+  applyOrientation(curRotation);   // snaps all six digits, clears animShow[]
+#if WATCHFACE_TETRIS
+  tetrisRotation = 0xFF;           // force a fresh layout and a fresh drop
+#endif
+  return shown;
+}
+
+// Live (non-AP) mode: advance and draw the selected watchface every loop
+// iteration. The Tetris one keeps its own state machine and pacing, so the
+// classic fly-in animation is not stepped while it is showing.
 void drawClock(void) {
+#if WATCHFACE_TETRIS
+  if (activeWatchface() == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
+#else
+  activeWatchface();
+#endif
   stepClockAnim();
   renderClock();
 }
@@ -1268,19 +1522,32 @@ void loadSettings() {
     settings = DEFAULTS;
     saveSettings();
     Serial.println("Settings: defaults written to flash");
+  } else if (settings.settingsRev < SETTINGS_REV) {
+    // Migration ladder. A rev 0 blob was written when settingsRev and watchface
+    // were still struct padding, so do not read a meaning into what is in them -
+    // give every field added since an explicit value. Everything the user
+    // configured keeps its place, because the struct did not grow.
+    if (settings.settingsRev < 1) { settings.watchface = WATCHFACE_CLASSIC; }
+    saveSettings();   // stamps the new revision
+    Serial.print("Settings: stored layout migrated to rev "); Serial.println(SETTINGS_REV);
   }
   applySettings();
 }
 
 // Write current settings to flash.
 void saveSettings() {
-  settings.magic = SETTINGS_MAGIC;
+  settings.magic       = SETTINGS_MAGIC;
+  settings.settingsRev = SETTINGS_REV;
   clockStore.write(settings);
 }
 
 // Push settings into the runtime globals that drive the clock.
 void applySettings() {
   if (settings.dst > DST_AUTO) { settings.dst = DST_AUTO; }
+  if (settings.watchface >= WATCHFACE_COUNT) { settings.watchface = WATCHFACE_CLASSIC; }
+#if !WATCHFACE_TETRIS
+  settings.watchface = WATCHFACE_CLASSIC;   // this build has no other watchface
+#endif
   loopTime = settings.animSpeed;
   for (uint8_t i = 0; i < 6; i++) { animDirection[i] = (int8_t)settings.dir[i]; }
   syncTimeHour   = settings.syncHour;
@@ -1584,6 +1851,7 @@ void drawAPScreen() {
   drawFeedbackIndicator();
   apScreenFbLit = fbLit;
   matrix.show();
+  tetrisPanelStale = true;
 }
 
 #if defined(CLOCK_DEBUG)
@@ -1825,6 +2093,9 @@ void applyParams(const String &q) {
   String v;
   v = getParam(q, "tz");     if (v.length()) { settings.tzOffset = (int32_t)v.toInt(); } // seconds, from the dropdown
   v = getParam(q, "dst");    if (v.length()) { settings.dst = constrain(v.toInt(), DST_WINTER, DST_AUTO); }
+#if WATCHFACE_TETRIS
+  v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
+#endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.animSpeed  = constrain(v.toInt(), 4, 60); }
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
@@ -1846,6 +2117,9 @@ void applyParams(const String &q) {
 // no reboot. The clock is being rendered every frame, so changes show instantly.
 void applyLiveParams(const String &q) {
   String v;
+#if WATCHFACE_TETRIS
+  v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
+#endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "autob");  if (v.length()) { settings.autoBright = (v == "on") ? 1 : 0; } // updateBrightness() re-seeds the fade
   v = getParam(q, "luxd");   if (v.length()) { settings.luxDark   = (uint16_t)constrain(v.toInt(), 0, 65535); }
@@ -1903,6 +2177,14 @@ void sendFormPage(Print &c) {
   printOption(c, settings.dst, DST_SUMMER, "Summer time (+1h)");
   printOption(c, settings.dst, DST_WINTER, "Standard / winter time");
   c.println("</select>");
+
+#if WATCHFACE_TETRIS
+  // Watchface (live, so the choice can be judged on the panel before saving).
+  c.println("<label>Watchface</label><select name=wf onchange=\"liveNow()\">");
+  printOption(c, settings.watchface, WATCHFACE_CLASSIC,   "Classic (flying digits, HH MM SS)");
+  printOption(c, settings.watchface, WATCHFACE_TETRIS_ID, "Tetris (falling blocks, HH:MM)");
+  c.println("</select>");
+#endif
 
   // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
   // around the sensor value (128 = neutral, lower = darker, higher = brighter).
@@ -1968,7 +2250,12 @@ void sendFormPage(Print &c) {
   c.println("var _t=0,_p=null;");
   c.println("function _send(){var g=function(n){return document.getElementsByName(n)[0].value;};");
   c.println("var ab=document.getElementsByName('autob')[0].checked?'on':'off';");
-  c.println("fetch('/live?bright='+g('bright')+'&autob='+ab+'&luxd='+g('luxd')+'&luxb='+g('luxb')+'&brmin='+g('brmin')+'&brmax='+g('brmax')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))).catch(function(){});}");
+#if WATCHFACE_TETRIS
+  c.println("var wf='&wf='+g('wf');");
+#else
+  c.println("var wf='';");   // no watchface selector in this build
+#endif
+  c.println("fetch('/live?bright='+g('bright')+'&autob='+ab+'&luxd='+g('luxd')+'&luxb='+g('luxb')+'&brmin='+g('brmin')+'&brmax='+g('brmax')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))+wf).catch(function(){});}");
   // Throttle the live stream to <=1 request/s while a slider is dragged (leading +
   // a single trailing send at the 1 s boundary). liveNow() bypasses it on release /
   // discrete changes so the final value always lands at once.
