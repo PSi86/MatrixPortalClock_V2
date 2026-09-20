@@ -242,34 +242,56 @@ previews live, so the choice can be judged on the panel before saving.
 **Classic** (default) shows `HH MM SS` with the six flying digits. This is the
 face the clock has always had; nothing about it changed.
 
-**Tetris** shows `HH:MM` built up from falling tetromino blocks, in the style of
-the well-known WiFi Tetris Clock. Only the digits that actually change are rebuilt,
-so at a minute change the rest of the display stays put. The colon blinks once per
-second (the face has no seconds digits — there is no room for them at this block
-size). Both orientations use the same block size:
+**Tetris** shows `HH:MM` built up from falling tetromino blocks. Only the digits
+that actually change are rebuilt, so at a minute change the rest of the display
+stays put. The colon blinks once per second (the face has no seconds digits —
+there is no room for them at this block size). Both orientations use the same
+block size:
 
 | | layout |
 |---|---|
 | landscape 64x32 | one line, hours at x 2..27, minutes at x 36..61, rows 6..25, colon at x 30..33 |
 | portrait 32x64 | hours in rows 8..27, minutes in rows 36..55, x 3..28, separator dots in the gap at rows 30..33 |
 
-Two properties worth knowing:
+**No two builds look alike.** Each digit is a 6×10 cell glyph, and every glyph
+has a cell count divisible by four, so it can be tiled exactly by tetrominoes —
+in a great many ways. `scripts/gen_tetris_digits.py` searches 32 different
+tilings per digit, orders each one so the pieces can be dropped in from above,
+and colours it. The firmware picks a tiling at random whenever a digit changes
+and maps the colour classes onto a freshly shuffled palette, so the same digit
+is neither assembled nor coloured the same way twice.
 
-- The **digit and trail colors do not apply here** — each tetromino has its own
-  color, as in the game. The master brightness (and therefore the light sensor)
-  does apply: the palette is rescaled before every frame.
-- A block that will end up rotated is drawn unrotated for the first part of its
-  fall, so it can stick out up to 6 px to the right of its final column and is
-  then clipped at the panel edge for a moment. The original clock has the same
-  artifact; it is not a bug in the layout.
+**Touching pieces always contrast.** The palette is six hues exactly 60° apart
+(red, yellow, green, cyan, blue, magenta — orange is left out because it sits
+only 23° from red). The generator colours each tiling as a proper graph
+colouring, so two pieces that touch never share a class, and because the hues
+are evenly spaced any shuffle keeps them at least 60° apart. Verified on the
+generated tables: of 4414 touching piece pairs, **zero** share a colour. It also
+spreads the pieces evenly over all six classes, so every digit shows the whole
+palette. This deliberately drops the classic Tetris convention of one fixed
+colour per shape — that convention is exactly what made equal colours end up
+side by side.
+
+**Pieces spin as they fall** and never leave their digit. A quarter turn changes
+a piece's bounding box, so a rotated state can be wider than where it lands. The
+library this replaced let those pixels simply run off the panel — measured on its
+tables: 21 of its 229 fall states left the six-cell digit box by up to 6 px,
+which on the rightmost digit meant drawing out to x=67 on a 64 px panel. Here a
+spinning piece is pushed back inside its own digit instead, the way a game kicks
+a piece off the wall when you rotate against it, and it hangs from its landing
+edge so the bottom travels smoothly however it is turned. Verified by simulating
+all 28285 fall states: none leaves the digit box. `TETRIS_SPIN` sets how much of
+the fall is spent spinning; 0 drops the pieces unrotated.
+
+The **digit and trail colors do not apply** to this face. The master brightness
+(and therefore the light sensor) does: the palette is rescaled before every frame.
 
 The face only repaints while blocks are falling or when something visible changes
 (colon, brightness, button indicator), so an idle Tetris clock costs almost no CPU.
 
-The Tetris face is built for the S3 only: its renderer, the TetrisAnimation
-library, declares `architectures=esp32`, so `platformio.ini` pulls it into the S3
-environment alone and `board_hal.h` compiles the face out everywhere else. On the
-M4 the config page has no watchface selector.
+The face is switched on for the S3 only (`WATCHFACE_TETRIS` in `board_hal.h`).
+Nothing in it is board specific any more, but it has not been tested on the M4,
+whose config page therefore has no watchface selector.
 
 ## Animation timing
 
@@ -278,9 +300,9 @@ per pixel in ms (default 12).
 
 On the Tetris watchface the same setting controls the fall: one block step every
 `animSpeed * 4` ms, so the slider covers 16..240 ms and the default lands at 48 ms.
-The original Tetris clock runs at 100 ms, which is `animSpeed 25` here. The longest
-digit (`8`) takes 172 steps, so even at the slowest setting it settles in about 41 s
-— well inside the minute before it has to change again.
+A digit needs roughly 40 to 140 steps depending on how its tiling came out, so
+even at the slowest setting it settles well inside the minute before it has to
+change again.
 
 On the S3 the loop runs in step with the panel refresh (about 165 Hz with the
 current 5 bit planes): `show()` waits for the refresh that takes the new frame, and
@@ -309,13 +331,13 @@ not build against picolibc, the default C library from ESP-IDF 6 on.
 MatrixPortal M4 only: WiFiNINA, FlashStorage_SAMD. On the S3 the WiFi stack and the
 NVS settings storage come from the ESP32 Arduino core, so no extra library is needed.
 
-MatrixPortal S3 only: **TetrisAnimation** (Tobias Blum / Brian Lough), the renderer
-behind the Tetris watchface, pinned to a commit because the registry only carries
-the 2019 tag `1.1.0`, whose block rotation differs. Note its licensing is
-inconsistent: the repository carries a GPL-3.0 `LICENSE` file while every source
-file's own header states LGPL-2.1-or-later. It is referenced through `lib_deps`
-and fetched at build time, so no third-party code lives in this repository;
-anyone distributing built firmware should settle which of the two applies.
+The Tetris watchface needs no library. Its block tables are generated by
+`scripts/gen_tetris_digits.py` into `src/tetris_digits.h` (a generated file — do
+not edit it by hand, re-run the script). The script has a fixed seed, so a re-run
+reproduces the header byte for byte, and it verifies every table it emits before
+writing: exact coverage of the glyph, no overlaps, every piece droppable from
+above in the stored order, and a proper colouring within the palette. It refuses
+to write anything if a check fails.
 
 ## Toolchain (S3)
 

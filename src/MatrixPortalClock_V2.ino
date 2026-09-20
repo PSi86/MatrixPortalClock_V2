@@ -31,7 +31,7 @@ Todo Concept:
 #include <Fonts/Picopixel.h>
 
 #if WATCHFACE_TETRIS
-#include <TetrisMatrixDraw.h>  // Tetris watchface renderer (draws through Adafruit_GFX)
+#include "tetris_digits.h"     // generated block tables for the Tetris watchface
 #endif
 
 #include <math.h>              // powf() for perceptual brightness fade
@@ -1005,50 +1005,63 @@ void drawStatusPixel() {
 /* ======================================================================
    Tetris watchface
 
-   HH:MM built from falling tetromino blocks. The rendering comes from the
-   TetrisAnimation library, which draws through Adafruit_GFX and therefore
-   straight into Protomatter. Three things it does not do by itself and that
-   are handled here:
-     - master brightness: its block colors are fixed 565 constants, so they get
-       recomputed from effectiveBrightness before a frame is drawn,
-     - the colon: drawNumbers() would paint it in hard-coded white and only
-       knows the four-digit landscape layout,
-     - pacing: drawNumbers() advances the animation by one step AND draws it, so
-       it must not be called more often than the animation is meant to move.
+   HH:MM built from falling tetromino blocks. The block tables live in
+   src/tetris_digits.h and are produced by scripts/gen_tetris_digits.py: every
+   digit comes in TETRIS_VARIANTS different tilings of its 6x10 glyph, each
+   already ordered so the pieces can be dropped in from above and coloured so
+   that no two touching pieces share a colour class.
+
+   Two things happen fresh every time a digit changes: a variant is drawn at
+   random, and the colour classes are mapped onto a shuffled palette. So the
+   same digit is neither built the same way nor coloured the same way twice.
+
+   The palette is six hues exactly 60 degrees apart. Because the classes are a
+   proper colouring and the mapping is injective, touching pieces can never end
+   up within 60 degrees of each other - no run-time check needed.
    ====================================================================== */
 #if WATCHFACE_TETRIS
 
-// Landscape (64x32) fits all four digits on one line; portrait (32x64) puts the
-// hours above the minutes, which is the only case where the second instance is
-// used. Both draw at the same block size, so the two orientations look alike.
-TetrisMatrixDraw tetrisTop(matrix);
-TetrisMatrixDraw tetrisBot(matrix);
-
-const uint8_t TETRIS_SCALE = 2;   // one tetromino cell = 2x2 px -> digit 12x20 px
-const uint8_t TETRIS_PITCH = 14;  // TETRIS_DISTANCE_BETWEEN_DIGITS (7) * TETRIS_SCALE
-const uint8_t TETRIS_DOT   = 2 * TETRIS_SCALE;  // colon dot edge length
+const uint8_t TETRIS_CELL  = 2;   // panel pixels per grid cell -> digit 12x20 px
+const uint8_t TETRIS_PITCH = 14;  // x distance between the two digits of a group
+const uint8_t TETRIS_DOT   = 4;   // colon dot edge length
+const uint8_t TETRIS_DROP  = 4;   // cells a piece starts above its own digit box
+// A falling piece turns into its landing orientation on the way down: roughly
+// one quarter turn per TETRIS_SPIN cells of fall, at most three. The exact
+// heights are drawn per piece, so the turns come as separate, slightly uneven
+// flicks rather than on a metronome - the way someone playing would tap the
+// button. Set TETRIS_SPIN to 0 to drop the pieces unrotated.
+const uint8_t TETRIS_SPIN   = 3;
+const uint8_t TETRIS_SETTLE = 2;  // last cells of the fall, never turning any more
 // One fall step every animSpeed * TETRIS_STEP_MULT ms, so the existing speed
-// setting covers 16..240 ms and the default (12) lands at 48 ms. The original
-// Tetris clock runs at 100 ms, which is animSpeed 25 here. The slowest setting
-// takes 172 steps * 240 ms = 41 s for the longest digit (8) - still inside the
-// minute, so a digit always settles before the next change.
+// setting covers 16..240 ms and the default (12) lands at 48 ms. A digit needs
+// between 40 and 140 steps, so even the slowest setting finishes a digit well
+// inside the minute before it has to change again.
 const uint8_t TETRIS_STEP_MULT = 4;
 
-// The library's eight block colors, expanded from its 565 constants, so the hues
-// stay exactly the same while the clock's master brightness scales them.
-const uint8_t TETRIS_RGB[8][3] = {
+// Six hues 60 degrees apart. Blue is lifted off pure 0000FF, which is too dark
+// against the others on the panel, without moving its hue.
+const uint8_t TETRIS_PALETTE[TETRIS_COLOUR_CLASSES][3] = {
   {255,   0,   0},   // red
-  {  0, 255,   0},   // green
-  { 49,  73, 255},   // blue    (0x325F)
-  {255, 255, 255},   // white
   {255, 255,   0},   // yellow
+  {  0, 255,   0},   // green
   {  0, 255, 255},   // cyan
-  {255,   0, 255},   // magenta
-  {255,  97,   0}    // orange  (0xFB00)
+  { 48,  48, 255},   // blue
+  {255,   0, 255}    // magenta
 };
 
-int8_t        tetrisDigit[4]    = {-1, -1, -1, -1}; // digits currently loaded in the instances
-uint8_t       tetrisRotation    = 0xFF;   // rotation the layout was built for (0xFF = none yet)
+// State of one of the four digits.
+struct TetrisDigit {
+  uint8_t value;      // 0..9, or 0xFF when nothing has been placed yet
+  uint8_t variant;    // which tiling of that digit is being built
+  uint8_t piece;      // index of the piece currently falling; == piece count when settled
+  uint8_t fall;       // cells that piece still has to drop
+  uint8_t turnAt[3];  // heights at which it turns a quarter; 0xFF = unused
+  uint8_t hue[TETRIS_COLOUR_CLASSES];  // colour class -> palette entry
+};
+
+TetrisDigit   tetrisDigits[4];
+uint16_t      tetrisPal[TETRIS_COLOUR_CLASSES]; // palette at the current brightness
+uint8_t       tetrisRotation    = 0xFF;   // rotation the layout was built for
 bool          tetrisLandscape   = false;  // orientation the layout was built for
 bool          tetrisSettled     = false;  // true once every block has landed
 unsigned long tetrisStepLast    = 0;      // millis() of the last animation step
@@ -1056,79 +1069,171 @@ uint8_t       tetrisBrightDrawn = 0xFF;   // effectiveBrightness of the frame on
 bool          tetrisColonDrawn  = false;  // colon state of the frame on the panel
 bool          tetrisFbDrawn     = false;  // button indicator state of the frame on the panel
 int           tetrisXHour = 0, tetrisXMin = 0;  // left edge of each digit group
-int           tetrisYHour = 0, tetrisYMin = 0;  // baseline the blocks of each group land on
+int           tetrisYHour = 0, tetrisYMin = 0;  // top edge of each digit group
 
-// Place the digits for the current rotation and make all of them drop again.
-// The geometry is the settled extent of the blocks, worked out from the
-// library's fall tables: a digit is 12 px wide and 20 px tall at this scale, and
-// the groups are 26 px wide.
+// The packed piece record of one piece of one variant.
+uint16_t tetrisPieceAt(uint8_t digit, uint8_t variant, uint8_t piece) {
+  return TETRIS_VAR[digit][(uint16_t)variant * TETRIS_PIECES_PER_DIGIT[digit] + piece];
+}
+
+// Send the next piece on its way: set how far it falls and decide at which
+// heights it flicks round a quarter. The heights are spread over the fall with
+// a random position inside each band, so the turns look tapped out by hand
+// instead of clocked. Nothing turns during the last TETRIS_SETTLE cells, so a
+// piece always arrives in the orientation it will keep.
+//
+// Takes the digit index rather than a reference: the .ino preprocessor injects
+// a prototype for every function ahead of the file, so a parameter of a type
+// declared here would not be known yet.
+void tetrisArmPiece(uint8_t idx) {
+  TetrisDigit &s = tetrisDigits[idx];
+  s.fall = TETRIS_PIECE_TOP(tetrisPieceAt(s.value, s.variant, s.piece)) + TETRIS_DROP;
+  for (uint8_t i = 0; i < 3; i++) { s.turnAt[i] = 0xFF; }   // 0xFF = no turn here
+  if (TETRIS_SPIN == 0 || s.fall <= TETRIS_SETTLE) { return; }
+  uint8_t usable = s.fall - TETRIS_SETTLE;
+  uint8_t turns  = usable / TETRIS_SPIN;
+  if (turns > 3) { turns = 3; }
+  if (turns == 0) { return; }
+  uint8_t band = usable / turns;
+  for (uint8_t i = 0; i < turns; i++) {
+    uint8_t at = TETRIS_SETTLE + i * band + 1 + (uint8_t)random(band);
+    s.turnAt[i] = (at < s.fall) ? at : (uint8_t)(s.fall - 1);
+  }
+}
+
+// Start building a digit: new tiling, new colours, first piece at the top.
+void tetrisStartDigit(uint8_t idx, uint8_t value) {
+  TetrisDigit &s = tetrisDigits[idx];
+  s.value   = value;
+  s.variant = (uint8_t)random(TETRIS_VARIANTS);
+  s.piece   = 0;
+  tetrisArmPiece(idx);
+  for (uint8_t i = 0; i < TETRIS_COLOUR_CLASSES; i++) { s.hue[i] = i; }
+  for (uint8_t i = TETRIS_COLOUR_CLASSES - 1; i > 0; i--) {   // Fisher-Yates
+    uint8_t j = (uint8_t)random(i + 1);
+    uint8_t t = s.hue[i]; s.hue[i] = s.hue[j]; s.hue[j] = t;
+  }
+}
+
+// Place the digit groups for the current rotation and rebuild all four digits.
+// A group is TETRIS_GRID_W x TETRIS_GRID_H cells, so 12 x 20 px, and the two
+// digits of a group sit TETRIS_PITCH apart; the coordinates below are the
+// top-left corner of each group.
 //
 // The orientation is taken from curRotation, not from the global isLandscape:
-// drawAPScreen() rotates the panel and updates curRotation without going through
-// applyOrientation(), so isLandscape can be one step behind.
+// drawAPScreen() rotates the panel and updates curRotation without going
+// through applyOrientation(), so isLandscape can be one step behind.
 void tetrisLayout() {
   tetrisRotation  = curRotation;
   tetrisLandscape = (curRotation == 0 || curRotation == 2);
   if (tetrisLandscape) {
-    // 64x32: one line. Hours x 2..27, minutes x 36..61, both rows 6..25 - the
-    // same positions the library's own four-digit layout produces.
-    tetrisXHour = 2;   tetrisXMin = 36;
-    tetrisYHour = 26;  tetrisYMin = 26;
+    // 64x32: one line. Hours x 2..27, minutes x 36..61, both rows 6..25.
+    tetrisXHour = 2;  tetrisXMin = 36;
+    tetrisYHour = 6;  tetrisYMin = 6;
   } else {
-    // 32x64: hours above minutes, x 3..28, rows 8..27 and 36..55.
-    tetrisXHour = 3;   tetrisXMin = 3;
-    tetrisYHour = 28;  tetrisYMin = 56;
+    // 32x64: hours above minutes, x 3..28, rows 8..27 and 36..55. The minutes
+    // start TETRIS_DROP cells above their own box, which is row 28 - exactly
+    // the gap below the hours, so the two groups never draw over each other.
+    tetrisXHour = 3;  tetrisXMin = 3;
+    tetrisYHour = 8;  tetrisYMin = 36;
   }
-  // setNumState() does not touch the library's private sizeOfValue, and the
-  // constructor leaves it at zero, so drawNumbers() would loop over no digits at
-  // all. setNumbers() is the only public way to set it; the two digits it writes
-  // are replaced by the first tetrisPushTime() below.
-  tetrisTop.scale = TETRIS_SCALE;
-  tetrisBot.scale = TETRIS_SCALE;
-  tetrisTop.setNumbers(10, true);
-  tetrisBot.setNumbers(10, true);
-  for (uint8_t i = 0; i < 4; i++) { tetrisDigit[i] = -1; }
+  for (uint8_t i = 0; i < 4; i++) { tetrisDigits[i].value = 0xFF; }
   tetrisSettled = false;
 }
 
-// Hand the current HH:MM to the instances, restarting only the digits that
-// really changed - an untouched digit keeps its settled blocks. setNumState()
-// takes plain ints, so unlike setTime() this needs no Arduino String and
-// allocates nothing.
+// Hand the current HH:MM to the four digits. Only a digit whose value really
+// changed is rebuilt - the others keep the blocks they have already dropped.
 void tetrisPushTime() {
   uint8_t h = clockHour(sysTime), m = clockMinute(sysTime);
-  int8_t  d[4] = { (int8_t)(h / 10), (int8_t)(h % 10), (int8_t)(m / 10), (int8_t)(m % 10) };
+  uint8_t d[4] = { (uint8_t)(h / 10), (uint8_t)(h % 10),
+                   (uint8_t)(m / 10), (uint8_t)(m % 10) };
   for (uint8_t i = 0; i < 4; i++) {
-    if (d[i] == tetrisDigit[i]) { continue; }
-    tetrisDigit[i] = d[i];
-    int xShift = (i & 1) ? TETRIS_PITCH : 0;
-    if (i < 2) { tetrisTop.setNumState(i, d[i], xShift); }
-    else       { tetrisBot.setNumState(i - 2, d[i], xShift); }
+    if (d[i] == tetrisDigits[i].value) { continue; }
+    tetrisStartDigit(i, d[i]);
     tetrisSettled = false;
   }
 }
 
-// Rescale the block palette to the master brightness, so the watchface follows
-// the light sensor and the brightness slider like the classic one does.
+// Rescale the palette to the master brightness, so the watchface follows the
+// light sensor and the brightness slider like the classic one does.
 void tetrisApplyBrightness() {
-  for (uint8_t i = 0; i < 8; i++) {
-    uint16_t c = scaledColorB(TETRIS_RGB[i][0], TETRIS_RGB[i][1], TETRIS_RGB[i][2],
-                              effectiveBrightness);
-    tetrisTop.tetrisColors[i] = c;
-    tetrisBot.tetrisColors[i] = c;
+  for (uint8_t i = 0; i < TETRIS_COLOUR_CLASSES; i++) {
+    tetrisPal[i] = scaledColorB(TETRIS_PALETTE[i][0], TETRIS_PALETTE[i][1],
+                                TETRIS_PALETTE[i][2], effectiveBrightness);
   }
 }
 
-// The separator between hours and minutes: vertically stacked next to the digits
-// in landscape, a horizontal pair in the gap between the two rows in portrait.
+// Move every digit on by one fall step. A piece drops one cell per step; when
+// it has arrived the next one starts at the top of the digit box.
+void tetrisStep() {
+  bool allSettled = true;
+  for (uint8_t i = 0; i < 4; i++) {
+    TetrisDigit &s = tetrisDigits[i];
+    if (s.value > 9) { continue; }
+    uint8_t total = TETRIS_PIECES_PER_DIGIT[s.value];
+    if (s.piece >= total) { continue; }        // this digit is complete
+    allSettled = false;
+    if (s.fall > 0) { s.fall--; continue; }
+    s.piece++;
+    if (s.piece < total) { tetrisArmPiece(i); }
+  }
+  tetrisSettled = allSettled;
+}
+
+// Draw one digit: every piece already dropped, plus the one still falling.
+//
+// The falling piece spins into place. A quarter turn changes the piece's
+// bounding box, so a rotated state can be wider than where it will land - the
+// library this replaced simply let those pixels run off the panel (measured: 21
+// of its 229 fall states left the six-cell digit box, by up to 6 px, which on
+// the rightmost digit meant drawing to x=67 on a 64 px panel). Here the spinning
+// piece is kept inside its own digit box instead, the way a real game kicks a
+// piece off the wall when you rotate against it. Vertically the piece hangs from
+// its landing edge, so its bottom travels smoothly however it is turned.
+void tetrisDrawDigit(uint8_t idx, int originX, int originY) {
+  TetrisDigit &s = tetrisDigits[idx];
+  if (s.value > 9) { return; }
+  uint8_t total = TETRIS_PIECES_PER_DIGIT[s.value];
+  uint8_t last  = (s.piece < total) ? s.piece : (uint8_t)(total - 1);
+  for (uint8_t p = 0; p <= last; p++) {
+    uint16_t rec    = tetrisPieceAt(s.value, s.variant, p);
+    uint8_t  orient = TETRIS_PIECE_ORIENT(rec);
+    int      lift   = (p == s.piece) ? s.fall : 0;   // only the current one is airborne
+    int      cx     = TETRIS_PIECE_X(rec);
+    int      bottom = (int)TETRIS_PIECE_TOP(rec) + (TETRIS_SIZE[orient] & 0x0F) - 1 - lift;
+
+    if (lift > 0) {
+      // Turns still to come: the piece is shown that many quarters short of its
+      // landing orientation and unwinds one flick at a time on the way down.
+      uint8_t turns = 0;
+      for (uint8_t t = 0; t < 3; t++) { if (s.turnAt[t] < lift) { turns++; } }
+      while (turns--) { orient = TETRIS_TURN[orient]; }
+      int w = TETRIS_SIZE[orient] >> 4;
+      if (cx + w > TETRIS_GRID_W) { cx = TETRIS_GRID_W - w; }   // kick off the wall
+      if (cx < 0) { cx = 0; }
+    }
+
+    uint16_t col = tetrisPal[s.hue[TETRIS_PIECE_CLASS(rec)]];
+    int      bx  = originX + cx * TETRIS_CELL;
+    int      by  = originY + (bottom - (TETRIS_SIZE[orient] & 0x0F) + 1) * TETRIS_CELL;
+    for (uint8_t c = 0; c < 4; c++) {
+      uint8_t cell = TETRIS_SHAPE[orient][c];
+      matrix.fillRect(bx + (cell >> 4) * TETRIS_CELL, by + (cell & 0x0F) * TETRIS_CELL,
+                      TETRIS_CELL, TETRIS_CELL, col);
+    }
+  }
+}
+
+// The separator between hours and minutes: vertically stacked between the two
+// groups in landscape, a horizontal pair in the gap between the rows in portrait.
 void tetrisDrawColon() {
   uint16_t c = scaledColorVisible(255, 255, 255);
   if (tetrisLandscape) {
     int x = tetrisXHour + TETRIS_PITCH * 2;   // x 30..33, between the two groups
-    matrix.fillRect(x, tetrisYHour - 16, TETRIS_DOT, TETRIS_DOT, c);  // y 10..13
-    matrix.fillRect(x, tetrisYHour - 8,  TETRIS_DOT, TETRIS_DOT, c);  // y 18..21
+    matrix.fillRect(x, tetrisYHour + 4,  TETRIS_DOT, TETRIS_DOT, c);  // y 10..13
+    matrix.fillRect(x, tetrisYHour + 12, TETRIS_DOT, TETRIS_DOT, c);  // y 18..21
   } else {
-    int y = tetrisYHour + 2;                  // y 30..33, in the 8 px gap between rows
+    int y = tetrisYHour + 22;                 // y 30..33, in the 8 px gap between rows
     matrix.fillRect(tetrisXHour + 5,  y, TETRIS_DOT, TETRIS_DOT, c);  // x 8..11
     matrix.fillRect(tetrisXHour + 17, y, TETRIS_DOT, TETRIS_DOT, c);  // x 20..23
   }
@@ -1151,11 +1256,13 @@ void drawTetrisFace() {
 
   if (!tetrisSettled) {
     // Between steps there is nothing new to show - unless another screen has
-    // just overwritten the panel, in which case repaint at once and accept the
-    // single extra fall step that costs.
-    if (!tetrisPanelStale &&
-        millisNow - tetrisStepLast < (unsigned long)loopTime * TETRIS_STEP_MULT) { return; }
-    tetrisStepLast = millisNow;
+    // just overwritten the panel, in which case repaint at once.
+    if (millisNow - tetrisStepLast < (unsigned long)loopTime * TETRIS_STEP_MULT) {
+      if (!tetrisPanelStale) { return; }
+    } else {
+      tetrisStepLast = millisNow;
+      tetrisStep();
+    }
   } else if (!tetrisPanelStale && colonOn == tetrisColonDrawn &&
              effectiveBrightness == tetrisBrightDrawn && fbNow == tetrisFbDrawn) {
     return;   // nothing on screen would change - leave the last frame standing
@@ -1163,17 +1270,10 @@ void drawTetrisFace() {
 
   tetrisApplyBrightness();
   matrix.fillScreen(0);
-  // A block starts falling 32 px above the line it lands on, so in portrait the
-  // minutes spawn inside the hours row (their envelope reaches up to y 16, the
-  // hours occupy 8..27). Draw the minutes first, wipe everything above the hours
-  // baseline, then draw the hours on top: minute blocks then appear from under
-  // the hours row instead of crossing through it. Hour blocks never reach below
-  // their own baseline, so the wipe cannot cut them. Landscape needs none of
-  // this - the two groups do not overlap in x.
-  bool doneMin = tetrisBot.drawNumbers(tetrisXMin, tetrisYMin, false);
-  if (!tetrisLandscape) { matrix.fillRect(0, 0, matrix.width(), tetrisYHour, 0); }
-  bool doneHour = tetrisTop.drawNumbers(tetrisXHour, tetrisYHour, false);
-  tetrisSettled = doneHour && doneMin;
+  tetrisDrawDigit(0, tetrisXHour, tetrisYHour);
+  tetrisDrawDigit(1, tetrisXHour + TETRIS_PITCH, tetrisYHour);
+  tetrisDrawDigit(2, tetrisXMin, tetrisYMin);
+  tetrisDrawDigit(3, tetrisXMin + TETRIS_PITCH, tetrisYMin);
   if (colonOn) { tetrisDrawColon(); }
 
   // Same overlays the classic watchface draws, so both behave alike.
