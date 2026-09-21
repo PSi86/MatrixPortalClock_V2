@@ -120,46 +120,106 @@ def find_tiling(cells, rng):
     return placed if step() else None
 
 
-def drop_order(pieces):
-    """Order the pieces so each can fall straight down into place without
-    passing through one already lying there. Returns indices, or None when the
-    tiling cannot be built from above (pieces interlock across columns)."""
-    tops, bottoms = [], []
-    for _oi, cells in pieces:
-        t, b = {}, {}
-        for (x, y) in cells:
-            t[x] = min(t.get(x, GRID_H), y)
-            b[x] = max(b.get(x, -1), y)
-        tops.append(t)
-        bottoms.append(b)
+SUPPORT_NONE  = 0   # would come to rest in mid-air
+SUPPORT_WEAK  = 1   # only touches an already placed piece sideways
+SUPPORT_FIRM  = 2   # stands on the bottom row, or on a piece already lying there
 
+
+def support_level(cells, placed):
+    if any(y == GRID_H - 1 for (_x, y) in cells):
+        return SUPPORT_FIRM                      # standing on the glyph's base
+    if any((x, y + 1) in placed for (x, y) in cells):
+        return SUPPORT_FIRM                      # resting on what is already there
+    if any((x + dx, y) in placed for (x, y) in cells for dx in (-1, 1)):
+        return SUPPORT_WEAK                      # only shoulder to shoulder
+    return SUPPORT_NONE
+
+
+def drop_order(pieces, rng, glyph):
+    """Order the pieces so each one can both reach its place and stay there.
+
+    Two conditions per piece. It must fall in from above without passing through
+    anything already lying there, and it must land on something: the bottom row
+    of the glyph, or a piece already in place beneath it. A piece that would come
+    to rest in mid-air is rejected outright.
+
+    Some digits cannot honour that everywhere. The middle bar of a 2 reaches out
+    over empty space - the glyph simply has no cells below it, so no order can
+    ever put anything there. Such a piece may settle against one it touches
+    sideways instead.
+
+    That exception is only taken when it is unavoidable, and the search proves it
+    rather than assuming it: it first looks for an order in which every piece
+    lands on something, and only if none exists does it allow the pieces the
+    glyph leaves hanging to lean sideways. A tiling that needs more than that is
+    thrown away - there are far more tilings than are kept, so nothing is lost by
+    being strict.
+
+    Returns (order, weak) or None.
+    """
     n = len(pieces)
-    after = defaultdict(set)   # i -> pieces that must be placed after i
-    indeg = [0] * n
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            # j has a cell above i in a shared column -> i must go first
-            if any(tops[j][c] < tops[i][c] for c in set(tops[i]) & set(tops[j])):
-                if j not in after[i]:
-                    after[i].add(j)
-                    indeg[j] += 1
+    cells = [c for _oi, c in pieces]
+    # A piece the glyph leaves hanging: nothing could ever be placed below it.
+    nothing_below = [not any((x, y + 1) in glyph for (x, y) in c) for c in cells]
 
-    # Lowest piece first among those that are ready, so the digit visibly
-    # builds from the bottom up.
-    ready = [i for i in range(n) if indeg[i] == 0]
-    order = []
-    while ready:
-        ready.sort(key=lambda i: (-max(bottoms[i].values()),
-                                  min(tops[i].keys())))
-        i = ready.pop(0)
-        order.append(i)
-        for j in sorted(after[i]):
-            indeg[j] -= 1
-            if indeg[j] == 0:
-                ready.append(j)
-    return order if len(order) == n else None
+    def path_clear(i, placed):
+        for (x, y) in cells[i]:
+            for r in range(y):
+                if (x, r) in placed:
+                    return False
+        return True
+
+    def search(allow_weak):
+        order, placed = [], set()
+        weak = [0]
+        budget = [40000]
+
+        def step():
+            if len(order) == n:
+                return True
+            if budget[0] <= 0:
+                return False
+            budget[0] -= 1
+            candidates = []
+            for i in range(n):
+                if i in order or not path_clear(i, placed):
+                    continue
+                level = SUPPORT_FIRM if not order else support_level(cells[i], placed)
+                if level == SUPPORT_NONE:
+                    continue
+                if level == SUPPORT_WEAK:
+                    if allow_weak == 0:
+                        continue
+                    if allow_weak == 1 and not nothing_below[i]:
+                        continue
+                candidates.append((level, i))
+            if not candidates:
+                return False
+            best = max(level for level, _i in candidates)
+            pool = [i for level, i in candidates if level == best]
+            rng.shuffle(pool)
+            for i in pool:
+                order.append(i)
+                placed.update(cells[i])
+                if best == SUPPORT_WEAK:
+                    weak[0] += 1
+                if step():
+                    return True
+                if best == SUPPORT_WEAK:
+                    weak[0] -= 1
+                placed.difference_update(cells[i])
+                order.pop()
+            return False
+
+        return (list(order), weak[0]) if step() else None
+
+    # Strictest first: no leaning at all, then only where the glyph forces it.
+    # Anything that still fails is not used.
+    for allow_weak in (0, 1):
+        found = search(allow_weak)
+        if found is not None:
+            return found
+    return None
 
 
 def adjacency(pieces):
@@ -241,9 +301,11 @@ def generate(digit, rng):
     cells = glyph_cells(GLYPHS[digit])
     if len(cells) % 4:
         sys.exit(f"digit {digit}: {len(cells)} cells is not a multiple of 4")
+    # Collect a pool several times the size that is kept, so the ones with the
+    # fewest pieces leaning on a neighbour can be picked out of it.
     variants = {}
     attempts = 0
-    while len(variants) < VARIANTS and attempts < VARIANTS * 500:
+    while len(variants) < VARIANTS * 4 and attempts < VARIANTS * 1500:
         attempts += 1
         pieces = find_tiling(cells, rng)
         if pieces is None:
@@ -251,20 +313,23 @@ def generate(digit, rng):
         key = frozenset(c for _oi, c in pieces)
         if key in variants:
             continue
-        order = drop_order(pieces)
-        if order is None:
-            continue           # interlocks, cannot be dropped from above
+        built = drop_order(pieces, rng, cells)
+        if built is None:
+            continue           # cannot be stacked up without a piece hanging free
+        order, weak = built
         pieces = [pieces[i] for i in order]
         adj = adjacency(pieces)
         cols = colour(pieces, adj, rng)
         if cols is None:
             continue           # needs more classes than the palette has
-        variants[key] = (pieces, cols)
-    return list(variants.values())
+        variants[key] = (pieces, cols, weak)
+    # Prefer the tidiest builds: fewest pieces that only lean on a neighbour.
+    best = sorted(variants.values(), key=lambda v: v[2])[:VARIANTS]
+    return [(p, c) for (p, c, _w) in best], [w for (_p, _c, w) in best]
 
 
 # --- checks ----------------------------------------------------------------
-def check(digit, variants):
+def check(digit, variants, forced, avoidable):
     """Verify every property the firmware relies on. Any failure aborts the
     run: a wrong table would show up as a broken digit on the panel, which is
     exactly what must not reach the device."""
@@ -293,12 +358,24 @@ def check(digit, variants):
         if covered != cells:
             sys.exit(f"{where}: does not cover the glyph exactly")
 
-        # droppable in the emitted order
+        # droppable in the emitted order, and never coming to rest in mid-air
         occupied = set()
-        for oi, pcs in pieces:
+        for n_piece, (oi, pcs) in enumerate(pieces):
             for (x, y) in pcs:
                 if any((x, r) in occupied for r in range(0, y)):
                     sys.exit(f"{where}: a piece falls through one already placed")
+            if n_piece > 0:
+                level = support_level(pcs, occupied)
+                if level == SUPPORT_NONE:
+                    sys.exit(f"{where}: piece {n_piece} would stop in mid-air")
+                if level == SUPPORT_WEAK:
+                    # Only leaning sideways. Count whether the glyph even has a
+                    # cell underneath this piece: if it has none, no order could
+                    # ever have put something there and the exception is forced.
+                    if any((x, y + 1) in cells for (x, y) in pcs):
+                        avoidable[0] += 1
+                    else:
+                        forced[0] += 1
             occupied |= set(pcs)
 
         # proper colouring, within the palette
@@ -463,11 +540,12 @@ def main():
 
     rng = random.Random(SEED)
     all_variants = []
+    forced, avoidable = [0], [0]
     for d in range(10):
-        variants = generate(d, rng)
-        if not variants:
-            sys.exit(f"digit {d}: no usable tiling found")
-        check(d, variants)
+        variants, weak = generate(d, rng)
+        if len(variants) < VARIANTS:
+            sys.exit(f"digit {d}: only {len(variants)} usable tilings found")
+        check(d, variants, forced, avoidable)
         all_variants.append(variants)
         pieces = len(variants[0][0])
         used = [len({c for c in cols}) for _p, cols in variants]
@@ -478,7 +556,13 @@ def main():
         share = " ".join(f"{100.0 * spread[c] / sum(spread.values()):.0f}%"
                          for c in range(MAX_COLOUR_CLASSES))
         print(f"digit {d}: {len(variants):3d} variants, {pieces:2d} pieces, "
-              f"{min(used)}-{max(used)} classes used, share per class: {share}")
+              f"{min(used)}-{max(used)} classes used, share per class: {share}, "
+              f"pieces only leaning sideways: {sum(weak)}/{len(variants) * pieces} "
+              f"({100.0 * sum(weak) / (len(variants) * pieces):.1f}%)")
+
+    print(f"\npieces that only lean on a neighbour: {forced[0] + avoidable[0]}")
+    print(f"  forced (the glyph has nothing underneath them):  {forced[0]}")
+    print(f"  avoidable (something could have gone below):     {avoidable[0]}")
 
     counts = emit(all_variants, args.out)
     total = sum(len(v) * c for v, c in zip(all_variants, counts))

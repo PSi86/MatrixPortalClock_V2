@@ -9,3 +9,6 @@
 
 # Do not commit WiFi credentials (create a local copy from arduino_secrets.h.example)
 src/arduino_secrets.h
+
+# Python bytecode from the table generator in scripts/
+__pycache__/
