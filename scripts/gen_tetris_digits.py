@@ -138,10 +138,17 @@ def support_level(cells, placed):
 def drop_order(pieces, rng, glyph):
     """Order the pieces so each one can both reach its place and stay there.
 
-    Two conditions per piece. It must fall in from above without passing through
-    anything already lying there, and it must land on something: the bottom row
-    of the glyph, or a piece already in place beneath it. A piece that would come
-    to rest in mid-air is rejected outright.
+    Two conditions per piece, the first one included. It must fall in from above
+    without passing through anything already lying there, and it must land on
+    something: the bottom row of the glyph, or a piece already in place beneath
+    it. A piece that would come to rest in mid-air is rejected outright.
+
+    The first piece is not a special case. Every glyph has cells in its bottom
+    row, so a build can always start on the floor - and it has to, because
+    nothing is placed yet and the floor is the only support there is. Exempting
+    it, as an earlier version did, let digits whose lower half is a narrow stroke
+    start with a block hanging in the air: in a 7 that put the top bar down
+    before the stroke it should be resting on.
 
     Some digits cannot honour that everywhere. The middle bar of a 2 reaches out
     over empty space - the glyph simply has no cells below it, so no order can
@@ -184,7 +191,7 @@ def drop_order(pieces, rng, glyph):
             for i in range(n):
                 if i in order or not path_clear(i, placed):
                     continue
-                level = SUPPORT_FIRM if not order else support_level(cells[i], placed)
+                level = support_level(cells[i], placed)
                 if level == SUPPORT_NONE:
                     continue
                 if level == SUPPORT_WEAK:
@@ -364,18 +371,19 @@ def check(digit, variants, forced, avoidable):
             for (x, y) in pcs:
                 if any((x, r) in occupied for r in range(0, y)):
                     sys.exit(f"{where}: a piece falls through one already placed")
-            if n_piece > 0:
-                level = support_level(pcs, occupied)
-                if level == SUPPORT_NONE:
-                    sys.exit(f"{where}: piece {n_piece} would stop in mid-air")
-                if level == SUPPORT_WEAK:
-                    # Only leaning sideways. Count whether the glyph even has a
-                    # cell underneath this piece: if it has none, no order could
-                    # ever have put something there and the exception is forced.
-                    if any((x, y + 1) in cells for (x, y) in pcs):
-                        avoidable[0] += 1
-                    else:
-                        forced[0] += 1
+            level = support_level(pcs, occupied)
+            if level == SUPPORT_NONE:
+                sys.exit(f"{where}: piece {n_piece} would stop in mid-air")
+            if n_piece == 0 and not any(y == GRID_H - 1 for (_x, y) in pcs):
+                sys.exit(f"{where}: the first piece does not start on the bottom row")
+            if level == SUPPORT_WEAK:
+                # Only leaning sideways. Count whether the glyph even has a cell
+                # underneath this piece: if it has none, no order could ever have
+                # put something there and the exception is forced.
+                if any((x, y + 1) in cells for (x, y) in pcs):
+                    avoidable[0] += 1
+                else:
+                    forced[0] += 1
             occupied |= set(pcs)
 
         # proper colouring, within the palette
