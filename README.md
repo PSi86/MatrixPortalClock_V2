@@ -274,13 +274,18 @@ side by side.
 
 **Nothing lands in mid-air.** The pieces of a variant are ordered so that each
 one both reaches its place from above and comes to rest on something: on the
-bottom row of the digit, or on a piece already lying there. The generator proves
-this rather than assuming it — it first searches for an order where every piece
-lands on something, and only where the glyph makes that impossible (the middle
-bar of a `2` reaches out over empty space, so nothing can ever be under it) may a
-piece settle against one it touches sideways. A tiling that needs more than that
-is thrown away. Over the shipped tables: 73 pieces rest sideways, all 73 of them
-forced by the glyph, none avoidable. Only `2`, `3` and `5` need it at all.
+bottom row of the digit, or on a piece already lying there. That includes the
+first piece, which therefore always starts on the bottom row — every glyph has
+cells there, so a build can always begin on the floor. A digit builds upwards
+from its base: in a `7` the stroke grows first and the top bar attaches to it
+afterwards.
+
+The generator proves this rather than assuming it — it first searches for an
+order where every piece lands on something, and only where the glyph makes that
+impossible (the middle bar of a `2` reaches out over empty space, so nothing can
+ever be under it) may a piece settle against one it touches sideways. A tiling
+that needs more than that is thrown away. Over the shipped tables: no piece lands
+in mid-air, 77 rest sideways, all 77 forced by the glyph and none avoidable.
 
 **Pieces turn as they fall**, as separate flicks rather than a steady spin: each
 piece draws its own turn times, spaced between half and one and a half times the
