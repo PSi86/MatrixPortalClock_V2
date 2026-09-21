@@ -57,7 +57,7 @@ button pin cannot be carried over.
     3x), starting after a short dark pause (~0.65 s after the last release). A sequence that triggers nothing (1x/2x while the config AP is open) gets
     no blink. A 2x2 square in the bottom-right matrix corner mirrors the LED
     (compile-time switch `BUTTON_FEEDBACK_ON_MATRIX`)
-- **AP config page** (`http://4.3.2.1`): watchface, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time
+- **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time
 - All settings are stored outside the program image, so they survive a restart
   **and a firmware re-upload** (S3: the NVS partition, which a normal upload does
   not touch - `pio run -t erase` does; M4: a fixed flash block at 0x7E000)
@@ -272,16 +272,37 @@ palette. This deliberately drops the classic Tetris convention of one fixed
 colour per shape — that convention is exactly what made equal colours end up
 side by side.
 
-**Pieces spin as they fall** and never leave their digit. A quarter turn changes
-a piece's bounding box, so a rotated state can be wider than where it lands. The
-library this replaced let those pixels simply run off the panel — measured on its
-tables: 21 of its 229 fall states left the six-cell digit box by up to 6 px,
-which on the rightmost digit meant drawing out to x=67 on a 64 px panel. Here a
-spinning piece is pushed back inside its own digit instead, the way a game kicks
-a piece off the wall when you rotate against it, and it hangs from its landing
-edge so the bottom travels smoothly however it is turned. Verified by simulating
-all 28285 fall states: none leaves the digit box. `TETRIS_SPIN` sets how much of
-the fall is spent spinning; 0 drops the pieces unrotated.
+**Nothing lands in mid-air.** The pieces of a variant are ordered so that each
+one both reaches its place from above and comes to rest on something: on the
+bottom row of the digit, or on a piece already lying there. The generator proves
+this rather than assuming it — it first searches for an order where every piece
+lands on something, and only where the glyph makes that impossible (the middle
+bar of a `2` reaches out over empty space, so nothing can ever be under it) may a
+piece settle against one it touches sideways. A tiling that needs more than that
+is thrown away. Over the shipped tables: 73 pieces rest sideways, all 73 of them
+forced by the glyph, none avoidable. Only `2`, `3` and `5` need it at all.
+
+**Pieces turn as they fall**, as separate flicks rather than a steady spin: each
+piece draws its own turn times, spaced between half and one and a half times the
+configured interval, and some pieces do not turn at all. Nothing turns over the
+last two rows, so a piece always arrives in the orientation it keeps.
+
+A quarter turn changes a piece's bounding box, so a turning piece can be wider
+than where it lands. The library this replaced let those pixels simply run off
+the panel — measured on its tables: 21 of its 229 fall states left the six-cell
+digit box by up to 6 px, which on the rightmost digit meant drawing out to x=67
+on a 64 px panel. Here a turning piece is pushed back inside its own digit, the
+way a game kicks a piece off the wall, and it hangs from its landing edge so the
+bottom travels smoothly however it is turned. Verified over all 452 560 draw
+states — every piece at every height at every turn count: none leaves the box.
+
+**Two settings of its own**, both on the config page and both previewing live:
+*Tetris drop* is the milliseconds a block takes per row (20–250, default 70), and
+*Tetris turn* the average milliseconds between quarter turns (80–1500, default
+260). They are deliberately separate — one sets how fast the digit builds, the
+other how busy it looks doing it — and they are kept in their own flash blob, so
+the main settings are untouched by them. The *animation speed* setting applies to
+the classic watchface only.
 
 The **digit and trail colors do not apply** to this face. The master brightness
 (and therefore the light sensor) does: the palette is rescaled before every frame.
@@ -298,11 +319,8 @@ whose config page therefore has no watchface selector.
 The digits fly in one pixel per step; the **animation speed** setting is the time
 per pixel in ms (default 12).
 
-On the Tetris watchface the same setting controls the fall: one block step every
-`animSpeed * 4` ms, so the slider covers 16..240 ms and the default lands at 48 ms.
-A digit needs roughly 40 to 140 steps depending on how its tiling came out, so
-even at the slowest setting it settles well inside the minute before it has to
-change again.
+The Tetris watchface has its own pair of settings instead (see above); the
+animation speed does not apply to it.
 
 On the S3 the loop runs in step with the panel refresh (about 165 Hz with the
 current 5 bit planes): `show()` waits for the refresh that takes the new frame, and

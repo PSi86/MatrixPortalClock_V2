@@ -124,25 +124,38 @@
 
 #include <Preferences.h>
 
+// The key lets a build keep more than one blob side by side in the same
+// namespace. It defaults to the one the clock has always used, so existing
+// settings stay exactly where they are.
 template <typename T>
 class SettingsStore {
  public:
-  void begin() { _prefs.begin("matrixclock", false); }
-
-  // Reads the stored blob. Anything but an exact-size match (nothing stored
-  // yet, or a struct that has grown since) leaves the destination zeroed, so
-  // the caller's magic check falls back to the factory defaults.
-  bool read(T &dst) {
-    memset(&dst, 0, sizeof(T));
-    if (_prefs.getBytes("settings", &dst, sizeof(T)) == sizeof(T)) { return true; }
-    memset(&dst, 0, sizeof(T));
-    return false;
+  void begin(const char *key = "settings") {
+    _key = key;
+    _prefs.begin("matrixclock", false);
   }
 
-  void write(T &src) { _prefs.putBytes("settings", &src, sizeof(T)); }
+  // Reads the stored blob. A blob SHORTER than the struct is accepted and the
+  // rest left zeroed - that is a layout from an earlier firmware, which
+  // loadSettings() then migrates by revision. Anything longer comes from a
+  // NEWER firmware and is refused, leaving the destination zeroed so the
+  // caller's magic check falls back to the factory defaults.
+  bool read(T &dst) {
+    memset(&dst, 0, sizeof(T));
+    size_t stored = _prefs.getBytesLength(_key);
+    if (stored == 0 || stored > sizeof(T)) { return false; }
+    if (_prefs.getBytes(_key, &dst, sizeof(T)) != stored) {
+      memset(&dst, 0, sizeof(T));
+      return false;
+    }
+    return true;
+  }
+
+  void write(T &src) { _prefs.putBytes(_key, &src, sizeof(T)); }
 
  private:
   Preferences _prefs;
+  const char *_key = "settings";
 };
 
 #else // BOARD_MATRIXPORTAL_M4
@@ -151,10 +164,12 @@ class SettingsStore {
 
 #define SETTINGS_FLASH_ADDR 0x0007E000UL   // last 8 KB erase block of the 512 KB flash
 
+// The key argument exists only so the call sites match the S3 backend; this
+// board has one fixed address and therefore room for a single blob.
 template <typename T>
 class SettingsStore {
  public:
-  void begin() {}
+  void begin(const char *key = "settings") { (void)key; }
   bool read(T &dst)  { _flash.read(dst); return true; }
   void write(T &src) { _flash.write(src); }
 

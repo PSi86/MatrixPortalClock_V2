@@ -1025,13 +1025,13 @@ const uint8_t TETRIS_CELL  = 2;   // panel pixels per grid cell -> digit 12x20 p
 const uint8_t TETRIS_PITCH = 14;  // x distance between the two digits of a group
 const uint8_t TETRIS_DOT   = 4;   // colon dot edge length
 const uint8_t TETRIS_DROP  = 4;   // cells a piece starts above its own digit box
-// A falling piece turns into its landing orientation on the way down: roughly
-// one quarter turn per TETRIS_SPIN cells of fall, at most three. The exact
-// heights are drawn per piece, so the turns come as separate, slightly uneven
-// flicks rather than on a metronome - the way someone playing would tap the
-// button. Set TETRIS_SPIN to 0 to drop the pieces unrotated.
-const uint8_t TETRIS_SPIN   = 3;
 const uint8_t TETRIS_SETTLE = 2;  // last cells of the fall, never turning any more
+
+// Drop and turn pace are two separate settings, because they are two separate
+// things to watch: how fast the blocks come down, and how busily they turn on
+// the way. Both are stored in their own blob (see TetrisSettings below).
+const uint8_t  TETRIS_DROP_MIN = 20,  TETRIS_DROP_MAX = 250;   // ms per cell
+const uint16_t TETRIS_SPIN_MIN = 80,  TETRIS_SPIN_MAX = 1500;  // ms per quarter turn
 // One fall step every animSpeed * TETRIS_STEP_MULT ms, so the existing speed
 // setting covers 16..240 ms and the default (12) lands at 48 ms. A digit needs
 // between 40 and 140 steps, so even the slowest setting finishes a digit well
@@ -1049,13 +1049,39 @@ const uint8_t TETRIS_PALETTE[TETRIS_COLOUR_CLASSES][3] = {
   {255,   0, 255}    // magenta
 };
 
+// Settings of this watchface, in their own flash blob. Keeping them out of the
+// main Settings struct is not tidiness: that struct is exactly 32 bytes with no
+// padding left, and a firmware that stored 36 would be refused wholesale by any
+// older build (Preferences::getBytes returns 0 when the blob is larger than the
+// buffer), which would reset every setting the user has. A second key costs
+// nothing and leaves the old blob untouched.
+#define TETRIS_SETTINGS_MAGIC 0x7E71
+#define TETRIS_SETTINGS_REV   1
+
+struct TetrisSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  dropMs;   // milliseconds per cell of fall
+  uint16_t spinMs;   // average milliseconds between quarter turns
+};
+
+const TetrisSettings TETRIS_DEFAULTS = {
+  TETRIS_SETTINGS_MAGIC, TETRIS_SETTINGS_REV,
+  70,    // a block falls one cell every 70 ms
+  260    // and turns a quarter every 260 ms on average
+};
+
+TetrisSettings tetrisSettings;
+SettingsStore<TetrisSettings> tetrisStore;
+
 // State of one of the four digits.
 struct TetrisDigit {
   uint8_t value;      // 0..9, or 0xFF when nothing has been placed yet
   uint8_t variant;    // which tiling of that digit is being built
   uint8_t piece;      // index of the piece currently falling; == piece count when settled
   uint8_t fall;       // cells that piece still has to drop
-  uint8_t turnAt[3];  // heights at which it turns a quarter; 0xFF = unused
+  uint8_t turns;      // quarter turns this piece still owes
+  unsigned long turnAt[3];  // millis() at which each of them happens
   uint8_t hue[TETRIS_COLOUR_CLASSES];  // colour class -> palette entry
 };
 
@@ -1068,6 +1094,7 @@ unsigned long tetrisStepLast    = 0;      // millis() of the last animation step
 uint8_t       tetrisBrightDrawn = 0xFF;   // effectiveBrightness of the frame on the panel
 bool          tetrisColonDrawn  = false;  // colon state of the frame on the panel
 bool          tetrisFbDrawn     = false;  // button indicator state of the frame on the panel
+uint8_t       tetrisSpinDrawn   = 0;      // turns still owed when that frame was drawn
 int           tetrisXHour = 0, tetrisXMin = 0;  // left edge of each digit group
 int           tetrisYHour = 0, tetrisYMin = 0;  // top edge of each digit group
 
@@ -1087,21 +1114,47 @@ uint16_t tetrisPieceAt(uint8_t digit, uint8_t variant, uint8_t piece) {
 // declared here would not be known yet.
 void tetrisArmPiece(uint8_t idx) {
   TetrisDigit &s = tetrisDigits[idx];
-  s.fall = TETRIS_PIECE_TOP(tetrisPieceAt(s.value, s.variant, s.piece)) + TETRIS_DROP;
-  for (uint8_t i = 0; i < 3; i++) { s.turnAt[i] = 0xFF; }   // 0xFF = no turn here
-  if (TETRIS_SPIN == 0 || s.fall <= TETRIS_SETTLE) { return; }
-  uint8_t usable = s.fall - TETRIS_SETTLE;
-  uint8_t turns  = usable / TETRIS_SPIN;
-  if (turns > 3) { turns = 3; }
-  if (turns == 0) { return; }
-  uint8_t band = usable / turns;
-  for (uint8_t i = 0; i < turns; i++) {
-    uint8_t at = TETRIS_SETTLE + i * band + 1 + (uint8_t)random(band);
-    s.turnAt[i] = (at < s.fall) ? at : (uint8_t)(s.fall - 1);
+  s.fall  = TETRIS_PIECE_TOP(tetrisPieceAt(s.value, s.variant, s.piece)) + TETRIS_DROP;
+  s.turns = 0;
+  if (s.fall <= TETRIS_SETTLE) { return; }
+
+  // How long the piece is in the air before it has to stop turning.
+  unsigned long budget = (unsigned long)(s.fall - TETRIS_SETTLE) * tetrisSettings.dropMs;
+  unsigned long spin   = tetrisSettings.spinMs;
+  unsigned long at     = millisNow;
+  unsigned long slots[3];
+  uint8_t fits = 0;
+  while (fits < 3) {
+    // Each gap is half to one and a half times the set interval, so successive
+    // flicks are noticeably unevenly spaced instead of metronomic.
+    unsigned long gap = spin / 2 + (unsigned long)random(spin);
+    if (at + gap - millisNow > budget) { break; }
+    at += gap;
+    slots[fits++] = at;
   }
+  // Not every piece turns, and one that does rarely uses every turn it could
+  // have - so some come down flat while others tumble.
+  s.turns = (fits == 0) ? 0 : (uint8_t)random(fits + 1);
+  for (uint8_t i = 0; i < s.turns; i++) { s.turnAt[i] = slots[i]; }
+}
+
+// Quarter turns this digit still owes, which is how far short of its landing
+// orientation the falling piece is drawn.
+uint8_t tetrisPendingTurns(uint8_t idx) {
+  TetrisDigit &s = tetrisDigits[idx];
+  uint8_t pending = 0;
+  for (uint8_t i = 0; i < s.turns; i++) {
+    if ((long)(s.turnAt[i] - millisNow) > 0) { pending++; }
+  }
+  return pending;
 }
 
 // Start building a digit: new tiling, new colours, first piece at the top.
+//
+// Do NOT add a randomSeed() anywhere for this: on the S3, random() reads the
+// hardware generator until randomSeed() is called, and calling it switches the
+// core over to a seeded software PRNG (WMath.cpp:44-61). Seeding would make the
+// variety worse, not better.
 void tetrisStartDigit(uint8_t idx, uint8_t value) {
   TetrisDigit &s = tetrisDigits[idx];
   s.value   = value;
@@ -1205,8 +1258,7 @@ void tetrisDrawDigit(uint8_t idx, int originX, int originY) {
     if (lift > 0) {
       // Turns still to come: the piece is shown that many quarters short of its
       // landing orientation and unwinds one flick at a time on the way down.
-      uint8_t turns = 0;
-      for (uint8_t t = 0; t < 3; t++) { if (s.turnAt[t] < lift) { turns++; } }
+      uint8_t turns = tetrisPendingTurns(idx);
       while (turns--) { orient = TETRIS_TURN[orient]; }
       int w = TETRIS_SIZE[orient] >> 4;
       if (cx + w > TETRIS_GRID_W) { cx = TETRIS_GRID_W - w; }   // kick off the wall
@@ -1254,18 +1306,21 @@ void drawTetrisFace() {
   bool fbNow = false;
 #endif
 
-  if (!tetrisSettled) {
-    // Between steps there is nothing new to show - unless another screen has
-    // just overwritten the panel, in which case repaint at once.
-    if (millisNow - tetrisStepLast < (unsigned long)loopTime * TETRIS_STEP_MULT) {
-      if (!tetrisPanelStale) { return; }
-    } else {
-      tetrisStepLast = millisNow;
-      tetrisStep();
-    }
-  } else if (!tetrisPanelStale && colonOn == tetrisColonDrawn &&
-             effectiveBrightness == tetrisBrightDrawn && fbNow == tetrisFbDrawn) {
-    return;   // nothing on screen would change - leave the last frame standing
+  // Turning runs on its own clock, so a flick between two fall steps has to be
+  // painted when it happens - otherwise the drop rate would quietly limit how
+  // finely the rotation setting can act.
+  uint8_t spinPending = 0;
+  for (uint8_t i = 0; i < 4; i++) { spinPending += tetrisPendingTurns(i); }
+
+  bool stepDue = !tetrisSettled &&
+                 (millisNow - tetrisStepLast >= tetrisSettings.dropMs);
+  bool changed = tetrisPanelStale || colonOn != tetrisColonDrawn ||
+                 effectiveBrightness != tetrisBrightDrawn || fbNow != tetrisFbDrawn ||
+                 spinPending != tetrisSpinDrawn;
+  if (!stepDue && !changed) { return; }   // leave the last frame standing
+  if (stepDue) {
+    tetrisStepLast = millisNow;
+    tetrisStep();
   }
 
   tetrisApplyBrightness();
@@ -1285,6 +1340,9 @@ void drawTetrisFace() {
   tetrisBrightDrawn = effectiveBrightness;
   tetrisFbDrawn     = fbNow;
   tetrisPanelStale  = false;
+  // After the step, because a piece may have landed and the next one armed.
+  tetrisSpinDrawn = 0;
+  for (uint8_t i = 0; i < 4; i++) { tetrisSpinDrawn += tetrisPendingTurns(i); }
 }
 #endif  // WATCHFACE_TETRIS
 
@@ -1631,8 +1689,34 @@ void loadSettings() {
     saveSettings();   // stamps the new revision
     Serial.print("Settings: stored layout migrated to rev "); Serial.println(SETTINGS_REV);
   }
+#if WATCHFACE_TETRIS
+  loadTetrisSettings();
+#endif
   applySettings();
 }
+
+#if WATCHFACE_TETRIS
+// The Tetris watchface keeps its settings in a blob of its own, so the main one
+// never has to grow. Same shape of migration: the magic says "mine", the
+// revision says how much of it is filled in.
+void loadTetrisSettings() {
+  tetrisStore.begin("tetris");
+  tetrisStore.read(tetrisSettings);
+  if (tetrisSettings.magic != TETRIS_SETTINGS_MAGIC) {
+    tetrisSettings = TETRIS_DEFAULTS;
+    saveTetrisSettings();
+    Serial.println("Tetris settings: defaults written to flash");
+  }
+  tetrisSettings.dropMs = constrain(tetrisSettings.dropMs, TETRIS_DROP_MIN, TETRIS_DROP_MAX);
+  tetrisSettings.spinMs = constrain(tetrisSettings.spinMs, TETRIS_SPIN_MIN, TETRIS_SPIN_MAX);
+}
+
+void saveTetrisSettings() {
+  tetrisSettings.magic = TETRIS_SETTINGS_MAGIC;
+  tetrisSettings.rev   = TETRIS_SETTINGS_REV;
+  tetrisStore.write(tetrisSettings);
+}
+#endif
 
 // Write current settings to flash.
 void saveSettings() {
@@ -2109,6 +2193,9 @@ void handleAP() {
   if (path.startsWith("/save")) {
     applyParams(query);
     saveSettings();
+#if WATCHFACE_TETRIS
+    saveTetrisSettings();
+#endif
     sendSavedPage(out);
     reboot = true;
   } else if (path.startsWith("/live")) {
@@ -2195,6 +2282,8 @@ void applyParams(const String &q) {
   v = getParam(q, "dst");    if (v.length()) { settings.dst = constrain(v.toInt(), DST_WINTER, DST_AUTO); }
 #if WATCHFACE_TETRIS
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
+  v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
+  v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.animSpeed  = constrain(v.toInt(), 4, 60); }
@@ -2219,6 +2308,8 @@ void applyLiveParams(const String &q) {
   String v;
 #if WATCHFACE_TETRIS
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
+  v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
+  v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "autob");  if (v.length()) { settings.autoBright = (v == "on") ? 1 : 0; } // updateBrightness() re-seeds the fade
@@ -2284,6 +2375,22 @@ void sendFormPage(Print &c) {
   printOption(c, settings.watchface, WATCHFACE_CLASSIC,   "Classic (flying digits, HH MM SS)");
   printOption(c, settings.watchface, WATCHFACE_TETRIS_ID, "Tetris (falling blocks, HH:MM)");
   c.println("</select>");
+
+  // Tetris pace: how fast the blocks come down, and how busily they turn on the
+  // way. Separate settings because they are separate things to look at.
+  c.print("<label>Tetris drop (ms per block row; higher = slower)</label>");
+  c.print("<input type=range min="); c.print(TETRIS_DROP_MIN);
+  c.print(" max="); c.print(TETRIS_DROP_MAX);
+  c.print(" name=tdrop value="); c.print(tetrisSettings.dropMs);
+  c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\" onchange=\"this.nextElementSibling.value=this.value;liveNow()\">");
+  c.print("<output>"); c.print(tetrisSettings.dropMs); c.println("</output>");
+
+  c.print("<label>Tetris turn (ms between quarter turns; higher = calmer)</label>");
+  c.print("<input type=range min="); c.print(TETRIS_SPIN_MIN);
+  c.print(" max="); c.print(TETRIS_SPIN_MAX);
+  c.print(" step=10 name=tspin value="); c.print(tetrisSettings.spinMs);
+  c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\" onchange=\"this.nextElementSibling.value=this.value;liveNow()\">");
+  c.print("<output>"); c.print(tetrisSettings.spinMs); c.println("</output>");
 #endif
 
   // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
@@ -2351,7 +2458,7 @@ void sendFormPage(Print &c) {
   c.println("function _send(){var g=function(n){return document.getElementsByName(n)[0].value;};");
   c.println("var ab=document.getElementsByName('autob')[0].checked?'on':'off';");
 #if WATCHFACE_TETRIS
-  c.println("var wf='&wf='+g('wf');");
+  c.println("var wf='&wf='+g('wf')+'&tdrop='+g('tdrop')+'&tspin='+g('tspin');");
 #else
   c.println("var wf='';");   // no watchface selector in this build
 #endif
