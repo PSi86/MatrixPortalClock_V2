@@ -33,7 +33,8 @@ button pin cannot be carried over.
 
 - **Two watchfaces**, selectable on the config page:
   - *Classic* — six animated digits `HH MM SS` (fly-in, direction configurable per digit)
-  - *Tetris* — `HH:MM` built up from falling tetromino blocks (S3 only)
+  - *Tetris* — `HH:MM` built up from falling tetromino blocks, and knocking the
+    clock throws them apart and rebuilds them (S3 only)
 - **Automatic orientation** via the onboard accelerometer: the display rotates in
   90° steps to match how the panel is held (both portrait and both landscape
   positions)
@@ -57,7 +58,7 @@ button pin cannot be carried over.
     3x), starting after a short dark pause (~0.65 s after the last release). A sequence that triggers nothing (1x/2x while the config AP is open) gets
     no blink. A 2x2 square in the bottom-right matrix corner mirrors the LED
     (compile-time switch `BUTTON_FEEDBACK_ON_MATRIX`)
-- **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time
+- **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time
 - All settings are stored outside the program image, so they survive a restart
   **and a firmware re-upload** (S3: the NVS partition, which a normal upload does
   not touch - `pio run -t erase` does; M4: a fixed flash block at 0x7E000)
@@ -272,20 +273,19 @@ palette. This deliberately drops the classic Tetris convention of one fixed
 colour per shape — that convention is exactly what made equal colours end up
 side by side.
 
-**Nothing lands in mid-air.** The pieces of a variant are ordered so that each
-one both reaches its place from above and comes to rest on something: on the
-bottom row of the digit, or on a piece already lying there. That includes the
-first piece, which therefore always starts on the bottom row — every glyph has
-cells there, so a build can always begin on the floor. A digit builds upwards
-from its base: in a `7` the stroke grows first and the top bar attaches to it
-afterwards.
+**Every piece lands on something** — the bottom row of the digit, or a piece
+already lying there. That includes the first piece, which therefore always starts
+on the bottom row: every glyph has cells there, so a build can always begin on the
+floor. A digit builds upwards from its base, so in a `7` the stroke grows first
+and the top bar attaches to it afterwards.
 
-The generator proves this rather than assuming it — it first searches for an
-order where every piece lands on something, and only where the glyph makes that
-impossible (the middle bar of a `2` reaches out over empty space, so nothing can
-ever be under it) may a piece settle against one it touches sideways. A tiling
-that needs more than that is thrown away. Over the shipped tables: no piece lands
-in mid-air, 77 rest sideways, all 77 forced by the glyph and none avoidable.
+Only tilings that manage this are shipped. Nothing rests on a neighbour and
+nothing hangs in mid-air — verified on the emitted tables: of 3038 pieces, 662
+land on the floor and 2376 on another piece, and none on nothing. The price is
+paid in variety rather than in physics: a digit that cannot offer 32 such builds
+ships fewer of them. The `2` has 22, the `5` 23 and the `7` 25, because their
+middle bars reach out over empty space and most of their tilings therefore need a
+piece that only leans. Every other digit has the full 32.
 
 **Pieces turn as they fall**, as separate flicks rather than a steady spin: each
 piece draws its own turn times, spaced between half and one and a half times the
@@ -308,6 +308,34 @@ states — every piece at every height at every turn count: none leaves the box.
 other how busy it looks doing it — and they are kept in their own flash blob, so
 the main settings are untouched by them. The *animation speed* setting applies to
 the classic watchface only.
+
+### Knock it and the digits come apart
+
+Give the clock a knock and the digits are thrown away, then built up again from
+the current time — with a fresh tiling and fresh colours, so the knock is worth
+something. Three effects, selectable and previewing live: **Collapse** (the stack
+gives way and drops), **Scatter** (the pieces fly off and tumble) and **Clear
+rows** (rows flash and vanish from the bottom, everything above dropping into the
+gap), plus *Random each time*. The effect is drawn once per event, so all the
+digits involved always come apart the same way.
+
+*Shake sensitivity* runs from 0 (off) to 10. The scale was measured on the
+device, not guessed: over about 70 s of standing still the largest deviation in
+any one second was 780 raw counts, which is the sensor's own noise, while every
+deliberate interaction produced 1900 or more and a firm knock 12700. Level 10
+therefore sits at 1500 (roughly twice the noise) and level 1 at 6000; one g is
+16000 counts, because the library leaves the LIS3DH in high-resolution mode.
+
+Nothing is triggered while another screen owns the panel, in the config AP, for
+the first three seconds after start-up, for 1.2 s after a rotation, while an
+animation is already running, or **while the button is held** — the switch sits
+next to the sensor, so a button press is a knock as far as it is concerned.
+
+With **Also use it when the time changes** ticked, the same effect replaces the
+plain swap when a digit changes: at a minute rollover only the digits that
+actually changed come apart, and they rebuild while the others stand still. The
+sensor's data rate was raised from 10 Hz to 100 Hz for all of this — at 10 Hz a
+knock lasts about as long as one sample and was a coin toss to catch.
 
 The **digit and trail colors do not apply** to this face. The master brightness
 (and therefore the light sensor) does: the palette is rescaled before every frame.

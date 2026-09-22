@@ -173,6 +173,13 @@ unsigned long dstMsgUntil = 0;        // show the daylight-saving banner until t
 // classic watchface). The Tetris watchface skips redrawing a picture that has
 // not changed, so it needs to know when someone else has overwritten it.
 bool tetrisPanelStale = true;
+// Knocking the clock is ignored until this millis(): while it is starting up,
+// and for a moment after a rotation, where the movement would otherwise set off
+// the very animation the rotation already redraws around. Declared here rather
+// than with the rest of the shake code because applyOrientation() sets it and is
+// compiled on both boards.
+const unsigned long SHAKE_SETTLE_MS = 1200;
+unsigned long shakeBlockUntil = 3000;   // and nothing counts for the first 3 s
 // Boot breadcrumb stages, written to flash while starting (see board_hal.h).
 const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
 const uint8_t BOOT_STAGE_START = 1;   // setup() entered
@@ -533,7 +540,9 @@ void setup(void) {
   accelOK = lis.begin(ACCEL_I2C_ADDR); // onboard, non-standard address on both boards
   if (accelOK) {
     lis.setRange(LIS3DH_RANGE_2_G);
-    lis.setDataRate(LIS3DH_DATARATE_10_HZ);
+    // 100 Hz, not 10: a knock lasts about as long as one 10 Hz sample, so at
+    // the old rate it was a coin toss whether the sensor even showed it.
+    lis.setDataRate(LIS3DH_DATARATE_100_HZ);
     Serial.println("LIS3DH found");
   } else {
     Serial.println("LIS3DH not found - orientation locked to portrait");
@@ -618,6 +627,11 @@ void setup(void) {
     printWifiStatus();
     delay(1000);
   } // end if(!apActive)
+  // Set last, from the real clock: applyOrientation() ran several times during
+  // the boot screens and left this behind with a millisNow from before the WiFi
+  // join, which can be ten seconds ago. Ignore the handling that comes with
+  // plugging the clock in.
+  shakeBlockUntil = millis() + 3000;
 }
 
 // MAIN
@@ -643,6 +657,9 @@ void loop(void) {
   timeSync_WifiLib();
   if (minuteTrigger) { updateAutoDst(); } // follow the timezone's summer/winter time changes
   updateOrientation();  // rotate the display to match how the panel is held
+#if WATCHFACE_TETRIS
+  updateShake();        // a knock takes the Tetris digits apart and rebuilds them
+#endif
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
   if (millisNow < dstMsgUntil) { drawDstMessage(); } // brief banner after a daylight-saving mode change
   else                         { drawClock(); }
@@ -717,6 +734,7 @@ void applyOrientation(uint8_t rot) {
   matrix.setRotation(rot);
   curRotation = rot;
   isLandscape = (rot == 0 || rot == 2);
+  shakeBlockUntil = millisNow + SHAKE_SETTLE_MS;   // turning is not a knock
 
   for (uint8_t i = 0; i < 6; i++) {
     if (isLandscape) {
@@ -1007,7 +1025,7 @@ void drawStatusPixel() {
 
    HH:MM built from falling tetromino blocks. The block tables live in
    src/tetris_digits.h and are produced by scripts/gen_tetris_digits.py: every
-   digit comes in TETRIS_VARIANTS different tilings of its 6x10 glyph, each
+   digit comes in several different tilings of its 6x10 glyph, each
    already ordered so the pieces can be dropped in from above and coloured so
    that no two touching pieces share a colour class.
 
@@ -1055,20 +1073,36 @@ const uint8_t TETRIS_PALETTE[TETRIS_COLOUR_CLASSES][3] = {
 // older build (Preferences::getBytes returns 0 when the blob is larger than the
 // buffer), which would reset every setting the user has. A second key costs
 // nothing and leaves the old blob untouched.
+// Fields added later go on the end and are filled in by revision, so a blob
+// written by an earlier firmware keeps everything it had.
 #define TETRIS_SETTINGS_MAGIC 0x7E71
-#define TETRIS_SETTINGS_REV   1
+#define TETRIS_SETTINGS_REV   3   // 1 = drop and spin, 2 = adds the shake, 3 = on a time change too
+
+// How the digits come apart when the clock is knocked.
+const uint8_t SHAKE_STYLE_COLLAPSE = 0;  // the stack gives way and drops
+const uint8_t SHAKE_STYLE_SCATTER  = 1;  // the pieces fly off and tumble
+const uint8_t SHAKE_STYLE_CLEAR    = 2;  // rows flash and vanish, bottom up
+const uint8_t SHAKE_STYLE_RANDOM   = 3;  // one of the three, drawn each time
+const uint8_t SHAKE_STYLE_COUNT    = 4;
+const uint8_t SHAKE_LEVEL_MAX      = 10;
 
 struct TetrisSettings {
   uint16_t magic;
   uint8_t  rev;
-  uint8_t  dropMs;   // milliseconds per cell of fall
-  uint16_t spinMs;   // average milliseconds between quarter turns
+  uint8_t  dropMs;      // milliseconds per cell of fall
+  uint16_t spinMs;      // average milliseconds between quarter turns
+  uint8_t  shakeLevel;  // 0 = knocking the clock does nothing, 1..10 sensitivity
+  uint8_t  shakeStyle;  // how the digits come apart, see SHAKE_STYLE_*
+  uint8_t  shakeOnChange; // 1 = a digit is also thrown away when the time changes
 };
 
 const TetrisSettings TETRIS_DEFAULTS = {
   TETRIS_SETTINGS_MAGIC, TETRIS_SETTINGS_REV,
   70,    // a block falls one cell every 70 ms
-  260    // and turns a quarter every 260 ms on average
+  260,   // and turns a quarter every 260 ms on average
+  6,     // reacts to a knock, not to someone walking past
+  3,     // a different way of coming apart each time
+  0      // but a minute change just swaps the digit, as it always has
 };
 
 TetrisSettings tetrisSettings;
@@ -1095,6 +1129,51 @@ uint8_t       tetrisBrightDrawn = 0xFF;   // effectiveBrightness of the frame on
 bool          tetrisColonDrawn  = false;  // colon state of the frame on the panel
 bool          tetrisFbDrawn     = false;  // button indicator state of the frame on the panel
 uint8_t       tetrisSpinDrawn   = 0;      // turns still owed when that frame was drawn
+
+/* ----------------------------------------------------------------------
+   Coming apart when the clock is knocked
+
+   A nudge throws the digits away and the time is then built up again from
+   scratch, which also picks fresh tilings and fresh colours. Three ways of
+   coming apart: the stack collapsing, the pieces flying off, and the rows
+   being cleared away from the bottom. The first two need pieces that move
+   freely, the third needs a cell grid - both are built from the same tables
+   when the animation starts, and only the one the style needs is filled in.
+   ------------------------------------------------------------------------- */
+const uint8_t  SHAKE_MAX_DEBRIS  = 4 * 13;  // four digits, at most 13 pieces each
+const uint8_t  SHAKE_STEP_MS     = 30;      // one animation step
+const int16_t  SHAKE_GRAVITY     = 10;      // added to the fall speed each step, 1/16 px
+const uint8_t  SHAKE_CLEAR_FLASH = 3;       // steps a row stays lit before it goes
+
+// One flying piece. Position and speed are in 1/16 of a pixel so the movement
+// does not step in whole pixels.
+struct ShakePiece {
+  int16_t x16, y16;    // top-left corner
+  int16_t vx16, vy16;  // speed per step
+  uint8_t orient;
+  uint8_t colour;      // index into tetrisPal
+  uint8_t delay;       // steps to wait before this one starts moving
+  uint8_t spin;        // steps between quarter turns, 0 = does not turn
+  uint8_t spinTick;    // steps since this one last turned
+};
+
+// All of this is per digit, not per display: a knock takes all four apart at
+// once, but a minute change only replaces the digits that actually changed, and
+// those have to come apart on their own while the rest stand still.
+const uint8_t SHAKE_MAX_PIECES = 13;  // the most any digit is made of
+
+bool          shakeBusy[4]    = {false, false, false, false};
+uint8_t        shakeStyleOf[4] = {0, 0, 0, 0};   // the style that digit is using
+uint8_t       shakeCount[4]   = {0, 0, 0, 0};    // pieces flying, per digit
+uint16_t      shakeFrame[4]   = {0, 0, 0, 0};    // steps since that one started
+ShakePiece    shakeDebris[4][SHAKE_MAX_PIECES];
+// Cell grid for the row-clearing style: colour + 1 per cell, 0 = empty. Rows are
+// always taken off the bottom of the digit and everything above drops into the
+// gap, just like a line clear in the game.
+uint8_t       shakeGrid[4][TETRIS_GRID_W * TETRIS_GRID_H];
+uint8_t       shakeClearsLeft[4] = {0, 0, 0, 0}; // rows still to take away
+uint8_t       shakeClearTick[4]  = {0, 0, 0, 0}; // steps spent on the row going
+unsigned long shakeStepLast = 0;      // one clock for all of them, they step together
 int           tetrisXHour = 0, tetrisXMin = 0;  // left edge of each digit group
 int           tetrisYHour = 0, tetrisYMin = 0;  // top edge of each digit group
 
@@ -1158,7 +1237,9 @@ uint8_t tetrisPendingTurns(uint8_t idx) {
 void tetrisStartDigit(uint8_t idx, uint8_t value) {
   TetrisDigit &s = tetrisDigits[idx];
   s.value   = value;
-  s.variant = (uint8_t)random(TETRIS_VARIANTS);
+  // Per digit, not TETRIS_VARIANTS: only builds where every piece lands on
+  // something are shipped, and the 2, the 5 and the 7 have fewer of those.
+  s.variant = (uint8_t)random(TETRIS_VARIANTS_PER_DIGIT[value]);
   s.piece   = 0;
   tetrisArmPiece(idx);
   for (uint8_t i = 0; i < TETRIS_COLOUR_CLASSES; i++) { s.hue[i] = i; }
@@ -1200,8 +1281,19 @@ void tetrisPushTime() {
   uint8_t h = clockHour(sysTime), m = clockMinute(sysTime);
   uint8_t d[4] = { (uint8_t)(h / 10), (uint8_t)(h % 10),
                    (uint8_t)(m / 10), (uint8_t)(m % 10) };
+  uint8_t changeStyle = 0xFF;   // drawn once, so digits changing together match
   for (uint8_t i = 0; i < 4; i++) {
+    if (shakeBusy[i]) { continue; }   // still coming apart, it will be rebuilt after
     if (d[i] == tetrisDigits[i].value) { continue; }
+    // Optionally the outgoing digit is thrown away rather than simply replaced.
+    // Only one that is actually standing there can be thrown, so a digit still
+    // being built, or not yet drawn at all, is just swapped as before.
+    if (tetrisSettings.shakeOnChange && tetrisDigits[i].value <= 9 &&
+        tetrisDigits[i].piece > 0) {
+      if (changeStyle == 0xFF) { changeStyle = shakePickStyle(); }
+      shakeStartDigit(i, changeStyle);
+      continue;
+    }
     tetrisStartDigit(i, d[i]);
     tetrisSettled = false;
   }
@@ -1222,7 +1314,7 @@ void tetrisStep() {
   bool allSettled = true;
   for (uint8_t i = 0; i < 4; i++) {
     TetrisDigit &s = tetrisDigits[i];
-    if (s.value > 9) { continue; }
+    if (s.value > 9 || shakeBusy[i]) { continue; }
     uint8_t total = TETRIS_PIECES_PER_DIGIT[s.value];
     if (s.piece >= total) { continue; }        // this digit is complete
     allSettled = false;
@@ -1291,12 +1383,186 @@ void tetrisDrawColon() {
   }
 }
 
+// Where digit `idx` sits on the panel: which group it belongs to, and whether it
+// is the left or the right of the two.
+int tetrisOriginX(uint8_t idx) {
+  return ((idx < 2) ? tetrisXHour : tetrisXMin) + ((idx & 1) ? TETRIS_PITCH : 0);
+}
+int tetrisOriginY(uint8_t idx) {
+  return (idx < 2) ? tetrisYHour : tetrisYMin;
+}
+
+// Take one digit apart. Only the pieces that have actually landed are thrown;
+// one still in the air simply goes with the rest of the build.
+// The style is chosen per EVENT and passed in, never per digit: with "random"
+// selected, picking it here would give a knock four different effects at once.
+uint8_t shakePickStyle() {
+  uint8_t style = tetrisSettings.shakeStyle;
+  if (style >= SHAKE_STYLE_RANDOM) { style = (uint8_t)random(SHAKE_STYLE_RANDOM); }
+  return style;
+}
+
+void shakeStartDigit(uint8_t d, uint8_t style) {
+  TetrisDigit &s = tetrisDigits[d];
+  shakeStyleOf[d]    = style;
+  shakeCount[d]      = 0;
+  shakeFrame[d]      = 0;
+  shakeClearTick[d]  = 0;
+  shakeClearsLeft[d] = (style == SHAKE_STYLE_CLEAR) ? TETRIS_GRID_H : 0;
+  if (style == SHAKE_STYLE_CLEAR) { memset(shakeGrid[d], 0, TETRIS_GRID_W * TETRIS_GRID_H); }
+  if (s.value > 9) { return; }   // nothing standing there, so nothing to throw
+
+  uint8_t total   = TETRIS_PIECES_PER_DIGIT[s.value];
+  uint8_t settled = (s.piece < total) ? s.piece : total;
+  // Marked busy only when there is something to show, or an empty digit would
+  // hold the whole display in the animation for nothing.
+  shakeBusy[d] = (settled > 0);
+  if (!shakeBusy[d]) { return; }
+  for (uint8_t p = 0; p < settled; p++) {
+    uint16_t rec    = tetrisPieceAt(s.value, s.variant, p);
+    uint8_t  orient = TETRIS_PIECE_ORIENT(rec);
+    uint8_t  colour = s.hue[TETRIS_PIECE_CLASS(rec)];
+    if (style == SHAKE_STYLE_CLEAR) {
+      for (uint8_t c = 0; c < 4; c++) {
+        uint8_t cell = TETRIS_SHAPE[orient][c];
+        uint8_t gx = TETRIS_PIECE_X(rec) + (cell >> 4);
+        uint8_t gy = TETRIS_PIECE_TOP(rec) + (cell & 0x0F);
+        shakeGrid[d][gy * TETRIS_GRID_W + gx] = colour + 1;
+      }
+    } else if (shakeCount[d] < SHAKE_MAX_PIECES) {
+      ShakePiece &f = shakeDebris[d][shakeCount[d]++];
+      f.orient = orient;
+      f.colour = colour;
+      f.x16 = (int16_t)((tetrisOriginX(d) + TETRIS_PIECE_X(rec) * TETRIS_CELL) * 16);
+      f.y16 = (int16_t)((tetrisOriginY(d) + TETRIS_PIECE_TOP(rec) * TETRIS_CELL) * 16);
+      if (style == SHAKE_STYLE_COLLAPSE) {
+        // The bottom gives way first and the rest sinks after it.
+        f.vx16 = 0;
+        f.vy16 = 0;
+        f.spin = 0;
+        f.spinTick = 0;
+        f.delay = (uint8_t)((TETRIS_GRID_H - 1 - TETRIS_PIECE_TOP(rec)) / 2);
+      } else {
+        f.vx16  = (int16_t)random(-40, 41);
+        f.vy16  = (int16_t)random(-48, -8);   // a kick upwards first
+        f.spin  = (uint8_t)random(2, 6);
+        f.spinTick = (uint8_t)random(f.spin);   // start them out of step
+        f.delay = 0;
+      }
+    }
+  }
+}
+
+bool shakeAnyBusy() {
+  for (uint8_t d = 0; d < 4; d++) { if (shakeBusy[d]) { return true; } }
+  return false;
+}
+
+// Take all four apart at once - what a knock does.
+void shakeStartAll() {
+  shakeStepLast = millisNow;
+  uint8_t style = shakePickStyle();   // one effect for the whole knock
+  for (uint8_t d = 0; d < 4; d++) { shakeStartDigit(d, style); }
+}
+
+// Advance one digit by one step. Returns true once it has nothing left to show.
+bool shakeStepDigit(uint8_t d) {
+  if (++shakeFrame[d] > 150) { return true; }   // never let it hang
+
+  if (shakeStyleOf[d] == SHAKE_STYLE_CLEAR) {
+    if (++shakeClearTick[d] < SHAKE_CLEAR_FLASH) { return false; }
+    shakeClearTick[d] = 0;
+    for (uint8_t r = TETRIS_GRID_H - 1; r > 0; r--) {   // everything drops into the gap
+      memcpy(&shakeGrid[d][r * TETRIS_GRID_W],
+             &shakeGrid[d][(r - 1) * TETRIS_GRID_W], TETRIS_GRID_W);
+    }
+    memset(&shakeGrid[d][0], 0, TETRIS_GRID_W);
+    return (shakeClearsLeft[d] == 0) || (--shakeClearsLeft[d] == 0);
+  }
+
+  bool allGone = true;
+  for (uint8_t i = 0; i < shakeCount[d]; i++) {
+    ShakePiece &f = shakeDebris[d][i];
+    if (f.delay) { f.delay--; allGone = false; continue; }
+    f.vy16 += SHAKE_GRAVITY;
+    f.x16  += f.vx16;
+    f.y16  += f.vy16;
+    // A quarter turn swaps the piece's bounding box, so shift it by half the
+    // difference and its middle stays put; anchored at the top-left instead, a
+    // long piece would jump three cells sideways on every turn. The tick is per
+    // piece, so pieces sharing a rate do not all flick on the same frame.
+    if (f.spin && ++f.spinTick >= f.spin) {
+      f.spinTick = 0;
+      uint8_t o = f.orient, n = TETRIS_TURN[o];
+      int dw = (int)(TETRIS_SIZE[o] >> 4)   - (int)(TETRIS_SIZE[n] >> 4);
+      int dh = (int)(TETRIS_SIZE[o] & 0x0F) - (int)(TETRIS_SIZE[n] & 0x0F);
+      f.x16 = (int16_t)(f.x16 + dw * TETRIS_CELL * 8);   // 8 = half of the sixteenths
+      f.y16 = (int16_t)(f.y16 + dh * TETRIS_CELL * 8);
+      f.orient = n;
+    }
+    if ((f.y16 >> 4) < matrix.height()) { allGone = false; }
+  }
+  return allGone;
+}
+
+// Draw the one digit that is coming apart.
+void shakeDrawDigit(uint8_t d) {
+  if (shakeStyleOf[d] == SHAKE_STYLE_CLEAR) {
+    bool flash = (shakeClearTick[d] == SHAKE_CLEAR_FLASH - 1);
+    uint16_t white = scaledColorVisible(255, 255, 255);
+    int ox = tetrisOriginX(d), oy = tetrisOriginY(d);
+    for (uint8_t gy = 0; gy < TETRIS_GRID_H; gy++) {
+      for (uint8_t gx = 0; gx < TETRIS_GRID_W; gx++) {
+        uint8_t v = shakeGrid[d][gy * TETRIS_GRID_W + gx];
+        if (!v) { continue; }
+        uint16_t col = (flash && gy == TETRIS_GRID_H - 1) ? white : tetrisPal[v - 1];
+        matrix.fillRect(ox + gx * TETRIS_CELL, oy + gy * TETRIS_CELL,
+                        TETRIS_CELL, TETRIS_CELL, col);
+      }
+    }
+    return;
+  }
+  for (uint8_t i = 0; i < shakeCount[d]; i++) {
+    ShakePiece &f = shakeDebris[d][i];
+    int bx = f.x16 >> 4, by = f.y16 >> 4;
+    uint16_t col = tetrisPal[f.colour];
+    for (uint8_t c = 0; c < 4; c++) {
+      uint8_t cell = TETRIS_SHAPE[f.orient][c];
+      matrix.fillRect(bx + (cell >> 4) * TETRIS_CELL, by + (cell & 0x0F) * TETRIS_CELL,
+                      TETRIS_CELL, TETRIS_CELL, col);
+    }
+  }
+}
+
+
 // One pass of the watchface. While blocks are falling this runs at the animation
 // step interval; once everything has landed it only repaints when something it
 // shows has actually changed, so an idle clock costs almost nothing. Skipping
 // matrix.show() is safe: Protomatter keeps refreshing the last frame it was given.
 void drawTetrisFace() {
-  if (curRotation != tetrisRotation) { tetrisLayout(); }
+  // A rotation moves every coordinate a running animation holds, and a rotation
+  // rebuilds the digits anyway - so it wins over the animation.
+  if (curRotation != tetrisRotation) {
+    for (uint8_t i = 0; i < 4; i++) { shakeBusy[i] = false; }
+    tetrisLayout();
+  }
+
+  // A digit that has finished coming apart is marked unknown, so the next
+  // tetrisPushTime() starts it again from the current time - which is also what
+  // makes the rebuild show the right value if a minute passed on the way.
+  bool anyShake = false;
+  bool shakeDue = (millisNow - shakeStepLast >= SHAKE_STEP_MS);
+  for (uint8_t i = 0; i < 4; i++) {
+    if (!shakeBusy[i]) { continue; }
+    if (shakeDue && shakeStepDigit(i)) {
+      shakeBusy[i] = false;
+      tetrisDigits[i].value = 0xFF;
+      shakeBlockUntil = millisNow + SHAKE_SETTLE_MS;  // do not retrigger on the same knock
+    }
+    if (shakeBusy[i]) { anyShake = true; }
+  }
+  if (shakeDue) { shakeStepLast = millisNow; }
+
   tetrisPushTime();
 
   bool colonOn = (sysTime % 2) == 0;   // 1 Hz blink, in step with the seconds
@@ -1317,7 +1583,9 @@ void drawTetrisFace() {
   bool changed = tetrisPanelStale || colonOn != tetrisColonDrawn ||
                  effectiveBrightness != tetrisBrightDrawn || fbNow != tetrisFbDrawn ||
                  spinPending != tetrisSpinDrawn;
-  if (!stepDue && !changed) { return; }   // leave the last frame standing
+  // Debris moving is a change in itself, so while anything is coming apart the
+  // face repaints on the animation's clock rather than waiting to be asked.
+  if (!stepDue && !changed && !(anyShake && shakeDue)) { return; }
   if (stepDue) {
     tetrisStepLast = millisNow;
     tetrisStep();
@@ -1325,10 +1593,9 @@ void drawTetrisFace() {
 
   tetrisApplyBrightness();
   matrix.fillScreen(0);
-  tetrisDrawDigit(0, tetrisXHour, tetrisYHour);
-  tetrisDrawDigit(1, tetrisXHour + TETRIS_PITCH, tetrisYHour);
-  tetrisDrawDigit(2, tetrisXMin, tetrisYMin);
-  tetrisDrawDigit(3, tetrisXMin + TETRIS_PITCH, tetrisYMin);
+  for (uint8_t i = 0; i < 4; i++) {
+    if (shakeBusy[i]) { shakeDrawDigit(i); } else { tetrisDrawDigit(i, tetrisOriginX(i), tetrisOriginY(i)); }
+  }
   if (colonOn) { tetrisDrawColon(); }
 
   // Same overlays the classic watchface draws, so both behave alike.
@@ -1343,6 +1610,119 @@ void drawTetrisFace() {
   // After the step, because a piece may have landed and the next one armed.
   tetrisSpinDrawn = 0;
   for (uint8_t i = 0; i < 4; i++) { tetrisSpinDrawn += tetrisPendingTurns(i); }
+}
+
+/* ----------------------------------------------------------------------
+   Detecting the knock
+
+   Not the absolute reading: a baseline that follows the sensor slowly holds
+   gravity, and the trigger looks at how far the current sample is from it. So
+   tilting or carrying the clock does not count, while a knock stands out. All
+   integer, and the magnitudes are compared squared so there is no square root.
+   ------------------------------------------------------------------------- */
+// Measured on the device rather than guessed. Over two quiet stretches totalling
+// about 70 s the largest deviation in any one second was 780 counts - that is
+// the sensor's own noise at 100 Hz. Every deliberate interaction came out at
+// 1900 or more, knocks at 5900, a firm knock or picking the clock up at 12700.
+// So the most sensitive setting sits at roughly twice the noise, and the least
+// sensitive just above a knock on the table.
+const uint8_t  SHAKE_POLL_MS     = 20;    // 50 Hz, the sensor itself runs at 100 Hz
+const uint8_t  SHAKE_HITS_NEEDED = 1;     // one sample is enough: even the most
+                                          // sensitive threshold is 2x the noise,
+                                          // and a light tap can be that short
+const uint16_t SHAKE_THRESH_MIN  = 1500;  // level 10, about 0.09 g
+const uint16_t SHAKE_THRESH_STEP = 500;   // level 1 -> 6000, about 0.38 g
+const int32_t  SHAKE_DEV_MAX     = 20000; // clamp before squaring, see updateShake()
+
+int16_t       shakeBaseX = 0, shakeBaseY = 0, shakeBaseZ = 0;
+bool          shakeBaseInit = false;
+unsigned long shakePollLast = 0;
+uint8_t       shakeHits = 0;
+#if defined(SHAKE_CALIBRATION)
+int32_t       shakePeak = 0;            // largest deviation seen this second
+unsigned long shakePeakLast = 0;
+#endif
+
+// Deviation a knock has to exceed, from the 0..10 sensitivity.
+//
+// One g is 16000 counts, not 4000: Adafruit_LIS3DH::begin() writes CTRL4 = 0x88,
+// which selects high-resolution (12 bit) mode, and setRange() only rewrites the
+// two range bits, so that survives. read() therefore divides by
+// LIS3DH_LSB16_TO_KILO_LSB12 = 16000. The numbers below come from measuring on
+// the device anyway, so they stand on their own - this note is here so nobody
+// re-derives them from the wrong scale.
+uint16_t shakeThreshold() {
+  uint8_t level = tetrisSettings.shakeLevel;
+  if (level == 0) { return 0; }
+  if (level > SHAKE_LEVEL_MAX) { level = SHAKE_LEVEL_MAX; }
+  return (uint16_t)(SHAKE_THRESH_MIN + (SHAKE_LEVEL_MAX - level) * SHAKE_THRESH_STEP);
+}
+
+void updateShake() {
+  if (!accelOK) { return; }
+  if (millisNow - shakePollLast < SHAKE_POLL_MS) { return; }
+  shakePollLast = millisNow;
+
+  // Everything that rules a knock out is checked BEFORE the sensor is read:
+  // Adafruit_LIS3DH::read() is four I2C transactions (it re-reads the range and
+  // the performance mode every time, to build float g values this does not
+  // use), which is about 1.7 ms at 100 kHz - too much to spend 50 times a
+  // second on a watchface that cannot react to it anyway.
+  bool armed = true;
+  if (shakeThreshold() == 0)              { armed = false; }  // switched off
+  else if (tetrisPanelStale)              { armed = false; }  // boot screen, banner,
+                                                              // AP info or the classic face
+  else if (apActive || shakeAnyBusy())    { armed = false; }
+  else if (btnPrev)                       { armed = false; }  // a button press IS a knock:
+                                                              // the switch sits 20 mm from the sensor
+  else if (orientCandidate != curRotation){ armed = false; }  // a rotation is being debounced
+  else if (millisNow < shakeBlockUntil)   { armed = false; }  // booting, just turned, cooling down
+  if (!armed) {
+    shakeBaseInit = false;   // re-seed the resting position when it matters again
+    shakeHits = 0;
+    return;
+  }
+
+  lis.read();
+  int16_t x = lis.x, y = lis.y, z = lis.z;
+  if (!shakeBaseInit) {
+    shakeBaseX = x; shakeBaseY = y; shakeBaseZ = z;
+    shakeBaseInit = true;
+    return;
+  }
+  int32_t dx = x - shakeBaseX, dy = y - shakeBaseY, dz = z - shakeBaseZ;
+  // Clamped before squaring. The reading saturates near 32000 counts and the
+  // baseline holds up to 16000, so an untamed difference reaches 48000 - and
+  // 48000 squared, times three, does not fit in an int32. It would wrap
+  // negative and the comparison below would silently fail, which means the
+  // HARDER the clock was hit the less likely it would react. 20000 counts is
+  // 1.25 g, far above every threshold, so the clamp costs nothing.
+  if (dx >  SHAKE_DEV_MAX) { dx =  SHAKE_DEV_MAX; } else if (dx < -SHAKE_DEV_MAX) { dx = -SHAKE_DEV_MAX; }
+  if (dy >  SHAKE_DEV_MAX) { dy =  SHAKE_DEV_MAX; } else if (dy < -SHAKE_DEV_MAX) { dy = -SHAKE_DEV_MAX; }
+  if (dz >  SHAKE_DEV_MAX) { dz =  SHAKE_DEV_MAX; } else if (dz < -SHAKE_DEV_MAX) { dz = -SHAKE_DEV_MAX; }
+  int32_t dev2 = dx * dx + dy * dy + dz * dz;   // at most 1.2e9, fits
+  // The baseline follows the sensor slowly, so a tilt is tracked out and a
+  // knock is not.
+  shakeBaseX += (int16_t)(dx / 16);   // about 320 ms to catch up at 20 ms a sample
+  shakeBaseY += (int16_t)(dy / 16);
+  shakeBaseZ += (int16_t)(dz / 16);
+
+#if defined(SHAKE_CALIBRATION)
+  if (dev2 > shakePeak) { shakePeak = dev2; }
+  if (millisNow - shakePeakLast >= 1000) {
+    shakePeakLast = millisNow;
+    Serial.print("shake peak "); Serial.print((int32_t)sqrtf((float)shakePeak));
+    Serial.print(" counts, threshold now "); Serial.println(shakeThreshold());
+    shakePeak = 0;
+  }
+#endif
+
+  uint16_t thresh = shakeThreshold();
+  if (dev2 > (int32_t)thresh * (int32_t)thresh) {
+    if (++shakeHits >= SHAKE_HITS_NEEDED) { shakeHits = 0; shakeStartAll(); }
+  } else {
+    shakeHits = 0;
+  }
 }
 #endif  // WATCHFACE_TETRIS
 
@@ -1706,9 +2086,22 @@ void loadTetrisSettings() {
     tetrisSettings = TETRIS_DEFAULTS;
     saveTetrisSettings();
     Serial.println("Tetris settings: defaults written to flash");
+  } else if (tetrisSettings.rev < TETRIS_SETTINGS_REV) {
+    // Migration ladder, same idea as the main settings. A rev 1 blob only had
+    // dropMs and spinMs; the read left the rest zeroed, so give the fields added
+    // since an explicit value and keep what the user had set.
+    if (tetrisSettings.rev < 2) {
+      tetrisSettings.shakeLevel = TETRIS_DEFAULTS.shakeLevel;
+      tetrisSettings.shakeStyle = TETRIS_DEFAULTS.shakeStyle;
+    }
+    if (tetrisSettings.rev < 3) { tetrisSettings.shakeOnChange = TETRIS_DEFAULTS.shakeOnChange; }
+    saveTetrisSettings();
+    Serial.print("Tetris settings: migrated to rev "); Serial.println(TETRIS_SETTINGS_REV);
   }
   tetrisSettings.dropMs = constrain(tetrisSettings.dropMs, TETRIS_DROP_MIN, TETRIS_DROP_MAX);
   tetrisSettings.spinMs = constrain(tetrisSettings.spinMs, TETRIS_SPIN_MIN, TETRIS_SPIN_MAX);
+  if (tetrisSettings.shakeLevel > SHAKE_LEVEL_MAX) { tetrisSettings.shakeLevel = SHAKE_LEVEL_MAX; }
+  if (tetrisSettings.shakeStyle >= SHAKE_STYLE_COUNT) { tetrisSettings.shakeStyle = SHAKE_STYLE_RANDOM; }
 }
 
 void saveTetrisSettings() {
@@ -2284,6 +2677,9 @@ void applyParams(const String &q) {
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
   v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
   v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
+  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); }
+  v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
+  tetrisSettings.shakeOnChange = (getParam(q, "shchg") == "on") ? 1 : 0;   // checkbox: absent when unticked
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.animSpeed  = constrain(v.toInt(), 4, 60); }
@@ -2310,6 +2706,9 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
   v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
   v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
+  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); }
+  v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
+  tetrisSettings.shakeOnChange = (getParam(q, "shchg") == "on") ? 1 : 0;   // checkbox: absent when unticked
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "autob");  if (v.length()) { settings.autoBright = (v == "on") ? 1 : 0; } // updateBrightness() re-seeds the fade
@@ -2391,6 +2790,27 @@ void sendFormPage(Print &c) {
   c.print(" step=10 name=tspin value="); c.print(tetrisSettings.spinMs);
   c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\" onchange=\"this.nextElementSibling.value=this.value;liveNow()\">");
   c.print("<output>"); c.print(tetrisSettings.spinMs); c.println("</output>");
+
+  // Knock the clock and the digits come apart. 0 switches it off.
+  c.print("<label>Shake sensitivity (0 = off, 10 = reacts to a light tap)</label>");
+  c.print("<input type=range min=0 max="); c.print(SHAKE_LEVEL_MAX);
+  c.print(" name=shk value="); c.print(tetrisSettings.shakeLevel);
+  c.println(" oninput=\"this.nextElementSibling.value=this.value==0?'off':this.value;live()\" onchange=\"this.nextElementSibling.value=this.value==0?'off':this.value;liveNow()\">");
+  c.print("<output>");
+  if (tetrisSettings.shakeLevel == 0) { c.print("off"); } else { c.print(tetrisSettings.shakeLevel); }
+  c.println("</output>");
+
+  c.println("<label>Shake effect</label><select name=shs onchange=\"liveNow()\">");
+  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_RANDOM,   "Random each time");
+  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_COLLAPSE, "Collapse (the stack gives way)");
+  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_SCATTER,  "Scatter (pieces fly off)");
+  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_CLEAR,    "Clear rows (bottom up)");
+  c.println("</select>");
+
+  // The same effect, used where a digit would otherwise just be swapped out.
+  c.print("<label><input type=checkbox name=shchg");
+  if (tetrisSettings.shakeOnChange) { c.print(" checked"); }
+  c.println(" onchange=\"liveNow()\"> Also use it when the time changes</label>");
 #endif
 
   // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
@@ -2458,7 +2878,8 @@ void sendFormPage(Print &c) {
   c.println("function _send(){var g=function(n){return document.getElementsByName(n)[0].value;};");
   c.println("var ab=document.getElementsByName('autob')[0].checked?'on':'off';");
 #if WATCHFACE_TETRIS
-  c.println("var wf='&wf='+g('wf')+'&tdrop='+g('tdrop')+'&tspin='+g('tspin');");
+  c.println("var sc=document.getElementsByName('shchg')[0].checked?'on':'off';");
+  c.println("var wf='&wf='+g('wf')+'&tdrop='+g('tdrop')+'&tspin='+g('tspin')+'&shk='+g('shk')+'&shs='+g('shs')+'&shchg='+sc;");
 #else
   c.println("var wf='';");   // no watchface selector in this build
 #endif
