@@ -1118,6 +1118,10 @@ struct TetrisDigit {
   uint8_t fall;       // cells that piece still has to drop
   uint8_t turns;      // quarter turns this piece still owes
   unsigned long turnAt[3];  // millis() at which each of them happens
+  int8_t  shiftDx;    // cells the piece still starts to the side of its column
+  uint8_t shiftAt;    // rows it falls before it starts walking across
+  uint8_t shiftEvery; // rows between one column change and the next
+  uint8_t fall0;      // the fall it started with, to work out how far it has come
   uint8_t hue[TETRIS_COLOUR_CLASSES];  // colour class -> palette entry
 };
 
@@ -1177,6 +1181,7 @@ uint8_t       shakeGrid[4][TETRIS_GRID_W * TETRIS_GRID_H];
 uint8_t       shakeClearsLeft[4] = {0, 0, 0, 0}; // rows still to take away
 uint8_t       shakeClearTick[4]  = {0, 0, 0, 0}; // steps spent on the row going
 unsigned long shakeStepLast = 0;      // one clock for all of them, they step together
+bool          shakePreviewReq = false;  // the config page asked to show a setting off
 unsigned long shakeHoldUntil[4] = {0, 0, 0, 0};  // empty space before the rebuild starts
 int           tetrisXHour = 0, tetrisXMin = 0;  // left edge of each digit group
 int           tetrisYHour = 0, tetrisYMin = 0;  // top edge of each digit group
@@ -1203,6 +1208,7 @@ void tetrisArmPiece(uint8_t idx) {
   uint8_t  oFinal  = TETRIS_PIECE_ORIENT(rec);
   uint8_t  hFinal  = TETRIS_SIZE[oFinal] & 0x0F;
   uint8_t  landing = TETRIS_PIECE_TOP(rec);
+  uint8_t  targetX = TETRIS_PIECE_X(rec);
   // The fall is led by the piece's bottom edge, so that is what the start
   // height is measured on: it begins tetrisDrop* cells above the digit box and
   // travels down to where it lands. Anchoring the TOP instead, as an earlier
@@ -1210,36 +1216,101 @@ void tetrisArmPiece(uint8_t idx) {
   // appeared, because a quarter turn swaps the bounding box and the top edge is
   // then up to three cells away from where the fall actually starts.
   uint8_t  drop    = (idx < 2) ? (uint8_t)tetrisDropHour : (uint8_t)tetrisDropMin;
-  uint8_t  nominal = landing + hFinal - 1 + drop;
+  s.fall  = landing + hFinal - 1 + drop;
+  s.fall0 = s.fall;
 
-  // How many quarter turns it can make, from the time it has in the air at the
-  // nominal drop height. Not every piece turns, and one that does rarely uses
-  // every turn it could have, so some come down flat while others tumble.
-  uint8_t turns = 0;
-  if (nominal > TETRIS_SETTLE && tetrisSettings.spinMs > 0) {
-    unsigned long budget = (unsigned long)(nominal - TETRIS_SETTLE) * tetrisSettings.dropMs;
-    uint8_t fits = 0;
-    while (fits < 3 && (unsigned long)(fits + 1) * tetrisSettings.spinMs <= budget) { fits++; }
-    turns = (fits == 0) ? 0 : (uint8_t)random(fits + 1);
+  // How much room there is to manoeuvre: the rows it can fall while it is still
+  // clear of everything already lying in the digit. The game's rule is that a
+  // piece may not pass through the stack, and both the turning and the walk
+  // sideways are kept inside this window for exactly that reason. A high stack
+  // therefore leaves little room for either - as it does in the game.
+  int topRow = TETRIS_GRID_H;
+  for (uint8_t q = 0; q < s.piece; q++) {
+    uint16_t o = tetrisPieceAt(s.value, s.variant, q);
+    if ((int)TETRIS_PIECE_TOP(o) < topRow) { topRow = TETRIS_PIECE_TOP(o); }
   }
-  // The fall is simply the distance the bottom edge has to travel, so it does
-  // not depend on the orientation at all. Turns that would not fit in the time
-  // that takes are dropped.
-  s.fall = nominal;
-  unsigned long band = 0;
-  while (turns > 0) {
-    if (s.fall > TETRIS_SETTLE) {
-      band = ((unsigned long)(s.fall - TETRIS_SETTLE) * tetrisSettings.dropMs) / turns;
-      if (band > 0) { break; }
+  // After `clear` steps the piece's bottom edge is level with the top of the
+  // stack, so only the steps before that are genuinely free.
+  int bottom0 = (int)landing + (int)hFinal - 1 - (int)s.fall;
+  int clear   = topRow - bottom0;
+  if (clear < 0) { clear = 0; }
+  if (clear > (int)s.fall) { clear = (int)s.fall; }
+
+  // Quarter turns, all of which have to be over before it reaches the stack.
+  // Not every piece turns, and one that does rarely uses every turn it could
+  // have, so some come down flat while others tumble.
+  uint8_t turns = 0;
+  // Every turn has to be over by the last genuinely free step, so that from
+  // there on the piece is in the orientation it will land in.
+  int turnSteps = clear - 1;
+  if (turnSteps > (int)s.fall - TETRIS_SETTLE) { turnSteps = (int)s.fall - TETRIS_SETTLE; }
+  unsigned long band  = tetrisSettings.spinMs;
+  unsigned long start = 0;
+  if (turnSteps > 0 && band > 0) {
+    unsigned long budget = (unsigned long)turnSteps * tetrisSettings.dropMs;
+    uint8_t fits = 0;
+    while (fits < 3 && (unsigned long)(fits + 1) * band <= budget) { fits++; }
+    turns = (fits == 0) ? 0 : (uint8_t)random(fits + 1);
+    if (turns > 0) {
+      // The turns themselves take turns*spinMs; whatever room is left over is
+      // where they may begin. A piece with a long way to fall can therefore
+      // still be turning well down the panel instead of sorting itself out at
+      // the top, which is what a player does too.
+      unsigned long slack = budget - (unsigned long)turns * band;
+      start = (unsigned long)random(slack + 1);
     }
-    turns--;
   }
   s.turns = turns;
-
-  // One turn per band, at a random point inside it: they always fit, and the
-  // gaps between them come out noticeably uneven rather than metronomic.
+  // One turn per band, at a random point inside it: the gaps come out uneven
+  // rather than metronomic, and they always finish inside the free window.
   for (uint8_t i = 0; i < turns; i++) {
-    s.turnAt[i] = millisNow + (unsigned long)i * band + 1 + (unsigned long)random(band);
+    s.turnAt[i] = millisNow + start + (unsigned long)i * band + 1 + (unsigned long)random(band);
+  }
+
+  // Where it comes in, and how far it has to walk.
+  //
+  // The game spawns a piece centred over the field, rounded to the left, and the
+  // player walks it across. Same here, and the whole walk is over before the
+  // piece reaches the stack, because from there on only its own column is clear.
+  //
+  // The game would also allow one more move as the piece touches down - that is
+  // what the lock delay is for. It is deliberately not used here: a piece can
+  // only be walked into place at the end if it could descend in the wrong column
+  // first, and with tilings where every piece is reached by a straight drop that
+  // column is usually blocked. Tried it, and the replay caught pieces sinking
+  // straight through the stack while they held their last move back. The move is
+  // worth one extra cell of reach in about one case in 250, and costs a piece
+  // passing through the stack in far more.
+  //
+  // When there is less room than distance, the piece comes in closer to its
+  // column instead - which is what happens in the game as well: a high stack
+  // leaves no time to walk a piece across.
+  uint8_t oSpawn = oFinal;
+  for (uint8_t i = 0; i < turns; i++) { oSpawn = TETRIS_TURN[oSpawn]; }
+  int spawnX   = (TETRIS_GRID_W - (TETRIS_SIZE[oSpawn] >> 4)) / 2;   // rounded left
+  int maxShift = clear - 1;      // every move on a step that is still free
+  if (maxShift < 0) { maxShift = 0; }
+  if (maxShift > (int)s.fall) { maxShift = (int)s.fall; }
+  int dx = spawnX - (int)targetX;
+  if (dx >  maxShift) { dx =  maxShift; }
+  if (dx < -maxShift) { dx = -maxShift; }
+  s.shiftDx = (int8_t)dx;
+  // When it sets off, and how briskly it walks, are drawn separately and
+  // separately from the turning - so one piece darts across the moment it
+  // appears while another drifts over a column at a time well down the panel.
+  // Both still finish inside the free window.
+  int span = (dx < 0) ? -dx : dx;
+  s.shiftEvery = 1;
+  s.shiftAt    = 0;
+  if (span > 0) {
+    int strideMax = (span > 1) ? (maxShift - 1) / (span - 1) : maxShift;
+    if (strideMax > 3) { strideMax = 3; }        // slower than this reads as drifting
+    if (strideMax < 1) { strideMax = 1; }
+    s.shiftEvery = (uint8_t)(1 + random(strideMax));
+    int needed = 1 + (span - 1) * (int)s.shiftEvery;
+    int slack  = maxShift - needed;
+    if (slack < 0) { slack = 0; }
+    s.shiftAt = (uint8_t)random(slack + 1);
   }
 }
 
@@ -1382,7 +1453,18 @@ void tetrisDrawDigit(uint8_t idx, int originX, int originY) {
     uint16_t rec    = tetrisPieceAt(s.value, s.variant, p);
     uint8_t  orient = TETRIS_PIECE_ORIENT(rec);
     int      lift   = (p == s.piece) ? s.fall : 0;   // only the current one is airborne
+    // One cell closer to its column for every row it has fallen; the last of
+    // those moves may be the one it makes as it lands.
     int      cx     = TETRIS_PIECE_X(rec);
+    if (lift > 0 && s.shiftDx != 0 && p == s.piece) {
+      int total = (s.shiftDx < 0) ? -s.shiftDx : s.shiftDx;
+      // Column changes happen every shiftEvery rows, starting shiftAt rows down.
+      int rows = (int)s.fall0 - lift - (int)s.shiftAt - 1;
+      int done = (rows < 0) ? 0 : (rows / (int)s.shiftEvery) + 1;
+      if (done > total) { done = total; }
+      int left = total - done;
+      if (left > 0) { cx += (s.shiftDx < 0) ? -left : left; }
+    }
     int      bottom = (int)TETRIS_PIECE_TOP(rec) + (TETRIS_SIZE[orient] & 0x0F) - 1 - lift;
 
     if (lift > 0) {
@@ -1583,6 +1665,16 @@ void drawTetrisFace() {
   if (curRotation != tetrisRotation) {
     for (uint8_t i = 0; i < 4; i++) { shakeBusy[i] = false; }
     tetrisLayout();
+  }
+
+  // The config page asks for a run when a setting has been changed there. A
+  // knock cannot be used for that - the sensor is deliberately ignored while the
+  // AP is up - and without it a changed setting would simply sit there unseen.
+  // Held back until the last run has finished, so each one can be watched to the
+  // end rather than being cut off by the next slider release.
+  if (shakePreviewReq && !shakeAnyBusy()) {
+    shakePreviewReq = false;
+    shakeStartAll();
   }
 
   // A digit that has finished coming apart is marked unknown, so the next
@@ -2643,6 +2735,16 @@ void handleAP() {
   } else if (path.startsWith("/live")) {
     applyLiveParams(query); // live preview: apply to RAM only, no save, no reboot
     sendNoContent(out);
+  } else if (path.startsWith("/discard")) {
+    // Undo the live preview: read the settings back out of flash, so everything
+    // tried out here is thrown away. Without this the only way back from a live
+    // change was a restart, since the preview never touches flash but does stay
+    // in RAM.
+    loadSettings();
+    sendNoContent(out);
+#if WATCHFACE_TETRIS
+    shakePreviewReq = true;   // show what was restored
+#endif
   } else if (path == "/b") {
     sendBrightness(out); // tiny plain-text poll of the currently rendered brightness
   } else if (path == "/" || path.startsWith("/index")) {
@@ -2768,6 +2870,14 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "speed");  if (v.length()) { settings.animSpeed = constrain(v.toInt(), 4, 60); loopTime = settings.animSpeed; }
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
   v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
+#if WATCHFACE_TETRIS
+  // The page says outright when a control that changes the Tetris face has been
+  // used, and that is what asks for a run. Comparing the values instead, as this
+  // did at first, was unreliable: the updates sent while a slider was being
+  // dragged had already pushed the final value across, so the release looked
+  // like no change at all and nothing was shown.
+  if (getParam(q, "pv").length()) { shakePreviewReq = true; }
+#endif
 }
 
 void sendHttpHeader(Print &c) {
@@ -2819,7 +2929,7 @@ void sendFormPage(Print &c) {
 
 #if WATCHFACE_TETRIS
   // Watchface (live, so the choice can be judged on the panel before saving).
-  c.println("<label>Watchface</label><select name=wf onchange=\"liveNow()\">");
+  c.println("<label>Watchface</label><select name=wf onchange=\"liveNow(1)\">");
   printOption(c, settings.watchface, WATCHFACE_CLASSIC,   "Classic (flying digits, HH MM SS)");
   printOption(c, settings.watchface, WATCHFACE_TETRIS_ID, "Tetris (falling blocks, HH:MM)");
   c.println("</select>");
@@ -2830,26 +2940,26 @@ void sendFormPage(Print &c) {
   c.print("<input type=range min="); c.print(TETRIS_DROP_MIN);
   c.print(" max="); c.print(TETRIS_DROP_MAX);
   c.print(" name=tdrop value="); c.print(tetrisSettings.dropMs);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\" onchange=\"this.nextElementSibling.value=this.value;liveNow()\">");
+  c.println(" oninput=\"this.nextElementSibling.value=this.value\" onchange=\"this.nextElementSibling.value=this.value;liveNow(1)\">");
   c.print("<output>"); c.print(tetrisSettings.dropMs); c.println("</output>");
 
   c.print("<label>Tetris turn (ms between quarter turns; higher = calmer)</label>");
   c.print("<input type=range min="); c.print(TETRIS_SPIN_MIN);
   c.print(" max="); c.print(TETRIS_SPIN_MAX);
   c.print(" step=10 name=tspin value="); c.print(tetrisSettings.spinMs);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\" onchange=\"this.nextElementSibling.value=this.value;liveNow()\">");
+  c.println(" oninput=\"this.nextElementSibling.value=this.value\" onchange=\"this.nextElementSibling.value=this.value;liveNow(1)\">");
   c.print("<output>"); c.print(tetrisSettings.spinMs); c.println("</output>");
 
   // Knock the clock and the digits come apart. 0 switches it off.
   c.print("<label>Shake sensitivity (0 = off, 10 = reacts to a light tap)</label>");
   c.print("<input type=range min=0 max="); c.print(SHAKE_LEVEL_MAX);
   c.print(" name=shk value="); c.print(tetrisSettings.shakeLevel);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value==0?'off':this.value;live()\" onchange=\"this.nextElementSibling.value=this.value==0?'off':this.value;liveNow()\">");
+  c.println(" oninput=\"this.nextElementSibling.value=this.value==0?'off':this.value\" onchange=\"this.nextElementSibling.value=this.value==0?'off':this.value;liveNow(1)\">");
   c.print("<output>");
   if (tetrisSettings.shakeLevel == 0) { c.print("off"); } else { c.print(tetrisSettings.shakeLevel); }
   c.println("</output>");
 
-  c.println("<label>Shake effect</label><select name=shs onchange=\"liveNow()\">");
+  c.println("<label>Shake effect</label><select name=shs onchange=\"liveNow(1)\">");
   printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_RANDOM,   "Random each time");
   printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_COLLAPSE, "Collapse (the stack gives way)");
   printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_SCATTER,  "Scatter (pieces fly off)");
@@ -2859,7 +2969,7 @@ void sendFormPage(Print &c) {
   // The same effect, used where a digit would otherwise just be swapped out.
   c.print("<label><input type=checkbox name=shchg");
   if (tetrisSettings.shakeOnChange) { c.print(" checked"); }
-  c.println(" onchange=\"liveNow()\"> Also use it when the time changes</label>");
+  c.println(" onchange=\"liveNow(1)\"> Also use it when the time changes</label>");
 #endif
 
   // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
@@ -2867,7 +2977,7 @@ void sendFormPage(Print &c) {
   c.print("<label>Brightness (0-255; auto mode: 128 = neutral)</label>");
   c.print("<input type=range min=0 max=255 name=bright value="); c.print(settings.brightness);
   // oninput throttles to <=1 update/s while dragging; onchange (release) always sends the final value.
-  c.println(" oninput=\"this.nextElementSibling.value=this.value;live()\" onchange=\"this.nextElementSibling.value=this.value;liveNow()\">");
+  c.println(" oninput=\"this.nextElementSibling.value=this.value\" onchange=\"this.nextElementSibling.value=this.value;liveNow(0)\">");
   c.print("<output>"); c.print(settings.brightness); c.println("</output>");
   // Live readout: brightness actually being rendered + the raw sensor lux; polled 1x/s.
   c.print("<div style=\"color:#8c8;font-size:13px\">Current brightness: <span id=cb>"); c.print(effectiveBrightness);
@@ -2877,21 +2987,21 @@ void sendFormPage(Print &c) {
 
   // Auto-brightness (BH1750 light sensor). Maps lux -> brightness; when on, the
   // sensor overrides the manual brightness above once per second.
-  c.print("<label><input type=checkbox name=autob onchange=liveNow() ");
+  c.print("<label><input type=checkbox name=autob onchange=liveNow(0) ");
   if (settings.autoBright) { c.print("checked"); }
   c.println("> Auto brightness (light sensor)</label>");
   c.println("<div class=row>");
-  c.print("<div><label>Dark lux</label><input type=number min=0 max=65535 name=luxd onchange=liveNow() value="); c.print(settings.luxDark); c.println("></div>");
-  c.print("<div><label>Bright lux</label><input type=number min=1 max=65535 name=luxb onchange=liveNow() value="); c.print(settings.luxBright); c.println("></div>");
+  c.print("<div><label>Dark lux</label><input type=number min=0 max=65535 name=luxd onchange=liveNow(0) value="); c.print(settings.luxDark); c.println("></div>");
+  c.print("<div><label>Bright lux</label><input type=number min=1 max=65535 name=luxb onchange=liveNow(0) value="); c.print(settings.luxBright); c.println("></div>");
   c.println("</div><div class=row>");
-  c.print("<div><label>Min brightness</label><input type=number min=0 max=255 name=brmin onchange=liveNow() value="); c.print(settings.brightMin); c.println("></div>");
-  c.print("<div><label>Max brightness</label><input type=number min=0 max=255 name=brmax onchange=liveNow() value="); c.print(settings.brightMax); c.println("></div>");
+  c.print("<div><label>Min brightness</label><input type=number min=0 max=255 name=brmin onchange=liveNow(0) value="); c.print(settings.brightMin); c.println("></div>");
+  c.print("<div><label>Max brightness</label><input type=number min=0 max=255 name=brmax onchange=liveNow(0) value="); c.print(settings.brightMax); c.println("></div>");
   c.println("</div>");
 
   // Animation speed (live)
   c.print("<label>Animation speed (ms per pixel, small=fast)</label>");
   c.print("<input type=number min=4 max=60 name=speed value="); c.print(settings.animSpeed);
-  c.println(" oninput=live() onchange=liveNow()>");
+  c.println(" onchange=liveNow(0)>");
 
   // Colors (live) - palette swatches instead of a free color picker (5-bit panel)
   c.print("<label>Digit color</label><div class=swbox id=swDigit></div><input type=hidden name=digit value=");
@@ -2919,12 +3029,15 @@ void sendFormPage(Print &c) {
 
   c.println("<button type=submit>Save &amp; Restart</button>");
   c.println("</form>");
+  // Everything above previews live but is only in RAM until it is saved. This
+  // puts the stored values back, so trying something out costs nothing.
+  c.println("<button type=button onclick=\"fetch('/discard').then(function(){location.reload();});\">Discard changes</button>");
 
   // Live preview: throttle the flood of slider events, but always send a trailing
   // update so the final value lands. Colors are URL-encoded (# -> %23).
   c.println("<script>");
-  c.println("var _t=0,_p=null;");
-  c.println("function _send(){var g=function(n){return document.getElementsByName(n)[0].value;};");
+
+  c.println("function _send(p){var g=function(n){return document.getElementsByName(n)[0].value;};");
   c.println("var ab=document.getElementsByName('autob')[0].checked?'on':'off';");
 #if WATCHFACE_TETRIS
   c.println("var sc=document.getElementsByName('shchg')[0].checked?'on':'off';");
@@ -2932,12 +3045,16 @@ void sendFormPage(Print &c) {
 #else
   c.println("var wf='';");   // no watchface selector in this build
 #endif
-  c.println("fetch('/live?bright='+g('bright')+'&autob='+ab+'&luxd='+g('luxd')+'&luxb='+g('luxb')+'&brmin='+g('brmin')+'&brmax='+g('brmax')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))+wf).catch(function(){});}");
-  // Throttle the live stream to <=1 request/s while a slider is dragged (leading +
-  // a single trailing send at the 1 s boundary). liveNow() bypasses it on release /
-  // discrete changes so the final value always lands at once.
-  c.println("function live(){var n=Date.now();if(n-_t>=1000){_t=n;if(_p){clearTimeout(_p);_p=null;}_send();}else if(!_p){_p=setTimeout(function(){_t=Date.now();_p=null;_send();},1000-(n-_t));}}");
-  c.println("function liveNow(){if(_p){clearTimeout(_p);_p=null;}_t=Date.now();_send();}");
+  c.println("fetch('/live?bright='+g('bright')+'&autob='+ab+'&luxd='+g('luxd')+'&luxb='+g('luxb')+'&brmin='+g('brmin')+'&brmax='+g('brmax')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))+wf+(p?'&pv=1':'')).catch(function(){});}");
+  // Nothing is sent while a slider is being dragged - only the readout beside it
+  // follows. A value is taken over when the slider is let go of or a point on it
+  // is tapped, which is what onchange means for a range input. Sending during the
+  // drag used to push the final value across before the release did, so the
+  // release then looked like "nothing changed" and no run was shown.
+  //
+  // The argument says whether the control is one that changes how the Tetris face
+  // behaves; those ask for a run, everything else does not.
+  c.println("function liveNow(p){_send(p);}");
   // Live brightness readout: poll the rendered brightness once a second, with a
   // single in-flight request so the slow WiFiNINA server is never stacked up.
   c.println("var _bf=false;");
@@ -2948,7 +3065,7 @@ void sendFormPage(Print &c) {
   c.println("var PAL=['#ffffff','#ff0000','#ff8000','#ffff00','#80ff00','#00ff00','#00ff80','#00ffff','#00c0ff','#0000ff','#8000ff','#ff00ff','#ff0080','#ff80c0'];");
   c.println("function mkSw(boxId,name){var box=document.getElementById(boxId),cur=document.getElementsByName(name)[0].value.toLowerCase();");
   c.println("PAL.forEach(function(col){var s=document.createElement('span');s.className='sw'+(col===cur?' sel':'');s.style.background=col;");
-  c.println("s.onclick=function(){document.getElementsByName(name)[0].value=col;box.querySelectorAll('.sw').forEach(function(e){e.className='sw';});s.className='sw sel';liveNow();};");
+  c.println("s.onclick=function(){document.getElementsByName(name)[0].value=col;box.querySelectorAll('.sw').forEach(function(e){e.className='sw';});s.className='sw sel';liveNow(0);};");
   c.println("box.appendChild(s);});}");
   c.println("mkSw('swDigit','digit');mkSw('swTrail','trail');");
   c.println("</script>");
