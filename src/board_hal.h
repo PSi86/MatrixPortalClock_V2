@@ -93,6 +93,11 @@
   // only been tested on the S3, so it stays switched off elsewhere until the M4
   // gets a hardware test.
   #define WATCHFACE_TETRIS 1
+  // The accelerometer's INT1 line. Not in Adafruit's pinout page - taken from
+  // the board schematic (Adafruit-MatrixPortal-S3-PCB, "Adafruit MatrixPortal
+  // S3.sch"), where the net list has U4 (the LIS3DH) pin INT1 on the net INT
+  // together with U3.IO15, U3 being the ESP32-S3. INT2 is on no net at all.
+  #define ACCEL_INT_PIN 15
 #else
   // The M4 keeps its fixed millisecond loop time.
   #define PANEL_PACED_LOOP 0
