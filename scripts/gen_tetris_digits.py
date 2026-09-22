@@ -44,6 +44,8 @@ GLYPHS = [
 GRID_W = 6
 GRID_H = 10
 VARIANTS = 32          # variants generated per digit
+SEARCH_BUDGET = 60000  # tilings tried per digit while hunting for clean ones
+MIN_VARIANTS = 16      # a digit offering fewer than this is a failure, not a trade
 MAX_COLOUR_CLASSES = 6  # the firmware palette has six well-separated hues
 SEED = 20260920
 
@@ -308,11 +310,16 @@ def generate(digit, rng):
     cells = glyph_cells(GLYPHS[digit])
     if len(cells) % 4:
         sys.exit(f"digit {digit}: {len(cells)} cells is not a multiple of 4")
-    # Collect a pool several times the size that is kept, so the ones with the
-    # fewest pieces leaning on a neighbour can be picked out of it.
+    # Keep searching until there are enough tilings in which EVERY piece lands on
+    # something, or the attempt budget runs out - then the best of what was found
+    # is used. Digits differ enormously here: a 0, a 1 or an 8 manages it every
+    # time, while only about one tiling in thirty of a 2 does, because its middle
+    # bar reaches out over empty space. The budget is counted in attempts, not
+    # seconds, so the result stays the same on any machine.
     variants = {}
     attempts = 0
-    while len(variants) < VARIANTS * 4 and attempts < VARIANTS * 1500:
+    clean = 0
+    while clean < VARIANTS and attempts < SEARCH_BUDGET:
         attempts += 1
         pieces = find_tiling(cells, rng)
         if pieces is None:
@@ -330,9 +337,18 @@ def generate(digit, rng):
         if cols is None:
             continue           # needs more classes than the palette has
         variants[key] = (pieces, cols, weak)
-    # Prefer the tidiest builds: fewest pieces that only lean on a neighbour.
-    best = sorted(variants.values(), key=lambda v: v[2])[:VARIANTS]
-    return [(p, c) for (p, c, _w) in best], [w for (_p, _c, w) in best]
+        if weak == 0:
+            clean += 1
+    # Keep ONLY the builds in which every piece lands on something. A digit that
+    # cannot offer VARIANTS of them ships fewer variants rather than being padded
+    # with builds where a piece hangs on its neighbour - the 2, the 5 and the 7
+    # are the ones this affects, and a couple of variants fewer is not visible
+    # while a piece resting on nothing is.
+    clean_only = [v for v in variants.values() if v[2] == 0][:VARIANTS]
+    if len(clean_only) < MIN_VARIANTS:
+        sys.exit(f"digit {digit}: only {len(clean_only)} fully supported tilings found, "
+                 f"need at least {MIN_VARIANTS}")
+    return [(p, c) for (p, c, _w) in clean_only], [w for (_p, _c, w) in clean_only]
 
 
 # --- checks ----------------------------------------------------------------
@@ -422,7 +438,7 @@ def emit(all_variants, path):
     w("")
     w(f"#define TETRIS_GRID_W {GRID_W}")
     w(f"#define TETRIS_GRID_H {GRID_H}")
-    w(f"#define TETRIS_VARIANTS {VARIANTS}")
+    w(f"#define TETRIS_VARIANTS {VARIANTS}   // the most any digit has")
     w(f"#define TETRIS_COLOUR_CLASSES {MAX_COLOUR_CLASSES}")
     w("")
     w("// The distinct tetromino orientations. Four cells each, relative to the")
@@ -464,9 +480,11 @@ def emit(all_variants, path):
     w("#define TETRIS_PIECE_CLASS(p)  (((p) >> 12) & 0x07)")
     w("")
     counts = []
+    vcounts = []
     for d, variants in enumerate(all_variants):
         n = len(variants[0][0])
         counts.append(n)
+        vcounts.append(len(variants))
         w(f"// digit {d}: {len(variants)} variants of {n} pieces")
         w(f"const uint16_t TETRIS_VAR_{d}[{len(variants) * n}] = {{")
         for pieces, cols in variants:
@@ -485,6 +503,12 @@ def emit(all_variants, path):
     w("// Pieces per variant, one entry per digit (glyph cells / 4).")
     w("const uint8_t TETRIS_PIECES_PER_DIGIT[10] = { "
       + ", ".join(str(c) for c in counts) + " };")
+    w("")
+    w("// Variants available per digit. Not the same for every digit: only builds")
+    w("// in which every piece lands on something are kept, and the 2, the 5 and")
+    w("// the 7 cannot offer as many of those as the rest.")
+    w("const uint8_t TETRIS_VARIANTS_PER_DIGIT[10] = { "
+      + ", ".join(str(v) for v in vcounts) + " };")
     w("")
     w("#endif  // TETRIS_DIGITS_H")
     with open(path, "w", encoding="utf-8", newline="\n") as f:
@@ -551,8 +575,7 @@ def main():
     forced, avoidable = [0], [0]
     for d in range(10):
         variants, weak = generate(d, rng)
-        if len(variants) < VARIANTS:
-            sys.exit(f"digit {d}: only {len(variants)} usable tilings found")
+
         check(d, variants, forced, avoidable)
         all_variants.append(variants)
         pieces = len(variants[0][0])
