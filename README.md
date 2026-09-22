@@ -153,6 +153,10 @@ change them in the web UI (at the full frame rate on the S3, 5 fps on the M4 - e
 WiFiNINA socket write is an SPI round trip there). The timezone is chosen from a dropdown. "Save &
 Restart" stores everything to flash and reboots.
 
+Everything on the page previews live but is only written to flash by "Save &
+Restart". **Discard changes** puts the stored settings back, so trying something
+out costs nothing.
+
 The color palette offers **full colors only** for both the digit and the fly-in
 color. The fly-in (trail) is automatically dimmed relative to the master
 brightness — floored so it never quantises to black — so the fly-in animation
@@ -287,10 +291,32 @@ ships fewer of them. The `2` has 22, the `5` 23 and the `7` 25, because their
 middle bars reach out over empty space and most of their tilings therefore need a
 piece that only leans. Every other digit has the full 32.
 
-**Pieces turn as they fall**, as separate flicks rather than a steady spin: each
-piece draws its own turn times, spaced between half and one and a half times the
-configured interval, and some pieces do not turn at all. Nothing turns over the
-last two rows, so a piece always arrives in the orientation it keeps.
+**Pieces are walked into place.** A piece appears centred over its digit, rounded
+to the left as the Tetris guideline has it, and walks across to the column it
+lands in - and it turns on the way, as separate flicks rather than a steady spin,
+with some pieces not turning at all.
+
+Both obey the game's rule that a piece may not pass through the stack: the walk
+and the turning are confined to the rows the piece can fall while still clear of
+everything already lying there, because below that only its own column is free.
+A high stack therefore leaves little room for either, and a piece that cannot be
+walked all the way comes in closer to its column instead — which is what the game
+does to you as well. When each of these happens is drawn separately: when the
+turning starts, when the walk starts, and how briskly it walks. So a piece with a
+long way to fall can still be sorting itself out well down the panel, and the
+last column change happens four or more rows down for 73% of them.
+
+The guideline's other move — shifting a piece sideways as it touches down, which
+is what the lock delay is for — is deliberately not used. It only works if the
+piece could come down in the wrong column first, and with tilings where
+everything is reached by a straight drop, that column is usually blocked: a
+replay of every frame showed such pieces sinking through the stack. It was worth
+one extra cell of reach in about one case in 250.
+
+All of this is checked by replaying 7.6 million drawn frames — both layouts,
+several speed settings, every turn count, every walking pace, every start row and
+every intermediate orientation. Nothing passes through the stack or the walls,
+and every piece lands exactly on the square its tiling gives it.
 
 A quarter turn changes a piece's bounding box, so a turning piece can be wider
 than where it lands. The library this replaced let those pixels simply run off
@@ -319,12 +345,26 @@ rows** (rows flash and vanish from the bottom, everything above dropping into th
 gap), plus *Random each time*. The effect is drawn once per event, so all the
 digits involved always come apart the same way.
 
+**The sensor raises the knock itself.** Its own interrupt generator watches for
+it and pulls INT1, which is wired to GPIO15 — not documented on Adafruit's pinout
+page, but the board schematic has the LIS3DH's INT1 on the same net as the
+ESP32-S3's IO15. The sketch only reads that pin. Sampling the sensor instead cost
+four I2C transactions 50 times a second and still left a 20 ms gap between reads
+that a short tap could slip through.
+
+The sensor compares against a fixed threshold, which would fire on gravity as
+soon as the clock is tilted, so its high-pass filter is enabled **for the
+interrupt generator only** and not for the output registers — the orientation
+detection still needs to see gravity. The data rate went from 10 Hz to 100 Hz:
+at 10 Hz a knock lasts about as long as one sample.
+
 *Shake sensitivity* runs from 0 (off) to 10. The scale was measured on the
 device, not guessed: over about 70 s of standing still the largest deviation in
 any one second was 780 raw counts, which is the sensor's own noise, while every
-deliberate interaction produced 1900 or more and a firm knock 12700. Level 10
-therefore sits at 1500 (roughly twice the noise) and level 1 at 6000; one g is
-16000 counts, because the library leaves the LIS3DH in high-resolution mode.
+deliberate interaction produced 1900 or more and a firm knock 12700. That is
+0.094 g and 0.375 g — one g is 16000 counts, because the library leaves the part
+in high-resolution mode — which the threshold register takes in steps of 16 mg,
+so level 10 is 6 steps and level 1 is 24.
 
 Nothing is triggered while another screen owns the panel, in the config AP, for
 the first three seconds after start-up, for 1.2 s after a rotation, while an
@@ -333,9 +373,19 @@ next to the sensor, so a button press is a knock as far as it is concerned.
 
 With **Also use it when the time changes** ticked, the same effect replaces the
 plain swap when a digit changes: at a minute rollover only the digits that
-actually changed come apart, and they rebuild while the others stand still. The
-sensor's data rate was raised from 10 Hz to 100 Hz for all of this — at 10 Hz a
-knock lasts about as long as one sample and was a coin toss to catch.
+actually changed come apart, and they rebuild while the others stand still.
+Whatever has come apart leaves the space empty for 300 ms before it builds
+again. The colon is never touched by any of this — it blinks on the second
+throughout, being the one thing on this face that shows time actually passing.
+
+**Trying it out on the config page.** Changing the watchface, the drop or turn
+pace, the sensitivity, the effect or the time-change option takes the digits
+apart and builds them again straight away, so the setting can be judged on the
+panel. That matters here because the clock deliberately ignores the sensor while
+the AP is up, so a knock is not available to test with. It happens on the
+settled value only — a slider let go of, or a point on it tapped. **Discard
+changes** puts the stored settings back: everything on the page previews live but
+sits in RAM until saved, and this is the way back from that.
 
 The **digit and trail colors do not apply** to this face. The master brightness
 (and therefore the light sensor) does: the palette is rescaled before every frame.
