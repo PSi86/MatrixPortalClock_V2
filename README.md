@@ -42,6 +42,10 @@ button pin cannot be carried over.
   lux → brightness mapping dims the clock once per second to match the room
 - NTP time synchronization with a daily resync. The WiFi is switched on one
   minute before the sync time and off again after the sync
+- **No waiting for the WiFi at start-up:** the clock is on the panel and
+  operable at once, joins the home WiFi in the background (starting the join
+  again every 10 s until it has joined) and shows dashes instead of digits until
+  it has a time
 - **Status pixel**: off in normal operation; a single red pixel in the bottom-left
   corner means a due NTP sync has not succeeded for an hour
 - **Automatic summer/winter time** for every timezone in the menu (rules from the
@@ -53,7 +57,8 @@ button pin cannot be carried over.
 - All settings are stored outside the program image, so they survive a restart
   **and a firmware re-upload** (S3: the NVS partition, which a normal upload does
   not touch - `pio run -t erase` does; M4: a fixed flash block at 0x7E000)
-- Recovery: hold UP during boot -> the AP opens even without the home WiFi
+- Recovery: the config hotspot is in the menu from the first second, also
+  without the home WiFi; holding UP during boot opens it as well
 
 ## Setup
 
@@ -99,7 +104,8 @@ button pin cannot be carried over.
    **Diagnosis without a console:** the clock shows the cause of an abnormal
    reset (`BROWN`, `PANIC`, `TWDT`, ...) for 2 s at boot, and remembers how far
    the previous start got: `DIED1` before the panel, `DIED2` after panel and
-   sensors, `DIED3` while joining WiFi, `DIED4` in normal operation. The
+   sensors, `DIED3` after the WiFi join started (the clock already runs then),
+   `DIED4` after it joined. A start that runs for 15 s clears it. The
    breadcrumb lives in flash, so it survives the detour through the bootloader.
 
    For the MatrixPortal M4, select its environment and put the board into the
