@@ -369,11 +369,28 @@ unsigned long panelRateLast = 0; // start of the running refresh-rate measuremen
 uint8_t hourNow, minuteNow, secondNow;
 bool secondTrigger, minuteTrigger, hourTrigger;
 uint8_t syncTimeHour = 5, syncTimeMinute = 11;
-unsigned long millisNow, deltaT, lastSync, ntpTimeout = 3000; // ms between NTP fetch retries while unsynced
-
-bool ntpRequestActive, ntpSuccess, wifiEnabled;
+unsigned long millisNow, deltaT;
 time_t localTime;   // what the panel shows: the clock's UTC plus zone and daylight saving
-time_t ntpTime;     // last NTP reply, UTC
+
+// NTP sync -----------------------------------------------------------------
+// One state instead of the flags ntpSuccess, ntpRequestActive and wifiEnabled.
+// ntpSuccess used to do two jobs - colour the status pixel and, cleared at the
+// sync minute, ask for the daily sync - so the pixel turned red every day
+// without anything having failed. The state changes only through
+// setSyncState().
+enum SyncState : uint8_t {
+  SYNC_IDLE,        // synced, radio off, waiting for the next sync time
+  SYNC_WAKING,      // radio on one minute early, so it has joined by the sync time
+  SYNC_FETCHING,    // a sync is due: ask for the time on this pass
+  SYNC_RETRY_WAIT,  // the last ask came back empty: wait NTP_RETRY_MS, then ask again
+};
+SyncState     syncState    = SYNC_FETCHING;   // the first sync is due at start-up
+unsigned long syncDueSince = 0;               // millis() when the pending sync became due
+unsigned long syncLastAsk  = 0;               // millis() of the last ask, for the retry pace
+const unsigned long NTP_RETRY_MS = 3000;      // between asks while a sync is due
+// A due sync that has not succeeded for this long is an error, shown on the
+// status pixel. The hour covers the retries, so a sync in progress never shows.
+const unsigned long SYNC_LATE_MS = 60UL * 60UL * 1000UL;
 
 // Network Stuff
 #include "arduino_secrets.h"
@@ -1042,17 +1059,29 @@ void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
 }
 #endif
 
-// NTP sync status pixel (green = synced, red = not), dimmed with the master
-// brightness but kept visible. It sits in the bottom-left corner of the current
-// rotation: (0,63) in portrait, (0,31) in landscape. A fixed (0,63) lies outside
-// the 32 px tall landscape canvas and was silently clipped, so landscape never
-// showed the sync status. Every watchface draws it the same way.
+// Whether a due NTP sync has failed for longer than SYNC_LATE_MS.
+bool syncOverdue() {
+  bool due = (syncState == SYNC_FETCHING || syncState == SYNC_RETRY_WAIT);
+  return due && (millisNow - syncDueSince > SYNC_LATE_MS);
+}
+
+// NTP status pixel: off in normal operation, red only on an error - a due sync
+// that has not succeeded within SYNC_LATE_MS - and then until a sync succeeds.
+// It sits in the bottom-left corner of the current rotation: (0,63) in
+// portrait, (0,31) in landscape. A fixed (0,63) lies outside the 32 px tall
+// landscape canvas and was silently clipped, so landscape never showed the sync
+// status. Every watchface draws it the same way.
+//
+// Dimmed with the master brightness, but never below STATUS_PIXEL_MIN:
+// color565() keeps only the top five bits of red, so any red under 8 comes out
+// black. With the old floor of 3 the red state vanished below a master
+// brightness of 48, while the old green one (six bits) still showed.
+const uint8_t STATUS_PIXEL_MIN = 24;
 void drawStatusPixel() {
-  uint8_t statusInt = effectiveBrightness / 6;
-  if (statusInt < 3) { statusInt = 3; }
-  matrix.drawPixel(0, matrix.height() - 1,
-                   ntpSuccess ? matrix.color565(0, statusInt, 0)
-                              : matrix.color565(statusInt, 0, 0));
+  if (!syncOverdue()) { return; }
+  uint8_t level = effectiveBrightness / 6;
+  if (level < STATUS_PIXEL_MIN) { level = STATUS_PIXEL_MIN; }
+  matrix.drawPixel(0, matrix.height() - 1, matrix.color565(level, 0, 0));
 }
 
 /* ======================================================================
@@ -2021,66 +2050,89 @@ void timekeeper(void) {
   }
 }
 
-// Sets the clock (UTC) from NTP (board_hal.h: the NINA's own SNTP client on the M4,
-// lwIP's on the S3). Enables/Disables WiFi when necessary.
-void timeSync_WifiLib() {
-  if (!ntpSuccess && !ntpRequestActive) {
-    ntpTime=netNtpEpoch();
-    lastSync=millisNow;
-    if(ntpTime != 0) {
-#if defined(CLOCK_DEBUG) && defined(DST_TEST_UTC)
-      ntpTime = DST_TEST_UTC;   // debug test: start just before a daylight-saving change
-      settings.dst = DST_AUTO;  // in RAM only
-#endif
-      // How far the clock had drifted from NTP, in seconds: positive when the clock
-      // was slow, negative when it was fast. Only logged.
-      long drift = clockIsSet() ? (long)(ntpTime - clockNow()) : 0;
-      if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), ntpTime); }
-      clockSet(ntpTime); // UTC as delivered; zone and daylight saving are added for the panel
-      Serial.println("NTP success");
-      Serial.print("NTP offset: ");
-      Serial.println(drift);
-      ntpSuccess = true;
-      ntpRequestActive = false;
-      netRadioOff();
-      wifiEnabled = false;
-      Serial.println("Disabled Wifi");
-    }
-    else {
-      Serial.println("NTP failed"); // print the second
-      ntpSuccess = false;
-      ntpRequestActive = true; // First wait for timout period before new try
-    }
-  }
-  if(minuteTrigger) {
-    // Switch the radio on one minute before the sync time, counted in minutes
-    // since midnight so it wraps across the hour and midnight (sync 05:00 ->
-    // 04:59, 00:00 -> 23:59). "syncTimeMinute-1" alone is -1 for minute 00 and
-    // never matches: the radio stayed off, the sync at hh:00 failed and, with
-    // ntpSuccess then false for good, no daily resync ever happened again.
-    const uint16_t minutesPerDay = 24 * 60;
-    uint16_t nowMinute  = hourNow * 60 + minuteNow;
-    uint16_t syncMinute = syncTimeHour * 60 + syncTimeMinute;
-    if(!wifiEnabled && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay) { // 1 minute before next Sync
-      netStaBegin(ssid, pass); // Connect to wifi (and arm a fresh NTP sync)
-      wifiEnabled = true;
-      Serial.println("Enabled Wifi");
-    }
-    if(ntpSuccess && hourNow == syncTimeHour && minuteNow == syncTimeMinute) {
-      ntpSuccess=false; // Trigger Renewal of NTP sync
-      printWifiStatus();
-      Serial.println("Renew NTP sync");
-    }
-  }
+// The one way to change the sync state. A sync becomes due when it is entered
+// from a synced state; asking again after an empty answer keeps that moment, so
+// syncOverdue() measures from when the sync was first wanted.
+void setSyncState(SyncState next) {
+  if (next == syncState) { return; }
+  bool wasDue = (syncState == SYNC_FETCHING || syncState == SYNC_RETRY_WAIT);
+  if (next == SYNC_FETCHING && !wasDue) { syncDueSince = millisNow; }
+  DEBUG_LOG("sync %u -> %u\n", (unsigned)syncState, (unsigned)next);
+  syncState = next;
+}
 
-  // Retry a failed NTP fetch promptly, independent of the minute change above.
-  // netNtpEpoch() returns 0 until SNTP completes (a few seconds after
-  // associating); gating this retry behind minuteTrigger left the clock stuck at
-  // 1970 (00:00:00) for up to a minute after boot even though WiFi was connected.
-  if(ntpRequestActive && millisNow-lastSync > ntpTimeout) { // time to try getTime() again
-    ntpRequestActive=false; // allow a fresh getTime() on the next iteration
-    Serial.println("NTP Retry");
+// Ask NTP for the time once (board_hal.h: the NINA's own SNTP client on the M4,
+// lwIP's on the S3). netNtpEpoch() returns 0 until SNTP has an answer, which takes
+// a few seconds after joining.
+void ntpAsk() {
+  syncLastAsk = millisNow;
+  time_t utc = netNtpEpoch();
+  if (utc == 0) {
+    Serial.println("NTP failed");
+    setSyncState(SYNC_RETRY_WAIT);
+    return;
   }
+#if defined(CLOCK_DEBUG) && defined(DST_TEST_UTC)
+  utc = DST_TEST_UTC;       // debug test: start just before a daylight-saving change
+  settings.dst = DST_AUTO;  // in RAM only
+#endif
+  // How far the clock had drifted from NTP, in seconds: positive when the clock
+  // was slow, negative when it was fast. Only logged.
+  long drift = clockIsSet() ? (long)(utc - clockNow()) : 0;
+  if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), utc); }
+  clockSet(utc); // UTC as delivered; zone and daylight saving are added for the panel
+  Serial.println("NTP success");
+  Serial.print("NTP offset: ");
+  Serial.println(drift);
+  netRadioOff();
+  Serial.println("Disabled Wifi");
+  setSyncState(SYNC_IDLE);
+}
+
+// Once a minute: wake the radio one minute before the sync time, and make the
+// sync due at the sync time. Counted in minutes since midnight so it wraps
+// across the hour and midnight (sync 05:00 -> 04:59, 00:00 -> 23:59);
+// "syncTimeMinute-1" alone is -1 for minute 00 and never matched, which once
+// stopped the daily resync for good.
+void syncSchedule() {
+  const uint16_t minutesPerDay = 24 * 60;
+  uint16_t nowMinute  = hourNow * 60 + minuteNow;
+  uint16_t syncMinute = syncTimeHour * 60 + syncTimeMinute;
+  if (syncState == SYNC_IDLE && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay) {
+    netStaBegin(ssid, pass); // join (and arm a fresh NTP sync)
+    Serial.println("Enabled Wifi");
+    setSyncState(SYNC_WAKING);
+  }
+  if ((syncState == SYNC_IDLE || syncState == SYNC_WAKING) && nowMinute == syncMinute) {
+    // Still idle means the early wake-up was missed, e.g. because the config AP
+    // was up a minute ago; join now instead of failing until tomorrow.
+    if (syncState == SYNC_IDLE) { netStaBegin(ssid, pass); }
+    printWifiStatus();
+    Serial.println("Renew NTP sync");
+    setSyncState(SYNC_FETCHING);
+  }
+}
+
+// Keeps the clock (UTC) in step with NTP and the radio on only while a sync
+// needs it.
+void timeSync_WifiLib() {
+  switch (syncState) {
+    case SYNC_FETCHING:
+      ntpAsk();
+      break;
+    case SYNC_RETRY_WAIT:
+      // Retried on its own pace, not on the minute change: gating the retry
+      // behind minuteTrigger once left the clock at 1970 for up to a minute
+      // after boot although the WiFi was connected.
+      if (millisNow - syncLastAsk > NTP_RETRY_MS) {
+        Serial.println("NTP Retry");
+        setSyncState(SYNC_FETCHING);
+      }
+      break;
+    default:
+      break;
+  }
+  if (minuteTrigger) { syncSchedule(); }
 }
 
 // Prints Wifi connection status, SSID, IP and RSSI to console.
@@ -2429,13 +2481,15 @@ void stopAPMode() {
   dnsUdp.stop();
   apServer.end(); // release the listening socket (a fresh begin() would leak one)
   netApEnd(ssid, pass); // drop the softAP and rejoin the home WiFi
-  if (!ntpSuccess) {
-    // The clock has never been NTP-synced (AP opened via the boot button):
-    // leave the station side marked active so the pending sync can complete.
-    wifiEnabled = true;
-    Serial.println("Enabled Wifi for pending NTP sync");
+  if (syncState == SYNC_IDLE) {
+    // Synced: back to how it is after a regular sync, radio off. It used to stay
+    // joined until the next sync while the code counted it as off.
+    netRadioOff();
+    Serial.println("Disabled Wifi");
   } else {
-    wifiEnabled = false; // same state as after a regular daily sync
+    // A sync is pending or about to start (e.g. the AP was opened from the boot
+    // button): the rejoined station lets it go ahead.
+    Serial.println("Enabled Wifi for pending NTP sync");
   }
   setScreen(SCREEN_FACE); // back to the normal clock, in the current orientation
 }

@@ -40,7 +40,10 @@ button pin cannot be carried over.
   positions)
 - **Automatic brightness** via an external BH1750 light sensor: a configurable
   lux → brightness mapping dims the clock once per second to match the room
-- NTP time synchronization with a daily resync
+- NTP time synchronization with a daily resync. The WiFi is switched on one
+  minute before the sync time and off again after the sync
+- **Status pixel**: off in normal operation; a single red pixel in the bottom-left
+  corner means a due NTP sync has not succeeded for an hour
 - **Automatic summer/winter time** for every timezone in the menu (rules from the
   IANA tz database), or a fixed summer or winter time
 - **User button** (UP button; S3: GPIO6, M4: D2):
