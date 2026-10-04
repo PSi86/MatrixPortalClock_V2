@@ -159,7 +159,6 @@ const unsigned long FB_BLINK_OFF_MS = 250;
 uint8_t       fbBlinkCount = 0;              // confirmation blinks of the running sequence
 unsigned long fbBlinkStart = 0;              // millis() when that sequence started
 bool          fbLit = false;                 // feedback state of this loop (LED and matrix)
-bool          apScreenFbLit = false;         // feedback state the static AP info screen shows
 
 // Perceptual brightness fade (long press) ----------------------------------
 const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep
@@ -167,12 +166,25 @@ const float FADE_GAMMA     = 2.2f;    // perceptual -> linear-light exponent
 float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the human eye)
 int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
-unsigned long dstMsgUntil = 0;        // show the daylight-saving banner until this millis()
-// Set by every screen that puts something other than the Tetris watchface on the
-// panel (boot messages, the daylight-saving banner, the AP info screen, the
-// classic watchface). The Tetris watchface skips redrawing a picture that has
-// not changed, so it needs to know when someone else has overwritten it.
-bool tetrisPanelStale = true;
+
+// Screens ------------------------------------------------------------------
+// Exactly one screen owns the panel at a time, and it changes only through
+// setScreen(). Which screen is up used to be worked out from the AP flags, the
+// banner timer and whoever had drawn last; now it is this one value.
+enum Screen : uint8_t {
+  SCREEN_BOOT,             // status lines while setup() runs
+  SCREEN_FACE,             // the clock face, classic or Tetris
+  SCREEN_BANNER,           // a short text after a change - today the daylight-saving mode
+  SCREEN_HOTSPOT_INFO,     // config AP up, no client yet: SSID, password and IP
+  SCREEN_HOTSPOT_PREVIEW,  // config AP up and a client connected: the live clock
+};
+Screen        screen = SCREEN_BOOT;
+unsigned long bannerUntil = 0;   // SCREEN_BANNER: back to the face at this millis()
+// True while the panel may not show what the current screen would draw: after
+// every screen change, a watchface change and whenever the press indicator
+// flips. The screens that only repaint on a change (the Tetris face, the hotspot
+// info) repaint when it is set; every full repaint clears it.
+bool          panelDirty = true;
 // Knocking the clock is ignored until this millis(): while it is starting up,
 // and for a moment after a rotation, where the movement would otherwise set off
 // the very animation the rotation already redraws around. Declared here rather
@@ -194,7 +206,6 @@ bool dstAutoActive = false;           // DST_AUTO: whether summer time is in eff
 #define AP_SSID "MatrixClock"
 #define AP_PASS "clock1234"   // must be >= 8 characters
 bool        apActive = false;
-bool        apClientConnected = false; // true once a client talks to us (station joined / HTTP hit)
 unsigned long apStatusLast = 0;        // last time the AP connection status was polled
 unsigned long apClockLast = 0;         // last live-preview clock frame (throttled in AP mode)
 // While a client is connected serving the web UI has priority, so the clock
@@ -606,6 +617,8 @@ void setup(void) {
     printWifiStatus();
     delay(1000);
   } // end if(!apActive)
+  // The boot screens are done; the config AP, if it was opened above, keeps its own.
+  if (screen == SCREEN_BOOT) { setScreen(SCREEN_FACE); }
   // Set last, from the real clock: applyOrientation() ran several times during
   // the boot screens and left this behind with a millisNow from before the WiFi
   // join, which can be ten seconds ago. Ignore the handling that comes with
@@ -640,38 +653,57 @@ void loop(void) {
   updateShake();        // a knock takes the Tetris digits apart and rebuilds them
 #endif
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
-  if (millisNow < dstMsgUntil) { drawDstMessage(); } // brief banner after a daylight-saving mode change
-  else                         { drawClock(); }
+  if (screen == SCREEN_BANNER && millisNow >= bannerUntil) { setScreen(SCREEN_FACE); }
+  switch (screen) {
+    case SCREEN_BANNER: drawDstMessage(); break;
+    case SCREEN_FACE:   drawClock();      break;
+    default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
+  }
+}
+
+// The one way to change the screen. Whatever a screen needs on the way in or out
+// happens here, so a caller only says where to go.
+void setScreen(Screen next) {
+  if (next == screen) { return; }
+  Screen prev = screen;
+  screen = next;
+  panelDirty = true;
+  DEBUG_LOG("screen %u -> %u\n", (unsigned)prev, (unsigned)next);
+  // Out: the hotspot screens leave the panel in a rotation of their own (the info
+  // screen is always landscape), so whatever comes next starts again from how
+  // the panel is actually held.
+  bool fromHotspot = (prev == SCREEN_HOTSPOT_INFO || prev == SCREEN_HOTSPOT_PREVIEW);
+  if (fromHotspot && next != SCREEN_HOTSPOT_INFO) { applyOrientation(detectRotation()); }
+  // In: the info screen is static and drawn once, at once - before the slow radio
+  // bring-up in startAPMode() freezes the loop.
+  if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
 }
 
 // Leave the AP-info screen and show the live clock (called once a client appears).
 void apShowClock() {
-  if (apClientConnected) { return; }
-  apClientConnected = true;
-  applyOrientation(detectRotation()); // start the clock preview in the current orientation
+  if (screen == SCREEN_HOTSPOT_INFO) { setScreen(SCREEN_HOTSPOT_PREVIEW); }
 }
 
 // While the AP is up: show connection info until a client appears, then switch to
 // a throttled live clock so brightness/color/speed changes are visible in real time
 // without starving the (slow) WiFiNINA web serving.
 void updateApDisplay() {
-  if (!apClientConnected) {
+  if (screen == SCREEN_HOTSPOT_INFO) {
     if (millisNow - apStatusLast >= 500) { // periodically check whether a station joined
       apStatusLast = millisNow;
       if (netApHasStation()) { apShowClock(); return; }
       if (apInfoRotation() != curRotation) { drawAPScreen(); } // re-orient the info if turned
     }
-#if BUTTON_FEEDBACK_ON_MATRIX
-    // The info screen is static, so redraw it whenever the button indicator flips.
-    if (fbLit != apScreenFbLit) { drawAPScreen(); }
-#endif
+    // The info screen is static, so it is only redrawn when the panel no longer
+    // shows it as it should, e.g. when the press indicator flipped.
+    if (panelDirty) { drawAPScreen(); }
     return;
   }
-  // A client is connected. Keep the animation advancing every loop so it runs at
-  // real time (stepClockAnim is cheap, no panel I/O), but only push the latest
-  // state to the panel at the board's preview rate (5 fps on the M4): skipped
-  // frames are computed, not slowed down. This leaves the radio free for the
-  // slow WiFiNINA web server; the S3 draws every frame.
+  // SCREEN_HOTSPOT_PREVIEW: a client is connected. Keep the animation advancing
+  // every loop so it runs at real time (stepClockAnim is cheap, no panel I/O),
+  // but only push the latest state to the panel at the board's preview rate
+  // (5 fps on the M4): skipped frames are computed, not slowed down. This leaves
+  // the radio free for the slow WiFiNINA web server; the S3 draws every frame.
   updateOrientation(); // clock preview follows the accelerometer (all four rotations)
 #if WATCHFACE_TETRIS
   // The Tetris watchface throttles itself (it only repaints on an animation step
@@ -855,7 +887,7 @@ void drawCenteredText(const char *msg, uint16_t color) {
   matrix.print(msg);
   drawFeedbackIndicator();
   matrix.show();
-  tetrisPanelStale = true;
+  panelDirty = false;   // the whole panel shows this text now
 }
 
 // Boot status line: oriented to the panel and dimmed to the live clock brightness
@@ -1100,7 +1132,6 @@ bool          tetrisSettled     = false;  // true once every block has landed
 unsigned long tetrisStepLast    = 0;      // millis() of the last animation step
 uint8_t       tetrisBrightDrawn = 0xFF;   // effectiveBrightness of the frame on the panel
 bool          tetrisColonDrawn  = false;  // colon state of the frame on the panel
-bool          tetrisFbDrawn     = false;  // button indicator state of the frame on the panel
 uint8_t       tetrisSpinDrawn   = 0;      // turns still owed when that frame was drawn
 
 /* ----------------------------------------------------------------------
@@ -1669,11 +1700,6 @@ void drawTetrisFace() {
   tetrisPushTime();
 
   bool colonOn = (sysTime % 2) == 0;   // 1 Hz blink, in step with the seconds
-#if BUTTON_FEEDBACK_ON_MATRIX
-  bool fbNow = fbLit;
-#else
-  bool fbNow = false;
-#endif
 
   // Turning runs on its own clock, so a flick between two fall steps has to be
   // painted when it happens - otherwise the drop rate would quietly limit how
@@ -1683,8 +1709,10 @@ void drawTetrisFace() {
 
   bool stepDue = !tetrisSettled &&
                  (millisNow - tetrisStepLast >= tetrisSettings.dropMs);
-  bool changed = tetrisPanelStale || colonOn != tetrisColonDrawn ||
-                 effectiveBrightness != tetrisBrightDrawn || fbNow != tetrisFbDrawn ||
+  // panelDirty covers everything outside the face itself: another screen having
+  // drawn over it, a change of watchface, the press indicator.
+  bool changed = panelDirty || colonOn != tetrisColonDrawn ||
+                 effectiveBrightness != tetrisBrightDrawn ||
                  spinPending != tetrisSpinDrawn;
   // Debris moving is a change in itself, so while anything is coming apart the
   // face repaints on the animation's clock rather than waiting to be asked.
@@ -1717,8 +1745,7 @@ void drawTetrisFace() {
 
   tetrisColonDrawn  = colonOn;
   tetrisBrightDrawn = effectiveBrightness;
-  tetrisFbDrawn     = fbNow;
-  tetrisPanelStale  = false;
+  panelDirty        = false;
   // After the step, because a piece may have landed and the next one armed.
   tetrisSpinDrawn = 0;
   for (uint8_t i = 0; i < 4; i++) { tetrisSpinDrawn += tetrisPendingTurns(i); }
@@ -1822,9 +1849,9 @@ void updateShake() {
   (void)accelReadReg(LIS3DH_INT1_SRC);
 
   if (shakeThreshold() == 0)              { return; }  // switched off
-  if (tetrisPanelStale)                   { return; }  // boot screen, banner,
-                                                       // AP info or the classic face
-  if (apActive || shakeAnyBusy())         { return; }
+  if (screen != SCREEN_FACE)              { return; }  // boot, banner or config AP
+  if (settings.watchface != WATCHFACE_TETRIS_ID) { return; }  // the classic face has nothing to throw
+  if (shakeAnyBusy())                     { return; }
   if (btnPrev)                            { return; }  // a button press IS a knock:
                                                        // the switch sits 20 mm from the sensor
   if (orientCandidate != curRotation)     { return; }  // a rotation is being debounced
@@ -1868,7 +1895,7 @@ void renderClock(void) {
   uint32_t showStart = micros();
 #endif
   matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
-  tetrisPanelStale = true;
+  panelDirty = false;
 #if defined(CLOCK_DEBUG)
   frameStatsAdd(showStart - drawStart, micros() - showStart);
 #endif
@@ -1890,6 +1917,7 @@ uint8_t activeWatchface() {
 #if WATCHFACE_TETRIS
   tetrisRotation = 0xFF;           // force a fresh layout and a fresh drop
 #endif
+  panelDirty = true;               // the other face's picture is still on the panel
   return shown;
 }
 
@@ -2273,6 +2301,9 @@ void updateFeedbackLed() {
   if (lit != fbLit) {
     fbLit = lit;
     digitalWrite(FEEDBACK_LED_PIN, lit ? HIGH : LOW);
+#if BUTTON_FEEDBACK_ON_MATRIX
+    panelDirty = true;   // the matrix shows the same square, so the panel has to follow
+#endif
   }
 }
 
@@ -2294,7 +2325,8 @@ void cycleDstMode() {
                : (settings.dst == DST_SUMMER) ? DST_WINTER : DST_AUTO;
   setDstMode(next);
   saveSettings();
-  dstMsgUntil = millisNow + 3000;
+  bannerUntil = millisNow + 3000;   // a click while it is still up extends it
+  setScreen(SCREEN_BANNER);
   Serial.print("DST mode -> "); Serial.println(settings.dst);
 }
 
@@ -2352,7 +2384,7 @@ void startAPMode() {
   apActive = true;
   millisNow = millis();
   updateBrightness(); // resolve the live brightness for the immediate info screen
-  drawAPScreen(); // show SSID/PW/IP immediately, before the slow radio bring-up freezes the loop
+  setScreen(SCREEN_HOTSPOT_INFO); // draws SSID/PW/IP at once, before the slow radio bring-up freezes the loop
   apRadioUp();
 }
 
@@ -2363,7 +2395,6 @@ void stopAPMode() {
   if (!apActive) { return; }
   Serial.println("Stopping config AP...");
   apActive = false;
-  apClientConnected = false;
   dnsUdp.stop();
   apServer.end(); // release the listening socket (a fresh begin() would leak one)
   netApEnd(ssid, pass); // drop the softAP and rejoin the home WiFi
@@ -2375,7 +2406,7 @@ void stopAPMode() {
   } else {
     wifiEnabled = false; // same state as after a regular daily sync
   }
-  applyOrientation(detectRotation()); // back to the normal clock in the current orientation
+  setScreen(SCREEN_FACE); // back to the normal clock, in the current orientation
 }
 
 // Re-create the AP when the radio dropped it: the M4's NINA firmware can crash
@@ -2400,8 +2431,10 @@ void apWatchdog() {
   apBadStatus = 0;
   Serial.println("AP watchdog: restarting AP");
   apRadioUp();
-  apClientConnected = false; // any station is gone after the restart
-  drawAPScreen();            // back to the SSID/PW/IP info screen
+  // Any station is gone after the restart, and the address may have changed:
+  // back to the info screen, redrawn either way.
+  setScreen(SCREEN_HOTSPOT_INFO);
+  panelDirty = true;
 #endif
 }
 
@@ -2431,9 +2464,8 @@ void drawAPScreen() {
   matrix.setTextColor(scaledColorVisible(255, 140, 0));
   matrix.setCursor(0, 28); matrix.print("IP "); matrix.print(apIP);
   drawFeedbackIndicator();
-  apScreenFbLit = fbLit;
   matrix.show();
-  tetrisPanelStale = true;
+  panelDirty = false;
 }
 
 #if defined(CLOCK_DEBUG)
