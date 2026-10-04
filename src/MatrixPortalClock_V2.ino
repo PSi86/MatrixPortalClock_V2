@@ -247,6 +247,19 @@ uint8_t       screenUnderCount = 0;
 const unsigned long MENU_IDLE_MS = 20000;   // menu and editors, back to the face
 const unsigned long BANNER_MS    = 3000;
 
+#if MENU_SLIDE
+// Slide between the menu list and an editor: the old picture moves out to one
+// side while the new one comes in from the other, deeper to the left. Both are
+// held as the panel's raw framebuffer (64x32, unrotated): the matrix is itself
+// a GFXcanvas16, so a picture is a plain copy of its buffer.
+const uint8_t       SLIDE_FRAMES   = 8;
+const unsigned long SLIDE_FRAME_MS = 12;    // on top of the panel refresh show() waits for
+uint16_t uiFrame[64 * 32];          // the last menu picture, without the press indicator
+uint8_t  uiFrameRotation = 0xFF;    // the rotation it was drawn in; 0xFF = none yet
+uint16_t slideTo[64 * 32];          // the new picture while a slide plays
+int8_t   slideDir = 0;              // the slide the next menu picture starts with: +1 deeper, -1 back, 0 none
+#endif
+
 // Banner: what it says and in which colour comes from the function that opened
 // it. A time banner shows the time the clock shows now, read when it is drawn.
 enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME };
@@ -860,6 +873,13 @@ void showScreen(Screen next) {
   if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
   // A face that was hidden is not stepped, so it catches up before it is drawn.
   if (!screenShowsFace(prev) && screenShowsFace(next)) { faceCatchUp(); }
+#if MENU_SLIDE
+  // Between the list and an editor the picture slides; any other change clears
+  // a slide that was asked for but never drawn (the editor closing straight
+  // into a banner).
+  slideDir = (prev == SCREEN_MENU   && next == SCREEN_EDITOR) ? +1
+           : (prev == SCREEN_EDITOR && next == SCREEN_MENU)   ? -1 : 0;
+#endif
 #if WATCHFACE_TETRIS
   // A knock latched while another screen was up is old news on the face.
   if (next == SCREEN_FACE) { shakeDiscardLatched(); }
@@ -1414,10 +1434,69 @@ void drawMenu() {
   char value[12];
   menuItemValue(menuFocus, value, sizeof(value));
   drawList("MENU", labels, count, focus, value);
+  presentUi();
+}
+
+// Put the menu picture just drawn on the panel, with the press indicator on
+// top - on the S3 sliding in from the previous one when the screen changed
+// between the list and an editor.
+void presentUi() {
+#if MENU_SLIDE
+  // A rotation in between would slide two pictures of different shape.
+  if (slideDir != 0 && uiFrameRotation == matrix.getRotation()) { playSlide(slideDir); }
+  slideDir = 0;
+  memcpy(uiFrame, matrix.getBuffer(), sizeof(uiFrame));
+  uiFrameRotation = matrix.getRotation();
+#endif
   drawFeedbackIndicator();
   matrix.show();
   panelDirty = false;
 }
+
+#if MENU_SLIDE
+// Index into the panel's raw framebuffer of the pixel at (x, y) in the current
+// rotation - the mapping GFXcanvas16::drawPixel() uses.
+uint16_t rawPixelIndex(int16_t x, int16_t y) {
+  uint8_t rot  = matrix.getRotation();
+  int16_t rawW = (rot & 1) ? matrix.height() : matrix.width();
+  int16_t rawH = (rot & 1) ? matrix.width()  : matrix.height();
+  int16_t t;
+  switch (rot) {
+    case 1: t = x; x = rawW - 1 - y; y = t; break;
+    case 2: x = rawW - 1 - x; y = rawH - 1 - y; break;
+    case 3: t = x; x = y; y = rawH - 1 - t; break;
+  }
+  return (uint16_t)(x + y * rawW);
+}
+
+// Slide from uiFrame (the old picture) to the one now in the framebuffer.
+// Going deeper (dir +1) both move left and the new one comes in from the
+// right; going back the other way round. Eased out, so it settles softly. It
+// blocks for about SLIDE_FRAMES refreshes plus SLIDE_FRAME_MS each, some
+// 130 ms, and leaves the new picture in the framebuffer.
+void playSlide(int8_t dir) {
+  memcpy(slideTo, matrix.getBuffer(), sizeof(slideTo));
+  uint16_t *panel = matrix.getBuffer();
+  int16_t w = matrix.width(), h = matrix.height();
+  for (uint8_t f = 1; f < SLIDE_FRAMES; f++) {
+    float t = (float)f / SLIDE_FRAMES;
+    int16_t shift = (int16_t)lroundf(w * (1.0f - (1.0f - t) * (1.0f - t)));
+    for (int16_t y = 0; y < h; y++) {
+      for (int16_t x = 0; x < w; x++) {
+        int16_t sx = (dir > 0) ? x + shift : x - shift;   // where this pixel comes from
+        uint16_t c;
+        if (sx >= 0 && sx < w) { c = uiFrame[rawPixelIndex(sx, y)]; }
+        else                   { c = slideTo[rawPixelIndex((dir > 0) ? sx - w : sx + w, y)]; }
+        panel[rawPixelIndex(x, y)] = c;
+      }
+    }
+    drawFeedbackIndicator();
+    matrix.show();
+    delay(SLIDE_FRAME_MS);
+  }
+  memcpy(panel, slideTo, sizeof(slideTo));
+}
+#endif
 
 // The brightness scale, one pixel tall across the panel at row y. Manual: a
 // bar from the left as long as the level. Auto: a bar from the middle (the
@@ -1533,10 +1612,8 @@ void drawEditor() {
     case ITEM_DST:    drawDstEditor();    break;
     default:          break;
   }
-  drawFeedbackIndicator();
-  matrix.show();
+  presentUi();
   editDrawnAt = millisNow;
-  panelDirty = false;
 }
 
 // Measure the panel refresh rate once per second (Protomatter counts refreshes).
