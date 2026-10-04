@@ -20,7 +20,7 @@ Todo Concept:
 ------------------------------------------------------------------------- */
 
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
-#include "clock_time.h"     // software clock: seconds since 1970 (local time), C library only
+#include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 
 #include <Adafruit_Protomatter.h>
 //#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font works
@@ -372,7 +372,8 @@ uint8_t syncTimeHour = 5, syncTimeMinute = 11;
 unsigned long millisNow, deltaT, lastSync, ntpTimeout = 3000; // ms between NTP fetch retries while unsynced
 
 bool ntpRequestActive, ntpSuccess, wifiEnabled;
-time_t sysTime, ntpTime;
+time_t localTime;   // what the panel shows: the clock's UTC plus zone and daylight saving
+time_t ntpTime;     // last NTP reply, UTC
 
 // Network Stuff
 #include "arduino_secrets.h"
@@ -448,29 +449,25 @@ bool dstInEffect() {
   return settings.dst == DST_SUMMER;
 }
 
-// Switch the daylight-saving mode and shift the running clock by the change in
-// the effective offset (none, or one hour).
+// Switch the daylight-saving mode. The clock holds UTC, so the time on the panel
+// follows by itself (by one hour, or not at all); only the automatic mode needs
+// to know at once whether summer time is in effect.
 void setDstMode(uint8_t mode) {
-  long before = tzTotalOffset();
-  time_t utc = clockNow() - before;
   settings.dst = mode;
-  if (mode == DST_AUTO) { dstAutoActive = clockIsSet() && dstActiveAt(tzRule(settings.tzOffset), utc); }
-  long after = tzTotalOffset();
-  if (after != before) { clockAdjust(after - before); }
+  if (mode == DST_AUTO) { dstAutoActive = clockIsSet() && dstActiveAt(tzRule(settings.tzOffset), clockNow()); }
 }
 
-// DST_AUTO, once a minute: follow the rule's changes by shifting the running clock
-// (EU: 01:00 UTC on the last Sunday of March and October). Decided on UTC, so the
-// hour repeated in autumn does not switch back again.
+// DST_AUTO, once a minute: follow the rule's changes (EU: 01:00 UTC on the last
+// Sunday of March and October). Decided on UTC, so the hour repeated in autumn
+// does not switch back again.
 void updateAutoDst() {
   if (settings.dst != DST_AUTO || !clockIsSet()) { return; }
-  bool active = dstActiveAt(tzRule(settings.tzOffset), clockNow() - tzTotalOffset());
+  bool active = dstActiveAt(tzRule(settings.tzOffset), clockNow());
   if (active == dstAutoActive) { return; }
   dstAutoActive = active;
-  clockAdjust(active ? 3600 : -3600);
-  time_t now = clockNow();
+  time_t local = clockNow() + tzTotalOffset();
   Serial.print(active ? "DST auto -> summer, clock " : "DST auto -> winter, clock ");
-  Serial.print(clockHour(now)); Serial.print(':'); Serial.println(clockMinute(now));
+  Serial.print(clockHour(local)); Serial.print(':'); Serial.println(clockMinute(local));
 }
 
 #if defined(CLOCK_DEBUG)
@@ -980,8 +977,8 @@ void stepClockAnim(void) {
   if (moveNow) { framesInStep = 0; }
 
   if (secondTrigger) {
-    sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime), clockMinute(sysTime), clockSecond(sysTime));
-    sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
+    sprintf(timeStr, "%02d%02d%02d", clockHour(localTime), clockMinute(localTime), clockSecond(localTime));
+    sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
   }
 
   // Concept: Iterate through the digits of the time display. If the animTrigger[i] is true, then create an location offset for the digit according to the fly-in direction that is configured for that digit.
@@ -1418,7 +1415,7 @@ void tetrisLayout() {
 // Hand the current HH:MM to the four digits. Only a digit whose value really
 // changed is rebuilt - the others keep the blocks they have already dropped.
 void tetrisPushTime() {
-  uint8_t h = clockHour(sysTime), m = clockMinute(sysTime);
+  uint8_t h = clockHour(localTime), m = clockMinute(localTime);
   uint8_t d[4] = { (uint8_t)(h / 10), (uint8_t)(h % 10),
                    (uint8_t)(m / 10), (uint8_t)(m % 10) };
   uint8_t changeStyle = 0xFF;   // drawn once, so digits changing together match
@@ -1733,7 +1730,7 @@ void drawTetrisFace() {
 
   tetrisPushTime();
 
-  bool colonOn = (sysTime % 2) == 0;   // 1 Hz blink, in step with the seconds
+  bool colonOn = (localTime % 2) == 0;   // 1 Hz blink, in step with the seconds
 
   // Turning runs on its own clock, so a flick between two fall steps has to be
   // painted when it happens - otherwise the drop rate would quietly limit how
@@ -1945,8 +1942,8 @@ uint8_t activeWatchface() {
   static uint8_t shown = 0xFF;
   if (settings.watchface == shown) { return shown; }
   shown = settings.watchface;
-  sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime),   clockMinute(sysTime),   clockSecond(sysTime));
-  sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
+  sprintf(timeStr, "%02d%02d%02d", clockHour(localTime),   clockMinute(localTime),   clockSecond(localTime));
+  sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
   applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
 #if WATCHFACE_TETRIS
   tetrisRotation = 0xFF;           // force a fresh layout and a fresh drop
@@ -1968,10 +1965,10 @@ void drawClock(void) {
   renderClock();
 }
 
-/* Updates millisNow, sysTime. Keeps track of the looptime using delay(). Updates the animTrigger[] array. */
+/* Updates millisNow, localTime. Keeps track of the looptime using delay(). Updates the animTrigger[] array. */
 void timekeeper(void) { 
   /*Call this always in the beginning of an iteration in loop()
-    for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain sysTime with the clock_time.h helpers eg: clockHour(sysTime)
+    for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain localTime with the clock_time.h helpers eg: clockHour(localTime)
     Triggers are only active for one iteration: hourTrigger -> when the hour has changed
     animTrigger[]: for each individual clock digit (6) the corresponding bool goes high if this digit will change in one second. This gives enough time for the entry animation of the digit.
 
@@ -1992,15 +1989,15 @@ void timekeeper(void) {
 #endif
   
   millisNow=millis();
-  sysTime=clockNow();
- 
-  if(secondNow != clockSecond(sysTime)) { secondNow=clockSecond(sysTime); secondTrigger=true; }
+  localTime=clockNow() + tzTotalOffset();   // the clock keeps UTC; the panel shows local time
+
+  if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; }
   else { secondTrigger=false; }
  
-  if(secondTrigger && minuteNow != clockMinute(sysTime)) { minuteNow=clockMinute(sysTime); minuteTrigger=true; }
+  if(secondTrigger && minuteNow != clockMinute(localTime)) { minuteNow=clockMinute(localTime); minuteTrigger=true; }
   else { minuteTrigger=false; }
 
-  if(minuteTrigger && hourNow != clockHour(sysTime)) { hourNow=clockHour(sysTime); hourTrigger=true; }
+  if(minuteTrigger && hourNow != clockHour(localTime)) { hourNow=clockHour(localTime); hourTrigger=true; }
   else { hourTrigger=false; }
 
   if(secondTrigger) { 
@@ -2024,7 +2021,7 @@ void timekeeper(void) {
   }
 }
 
-// Updates sysTime from NTP (board_hal.h: the NINA's own SNTP client on the M4,
+// Sets the clock (UTC) from NTP (board_hal.h: the NINA's own SNTP client on the M4,
 // lwIP's on the S3). Enables/Disables WiFi when necessary.
 void timeSync_WifiLib() {
   if (!ntpSuccess && !ntpRequestActive) {
@@ -2037,9 +2034,9 @@ void timeSync_WifiLib() {
 #endif
       // How far the clock had drifted from NTP, in seconds: positive when the clock
       // was slow, negative when it was fast. Only logged.
-      long drift = clockIsSet() ? (long)(ntpTime + tzTotalOffset() - sysTime) : 0;
+      long drift = clockIsSet() ? (long)(ntpTime - clockNow()) : 0;
       if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), ntpTime); }
-      clockSet(ntpTime + tzTotalOffset()); // local time: UTC + configurable timezone + daylight saving offset
+      clockSet(ntpTime); // UTC as delivered; zone and daylight saving are added for the panel
       Serial.println("NTP success");
       Serial.print("NTP offset: ");
       Serial.println(drift);
@@ -2353,7 +2350,7 @@ void drawFeedbackIndicator() {
 }
 
 // Single click: cycle the daylight-saving mode automatic -> summer -> winter ->
-// automatic, shift the running clock to match and show the new mode for ~3 s.
+// automatic; the time on the panel follows, and the new mode shows for ~3 s.
 void cycleDstMode() {
   uint8_t next = (settings.dst == DST_AUTO)   ? DST_SUMMER
                : (settings.dst == DST_SUMMER) ? DST_WINTER : DST_AUTO;
