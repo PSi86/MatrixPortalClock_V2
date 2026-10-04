@@ -287,8 +287,8 @@ unsigned long shakeEndedAt = 0;   // millis() when the last effect had run its c
 const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
 const uint8_t BOOT_STAGE_START = 1;   // setup() entered
 const uint8_t BOOT_STAGE_PANEL = 2;   // panel and sensors up
-const uint8_t BOOT_STAGE_WIFI  = 3;   // joining the WiFi
-const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined, clock running
+const uint8_t BOOT_STAGE_WIFI  = 3;   // the WiFi join started (the clock runs while it joins)
+const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined
 uint8_t prevBootStage = BOOT_STAGE_CLEAR;
 bool bootStageCleared = false;        // breadcrumb cleared after the first healthy seconds
 bool dstAutoActive = false;           // DST_AUTO: whether summer time is in effect now (derived from UTC, not stored)
@@ -469,16 +469,24 @@ time_t localTime;   // what the panel shows: the clock's UTC plus zone and dayli
 // sync minute, ask for the daily sync - so the pixel turned red every day
 // without anything having failed. The state changes only through
 // setSyncState().
+//
+// Nothing waits for the WiFi: setup() only starts the join, and the clock is
+// on the panel and operable while the join and the sync run here.
 enum SyncState : uint8_t {
   SYNC_IDLE,        // synced, radio off, waiting for the next sync time
   SYNC_WAKING,      // radio on one minute early, so it has joined by the sync time
-  SYNC_FETCHING,    // a sync is due: ask for the time on this pass
+  SYNC_JOINING,     // a sync is due and the station is not connected: re-join every JOIN_RETRY_MS
+  SYNC_FETCHING,    // a sync is due and the station is connected: ask for the time on this pass
   SYNC_RETRY_WAIT,  // the last ask came back empty: wait NTP_RETRY_MS, then ask again
 };
-SyncState     syncState    = SYNC_FETCHING;   // the first sync is due at start-up
+SyncState     syncState    = SYNC_JOINING;    // the first sync is due at start-up
 unsigned long syncDueSince = 0;               // millis() when the pending sync became due
 unsigned long syncLastAsk  = 0;               // millis() of the last ask, for the retry pace
-const unsigned long NTP_RETRY_MS = 3000;      // between asks while a sync is due
+unsigned long joinAskedAt  = 0;               // millis() the join was last started, for the re-join pace
+unsigned long joinPolledAt = 0;               // millis() the station was last polled (an SPI round trip on the M4)
+const unsigned long NTP_RETRY_MS  = 3000;     // between asks while a sync is due
+const unsigned long JOIN_RETRY_MS = 10000;    // between joins while the station does not connect
+const unsigned long JOIN_POLL_MS  = 500;      // between looks at whether it has
 // A due sync that has not succeeded for this long is an error, shown on the
 // status pixel. The hour covers the retries, so a sync in progress never shows.
 const unsigned long SYNC_LATE_MS = 60UL * 60UL * 1000UL;
@@ -767,34 +775,19 @@ void setup(void) {
     handleInput(EV_UP_AT_BOOT, 1);
   }
 
-  // Initialize Network...... (skipped while the config AP is running)
+  // Start joining the home WiFi, without waiting for it: the clock comes up at
+  // once and the join and the first sync run in the loop (SYNC_JOINING). The
+  // config AP, if it was opened above, has the radio until it closes.
   if (!apActive) {
     netRadioInit();
     netPrintRadioInfo();
-
-    // attempt to connect to WiFi network: Connect to WPA/WPA2 network.
-    boardBootStageWrite(BOOT_STAGE_WIFI);
-    bootStatus("WLAN?");
-    Serial.print("Attempting to connect to SSID: ");
-    Serial.println(ssid);
-
-    netStaBegin(ssid, pass);
-    uint8_t waited = 0;
-    while (!netStaConnected()) {
-      delay(500);
-      if (++waited >= 14) { waited = 0; netStaBegin(ssid, pass); } // re-issue the join every 7 s
-    }
-    boardBootStageWrite(BOOT_STAGE_RUN);
-    bootStatus("WLAN!");
-    Serial.println("Connected to WiFi");
-    printWifiStatus();
-    delay(1000);
-  } // end if(!apActive)
+    boardBootStageWrite(BOOT_STAGE_WIFI);   // the radio's first transmit burst comes now
+    syncJoin();
+  }
   // The boot screens are done; the config AP, if it was opened above, keeps its own.
   if (screen == SCREEN_BOOT) { setScreen(SCREEN_FACE); }
-  // Set last, from the real clock - millisNow can be from before the WiFi join,
-  // ten seconds ago. Knocks are ignored for a moment from here on: that is the
-  // handling that comes with plugging the clock in.
+  // Set last, from the real clock. Knocks are ignored for a moment from here
+  // on: that is the handling that comes with plugging the clock in.
   setupDoneAt = millis();
 }
 
@@ -1650,10 +1643,8 @@ void stepClockAnim(void) {
   bool moveNow = (++framesInStep >= framesPerStep());
   if (moveNow) { framesInStep = 0; }
 
-  if (secondTrigger) {
-    sprintf(timeStr, "%02d%02d%02d", clockHour(localTime), clockMinute(localTime), clockSecond(localTime));
-    sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
-  }
+  if (secondTrigger) { classicDigits(); }
+  bool timeKnown = clockIsSet();   // dashes do not fly in
 
   // Concept: Iterate through the digits of the time display. If the animTrigger[i] is true, then create an location offset for the digit according to the fly-in direction that is configured for that digit.
   for (uint8_t i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
@@ -1664,7 +1655,7 @@ void stepClockAnim(void) {
       timeYPos[i]=animYTarget[i];
       animShow[i] = false;
     }
-    if(animTrigger[i] == true) {
+    if(animTrigger[i] == true && timeKnown) {
       animShow[i] = true;
       // Fly-in start offset = the off-screen edge the digit comes from. The
       // vertical offset shrinks in landscape (short edge is 32 px) so the
@@ -1718,8 +1709,7 @@ void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
 
 // Whether a due NTP sync has failed for longer than SYNC_LATE_MS.
 bool syncOverdue() {
-  bool due = (syncState == SYNC_FETCHING || syncState == SYNC_RETRY_WAIT);
-  return due && (millisNow - syncDueSince > SYNC_LATE_MS);
+  return syncStateDue(syncState) && (millisNow - syncDueSince > SYNC_LATE_MS);
 }
 
 // NTP status pixel: off in normal operation, red only on an error - a due sync
@@ -2100,6 +2090,7 @@ void tetrisLayout() {
 // Hand the current HH:MM to the four digits. Only a digit whose value really
 // changed is rebuilt - the others keep the blocks they have already dropped.
 void tetrisPushTime() {
+  if (!clockIsSet()) { return; }   // nothing to build yet; drawTetrisFace() shows dashes
   uint8_t h = clockHour(localTime), m = clockMinute(localTime);
   uint8_t d[4] = { (uint8_t)(h / 10), (uint8_t)(h % 10),
                    (uint8_t)(m / 10), (uint8_t)(m % 10) };
@@ -2214,6 +2205,16 @@ void tetrisDrawColon() {
     int y = tetrisYHour + 22;                 // y 30..33, in the 8 px gap between rows
     matrix.fillRect(tetrisXHour + 5,  y, TETRIS_DOT, TETRIS_DOT, c);  // x 8..11
     matrix.fillRect(tetrisXHour + 17, y, TETRIS_DOT, TETRIS_DOT, c);  // x 20..23
+  }
+}
+
+// Stand-ins for the four digits while the clock has no time yet: a bar of
+// blocks across the middle of each digit box, in the colon's colour.
+void tetrisDrawDashes() {
+  uint16_t c = scaledColorVisible(255, 255, 255);
+  for (uint8_t i = 0; i < 4; i++) {
+    matrix.fillRect(tetrisOriginX(i) + TETRIS_CELL, tetrisOriginY(i) + 4 * TETRIS_CELL,
+                    4 * TETRIS_CELL, 2 * TETRIS_CELL, c);
   }
 }
 
@@ -2447,6 +2448,7 @@ void drawTetrisFace() {
   for (uint8_t i = 0; i < 4; i++) {
     if (shakeBusy[i]) { shakeDrawDigit(i); } else { tetrisDrawDigit(i, tetrisOriginX(i), tetrisOriginY(i)); }
   }
+  if (!clockIsSet()) { tetrisDrawDashes(); }
   // The colon keeps its own beat and is never touched by the animations. It is
   // the one thing on this face that shows real time passing, so it has to stay
   // on the second, whatever the digits are doing. Hiding it while everything was
@@ -2664,9 +2666,21 @@ uint8_t activeWatchface() {
 // places, so no fly-in from before resumes. The Tetris face catches up by
 // itself, digit by digit.
 void faceCatchUp() {
+  classicDigits();
+  applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
+}
+
+// The six characters of the classic face, for now and for one second ahead
+// (what flies in). Dashes while the clock has no time yet: it shows that it
+// has none rather than counting up from midnight.
+void classicDigits() {
+  if (!clockIsSet()) {
+    strcpy(timeStr, "------");
+    strcpy(animStr, "------");
+    return;
+  }
   sprintf(timeStr, "%02d%02d%02d", clockHour(localTime),   clockMinute(localTime),   clockSecond(localTime));
   sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
-  applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
 }
 
 // Live (non-AP) mode: advance and draw the selected watchface every loop
@@ -2743,10 +2757,21 @@ void timekeeper(void) {
 // syncOverdue() measures from when the sync was first wanted.
 void setSyncState(SyncState next) {
   if (next == syncState) { return; }
-  bool wasDue = (syncState == SYNC_FETCHING || syncState == SYNC_RETRY_WAIT);
-  if (next == SYNC_FETCHING && !wasDue) { syncDueSince = millisNow; }
+  if (syncStateDue(next) && !syncStateDue(syncState)) { syncDueSince = millisNow; }
   DEBUG_LOG("sync %u -> %u\n", (unsigned)syncState, (unsigned)next);
   syncState = next;
+}
+
+// Whether a sync is due in this state: wanted, and not done yet.
+bool syncStateDue(SyncState s) {
+  return s == SYNC_JOINING || s == SYNC_FETCHING || s == SYNC_RETRY_WAIT;
+}
+
+// Start joining the home WiFi, or start again. Never waits for it.
+void syncJoin() {
+  Serial.print("Joining WiFi "); Serial.println(ssid);
+  netStaBegin(ssid, pass);   // also arms a fresh NTP sync
+  joinAskedAt = millisNow;
 }
 
 // Ask NTP for the time once (board_hal.h: the NINA's own SNTP client on the M4,
@@ -2787,34 +2812,48 @@ void syncSchedule() {
   uint16_t nowMinute  = hourNow * 60 + minuteNow;
   uint16_t syncMinute = syncTimeHour * 60 + syncTimeMinute;
   if (syncState == SYNC_IDLE && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay) {
-    netStaBegin(ssid, pass); // join (and arm a fresh NTP sync)
-    Serial.println("Enabled Wifi");
+    syncJoin();
     setSyncState(SYNC_WAKING);
   }
   if ((syncState == SYNC_IDLE || syncState == SYNC_WAKING) && nowMinute == syncMinute) {
     // Still idle means the early wake-up was missed, e.g. because the config AP
     // was up a minute ago; join now instead of failing until tomorrow.
-    if (syncState == SYNC_IDLE) { netStaBegin(ssid, pass); }
-    printWifiStatus();
+    if (syncState == SYNC_IDLE) { syncJoin(); }
     Serial.println("Renew NTP sync");
-    setSyncState(SYNC_FETCHING);
+    setSyncState(SYNC_JOINING);
   }
 }
 
 // Keeps the clock (UTC) in step with NTP and the radio on only while a sync
-// needs it.
+// needs it. Runs on every pass and never waits: the clock stays on the panel
+// and operable while the station joins.
 void timeSync_WifiLib() {
   switch (syncState) {
+    case SYNC_JOINING:
+      // Looked at twice a second, not on every pass: on the M4 every look is
+      // an SPI round trip to the radio.
+      if (millisNow - joinPolledAt < JOIN_POLL_MS) { break; }
+      joinPolledAt = millisNow;
+      if (netStaConnected()) {
+        Serial.println("Connected to WiFi");
+        printWifiStatus();
+        if (!bootStageCleared) { boardBootStageWrite(BOOT_STAGE_RUN); }
+        setSyncState(SYNC_FETCHING);
+      } else if (millisNow - joinAskedAt >= JOIN_RETRY_MS) {
+        syncJoin();   // not joined after all this time: start the join again
+      }
+      break;
     case SYNC_FETCHING:
       ntpAsk();
       break;
     case SYNC_RETRY_WAIT:
       // Retried on its own pace, not on the minute change: gating the retry
       // behind minuteTrigger once left the clock at 1970 for up to a minute
-      // after boot although the WiFi was connected.
+      // after boot although the WiFi was connected. A station that has dropped
+      // out has to join again first.
       if (millisNow - syncLastAsk > NTP_RETRY_MS) {
         Serial.println("NTP Retry");
-        setSyncState(SYNC_FETCHING);
+        setSyncState(netStaConnected() ? SYNC_FETCHING : SYNC_JOINING);
       }
       break;
     default:
@@ -3499,7 +3538,10 @@ void stopAPMode() {
     Serial.println("Disabled Wifi");
   } else {
     // A sync is pending or about to start (e.g. the AP was opened from the boot
-    // button): the rejoined station lets it go ahead.
+    // button): netApEnd() has started the join, and a due sync waits for it -
+    // the AP had the radio, so whatever the station had before is gone.
+    joinAskedAt = millisNow;
+    if (syncStateDue(syncState)) { setSyncState(SYNC_JOINING); }
     Serial.println("Enabled Wifi for pending NTP sync");
   }
   setScreen(SCREEN_FACE); // back to the normal clock, in the current orientation
