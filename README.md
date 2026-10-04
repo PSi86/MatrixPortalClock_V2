@@ -18,7 +18,7 @@ reset instruction - so the sketch itself is board independent.
 | WiFi | on-chip | WiFiNINA co-processor over SPI |
 | NTP | lwIP SNTP client | the NINA firmware's own SNTP |
 | Settings stored in | NVS partition (0x9000) | flash block at 0x7E000 |
-| User button | GPIO6 (`BUTTON_UP`) | D2 (`UP`) |
+| Buttons | UP GPIO6 (`BUTTON_UP`), DOWN GPIO7 (`BUTTON_DOWN`) | UP D2, DOWN D3 |
 | Upload | esptool over native USB | UF2 bootloader (double reset) |
 
 The S3 was added because the M4's WiFiNINA link kept causing WiFi trouble; on the S3
@@ -46,31 +46,14 @@ button pin cannot be carried over.
   corner means a due NTP sync has not succeeded for an hour
 - **Automatic summer/winter time** for every timezone in the menu (rules from the
   IANA tz database), or a fixed summer or winter time
-- **User button** (UP button; S3: GPIO6, M4: D2):
-  - **1x short** -> cycle the daylight-saving mode: automatic -> summer time ->
-    winter time -> automatic; the clock shifts by 1 h where needed and shows a 3 s
-    `auto` / `summer` / `winter` banner (orange while summer time is in effect,
-    ice-blue otherwise)
-  - **2x short** -> toggle auto-brightness (light sensor) on/off
-  - **3x short** -> open the WiFi access point for settings (3x again closes it)
-  - **hold long** -> adjust brightness (cyclic, perceptually linear); releasing
-    saves it. With auto-brightness on, this trims the brightness *relative* to the
-    measured ambient level (neutral in the middle) instead of setting an absolute level
-  - **Feedback:** the red board LED (D13) lights while a button is held. Once a
-    click sequence has triggered its function, it blinks once per click (1x, 2x or
-    3x), starting after a short dark pause (~0.65 s after the last release). A sequence that triggers nothing (1x/2x while the config AP is open) gets
-    no blink. A 2x2 square in the bottom-right matrix corner mirrors the LED
-    (compile-time switch `BUTTON_FEEDBACK_ON_MATRIX`)
-  - The **DOWN button** (S3: GPIO7, M4: D3) is read as well and lights the
-    feedback, but has no function yet
-  - Under the hood every input becomes a named event first, and a profile table
-    (`PROFILE_CLASSIC_CLICKS`) says what each event does on the current screen:
-    the knock and the boot-time hold go through it too
+- **On-screen menu** with the UP and DOWN buttons: brightness, auto brightness,
+  timezone, daylight saving and the config hotspot, set on the clock itself
+  without WiFi (see [Menu and buttons](#menu-and-buttons))
 - **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time
 - All settings are stored outside the program image, so they survive a restart
   **and a firmware re-upload** (S3: the NVS partition, which a normal upload does
   not touch - `pio run -t erase` does; M4: a fixed flash block at 0x7E000)
-- Recovery: hold the user button during boot -> the AP opens even without the home WiFi
+- Recovery: hold UP during boot -> the AP opens even without the home WiFi
 
 ## Setup
 
@@ -132,10 +115,69 @@ button pin cannot be carried over.
    build_flags = -D NTP_SERVER_1='"192.168.2.1"'
    ```
 
+## Menu and buttons
+
+Two buttons operate the clock: **UP** (S3: GPIO6, M4: D2) and **DOWN** (S3:
+GPIO7, M4: D3). They keep their printed meaning in every orientation.
+
+| On the clock face | |
+|---|---|
+| UP or DOWN short, DOWN held | open the menu |
+| UP held during boot | open the config hotspot, even without the home WiFi |
+
+| In the menu and its editors | |
+|---|---|
+| UP / DOWN short | previous / next item, or change the value |
+| DOWN held (0.6 s) | open the item; in an editor: save |
+| UP held (0.6 s) | back, without saving; held on, one more level every 0.6 s, out to the face |
+
+The menu holds five items, shown with their current value: **Bright**, **Auto**
+(only with a light sensor), **Zone**, **DST** and **Hotspot**.
+
+- **Bright** shows the brightness large with a scale under it and changes the
+  panel live. Manual: 16 steps on a perceptual scale. With auto brightness the
+  value is a trim around the light sensor, -8 to +8 (half to twice the sensor's
+  brightness), and the editor says `auto`.
+- **Auto** switches auto brightness on and off straight in the list.
+- **Zone** picks one of the 26 timezones of the config page. Each row shows its
+  offset, the time it would show now and its place names, which scroll when they
+  are too long. UP goes west, DOWN east.
+- **DST** chooses Auto, Summer or Winter, with the time each choice would show.
+- **Hotspot** opens the config hotspot; holding UP closes it again.
+
+From the fourth of several quick presses on (less than 0.4 s apart), each press
+moves five steps, so the 16 brightness steps and the 26 zones are quick to cross.
+A value is written to flash only when it is saved and differs from the stored
+one; leaving an editor any other way puts the stored value back. The menu closes
+by itself after 20 s without input.
+
+Saving a new zone or daylight-saving mode shows a 3 s **banner** with the
+resulting time and its offset from UTC, orange while summer time is in effect
+and ice-blue otherwise. A button pressed while a banner is up only closes it.
+
+**Feedback:** the red board LED (D13) and a 2x2 square in the bottom-right
+matrix corner light while a button is held (the square is the compile-time
+switch `BUTTON_FEEDBACK_ON_MATRIX`).
+
+**Classic clicks.** Building with `-D INPUT_PROFILE_CLASSIC=1` brings back the
+button codes the clock had before the menu: on the face UP 1x cycles daylight
+saving with a banner, 2x toggles auto brightness with a banner, 3x opens or
+closes the hotspot, and holding UP fades the brightness, saved on release. Each
+click sequence is confirmed by one blink of the LED per click. Holding DOWN
+opens the menu, which then works as above. Until the config page can choose the
+profile, the build does.
+
+Under the hood every input becomes a named event (short, 2x, 3x, hold, hold
+repeat, boot, knock), and a profile table in `src/input_map.h` says what each
+event does on the current screen. The build checks every profile: no event may
+mean two things on one screen, the menu must be possible to open, move through
+and leave, and a boot event must open a hotspot that can be closed again on the
+clock. A profile that breaks one of these does not compile.
+
 ## AP configuration
 
-Press the user button 3x short -> the board opens the access point (another
-3x short closes it again and returns to the normal clock):
+Open the menu, select **Hotspot** and hold DOWN -> the board opens the access
+point; holding UP closes it again and returns to the normal clock:
 
 | | |
 |---|---|
@@ -185,8 +227,9 @@ gravity and rotates the display in 90° increments so the clock is always uprigh
 The rotation switches with a short debounce and ignores near-45° tilts to avoid
 flicker. If the accelerometer is not found, the clock stays in portrait.
 
-Every screen aligns the same way: the **boot status text**, the **DST banner**,
-and the **AP clock preview** all follow the accelerometer. The **AP info screen**
+Every screen aligns the same way: the **boot status text**, the **menu**, the
+**banners** and the **AP clock preview** all follow the accelerometer; turning
+the clock with the menu open keeps the focus and an open edit. The **AP info screen**
 (SSID/PW/IP) is always landscape because the text is too wide for portrait, but
 it auto-flips (rotation 0/2) so it is never upside down.
 
@@ -220,16 +263,16 @@ brightness through a configurable linear curve, set on the AP config page:
 | Min / Max brightness | brightness endpoints (0–255) |
 
 Between the two lux values the brightness is interpolated linearly and clamped.
-Toggle the feature with the **Auto brightness** checkbox or a **double click** of
-the user button. When it is off (or the sensor is missing) the manual brightness
-slider / long-press fade apply as before. The serial console logs the measured
+Toggle the feature with the **Auto brightness** checkbox or the menu item
+**Auto**. When it is off (or the sensor is missing) the manual brightness
+(slider, menu item **Bright**) applies as before. The serial console logs the measured
 lux and resulting brightness.
 
 In auto mode the **brightness value (0–255) becomes a relative trim** around the
 sensor-derived brightness rather than an absolute level: **128 = neutral** (use
 the sensor value as-is), lower = darker, higher = brighter (up to ~2×, clamped).
-So the long-press fade (or the slider) lets you quickly nudge the clock brighter
-or darker without touching the lux mapping. The configured **Min brightness is a
+So the menu item **Bright** (or the slider) lets you quickly nudge the clock
+brighter or darker without touching the lux mapping. The configured **Min brightness is a
 hard floor** that the manual trim can never undercut. The detailed lux range /
 mapping fields stay available for finer control.
 
@@ -245,7 +288,7 @@ on the last Sunday of March and of October). Deciding on UTC means the hour that
 repeats in autumn does not switch back again.
 
 The timezone setting stores only the base UTC offset, so every offset appears
-once in the menu. Where zones with the same offset follow different rules, the
+once in the list. Where zones with the same offset follow different rules, the
 menu names the one it uses (e.g. "Athens, Helsinki", not Cairo).
 
 Debug builds run a self-test 10 s after boot: 38 checks, one second before and at
@@ -381,13 +424,14 @@ deliberate interaction produced 1900 or more and a firm knock 12700. That is
 in high-resolution mode — which the threshold register takes in steps of 16 mg,
 so level 10 is 6 steps and level 1 is 24.
 
-Nothing is triggered while another screen owns the panel, in the config AP, for
+Nothing is triggered while another screen owns the panel (the menu, an editor,
+a banner), in the config AP, for
 the first three seconds after start-up, for 1.2 s after a rotation or after an
 effect has run, while an animation is already running, **while a button is
 held, and for 3 s after a button was last pressed or let go** — the switches sit
 next to the sensor, so a button press is a knock as far as it is concerned, and
-so is everything around it: the release, steadying the clock, letting go after a
-brightness fade. A knock the sensor latched while the config AP was up is
+so is everything around it: the release, steadying the clock, letting go of a
+held button. A knock the sensor latched while the config AP was up is
 discarded when the face comes back. The reasons the sensor fires without a real
 knock sit together in `knockIsReal()`, the reasons the face cannot be knocked
 apart right now in `knockEffectReady()`.
