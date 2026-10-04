@@ -377,9 +377,12 @@ in high-resolution mode — which the threshold register takes in steps of 16 mg
 so level 10 is 6 steps and level 1 is 24.
 
 Nothing is triggered while another screen owns the panel, in the config AP, for
-the first three seconds after start-up, for 1.2 s after a rotation, while an
-animation is already running, or **while the button is held** — the switch sits
-next to the sensor, so a button press is a knock as far as it is concerned.
+the first three seconds after start-up, for 1.2 s after a rotation or after an
+effect has run, while an animation is already running, or **while the button is
+held** — the switch sits next to the sensor, so a button press is a knock as far
+as it is concerned. A knock the sensor latched while the config AP was up is
+discarded when the face comes back. All of these reasons sit together in
+`knockAccepted()`.
 
 With **Also use it when the time changes** ticked, the same effect replaces the
 plain swap when a digit changes: at a minute rollover only the digits that

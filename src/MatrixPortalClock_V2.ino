@@ -185,13 +185,14 @@ unsigned long bannerUntil = 0;   // SCREEN_BANNER: back to the face at this mill
 // flips. The screens that only repaint on a change (the Tetris face, the hotspot
 // info) repaint when it is set; every full repaint clears it.
 bool          panelDirty = true;
-// Knocking the clock is ignored until this millis(): while it is starting up,
-// and for a moment after a rotation, where the movement would otherwise set off
-// the very animation the rotation already redraws around. Declared here rather
-// than with the rest of the shake code because applyOrientation() sets it and is
-// compiled on both boards.
-const unsigned long SHAKE_SETTLE_MS = 1200;
-unsigned long shakeBlockUntil = 3000;   // and nothing counts for the first 3 s
+// Knock gates: one reason and one timestamp each, read only by knockAccepted().
+// Declared here rather than with the rest of the shake code because setup() and
+// the orientation code set them, and those are compiled on both boards.
+const unsigned long KNOCK_START_QUIET_MS = 3000;  // after setup(): plugging the clock in
+const unsigned long SHAKE_SETTLE_MS      = 1200;  // after a turn, and after an effect
+unsigned long setupDoneAt  = 0;   // millis() at the end of setup()
+unsigned long rotatedAt    = 0;   // millis() when the device rotation last changed
+unsigned long shakeEndedAt = 0;   // millis() when the last effect had run its course
 // Boot breadcrumb stages, written to flash while starting (see board_hal.h).
 const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
 const uint8_t BOOT_STAGE_START = 1;   // setup() entered
@@ -641,11 +642,10 @@ void setup(void) {
   } // end if(!apActive)
   // The boot screens are done; the config AP, if it was opened above, keeps its own.
   if (screen == SCREEN_BOOT) { setScreen(SCREEN_FACE); }
-  // Set last, from the real clock: applyOrientation() ran several times during
-  // the boot screens and left this behind with a millisNow from before the WiFi
-  // join, which can be ten seconds ago. Ignore the handling that comes with
-  // plugging the clock in.
-  shakeBlockUntil = millis() + 3000;
+  // Set last, from the real clock - millisNow can be from before the WiFi join,
+  // ten seconds ago. Knocks are ignored for a moment from here on: that is the
+  // handling that comes with plugging the clock in.
+  setupDoneAt = millis();
 }
 
 // MAIN
@@ -700,6 +700,10 @@ void setScreen(Screen next) {
   // In: the info screen is static and drawn once, at once - before the slow radio
   // bring-up in startAPMode() freezes the loop.
   if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
+#if WATCHFACE_TETRIS
+  // In: a knock latched while another screen was up is old news on the face.
+  if (next == SCREEN_FACE) { shakeDiscardLatched(); }
+#endif
 }
 
 // Leave the AP-info screen and show the live clock (called once a client appears).
@@ -764,7 +768,6 @@ uint8_t swapDir(uint8_t d) {
 // in-flight animation never streaks across the screen during a rotation.
 void applyOrientation(uint8_t rot) {
   setScreenRotation(rot);
-  shakeBlockUntil = millisNow + SHAKE_SETTLE_MS;   // turning is not a knock
 
   for (uint8_t i = 0; i < 6; i++) {
     if (screenIsLandscape()) {
@@ -844,6 +847,7 @@ void updateOrientation() {
   if (wanted != deviceRotation && orientStable >= ORIENT_DEBOUNCE) {
     Serial.print("Orientation -> rotation "); Serial.println(wanted);
     deviceRotation = wanted;
+    rotatedAt = millisNow;   // turning is not a knock
     followDeviceRotation();
   }
 }
@@ -1751,7 +1755,7 @@ void drawTetrisFace() {
       // is already on its way down while the last of the old ones is still
       // leaving the panel, and the two read as one continuous movement.
       shakeHoldUntil[i] = millisNow + SHAKE_HOLD_MS;
-      shakeBlockUntil = millisNow + SHAKE_SETTLE_MS;  // do not retrigger on the same knock
+      shakeEndedAt = millisNow;   // do not retrigger on the same knock
     }
     if (shakeBusy[i]) { anyShake = true; }
   }
@@ -1907,16 +1911,32 @@ void updateShake() {
   // The interrupt is latched, so it has to be read away even when the knock is
   // going to be ignored - otherwise it would fire the moment the block lifts.
   (void)accelReadReg(LIS3DH_INT1_SRC);
+  if (knockAccepted()) { shakeStartAll(); }
+}
 
-  if (shakeThreshold() == 0)              { return; }  // switched off
-  if (screen != SCREEN_FACE)              { return; }  // boot, banner or config AP
-  if (settings.watchface != WATCHFACE_TETRIS_ID) { return; }  // the classic face has nothing to throw
-  if (shakeAnyBusy())                     { return; }
-  if (btnPrev)                            { return; }  // a button press IS a knock:
-                                                       // the switch sits 20 mm from the sensor
-  if (orientCandidate != deviceRotation)  { return; }  // a rotation is being debounced
-  if (millisNow < shakeBlockUntil)        { return; }  // booting, just turned, cooling down
-  shakeStartAll();
+// Whether a knock may take the digits apart now. Every reason to ignore one is
+// here, one per line, each reading one explicit state or one gate with one
+// reason - so a new reason is one more line, not a new flag somewhere else.
+bool knockAccepted() {
+  if (shakeThreshold() == 0)                           { return false; }  // switched off
+  if (screen != SCREEN_FACE)                           { return false; }  // boot, banner or config AP
+  if (settings.watchface != WATCHFACE_TETRIS_ID)       { return false; }  // the classic face has nothing to throw
+  if (shakeAnyBusy())                                  { return false; }  // already coming apart
+  if (btnPrev)                                         { return false; }  // a button press IS a knock: the
+                                                                          // switch sits 20 mm from the sensor
+  if (orientCandidate != deviceRotation)               { return false; }  // a rotation is being debounced
+  if (millisNow - setupDoneAt  < KNOCK_START_QUIET_MS) { return false; }  // just plugged in
+  if (millisNow - rotatedAt    < SHAKE_SETTLE_MS)      { return false; }  // turning is not a knock
+  if (millisNow - shakeEndedAt < SHAKE_SETTLE_MS)      { return false; }  // the last knock, still ringing
+  return true;
+}
+
+// Throw away a knock the sensor has latched. updateShake() does not run while
+// the config AP is up, so a button press there - a knock as far as the sensor
+// is concerned - would otherwise still be waiting when the face comes back, and
+// fire at once. (A side effect of the old rotation block used to swallow it.)
+void shakeDiscardLatched() {
+  if (accelOK) { (void)accelReadReg(LIS3DH_INT1_SRC); }
 }
 #endif  // WATCHFACE_TETRIS
 
