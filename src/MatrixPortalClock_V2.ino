@@ -21,6 +21,7 @@ Todo Concept:
 
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
+#include "input_map.h"      // input events, functions and the profiles mapping them
 
 #include <Adafruit_Protomatter.h>
 //#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font works
@@ -29,6 +30,7 @@ Todo Concept:
 #include <Fonts/FreeSansBold12pt7b.h> // Large friendly font
 #include <Fonts/FreeSansBold9pt7b.h> // Large friendly font
 #include <Fonts/Picopixel.h>
+#include <Fonts/TomThumb.h>    // 3x5, for the menu
 
 #if WATCHFACE_TETRIS
 #include "tetris_digits.h"     // generated block tables for the Tetris watchface
@@ -62,7 +64,7 @@ Adafruit_Protomatter matrix(
   true);       // HERE IS THE MAGIC FOR DOUBLE-BUFFERING!
 
 // Persistent settings ------------------------------------------------------
-// Configurable at runtime via the WLAN AP config page and the user button.
+// Configurable at runtime via the WLAN AP config page and the on-screen menu.
 #define SETTINGS_MAGIC 0xC10E   // bump this to force a reset to defaults after a struct change
 // Layout revision inside a valid blob. Fields added later go into spare bytes and
 // are migrated in loadSettings() by revision, so the magic can stay the same and
@@ -132,48 +134,20 @@ Settings settings;
 // See board_hal.h for why each board needs its own backend.
 SettingsStore<Settings> clockStore;
 
-// Input events and mapping -------------------------------------------------
-// Every input is first turned into a named event; a mapping table then says
-// what that event does on the current screen. A function moves to another
-// input by changing a table row, not the code that reads the input.
-
-enum InputEvent : uint8_t {
-  EV_NONE,
-  EV_UP_SHORT,   EV_UP_2X,   EV_UP_3X,   EV_UP_HOLD,
-  EV_DOWN_SHORT, EV_DOWN_2X, EV_DOWN_3X, EV_DOWN_HOLD,
-  EV_UP_AT_BOOT,       // UP held while the clock starts
-  EV_KNOCK,            // the accelerometer felt a knock
+// Input profile --------------------------------------------------------------
+// The tables and the rules they are checked against are in input_map.h. Until
+// the web UI can choose a profile, the build does: -DINPUT_PROFILE_CLASSIC=1
+// brings back the clicks the clock had before the menu.
+struct InputProfile {
+  const InputMapping *rows;
+  uint8_t             count;
+  bool                blinkClicks;   // confirm 1x/2x/3x with blinks of the board LED
 };
-
-// Where an event happens. The banner counts as the face: it sits on top of it.
-enum InputContext : uint8_t { CTX_BOOT, CTX_FACE, CTX_HOTSPOT };
-
-enum InputFunction : uint8_t {
-  FN_NONE,
-  FN_CYCLE_DST,        // daylight saving auto -> summer -> winter, with the banner
-  FN_TOGGLE_AUTO,      // auto brightness on/off
-  FN_TOGGLE_HOTSPOT,   // config AP on/off
-  FN_BRIGHT_FADE,      // cyclic brightness fade while the button stays held, saved on release
-  FN_KNOCK_EFFECT,     // the Tetris digits come apart
-};
-
-struct InputMapping { InputEvent event; InputContext context; InputFunction function; };
-
-// Profile "Classic clicks": the controls the clock has always had - UP 1x, 2x,
-// 3x and held, the boot-time hold and the knock. It stays the only profile
-// until the on-screen menu exists. An event without a row does nothing, which
-// is why 1x/2x and the hold do nothing while the config AP is up.
-const InputMapping PROFILE_CLASSIC_CLICKS[] = {
-  { EV_UP_SHORT,   CTX_FACE,    FN_CYCLE_DST      },
-  { EV_UP_2X,      CTX_FACE,    FN_TOGGLE_AUTO    },
-  { EV_UP_3X,      CTX_FACE,    FN_TOGGLE_HOTSPOT },
-  { EV_UP_3X,      CTX_HOTSPOT, FN_TOGGLE_HOTSPOT },
-  { EV_UP_HOLD,    CTX_FACE,    FN_BRIGHT_FADE    },
-  { EV_UP_AT_BOOT, CTX_BOOT,    FN_TOGGLE_HOTSPOT },
-  { EV_KNOCK,      CTX_FACE,    FN_KNOCK_EFFECT   },
-};
-const InputMapping *profileRows  = PROFILE_CLASSIC_CLICKS;
-const uint8_t       profileCount = sizeof(PROFILE_CLASSIC_CLICKS) / sizeof(PROFILE_CLASSIC_CLICKS[0]);
+#if INPUT_PROFILE_CLASSIC
+const InputProfile profile = { PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS), true };
+#else
+const InputProfile profile = { PROFILE_DEFAULT, PROFILE_ROWS(PROFILE_DEFAULT), false };
+#endif
 
 // Buttons ------------------------------------------------------------------
 // UP_BUTTON_PIN / DOWN_BUTTON_PIN come from board_hal.h (M4: D2/D3, S3:
@@ -181,8 +155,13 @@ const uint8_t       profileCount = sizeof(PROFILE_CLASSIC_CLICKS) / sizeof(PROFI
 // internal pull-up on both boards. Every button runs the same small state
 // machine, which only turns presses into events.
 const unsigned long BTN_DEBOUNCE_MS  = 25;   // ignore bounces shorter than this
-const unsigned long BTN_LONGPRESS_MS = 600;  // pressed this long -> the hold event
-const unsigned long BTN_MULTI_GAP_MS = 400;  // window to collect a click sequence
+const unsigned long BTN_LONGPRESS_MS = 600;  // pressed this long -> the hold event, then a repeat every 600 ms
+const unsigned long BTN_MULTI_GAP_MS = 400;  // window to collect a click sequence, and the gap of a burst
+// Tap burst: short presses less than BTN_MULTI_GAP_MS apart. From the fourth
+// press of a burst on, each moves five steps instead of one, which makes the
+// long ranges (16 brightness levels, 26 zones) quick to cross.
+const uint8_t BURST_FAST_FROM  = 4;
+const uint8_t BURST_FAST_STEPS = 5;
 
 // The last time anyone handled an input - a button going down or up. Whoever
 // operates the clock touches it, and the sensor feels that as knocks: the
@@ -197,29 +176,36 @@ enum ButtonPhase : uint8_t {
   BTN_PRESSED,     // down, not yet long enough for the hold event
   BTN_HELD,        // down past BTN_LONGPRESS_MS; the hold event has fired
   BTN_COUNTING,    // up after a click; another may follow within BTN_MULTI_GAP_MS
+  BTN_SPENT,       // down, but this press has done its job (it was held through
+                   // the start); nothing more until it is let go
 };
 
 struct Button {
   uint8_t       pin;
-  InputEvent    evShort, ev2x, ev3x, evHold;   // what this button reports
+  InputEvent    evShort, ev2x, ev3x, evHold, evRepeat;   // what this button reports
   ButtonPhase   phase;
   uint8_t       clicks;       // clicks in the open sequence
+  uint8_t       burst;        // short presses in the running tap burst
   unsigned long pressedAt;    // millis() the current press began
   unsigned long releasedAt;   // millis() of the last counted click
+  unsigned long heldAt;       // millis() of the last hold or repeat event
   InputFunction holding;      // what its hold event started, running until it is let go
 };
 
 Button buttons[] = {
-  { UP_BUTTON_PIN,   EV_UP_SHORT,   EV_UP_2X,   EV_UP_3X,   EV_UP_HOLD,   BTN_RELEASED, 0, 0, 0, FN_NONE },
-  { DOWN_BUTTON_PIN, EV_DOWN_SHORT, EV_DOWN_2X, EV_DOWN_3X, EV_DOWN_HOLD, BTN_RELEASED, 0, 0, 0, FN_NONE },
+  { UP_BUTTON_PIN,   EV_UP_SHORT,   EV_UP_2X,   EV_UP_3X,   EV_UP_HOLD,   EV_UP_HOLD_REPEAT,
+    BTN_RELEASED, 0, 0, 0, 0, 0, FN_NONE },
+  { DOWN_BUTTON_PIN, EV_DOWN_SHORT, EV_DOWN_2X, EV_DOWN_3X, EV_DOWN_HOLD, EV_DOWN_HOLD_REPEAT,
+    BTN_RELEASED, 0, 0, 0, 0, 0, FN_NONE },
 };
 
 // Button feedback ----------------------------------------------------------
 // The red board LED (FEEDBACK_LED_PIN) - and, if enabled, a small square in the
-// bottom-right corner of the matrix - is lit while a button is down. Once a
-// click sequence has triggered its function it blinks once per click, so 1x /
-// 2x / 3x can be told apart. A sequence that triggers nothing (no row in the
-// profile, e.g. 1x/2x while the config AP is up) gets no confirmation.
+// bottom-right corner of the matrix - is lit while a button is down. With the
+// Classic clicks profile it then blinks once per click after a click sequence
+// has triggered its function, so 1x / 2x / 3x can be told apart; a sequence
+// that triggers nothing gets no confirmation. Everywhere else the screen shows
+// what happened.
 #define BUTTON_FEEDBACK_ON_MATRIX 1          // 0 = board LED only
 // Dark pause before the first confirmation blink, on top of BTN_MULTI_GAP_MS
 // (the function itself still triggers after the gap). Separates the blinks
@@ -231,7 +217,7 @@ uint8_t       fbBlinkCount = 0;              // confirmation blinks of the runni
 unsigned long fbBlinkStart = 0;              // millis() when that sequence started
 bool          fbLit = false;                 // feedback state of this loop (LED and matrix)
 
-// Perceptual brightness fade (long press) ----------------------------------
+// Perceptual brightness fade (Classic clicks: UP held) ----------------------
 const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep
 const float FADE_GAMMA     = 2.2f;    // perceptual -> linear-light exponent
 float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the human eye)
@@ -239,22 +225,41 @@ int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
 
 // Screens ------------------------------------------------------------------
-// Exactly one screen owns the panel at a time, and it changes only through
-// setScreen(). Which screen is up used to be worked out from the AP flags, the
-// banner timer and whoever had drawn last; now it is this one value.
+// Exactly one screen owns the panel at a time. Screens can lie on top of each
+// other - the menu on the face, an editor on the menu, a banner on either - and
+// closing one uncovers the one beneath. The stack changes only through
+// setScreen(), openScreen() and closeScreen().
 enum Screen : uint8_t {
   SCREEN_BOOT,             // status lines while setup() runs
   SCREEN_FACE,             // the clock face, classic or Tetris
-  SCREEN_BANNER,           // a short text after a change - today the daylight-saving mode
+  SCREEN_MENU,             // the menu list
+  SCREEN_EDITOR,           // the editor of one menu item
+  SCREEN_BANNER,           // a short confirmation after a change, over the screen it confirms
   SCREEN_HOTSPOT_INFO,     // config AP up, no client yet: SSID, password and IP
   SCREEN_HOTSPOT_PREVIEW,  // config AP up and a client connected: the live clock
 };
-Screen        screen = SCREEN_BOOT;
-unsigned long bannerUntil = 0;   // SCREEN_BANNER: back to the face at this millis()
+Screen        screen = SCREEN_BOOT;    // the screen on top, the one on the panel
+const uint8_t SCREEN_DEPTH = 3;        // room for the screens beneath it
+Screen        screenUnder[SCREEN_DEPTH];
+uint8_t       screenUnderCount = 0;
+// Screens that close by themselves: after this long without input, or, for a
+// banner, after this long at all.
+const unsigned long MENU_IDLE_MS = 20000;   // menu and editors, back to the face
+const unsigned long BANNER_MS    = 3000;
+
+// Banner: what it says and in which colour comes from the function that opened
+// it. A time banner shows the time the clock shows now, read when it is drawn.
+enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME };
+BannerKind    bannerKind = BANNER_TEXT;
+char          bannerText[2][12] = { "", "" };   // one or two lines; an empty second one is not drawn
+uint8_t       bannerR = 255, bannerG = 255, bannerB = 255;
+unsigned long bannerAt = 0;      // millis() the banner came up
 // True while the panel may not show what the current screen would draw: after
-// every screen change, a watchface change and whenever the press indicator
-// flips. The screens that only repaint on a change (the Tetris face, the hotspot
-// info) repaint when it is set; every full repaint clears it.
+// every screen change, a watchface change, a rotation, a brightness change, an
+// input the screen shows, every new minute and whenever the press indicator
+// flips. The screens that only repaint on a change (the Tetris face, the menu,
+// the banner, the hotspot info) repaint when it is set; every full repaint
+// clears it.
 bool          panelDirty = true;
 // Knock gates: one reason and one timestamp each, read only by knockIsReal()
 // and knockEffectReady().
@@ -508,6 +513,59 @@ const TzOption TZONES[] = {
   {  39600, "(UTC+11:00) Solomon Is.",        nullptr},
   {  43200, "(UTC+12:00) Auckland",           "NZST-12NZDT,M9.5.0,M4.1.0/3"},
 };
+const uint8_t ZONE_COUNT = sizeof(TZONES) / sizeof(TZONES[0]);
+
+/* ======================================================================
+   On-screen menu: model
+   ====================================================================== */
+
+// One flat list. Each item names the kind of editor it uses; what the item
+// changes is decided where its kind needs it (editorOpen() and friends).
+enum MenuItem : uint8_t { ITEM_BRIGHT, ITEM_AUTO, ITEM_ZONE, ITEM_DST, ITEM_HOTSPOT, ITEM_COUNT };
+enum EditorKind : uint8_t {
+  KIND_NUMBER,   // a value on a scale: PREV / NEXT step it, ENTER saves, BACK reverts
+  KIND_TOGGLE,   // no editor: ENTER on the row flips it and saves
+  KIND_ZONE,     // the timezone picker
+  KIND_CHOICE,   // one of a few named options
+  KIND_ACTION,   // no editor: ENTER on the row does it
+};
+struct MenuEntry { const char *label; const char *longLabel; EditorKind kind; };
+// Short labels have at most 8 characters, what a 32 px wide portrait panel
+// holds in TomThumb. The long ones are for the larger wall-clock panels.
+const MenuEntry MENU_ITEMS[ITEM_COUNT] = {
+  { "Bright",  "Brightness",      KIND_NUMBER },
+  { "Auto",    "Auto brightness", KIND_TOGGLE },
+  { "Zone",    "Timezone",        KIND_ZONE   },
+  { "DST",     "Daylight saving", KIND_CHOICE },
+  { "Hotspot", "Config hotspot",  KIND_ACTION },
+};
+MenuItem menuFocus = ITEM_BRIGHT;
+
+// Options of the daylight-saving editor, in the order shown.
+const uint8_t     DST_OPTIONS[]     = { DST_AUTO, DST_SUMMER, DST_WINTER };
+const char *const DST_OPTION_NAMES[] = { "Auto", "Summer", "Winter" };
+const uint8_t     DST_OPTION_COUNT  = sizeof(DST_OPTIONS) / sizeof(DST_OPTIONS[0]);
+
+// The open edit. A value being edited lives in RAM; flash is written on ENTER
+// only, and only when the value differs from what flash holds. Leaving any
+// other way - BACK, HOME, the timeout - puts the stored value back.
+MenuItem      editItem       = ITEM_BRIGHT;
+uint8_t       editIndex      = 0;   // zone row or option on show
+uint8_t       editIndexSaved = 0;   // the one flash holds
+unsigned long editShownAt    = 0;   // millis() the value on show changed, where the marquee starts
+unsigned long editDrawnAt    = 0;   // millis() of the last editor frame, paces the marquee
+// settings.brightness as flash holds it, while the Bright editor changes it
+// live (the panel itself is the preview).
+uint8_t       brightSaved    = 0;
+
+// Brightness steps. Manual: 16 levels evenly spaced on the perceptual scale of
+// the brightness fade (FADE_GAMMA), from the lowest brightness at which the blue
+// digits still light (8: color565 keeps the top five bits of blue) to full.
+// Auto brightness: settings.brightness is a trim around the sensor value (128 =
+// as measured), stepped by a factor of 2^(1/8) from half to twice the sensor.
+const uint8_t BRIGHT_LEVELS    = 16;
+const float   BRIGHT_PHASE_MIN = 0.207f;   // perceptual position of brightness 8
+const int8_t  BRIGHT_TRIM_MAX  = 8;
 
 /* ======================================================================
    Daylight saving
@@ -685,9 +743,15 @@ void setup(void) {
   bootStatus("CLOCK");
 
   // Recovery / manual entry: UP held during boot opens the config AP even when
-  // the home WiFi is unavailable (the profile maps EV_UP_AT_BOOT to it).
+  // the home WiFi is unavailable (the profile maps EV_UP_AT_BOOT to it). A
+  // button held through the start has done its job with that: held on, it
+  // would otherwise count as a hold once the loop runs - and holding UP on
+  // the hotspot screen closes it again.
+  for (Button &b : buttons) {
+    if (digitalRead(b.pin) == LOW) { b.phase = BTN_SPENT; }
+  }
   if (digitalRead(UP_BUTTON_PIN) == LOW) {
-    handleInput(EV_UP_AT_BOOT);
+    handleInput(EV_UP_AT_BOOT, 1);
   }
 
   // Initialize Network...... (skipped while the config AP is running)
@@ -724,6 +788,7 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
+  if (minuteTrigger) { panelDirty = true; }   // whatever shows the time has to follow it
   updatePanelRate();
   // Ran fine for 15 s: clear the breadcrumb, so only a real early death leaves one.
   if (!bootStageCleared && millisNow > 15000) { bootStageCleared = true; boardBootStageWrite(BOOT_STAGE_CLEAR); }
@@ -749,34 +814,99 @@ void loop(void) {
   updateShake();        // a knock takes the Tetris digits apart and rebuilds them
 #endif
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
-  if (screen == SCREEN_BANNER && millisNow >= bannerUntil) { setScreen(SCREEN_FACE); }
+  updateScreenTimeouts();
   switch (screen) {
-    case SCREEN_BANNER: drawDstMessage(); break;
-    case SCREEN_FACE:   drawClock();      break;
+    case SCREEN_FACE:   drawClock(); break;
+    case SCREEN_MENU:   if (panelDirty) { drawMenu(); }   break;   // static: redrawn on a change only
+    case SCREEN_BANNER: if (panelDirty) { drawBanner(); } break;
+    case SCREEN_EDITOR: if (panelDirty || editorMoving()) { drawEditor(); } break;
     default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
   }
 }
 
-// The one way to change the screen. Whatever a screen needs on the way in or out
-// happens here, so a caller only says where to go.
-void setScreen(Screen next) {
-  if (next == screen) { return; }
+/* ======================================================================
+   Screens: the stack and the one way to change it
+   ====================================================================== */
+
+// Whether a screen shows the clock face.
+bool screenShowsFace(Screen s) {
+  return s == SCREEN_FACE || s == SCREEN_HOTSPOT_PREVIEW;
+}
+
+// The screen beneath the one on top; the face when there is none.
+Screen screenBeneath() {
+  return screenUnderCount ? screenUnder[screenUnderCount - 1] : SCREEN_FACE;
+}
+
+// The steps of a screen that goes away for good: closed, or cleared from under
+// the one on top. Covering a screen is not leaving it.
+void leaveScreen(Screen s) {
+  if (s == SCREEN_EDITOR) { editorRevert(); }   // what ENTER did not save goes back
+}
+
+// The steps of the screen that comes to the top, opened or uncovered again.
+void showScreen(Screen next) {
   Screen prev = screen;
   screen = next;
   panelDirty = true;
-  DEBUG_LOG("screen %u -> %u\n", (unsigned)prev, (unsigned)next);
-  // Out: the hotspot screens leave the panel in a rotation of their own (the info
+  DEBUG_LOG("screen %u -> %u (%u beneath)\n", (unsigned)prev, (unsigned)next, (unsigned)screenUnderCount);
+  // The hotspot screens leave the panel in a rotation of their own (the info
   // screen is always landscape), so whatever comes next starts again from how
   // the panel is actually held.
   bool fromHotspot = (prev == SCREEN_HOTSPOT_INFO || prev == SCREEN_HOTSPOT_PREVIEW);
   if (fromHotspot && next != SCREEN_HOTSPOT_INFO) { applyOrientation(deviceRotation); }
-  // In: the info screen is static and drawn once, at once - before the slow radio
+  // The info screen is static and drawn once, at once - before the slow radio
   // bring-up in startAPMode() freezes the loop.
   if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
+  // A face that was hidden is not stepped, so it catches up before it is drawn.
+  if (!screenShowsFace(prev) && screenShowsFace(next)) { faceCatchUp(); }
 #if WATCHFACE_TETRIS
-  // In: a knock latched while another screen was up is old news on the face.
+  // A knock latched while another screen was up is old news on the face.
   if (next == SCREEN_FACE) { shakeDiscardLatched(); }
 #endif
+}
+
+// A new screen on its own: everything open is closed (with its leaving steps),
+// and nothing lies beneath the new one.
+void setScreen(Screen next) {
+  if (next == screen && screenUnderCount == 0) { return; }
+  leaveScreen(screen);
+  while (screenUnderCount) { leaveScreen(screenUnder[--screenUnderCount]); }
+  showScreen(next);
+}
+
+// A screen on top of the current one, which comes back when it closes.
+void openScreen(Screen next) {
+  if (screenUnderCount == SCREEN_DEPTH) { setScreen(next); return; }   // deeper than any path today
+  screenUnder[screenUnderCount++] = screen;
+  showScreen(next);
+}
+
+// Close the screen on top and uncover the one beneath.
+void closeScreen() {
+  if (screenUnderCount == 0) { setScreen(SCREEN_FACE); return; }
+  leaveScreen(screen);
+  showScreen(screenUnder[--screenUnderCount]);
+}
+
+// Whether nobody has touched an input for this long.
+bool inputIdleFor(unsigned long ms) {
+  return !anyButtonDown() && millisNow - lastInputAt >= ms;
+}
+
+// The screens that close by themselves.
+void updateScreenTimeouts() {
+  switch (screen) {
+    case SCREEN_BANNER:
+      if (millisNow - bannerAt >= BANNER_MS) { closeScreen(); }
+      break;
+    case SCREEN_MENU:
+    case SCREEN_EDITOR:
+      if (inputIdleFor(MENU_IDLE_MS)) { Serial.println("Menu timed out"); setScreen(SCREEN_FACE); }
+      break;
+    default:
+      break;
+  }
 }
 
 // Leave the AP-info screen and show the live clock (called once a client appears).
@@ -862,6 +992,7 @@ void applyOrientation(uint8_t rot) {
 
 // The one place the panel's drawing rotation is set.
 void setScreenRotation(uint8_t rot) {
+  if (rot != screenRotation) { panelDirty = true; }   // the panel still shows the old rotation
   matrix.setRotation(rot);
   screenRotation = rot;
 }
@@ -980,37 +1111,112 @@ void updateBrightness() {
     }
   }
 
-  if (!luxOK || !settings.autoBright) { // manual mode (or no sensor)
+  uint8_t before = effectiveBrightness;
+  if (!brightnessIsTrim()) {            // manual mode (or no sensor)
     effectiveBrightness = settings.brightness;
     autoBrightInit = false;             // re-seed the ease when auto resumes
-    return;
+  } else {
+    // Relative trim around the sensor value: settings.brightness 128 = neutral,
+    // 0 = much darker, 255 = ~2x brighter. Min brightness is a hard floor.
+    float relTarget = (float)autoBrightTarget * (float)settings.brightness / 128.0f;
+    if (relTarget > 255.0f)              { relTarget = 255.0f; }
+    if (relTarget < settings.brightMin)  { relTarget = settings.brightMin; }
+
+    // Ease toward the trimmed target (frame-rate independent) for a smooth fade;
+    // seeded to the target on the first call to avoid a jump.
+    if (!autoBrightInit) { autoBrightCurrent = relTarget; autoBrightInit = true; autoFadeLastMs = millisNow; }
+    float dt = (float)(millisNow - autoFadeLastMs);
+    autoFadeLastMs = millisNow;
+    autoBrightCurrent += (relTarget - autoBrightCurrent) * (1.0f - expf(-dt / AUTOBRIGHT_TAU_MS));
+    effectiveBrightness = (uint8_t)lroundf(autoBrightCurrent);
   }
+  // Every colour on the panel is scaled with it, so the screens that only
+  // repaint on a change have to repaint.
+  if (effectiveBrightness != before) { panelDirty = true; }
+}
 
-  // Relative trim around the sensor value: settings.brightness 128 = neutral,
-  // 0 = much darker, 255 = ~2x brighter. Min brightness is a hard floor.
-  float relTarget = (float)autoBrightTarget * (float)settings.brightness / 128.0f;
-  if (relTarget > 255.0f)              { relTarget = 255.0f; }
-  if (relTarget < settings.brightMin)  { relTarget = settings.brightMin; }
+// Whether settings.brightness is a trim around the light sensor (auto
+// brightness on and a sensor found) rather than the brightness itself.
+bool brightnessIsTrim() {
+  return luxOK && settings.autoBright;
+}
 
-  // Ease toward the trimmed target (frame-rate independent) for a smooth fade;
-  // seeded to the target on the first call to avoid a jump.
-  if (!autoBrightInit) { autoBrightCurrent = relTarget; autoBrightInit = true; autoFadeLastMs = millisNow; }
-  float dt = (float)(millisNow - autoFadeLastMs);
-  autoFadeLastMs = millisNow;
-  autoBrightCurrent += (relTarget - autoBrightCurrent) * (1.0f - expf(-dt / AUTOBRIGHT_TAU_MS));
-  effectiveBrightness = (uint8_t)lroundf(autoBrightCurrent);
+// Manual brightness level 0..BRIGHT_LEVELS-1 nearest to a brightness.
+uint8_t brightnessLevel(uint8_t b) {
+  float phase = powf((float)b / 255.0f, 1.0f / FADE_GAMMA);
+  long level = lroundf((phase - BRIGHT_PHASE_MIN) / (1.0f - BRIGHT_PHASE_MIN) * (BRIGHT_LEVELS - 1));
+  return (uint8_t)constrain(level, 0L, (long)(BRIGHT_LEVELS - 1));
+}
+
+// The brightness of a manual level.
+uint8_t levelBrightness(uint8_t level) {
+  float phase = BRIGHT_PHASE_MIN + (1.0f - BRIGHT_PHASE_MIN) * level / (BRIGHT_LEVELS - 1);
+  return (uint8_t)lroundf(255.0f * powf(phase, FADE_GAMMA));
+}
+
+// Auto-brightness trim -BRIGHT_TRIM_MAX..BRIGHT_TRIM_MAX nearest to a brightness.
+int8_t brightnessTrim(uint8_t b) {
+  if (b == 0) { return -BRIGHT_TRIM_MAX; }
+  long trim = lroundf(BRIGHT_TRIM_MAX * log2f((float)b / 128.0f));
+  return (int8_t)constrain(trim, (long)-BRIGHT_TRIM_MAX, (long)BRIGHT_TRIM_MAX);
+}
+
+// The brightness of a trim: 128 times 2^(trim/8), at most 255.
+uint8_t trimBrightness(int8_t trim) {
+  long b = lroundf(128.0f * exp2f((float)trim / BRIGHT_TRIM_MAX));
+  return (uint8_t)constrain(b, 1L, 255L);
+}
+
+// Move the brightness by whole steps of its current meaning: levels in manual
+// mode, trim steps with auto brightness.
+void brightnessStep(int delta) {
+  if (brightnessIsTrim()) {
+    int trim = constrain(brightnessTrim(settings.brightness) + delta, -(int)BRIGHT_TRIM_MAX, (int)BRIGHT_TRIM_MAX);
+    settings.brightness = trimBrightness((int8_t)trim);
+  } else {
+    int level = constrain(brightnessLevel(settings.brightness) + delta, 0, (int)BRIGHT_LEVELS - 1);
+    settings.brightness = levelBrightness((uint8_t)level);
+  }
+  panelDirty = true;
+}
+
+// Keep the brightness the Bright editor has set: written to flash if it
+// differs from what flash holds.
+void brightnessKeep() {
+  if (settings.brightness == brightSaved) { return; }
+  brightSaved = settings.brightness;
+  saveSettings();
+  Serial.print("Brightness set to "); Serial.println(settings.brightness);
 }
 
 // Draw a short text centred in the current rotation's canvas. Used by the boot
-// status screens and the summer/winter banner so they align like the clock.
+// status screens and the banners so they align like the clock.
 void drawCenteredText(const char *msg, uint16_t color) {
+  drawCenteredLines(msg, nullptr, color);
+}
+
+// One or two lines of Picopixel, centred. A single line is centred on its own
+// bounds; two lines sit one 8 px line pitch apart around the middle.
+void drawCenteredLines(const char *first, const char *second, uint16_t color) {
   matrix.setFont(&Picopixel);
-  int16_t x1, y1; uint16_t w, h;
-  matrix.getTextBounds(msg, 0, 0, &x1, &y1, &w, &h);
+  matrix.setTextSize(1);
   matrix.fillScreen(0);
   matrix.setTextColor(color);
-  matrix.setCursor((matrix.width() - (int)w) / 2 - x1, (matrix.height() - (int)h) / 2 - y1);
-  matrix.print(msg);
+  int16_t x1, y1; uint16_t w, h;
+  if (second == nullptr) {
+    matrix.getTextBounds(first, 0, 0, &x1, &y1, &w, &h);
+    matrix.setCursor((matrix.width() - (int)w) / 2 - x1, (matrix.height() - (int)h) / 2 - y1);
+    matrix.print(first);
+  } else {
+    const char *lines[2] = { first, second };
+    int16_t baseline = matrix.height() / 2 - 2;   // capitals 5 px tall: rows mid-7 .. mid+6 in all
+    for (const char *line : lines) {
+      matrix.getTextBounds(line, 0, 0, &x1, &y1, &w, &h);
+      matrix.setCursor((matrix.width() - (int)w) / 2 - x1, baseline);
+      matrix.print(line);
+      baseline += 8;
+    }
+  }
   drawFeedbackIndicator();
   matrix.show();
   panelDirty = false;   // the whole panel shows this text now
@@ -1026,14 +1232,311 @@ void bootStatus(const char *msg) {
   drawCenteredText(msg, scaledColor(255, 255, 255));
 }
 
-// Brief banner shown for ~3 s after the daylight-saving mode changed: "auto",
-// "summer" or "winter", in orange while summer time is in effect and in ice-blue
-// otherwise, aligned to the accelerometer.
-void drawDstMessage() {
-  const char *mode = (settings.dst == DST_AUTO)   ? "auto"
-                   : (settings.dst == DST_SUMMER) ? "summer" : "winter";
-  if (dstInEffect()) { drawCenteredText(mode, scaledColor(255, 165, 0)); }
-  else               { drawCenteredText(mode, scaledColor(120, 200, 255)); }
+/* ======================================================================
+   Banners: a short confirmation over the screen it confirms
+   ====================================================================== */
+
+// Daylight-saving colours, used wherever the time or the mode is confirmed:
+// orange while summer time is in effect, ice-blue otherwise.
+void dstColour(uint8_t &r, uint8_t &g, uint8_t &b) {
+  if (dstInEffect()) { r = 255; g = 165; b = 0; }
+  else               { r = 120; g = 200; b = 255; }
+}
+
+// Put a banner up, or replace the one that is up, for BANNER_MS.
+void bannerOpen() {
+  bannerAt = millisNow;
+  if (screen == SCREEN_BANNER) { panelDirty = true; return; }
+  openScreen(SCREEN_BANNER);
+}
+
+// A banner with one or two lines of text (second = nullptr for one) in a
+// colour, all chosen by the function confirming its change.
+void showBanner(const char *first, const char *second, uint8_t r, uint8_t g, uint8_t b) {
+  const char *lines[2] = { first, second ? second : "" };
+  for (uint8_t i = 0; i < 2; i++) {
+    strncpy(bannerText[i], lines[i], sizeof(bannerText[i]) - 1);
+    bannerText[i][sizeof(bannerText[i]) - 1] = '\0';
+  }
+  bannerR = r; bannerG = g; bannerB = b;
+  bannerKind = BANNER_TEXT;
+  bannerOpen();
+}
+
+// A banner with the time the clock now shows and its offset from UTC, after a
+// change of zone or daylight saving.
+void showTimeBanner() {
+  bannerKind = BANNER_TIME;
+  bannerOpen();
+}
+
+void drawBanner() {
+  if (bannerKind == BANNER_TEXT) {
+    drawCenteredLines(bannerText[0], bannerText[1][0] ? bannerText[1] : nullptr,
+                      scaledColorVisible(bannerR, bannerG, bannerB));
+    return;
+  }
+  // Read now, not from localTime: that was computed before this loop's input
+  // changed the zone.
+  long offset = tzTotalOffset();
+  char hhmm[6], zone[10];
+  formatClockTime(hhmm, sizeof(hhmm), clockNow() + offset);
+  formatOffset(zone, sizeof(zone), offset);
+  uint8_t r, g, b;
+  dstColour(r, g, b);
+  drawCenteredLines(hhmm, zone, scaledColorVisible(r, g, b));
+}
+
+// "HH:MM" of a local time, or "--:--" while the clock has no time yet.
+void formatClockTime(char *buf, size_t size, time_t local) {
+  if (!clockIsSet()) { snprintf(buf, size, "--:--"); return; }
+  snprintf(buf, size, "%02d:%02d", clockHour(local), clockMinute(local));
+}
+
+// An offset from UTC as "UTC+1", "UTC-11" or "UTC+5:30".
+void formatOffset(char *buf, size_t size, long offset) {
+  char sign = (offset < 0) ? '-' : '+';
+  long magnitude = (offset < 0) ? -offset : offset;
+  unsigned hours = magnitude / 3600, minutes = (magnitude % 3600) / 60;
+  if (minutes) { snprintf(buf, size, "UTC%c%u:%02u", sign, hours, minutes); }
+  else         { snprintf(buf, size, "UTC%c%u", sign, hours); }
+}
+
+/* ======================================================================
+   On-screen menu: drawing (display class S, 64x32 and 32x64)
+
+   Menus redraw on input only (panelDirty), so they cost nothing while they
+   wait. Text: TomThumb (3x5) for titles, values and the portrait rows, the
+   built-in 5x7 font for the landscape rows. One accent colour marks the focus
+   and the focused value; secondary text is dimmed. Every colour keeps the
+   AP_INFO_MIN_BRIGHT floor, so the menu stays readable at night.
+   ====================================================================== */
+
+uint16_t uiInk()    { return scaledColorVisible(255, 255, 255); }
+uint16_t uiQuiet()  { return scaledColorVisible(110, 110, 110); }
+uint16_t uiAccent() { return scaledColorVisible(0, 170, 255); }
+
+// TomThumb text, placed by the top of its capitals (5 rows from `top`).
+void uiTiny(int16_t x, int16_t top, const char *s, uint16_t colour) {
+  matrix.setFont(&TomThumb);
+  matrix.setTextSize(1);
+  matrix.setTextColor(colour);
+  matrix.setCursor(x, top + 5);
+  matrix.print(s);
+}
+
+// Built-in 5x7 text, placed by its top row.
+void uiSmall(int16_t x, int16_t top, const char *s, uint16_t colour) {
+  matrix.setFont(nullptr);
+  matrix.setTextSize(1);
+  matrix.setTextColor(colour);
+  matrix.setCursor(x, top);
+  matrix.print(s);
+}
+
+// Pixel width of a text in a font and size, from its left edge to its right edge.
+int16_t uiTextWidth(const char *s, const GFXfont *font, uint8_t size) {
+  matrix.setFont(font);
+  matrix.setTextSize(size);
+  int16_t x1, y1; uint16_t w, h;
+  matrix.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  return (int16_t)w + x1;
+}
+
+// TomThumb text ending at column `right`.
+void uiTinyRight(int16_t right, int16_t top, const char *s, uint16_t colour) {
+  uiTiny(right + 1 - uiTextWidth(s, &TomThumb, 1), top, s, colour);
+}
+
+// A list with a title: the menu itself, and the options of a choice editor.
+// The focused row sits on an accent bar; `value` is shown in the title row
+// in landscape and at the foot in portrait.
+void drawList(const char *title, const char *const *labels, uint8_t count, uint8_t focus, const char *value) {
+  uiTiny(1, 1, title, uiQuiet());
+  if (screenIsLandscape()) {
+    // 64x32: the title row and three 8 px rows of 5x7 text, scrolled so the
+    // focus stays visible, with a scrollbar in the last column.
+    const uint8_t rows = 3;
+    uiTinyRight(61, 1, value, uiAccent());
+    uint8_t first = 0;
+    if (count > rows) { first = (focus == 0) ? 0 : (uint8_t)min((int)focus - 1, (int)count - rows); }
+    for (uint8_t r = 0; r < rows && first + r < count; r++) {
+      uint8_t i = first + r;
+      int16_t top = 8 + 8 * r;
+      if (i == focus) { matrix.fillRect(0, top, 63, 8, uiAccent()); }
+      uiSmall(1, top, labels[i], (i == focus) ? 0 : uiInk());
+    }
+    if (count > rows) {
+      int16_t trackH = 24;
+      int16_t thumbH = trackH * rows / count;
+      matrix.drawFastVLine(63, 8 + trackH * first / count, thumbH, uiQuiet());
+    }
+  } else {
+    // 32x64: all rows in TomThumb, 8 px apart, and the value at the foot.
+    for (uint8_t i = 0; i < count; i++) {
+      int16_t top = 8 + 8 * i;
+      if (i == focus) { matrix.fillRect(0, top, matrix.width(), 7, uiAccent()); }
+      uiTiny(1, top + 1, labels[i], (i == focus) ? 0 : uiInk());
+    }
+    uiTiny(1, 57, value, uiAccent());
+  }
+}
+
+// Whether a menu item is offered on this clock.
+bool menuItemShown(MenuItem item) {
+  if (item == ITEM_AUTO) { return luxOK; }   // nothing to switch without a light sensor
+  return true;
+}
+
+// The value a menu item shows in the list.
+void menuItemValue(MenuItem item, char *buf, size_t size) {
+  switch (item) {
+    case ITEM_BRIGHT:
+      if (brightnessIsTrim()) { snprintf(buf, size, "%+d", brightnessTrim(settings.brightness)); }
+      else { snprintf(buf, size, "%d%%", ((brightnessLevel(settings.brightness) + 1) * 100 + BRIGHT_LEVELS / 2) / BRIGHT_LEVELS); }
+      break;
+    case ITEM_AUTO:  snprintf(buf, size, "%s", settings.autoBright ? "On" : "Off"); break;
+    case ITEM_ZONE:  formatOffset(buf, size, settings.tzOffset); break;
+    case ITEM_DST:   snprintf(buf, size, "%s", DST_OPTION_NAMES[dstOptionIndex(settings.dst)]); break;
+    default:         buf[0] = '\0'; break;
+  }
+}
+
+void drawMenu() {
+  matrix.fillScreen(0);
+  const char *labels[ITEM_COUNT];
+  uint8_t count = 0, focus = 0;
+  for (uint8_t i = 0; i < ITEM_COUNT; i++) {
+    if (!menuItemShown((MenuItem)i)) { continue; }
+    if (i == menuFocus) { focus = count; }
+    labels[count++] = MENU_ITEMS[i].label;
+  }
+  char value[12];
+  menuItemValue(menuFocus, value, sizeof(value));
+  drawList("MENU", labels, count, focus, value);
+  drawFeedbackIndicator();
+  matrix.show();
+  panelDirty = false;
+}
+
+// The brightness scale, one pixel tall across the panel at row y. Manual: a
+// bar from the left as long as the level. Auto: a bar from the middle (the
+// sensor's own value) to the trim, left darker, right brighter.
+void drawBrightnessScale(int16_t y) {
+  int16_t w = matrix.width();
+  matrix.drawFastHLine(0, y, w, uiQuiet());
+  if (brightnessIsTrim()) {
+    int16_t mid = w / 2;
+    int16_t len = (int16_t)((long)brightnessTrim(settings.brightness) * mid / BRIGHT_TRIM_MAX);
+    if (len > 0) { matrix.drawFastHLine(mid, y, len, uiAccent()); }
+    if (len < 0) { matrix.drawFastHLine(mid + len, y, -len, uiAccent()); }
+    matrix.drawPixel(mid, y, uiInk());
+  } else {
+    int16_t len = (int16_t)((long)(brightnessLevel(settings.brightness) + 1) * w / BRIGHT_LEVELS);
+    matrix.drawFastHLine(0, y, len, uiAccent());
+  }
+}
+
+// Editor of a number (Bright): the value at twice the size, the scale under it,
+// and "auto" when the value is a trim around the light sensor.
+void drawBrightEditor() {
+  char value[8];
+  menuItemValue(ITEM_BRIGHT, value, sizeof(value));
+  bool land = screenIsLandscape();
+  uiTiny(1, 1, MENU_ITEMS[ITEM_BRIGHT].label, uiQuiet());
+  if (brightnessIsTrim()) {
+    if (land) { uiTinyRight(62, 1, "auto", uiQuiet()); } else { uiTiny(1, 57, "auto", uiQuiet()); }
+  }
+  int16_t valueTop = land ? 11 : 22;
+  matrix.setFont(&TomThumb);
+  matrix.setTextSize(2);
+  matrix.setTextColor(uiInk());
+  matrix.setCursor((matrix.width() - uiTextWidth(value, &TomThumb, 2)) / 2, valueTop + 10);
+  matrix.print(value);
+  matrix.setTextSize(1);
+  drawBrightnessScale(land ? 27 : 38);
+}
+
+// The time a zone row and daylight-saving mode would show now, as "HH:MM".
+void formatZoneTime(char *buf, size_t size, uint8_t zone, uint8_t dstMode) {
+  time_t utc = clockNow();
+  bool summer = (dstMode == DST_AUTO) ? dstActiveAt(TZONES[zone].rule, utc) : (dstMode == DST_SUMMER);
+  formatClockTime(buf, size, utc + TZONES[zone].off + (summer ? 3600 : 0));
+}
+
+// The place names of a zone row, without the "(UTC+01:00) " in front.
+const char *zoneCity(uint8_t zone) {
+  const char *s = strstr(TZONES[zone].label, ") ");
+  return s ? s + 2 : TZONES[zone].label;
+}
+
+// Marquee for a text wider than its box: it stands at the start, moves left a
+// pixel per step until its end is in view, stands again, and starts over.
+const unsigned long MARQUEE_STEP_MS  = 80;
+const unsigned long MARQUEE_PAUSE_MS = 1200;
+int16_t marqueeShift(int16_t textW, int16_t boxW, unsigned long since) {
+  if (textW <= boxW) { return 0; }
+  unsigned long travel = (unsigned long)(textW - boxW);
+  unsigned long t = (millisNow - since) % (2 * MARQUEE_PAUSE_MS + travel * MARQUEE_STEP_MS);
+  if (t < MARQUEE_PAUSE_MS) { return 0; }
+  t -= MARQUEE_PAUSE_MS;
+  return (int16_t)min(t / MARQUEE_STEP_MS, travel);
+}
+
+// Whether the zone row's place names are too wide for the panel.
+bool zoneCityScrolls() {
+  return uiTextWidth(zoneCity(editIndex), &TomThumb, 1) > matrix.width() - 2;
+}
+
+// Editor of the zone: the offset, the time this zone would show now, and its
+// place names, scrolled when they do not fit.
+void drawZoneEditor() {
+  char offset[10], hhmm[6];
+  formatOffset(offset, sizeof(offset), TZONES[editIndex].off);
+  formatZoneTime(hhmm, sizeof(hhmm), editIndex, settings.dst);
+  const char *city = zoneCity(editIndex);
+  int16_t shift = marqueeShift(uiTextWidth(city, &TomThumb, 1), matrix.width() - 2, editShownAt);
+  uiTiny(1, 1, MENU_ITEMS[ITEM_ZONE].label, uiQuiet());
+  if (screenIsLandscape()) {
+    uiTinyRight(62, 1, hhmm, uiAccent());
+    uiSmall(1, 10, offset, uiInk());
+    uiTiny(1 - shift, 22, city, uiInk());
+  } else {
+    // "UTC+5:30" is 48 px in 5x7, so the 32 px column gets the offset in
+    // TomThumb and the time in 5x7.
+    uiTiny(1, 10, offset, uiInk());
+    uiSmall(1, 19, hhmm, uiAccent());
+    uiTiny(1 - shift, 31, city, uiInk());
+  }
+}
+
+// Editor of a choice (DST): the options as a list, with the time the focused
+// one would show.
+void drawDstEditor() {
+  char hhmm[6];
+  formatZoneTime(hhmm, sizeof(hhmm), zoneIndex(settings.tzOffset), DST_OPTIONS[editIndex]);
+  drawList(MENU_ITEMS[ITEM_DST].label, DST_OPTION_NAMES, DST_OPTION_COUNT, editIndex, hhmm);
+}
+
+// Whether the editor has to be redrawn without an input: a scrolling name, at
+// its own pace.
+bool editorMoving() {
+  if (editItem != ITEM_ZONE || !zoneCityScrolls()) { return false; }
+  return millisNow - editDrawnAt >= MARQUEE_STEP_MS;
+}
+
+void drawEditor() {
+  matrix.fillScreen(0);
+  switch (editItem) {
+    case ITEM_BRIGHT: drawBrightEditor(); break;
+    case ITEM_ZONE:   drawZoneEditor();   break;
+    case ITEM_DST:    drawDstEditor();    break;
+    default:          break;
+  }
+  drawFeedbackIndicator();
+  matrix.show();
+  editDrawnAt = millisNow;
+  panelDirty = false;
 }
 
 // Measure the panel refresh rate once per second (Protomatter counts refreshes).
@@ -1269,7 +1772,6 @@ uint8_t       tetrisRotation    = 0xFF;   // rotation the layout was built for
 bool          tetrisLandscape   = false;  // orientation the layout was built for
 bool          tetrisSettled     = false;  // true once every block has landed
 unsigned long tetrisStepLast    = 0;      // millis() of the last animation step
-uint8_t       tetrisBrightDrawn = 0xFF;   // effectiveBrightness of the frame on the panel
 bool          tetrisColonDrawn  = false;  // colon state of the frame on the panel
 uint8_t       tetrisSpinDrawn   = 0;      // turns still owed when that frame was drawn
 
@@ -1847,9 +2349,9 @@ void drawTetrisFace() {
   bool stepDue = !tetrisSettled &&
                  (millisNow - tetrisStepLast >= tetrisSettings.dropMs);
   // panelDirty covers everything outside the face itself: another screen having
-  // drawn over it, a change of watchface, the press indicator.
+  // drawn over it, a change of watchface or brightness, the press
+  // indicator.
   bool changed = panelDirty || colonOn != tetrisColonDrawn ||
-                 effectiveBrightness != tetrisBrightDrawn ||
                  spinPending != tetrisSpinDrawn;
   // Debris moving is a change in itself, so while anything is coming apart the
   // face repaints on the animation's clock rather than waiting to be asked.
@@ -1881,7 +2383,6 @@ void drawTetrisFace() {
   matrix.show();
 
   tetrisColonDrawn  = colonOn;
-  tetrisBrightDrawn = effectiveBrightness;
   panelDirty        = false;
   // After the step, because a piece may have landed and the next one armed.
   tetrisSpinDrawn = 0;
@@ -1984,7 +2485,7 @@ void updateShake() {
   // The interrupt is latched, so it has to be read away even when the knock is
   // going to be ignored - otherwise it would fire the moment the block lifts.
   (void)accelReadReg(LIS3DH_INT1_SRC);
-  if (knockIsReal()) { handleInput(EV_KNOCK); }
+  if (knockIsReal()) { handleInput(EV_KNOCK, 1); }
 }
 
 // Whether the sensor's latched event is worth reporting as a knock. These are
@@ -2072,14 +2573,23 @@ uint8_t activeWatchface() {
   static uint8_t shown = 0xFF;
   if (settings.watchface == shown) { return shown; }
   shown = settings.watchface;
-  sprintf(timeStr, "%02d%02d%02d", clockHour(localTime),   clockMinute(localTime),   clockSecond(localTime));
-  sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
-  applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
+  faceCatchUp();
 #if WATCHFACE_TETRIS
   tetrisRotation = 0xFF;           // force a fresh layout and a fresh drop
 #endif
   panelDirty = true;               // the other face's picture is still on the panel
   return shown;
+}
+
+// Bring the classic face up to the time before it is drawn again, after it was
+// hidden or replaced: fresh digit strings, which stepClockAnim() would only
+// rebuild on the next second tick, and all six digits snapped onto their
+// places, so no fly-in from before resumes. The Tetris face catches up by
+// itself, digit by digit.
+void faceCatchUp() {
+  sprintf(timeStr, "%02d%02d%02d", clockHour(localTime),   clockMinute(localTime),   clockSecond(localTime));
+  sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
+  applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
 }
 
 // Live (non-AP) mode: advance and draw the selected watchface every loop
@@ -2405,34 +2915,41 @@ void normalizeColorFull(uint8_t &r, uint8_t &g, uint8_t &b) {
 
 /* ======================================================================
    Input: buttons -> events -> the function the profile maps them to on the
-   current screen. What each button does lives in the profile table at the top,
-   not here.
+   current screen. What each button does lives in the profile tables
+   (input_map.h), not here.
    ====================================================================== */
 
-// The context an event happens in, from the screen that is up.
-InputContext inputContext() {
-  switch (screen) {
+// The context of a screen.
+InputContext contextOf(Screen s) {
+  switch (s) {
     case SCREEN_BOOT:            return CTX_BOOT;
+    case SCREEN_MENU:
+    case SCREEN_EDITOR:          return CTX_MENU;
     case SCREEN_HOTSPOT_INFO:
     case SCREEN_HOTSPOT_PREVIEW: return CTX_HOTSPOT;
-    default:                     return CTX_FACE;   // the face and the banner on top of it
+    default:                     return CTX_FACE;
   }
+}
+
+// The context an event happens in. A banner has none of its own: it confirms
+// the screen beneath it.
+InputContext inputContext() {
+  return contextOf(screen == SCREEN_BANNER ? screenBeneath() : screen);
 }
 
 // What the active profile maps this event to in this context; FN_NONE if nothing.
 InputFunction mappedFunction(InputEvent ev, InputContext ctx) {
-  for (uint8_t i = 0; i < profileCount; i++) {
-    if (profileRows[i].event == ev && profileRows[i].context == ctx) { return profileRows[i].function; }
+  for (uint8_t i = 0; i < profile.count; i++) {
+    if (profile.rows[i].event == ev && profile.rows[i].context == ctx) { return profile.rows[i].function; }
   }
   return FN_NONE;
 }
 
-// Whether the profile uses this event anywhere.
-bool profileUses(InputEvent ev) {
-  for (uint8_t i = 0; i < profileCount; i++) {
-    if (profileRows[i].event == ev) { return true; }
-  }
-  return false;
+// Whether a short press of this button has to wait BTN_MULTI_GAP_MS for a
+// second one: only where the mapping gives its 2x or 3x something to do.
+bool clicksCounted(const Button &b) {
+  InputContext ctx = inputContext();
+  return mappedFunction(b.ev2x, ctx) != FN_NONE || mappedFunction(b.ev3x, ctx) != FN_NONE;
 }
 
 // How many clicks an event stands for, for the confirmation blinks; 0 = not a click.
@@ -2445,14 +2962,35 @@ uint8_t clickCount(InputEvent ev) {
   }
 }
 
-// Run a function once. A hold function (the fade) also runs on while its button
-// stays down: holdStep() and holdEnd() below.
-void runFunction(InputFunction fn) {
+// Whether an event closes a banner. A banner closes on the next thing the user
+// does, but not on a knock, which is not operating the clock, and not on the
+// repeats of a hold that was already going when the banner came up: holding
+// DOWN to save a zone would otherwise close its banner at once.
+bool closesBanner(InputEvent ev) {
+  switch (ev) {
+    case EV_NONE:
+    case EV_KNOCK:
+    case EV_UP_HOLD_REPEAT:
+    case EV_DOWN_HOLD_REPEAT: return false;
+    default:                  return true;
+  }
+}
+
+// Run a function once. `steps` is how far PREV / NEXT move in an editor: 1, or
+// more from a tap burst. A hold function (the fade) also runs on while
+// its button stays down: holdStep() and holdEnd() below.
+void runFunction(InputFunction fn, uint8_t steps) {
   switch (fn) {
-    case FN_CYCLE_DST:      cycleDstMode();     break;
-    case FN_TOGGLE_AUTO:    toggleAutoBright(); break;
+    case FN_PREV:
+    case FN_NEXT:
+    case FN_ENTER:
+    case FN_BACK:
+    case FN_HOME:           navigate(fn, steps); break;
+    case FN_OPEN_MENU:      menuOpen(); break;
+    case FN_TOGGLE_AUTO:    toggleAutoBrightWithBanner(); break;
+    case FN_CYCLE_DST:      cycleDstMode(); break;
     case FN_TOGGLE_HOTSPOT: if (apActive) { stopAPMode(); } else { startAPMode(); } break;
-    case FN_BRIGHT_FADE:    fadeStart();        break;
+    case FN_BRIGHT_FADE:    fadeStart(); break;
 #if WATCHFACE_TETRIS
     case FN_KNOCK_EFFECT:   if (knockEffectReady()) { shakeStartAll(); } break;
 #endif
@@ -2472,14 +3010,21 @@ void holdEnd(InputFunction fn) {
 }
 
 // Look an event up for the current screen and run what it maps to. Returns the
-// function, so a hold event's button can keep it running. A click sequence that
-// ran something is confirmed by blinks; one that maps to nothing is not.
-InputFunction handleInput(InputEvent ev) {
+// function, so a hold event's button can keep it running.
+//
+// A banner takes the next input for itself: it closes, and the input is used
+// up, since it was meant for a screen the banner hid. With the Classic clicks
+// profile a click sequence that ran something is confirmed by blinks.
+InputFunction handleInput(InputEvent ev, uint8_t steps) {
+  if (screen == SCREEN_BANNER) {
+    if (closesBanner(ev)) { closeScreen(); }
+    return FN_NONE;
+  }
   InputFunction fn = mappedFunction(ev, inputContext());
   if (fn == FN_NONE) { return FN_NONE; }
-  runFunction(fn);
+  runFunction(fn, steps);
   uint8_t clicks = clickCount(ev);
-  if (clicks) { feedbackConfirm(clicks); }
+  if (clicks && profile.blinkClicks) { feedbackConfirm(clicks); }
   return fn;
 }
 
@@ -2495,14 +3040,18 @@ InputEvent closeSequence(Button &b) {
 }
 
 // Advance one button by one pass and return the event it produced, if any.
-// A button whose 2x/3x the profile does not use reports a click at once,
-// instead of waiting BTN_MULTI_GAP_MS for a second one.
+// Where its 2x and 3x map to nothing, a button reports a click at once instead
+// of waiting BTN_MULTI_GAP_MS for a second one. A hold repeats every
+// BTN_LONGPRESS_MS while the button stays down.
 InputEvent stepButton(Button &b) {
   bool down = (digitalRead(b.pin) == LOW);
   unsigned long t = millisNow;
-  bool wasDown = (b.phase == BTN_PRESSED || b.phase == BTN_HELD);
+  bool wasDown = (b.phase == BTN_PRESSED || b.phase == BTN_HELD || b.phase == BTN_SPENT);
   if (down != wasDown) { lastInputAt = t; }   // every press and every release is handling
   switch (b.phase) {
+    case BTN_SPENT:
+      if (!down) { b.phase = BTN_RELEASED; }
+      return EV_NONE;
     case BTN_RELEASED:
     case BTN_COUNTING:
       if (down) { b.phase = BTN_PRESSED; b.pressedAt = t; return EV_NONE; }
@@ -2513,28 +3062,44 @@ InputEvent stepButton(Button &b) {
         if (t - b.pressedAt < BTN_LONGPRESS_MS) { return EV_NONE; }
         b.phase  = BTN_HELD;
         b.clicks = 0;           // a hold ends any open click sequence
+        b.burst  = 0;           // and any tap burst
+        b.heldAt = t;
         return b.evHold;
       }
       if (t - b.pressedAt < BTN_DEBOUNCE_MS) {   // a bounce, not a click
         b.phase = b.clicks ? BTN_COUNTING : BTN_RELEASED;
         return EV_NONE;
       }
+      // A tap burst goes on when this press began soon after the last click.
+      if (b.burst > 0 && b.pressedAt - b.releasedAt < BTN_MULTI_GAP_MS) {
+        if (b.burst < 255) { b.burst++; }
+      } else {
+        b.burst = 1;
+      }
       b.clicks++;
       b.releasedAt = t;
-      if (!profileUses(b.ev2x) && !profileUses(b.ev3x)) { return closeSequence(b); }
+      if (!clicksCounted(b)) { return closeSequence(b); }
       b.phase = BTN_COUNTING;
       return EV_NONE;
     case BTN_HELD:
-      if (!down) { b.phase = BTN_RELEASED; }
-      return EV_NONE;
+      if (!down) { b.phase = BTN_RELEASED; return EV_NONE; }
+      if (t - b.heldAt < BTN_LONGPRESS_MS) { return EV_NONE; }
+      b.heldAt = t;
+      return b.evRepeat;
   }
   return EV_NONE;
+}
+
+// How far a short press of this button moves: from the BURST_FAST_FROM-th
+// press of a tap burst on, BURST_FAST_STEPS.
+uint8_t burstSteps(const Button &b) {
+  return (b.burst >= BURST_FAST_FROM) ? BURST_FAST_STEPS : 1;
 }
 
 // Whether any button is down right now.
 bool anyButtonDown() {
   for (const Button &b : buttons) {
-    if (b.phase == BTN_PRESSED || b.phase == BTN_HELD) { return true; }
+    if (b.phase == BTN_PRESSED || b.phase == BTN_HELD || b.phase == BTN_SPENT) { return true; }
   }
   return false;
 }
@@ -2546,12 +3111,174 @@ void updateInput() {
     ButtonPhase before = b.phase;
     InputEvent ev = stepButton(b);
     if (b.phase == BTN_PRESSED && before != BTN_PRESSED) { fbBlinkCount = 0; }   // a new press cancels a pending confirmation
-    if (ev == b.evHold) { b.holding = handleInput(ev); }
-    else if (ev != EV_NONE) { handleInput(ev); }
+    if (ev == b.evHold) { b.holding = handleInput(ev, 1); }
+    else if (ev != EV_NONE) { handleInput(ev, (ev == b.evShort) ? burstSteps(b) : 1); }
     if (b.phase == BTN_HELD) { holdStep(b.holding); }
     if (before == BTN_HELD && b.phase != BTN_HELD) { holdEnd(b.holding); b.holding = FN_NONE; }
   }
   updateFeedbackLed();
+}
+
+/* ======================================================================
+   On-screen menu: what the functions do there
+   ====================================================================== */
+
+// FN_OPEN_MENU: the list, on top of the face, focus on the first item.
+void menuOpen() {
+  menuFocus = ITEM_BRIGHT;
+  openScreen(SCREEN_MENU);
+}
+
+// PREV / NEXT / ENTER / BACK / HOME mean what the screen on top makes of them.
+void navigate(InputFunction fn, uint8_t steps) {
+  switch (screen) {
+    case SCREEN_MENU:
+      menuNavigate(fn);
+      break;
+    case SCREEN_EDITOR:
+      editorNavigate(fn, steps);
+      break;
+    case SCREEN_HOTSPOT_INFO:
+    case SCREEN_HOTSPOT_PREVIEW:
+      if (fn == FN_BACK || fn == FN_HOME) { stopAPMode(); }   // closes the hotspot, back to the face
+      break;
+    default:
+      break;
+  }
+}
+
+// The next item shown in the list from `from`, in direction dir, wrapping
+// round at either end.
+MenuItem menuStep(MenuItem from, int8_t dir) {
+  uint8_t i = from;
+  do { i = (uint8_t)((i + ITEM_COUNT + dir) % ITEM_COUNT); } while (!menuItemShown((MenuItem)i));
+  return (MenuItem)i;
+}
+
+void menuNavigate(InputFunction fn) {
+  switch (fn) {
+    case FN_PREV:  menuFocus = menuStep(menuFocus, -1); panelDirty = true; break;
+    case FN_NEXT:  menuFocus = menuStep(menuFocus, +1); panelDirty = true; break;
+    case FN_ENTER: menuEnter(menuFocus); break;
+    case FN_BACK:  closeScreen(); break;            // BACK at the top leaves the menu
+    case FN_HOME:  setScreen(SCREEN_FACE); break;
+    default:       break;
+  }
+}
+
+// ENTER on a row: a toggle flips in place, an action runs, everything else
+// opens its editor.
+void menuEnter(MenuItem item) {
+  switch (MENU_ITEMS[item].kind) {
+    case KIND_TOGGLE: menuToggle(item); break;
+    case KIND_ACTION: menuAction(item); break;
+    default:          editorOpen(item); break;
+  }
+}
+
+// A toggle needs no confirmation: the row shows its new value.
+void menuToggle(MenuItem item) {
+  if (item == ITEM_AUTO) { toggleAutoBright(); }
+  panelDirty = true;
+}
+
+void menuAction(MenuItem item) {
+  if (item == ITEM_HOTSPOT) { startAPMode(); }   // its screen replaces the menu
+}
+
+// Row of TZONES with this base offset, or the nearest one.
+uint8_t zoneIndex(int32_t offset) {
+  uint8_t best = 0;
+  for (uint8_t i = 0; i < ZONE_COUNT; i++) {
+    if (labs((long)TZONES[i].off - offset) < labs((long)TZONES[best].off - offset)) { best = i; }
+  }
+  return best;
+}
+
+// Position of a daylight-saving mode in DST_OPTIONS.
+uint8_t dstOptionIndex(uint8_t mode) {
+  for (uint8_t i = 0; i < DST_OPTION_COUNT; i++) {
+    if (DST_OPTIONS[i] == mode) { return i; }
+  }
+  return 0;
+}
+
+void editorOpen(MenuItem item) {
+  editItem = item;
+  switch (item) {
+    case ITEM_BRIGHT: brightSaved = settings.brightness; break;
+    case ITEM_ZONE:   editIndex = zoneIndex(settings.tzOffset); break;
+    case ITEM_DST:    editIndex = dstOptionIndex(settings.dst); break;
+    default:          break;
+  }
+  editIndexSaved = editIndex;
+  editShownAt = millisNow;
+  openScreen(SCREEN_EDITOR);
+}
+
+void editorNavigate(InputFunction fn, uint8_t steps) {
+  switch (fn) {
+    case FN_PREV:  editorStep(-(int)steps); break;
+    case FN_NEXT:  editorStep(steps); break;
+    case FN_ENTER: editorCommit(); break;
+    case FN_BACK:  closeScreen(); break;            // leaving reverts, see leaveScreen()
+    case FN_HOME:  setScreen(SCREEN_FACE); break;
+    default:       break;
+  }
+}
+
+// PREV / NEXT in an editor. Lists (zones, options) move with the list:
+// PREV goes up the list, towards the west for zones. A scale moves the other
+// way, so that UP - mapped to PREV - is brighter.
+void editorStep(int delta) {
+  switch (editItem) {
+    case ITEM_BRIGHT: brightnessStep(-delta); break;   // applied at once: the panel is the preview
+    case ITEM_ZONE:   editIndex = (uint8_t)constrain((int)editIndex + delta, 0, (int)ZONE_COUNT - 1); break;
+    case ITEM_DST:    editIndex = (uint8_t)constrain((int)editIndex + delta, 0, (int)DST_OPTION_COUNT - 1); break;
+    default:          break;
+  }
+  editShownAt = millisNow;
+  panelDirty = true;
+}
+
+// ENTER in an editor: save what is on show if it differs from what flash
+// holds, close the editor, and confirm a change the menu list does not show -
+// a new zone or daylight-saving mode changes the time on the clock.
+void editorCommit() {
+  bool changed = (editIndex != editIndexSaved);
+  editIndexSaved = editIndex;   // whatever happens now, there is nothing to revert
+  switch (editItem) {
+    case ITEM_BRIGHT:
+      brightnessKeep();
+      closeScreen();
+      break;
+    case ITEM_ZONE:
+      closeScreen();
+      if (!changed) { break; }
+      settings.tzOffset = TZONES[editIndex].off;
+      setDstMode(settings.dst);   // Auto follows the new zone's rule at once
+      saveSettings();
+      Serial.print("Timezone -> "); Serial.println(settings.tzOffset);
+      showTimeBanner();
+      break;
+    case ITEM_DST:
+      closeScreen();
+      if (!changed) { break; }
+      setDstMode(DST_OPTIONS[editIndex]);
+      saveSettings();
+      Serial.print("DST mode -> "); Serial.println(settings.dst);
+      showTimeBanner();
+      break;
+    default:
+      closeScreen();
+      break;
+  }
+}
+
+// What an editor did without ENTER goes back. Only the brightness is applied
+// while it is being edited; zone and daylight saving only ever change on ENTER.
+void editorRevert() {
+  if (editItem == ITEM_BRIGHT) { settings.brightness = brightSaved; }
 }
 
 // Start the confirmation for a triggered n-click function. Timed from now rather
@@ -2598,24 +3325,34 @@ void drawFeedbackIndicator() {
 #endif
 }
 
-// Single click: cycle the daylight-saving mode automatic -> summer -> winter ->
-// automatic; the time on the panel follows, and the new mode shows for ~3 s.
+// FN_CYCLE_DST (Classic: 1x on the face): cycle the daylight-saving mode
+// automatic -> summer -> winter -> automatic; the time on the panel follows,
+// and a banner names the new mode.
 void cycleDstMode() {
   uint8_t next = (settings.dst == DST_AUTO)   ? DST_SUMMER
                : (settings.dst == DST_SUMMER) ? DST_WINTER : DST_AUTO;
   setDstMode(next);
   saveSettings();
-  bannerUntil = millisNow + 3000;   // a click while it is still up extends it
-  setScreen(SCREEN_BANNER);
+  uint8_t r, g, b;
+  dstColour(r, g, b);
+  showBanner((settings.dst == DST_AUTO) ? "auto" : (settings.dst == DST_SUMMER) ? "summer" : "winter", nullptr, r, g, b);
   Serial.print("DST mode -> "); Serial.println(settings.dst);
 }
 
-// Double click: toggle the BH1750 auto-brightness on/off (lets you fall back to
-// the manual brightness / long-press fade without opening the config page).
+// Toggle the BH1750 auto-brightness on/off and save it.
 void toggleAutoBright() {
   settings.autoBright = settings.autoBright ? 0 : 1;
   saveSettings();
   Serial.print("Auto-brightness -> "); Serial.println(settings.autoBright);
+}
+
+// FN_TOGGLE_AUTO (Classic: 2x on the face), where nothing on the screen shows
+// the mode, so a banner says it. Without a light sensor there is nothing to
+// switch, and the banner says that instead.
+void toggleAutoBrightWithBanner() {
+  if (!luxOK) { showBanner("no", "sensor", 255, 255, 255); return; }
+  toggleAutoBright();
+  showBanner(settings.autoBright ? "auto" : "manual", nullptr, 255, 255, 255);
 }
 
 /* ======================================================================
@@ -2668,9 +3405,9 @@ void startAPMode() {
   apRadioUp();
 }
 
-// Triple click while the AP is running: leave config mode and return to the
-// normal clock. How the softAP is actually torn down differs per board, see
-// netApEnd() in board_hal.h.
+// Close the hotspot (BACK on its screen, or 3x with Classic clicks): leave
+// config mode and return to the normal clock. How the softAP is actually torn
+// down differs per board, see netApEnd() in board_hal.h.
 void stopAPMode() {
   if (!apActive) { return; }
   Serial.println("Stopping config AP...");
