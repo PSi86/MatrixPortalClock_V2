@@ -280,13 +280,7 @@ uint8_t BufferedWriter::_buf[2000];
 
 // Sundry globals used for animation ---------------------------------------
 
-int16_t  textX, // Current text position (X)
-         textY,                  // Current text position (Y)
-         textMin,                // Text pos. (X) when scrolled off left edge
-         hue = 0;
-char message[10] = "TERMIN";  // Buffer to hold scrolling message text
 char timeStr[7], animStr[7]; // 6 digits + null terminator
-uint8_t intensityValue, position;
 bool animTrigger[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
 bool animShow[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
 int8_t animXPos[6] = {0, 0, 0, 0, 0, 0};
@@ -349,41 +343,23 @@ const float   AUTOBRIGHT_TAU_MS = 1200.0f;  // fade time constant (~1.2 s to 63%
 // darker, 255 = much brighter) and effectiveBrightness is the result.
 uint8_t       effectiveBrightness = 128;
 
-int16_t bgBrightness, counter;
-uint16_t color, colorBg;
-bool directionSwitch;
-
 //Time Related Variables
 uint8_t loopTime = 12; // ms per animation pixel (PANEL_PACED_LOOP: rounded to whole panel refreshes)
 uint16_t panelHz = 0;            // measured panel refresh rate, 0 until the first measurement
 unsigned long panelRateLast = 0; // start of the running refresh-rate measurement
 uint8_t hourNow, minuteNow, secondNow;
-long timeOffset;
 bool secondTrigger, minuteTrigger, hourTrigger;
 uint8_t syncTimeHour = 5, syncTimeMinute = 11;
 unsigned long millisNow, deltaT, lastSync, ntpTimeout = 3000; // ms between NTP fetch retries while unsynced
 
 bool ntpRequestActive, ntpSuccess, wifiEnabled;
-bool firstSync=true;
 time_t sysTime, ntpTime;
 
 // Network Stuff
-#include "arduino_secrets.h" 
+#include "arduino_secrets.h"
 ///////please enter your sensitive data in the Secret tab/arduino_secrets.h
 char ssid[] = SECRET_SSID;        // your network SSID (name)
 char pass[] = SECRET_PASS;    // your network password (use for WPA, or use as key for WEP)
-int keyIndex = 0;            // your network key index number (needed only for WEP)
-
-unsigned int localPort = 2390;      // local port to listen for UDP packets
-
-//IPAddress timeServer(129, 6, 15, 28); // time.nist.gov NTP server
-IPAddress timeServer(192, 168, 2, 1); // fritz.box NTP server
-
-const int NTP_PACKET_SIZE = 48; // NTP timestamp is in the first 48 bytes of the message
-byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
-
-// A UDP instance to let us send and receive packets over UDP
-WiFiUDP Udp;
 
 /* ======================================================================
    Timezones
@@ -938,11 +914,7 @@ void stepClockAnim(void) {
   if (secondTrigger) {
     sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime), clockMinute(sysTime), clockSecond(sysTime));
     sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
-      //sprintf(animStr, "%02d%02d%02d", hourNow+1, minuteNow+1, secondNow+1 );
-    //animShow[4]=false; //right number [5] will be set true on the secondTrigger everytime so resetting it is not necessary
   }
- // if (minuteTrigger) { animShow[2]=false; animShow[3]=false; }
- // if (hourTrigger) { animShow[0]=false; animShow[1]=false; }
 
   // Concept: Iterate through the digits of the time display. If the animTrigger[i] is true, then create an location offset for the digit according to the fly-in direction that is configured for that digit.
   for (uint8_t i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
@@ -972,18 +944,13 @@ void stepClockAnim(void) {
     }
     else if (animShow[i] && moveNow) {
       // as long as animShow is true, we need to update the position / do the animation of the corresponding digit (i)
-      //
-      //Serial.println(i);
       if      (animYPos[i] < animYTarget[i]) { animYPos[i]++; timeYPos[i]++; } // move animation digit and current time digit at the same time in the same direction
       else if (animYPos[i] > animYTarget[i]) { animYPos[i]--; timeYPos[i]--; }
-      //else if (animYPos[i] == animYTarget[i]) { timeYPos[i]=animYTarget[i];   }
 
       if      (animXPos[i] < animXTarget[i]) { animXPos[i]++; timeXPos[i]++; }
       else if (animXPos[i] > animXTarget[i]) { animXPos[i]--; timeXPos[i]--; }
-      //else if (animXPos[i] == animXTarget[i]) { timeXPos[i]=animXTarget[i];   }
     }
   }
-  if(secondTrigger) { Serial.println(deltaT); } // Debugging //timeOffset //deltaT //animTrigger[4] //animShow[i]
 }
 
 #if defined(CLOCK_DEBUG)
@@ -1882,7 +1849,6 @@ void renderClock(void) {
     else    { matrix.setFont(&FreeSansBold12pt7b); } // Bigger Font for displaying Minutes and Hours
 
     if(animShow[i] == true) {
-      //Serial.println(animXPos[i]);
       if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i]) { matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB)); } // digit has arrived
       else { matrix.setTextColor(scaledColorB(settings.trailR, settings.trailG, settings.trailB, trailBrightness())); } // dim trail (relative to brightness, never black)
       matrix.setCursor(animXPos[i], animYPos[i]);
@@ -2007,13 +1973,14 @@ void timeSync_WifiLib() {
       ntpTime = DST_TEST_UTC;   // debug test: start just before a daylight-saving change
       settings.dst = DST_AUTO;  // in RAM only
 #endif
-      if(clockIsSet()) { timeOffset=ntpTime+tzTotalOffset()-sysTime; } // timeOffset will be positive if acutal time is ahead of sysTime (=sysTime/ system clock is slow) and negative if acutal time is behind sysTime (=sysTime/ system clock is fast)
-      else { timeOffset=0; }
+      // How far the clock had drifted from NTP, in seconds: positive when the clock
+      // was slow, negative when it was fast. Only logged.
+      long drift = clockIsSet() ? (long)(ntpTime + tzTotalOffset() - sysTime) : 0;
       if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), ntpTime); }
       clockSet(ntpTime + tzTotalOffset()); // local time: UTC + configurable timezone + daylight saving offset
       Serial.println("NTP success");
       Serial.print("NTP offset: ");
-      Serial.println(timeOffset);
+      Serial.println(drift);
       ntpSuccess = true;
       ntpRequestActive = false;
       netRadioOff();
@@ -2027,23 +1994,6 @@ void timeSync_WifiLib() {
     }
   }
   if(minuteTrigger) {
-    /* This code should to a smooth transition between shown time and NTP time but clockAdjust works on seconds as smallest increment. Need to find way to make the clock work not on systemtime directly or adjus system time in another way
-    if(timeOffset != 0) {
-      if(abs(timeOffset)<100 || firstSync) {
-        clockAdjust(timeOffset);
-        timeOffset=0;
-        firstSync=false;
-      }
-      else if(timeOffset>0) {
-        timeOffset-=100;
-        clockAdjust(100);
-      }
-      else if(timeOffset<0) {
-        timeOffset+=100;
-        clockAdjust(-100);
-      }
-    }
-    */
     // Switch the radio on one minute before the sync time, counted in minutes
     // since midnight so it wraps across the hour and midnight (sync 05:00 ->
     // 04:59, 00:00 -> 23:59). "syncTimeMinute-1" alone is -1 for minute 00 and
@@ -2073,92 +2023,6 @@ void timeSync_WifiLib() {
     Serial.println("NTP Retry");
   }
 }
-
-/*
-// Updates sysTime using UDP Packet based low level NTP. NOT maintained! Nice because it can contact a given server rather than a hardcoded one.
-// Server: 0.europe.pool.ntp.org
-// Server: ptbtime2.ptb.de
-// https://www.pool.ntp.org/zone/europe
-void timeSync_LowLevelUdp() {
-  if (!ntpSuccess && !ntpRequestActive) {
-    Serial.println(WiFi.status());
-    //Serial.println(WiFi.getTime());
-    Udp.begin(localPort);
-    Udp.flush();
-    sendNTPpacket(timeServer); // send an NTP packet to a time server
-    Serial.println("NTP request sent"); // print the second
-    lastSync=millisNow;
-    ntpRequestActive = true;
-    ntpSuccess = false;
-  }
-  else if (Udp.parsePacket()) { // check for new packets
-    Serial.println("NTP packet received");
-    // We've received a packet, read the data from it
-    Udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
-
-    //the timestamp starts at byte 40 of the received packet and is four bytes,
-    // or two words, long. First, extract the two words:
-
-    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
-    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
-    // combine the four bytes (two words) into a long integer
-    // this is NTP time (seconds since Jan 1 1900):
-    unsigned long secsSince1900 = highWord << 16 | lowWord;
-
-    //ntpTime = secsSince1900;
-    //setTime(secsSince1900);
-    setTime(WiFi.getTime());
-    adjustTime(7200); // UTC+2 (60sec*60min*2h)
-
-    hourNow=hour(); 
-    minuteNow=minute();
-
-    Udp.stop();
-    ntpRequestActive = false;
-    ntpSuccess = true;
-  }
-  else if(ntpRequestActive && millisNow-lastSync > ntpTimeout) { // NTP Request Timed out
-    ntpRequestActive=false; // asume the request has timed out
-    Serial.println("NTP Timeout"); // print the second
-    Udp.stop();
-    // WiFi.disconnect(); // TEST
-  }
-  else if(ntpSuccess && millisNow-lastSync > syncInterval) {
-    ntpSuccess=false; // asume the request has timed out
-    Serial.println("Renew NTP sync"); // print the second
-  }
-}
-
-// send an NTP request to the time server at the given address
-void sendNTPpacket(IPAddress& address) {
-  //Serial.println("1");
-  // set all bytes in the buffer to 0
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  //Serial.println("2");
-  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-  packetBuffer[1] = 0;     // Stratum, or type of clock
-  packetBuffer[2] = 6;     // Polling Interval
-  packetBuffer[3] = 0xEC;  // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  packetBuffer[12]  = 49;
-  packetBuffer[13]  = 0x4E;
-  packetBuffer[14]  = 49;
-  packetBuffer[15]  = 52;
-
-  //Serial.println("3");
-
-  // all NTP fields have been given values, now
-  // you can send a packet requesting a timestamp:
-  Udp.beginPacket(address, 123); //NTP requests are to port 123
-  //Serial.println("4");
-  Udp.write(packetBuffer, NTP_PACKET_SIZE);
-  //Serial.println("5");
-  Udp.endPacket();
-  //Serial.println("6");
-}
-*/
 
 // Prints Wifi connection status, SSID, IP and RSSI to console.
 // The numeric status is wl_status_t: 0 = idle, 3 = connected, 6 = disconnected.
