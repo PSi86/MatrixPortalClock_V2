@@ -184,6 +184,14 @@ const unsigned long BTN_DEBOUNCE_MS  = 25;   // ignore bounces shorter than this
 const unsigned long BTN_LONGPRESS_MS = 600;  // pressed this long -> the hold event
 const unsigned long BTN_MULTI_GAP_MS = 400;  // window to collect a click sequence
 
+// The last time anyone handled an input - a button going down or up. Whoever
+// operates the clock touches it, and the sensor feels that as knocks: the
+// press, the release, steadying the clock, letting go after a fade. So knocks
+// are ignored until the inputs have been left alone for INPUT_SETTLE_MS (see
+// knockIsReal()). Gesture input will set this as well.
+const unsigned long INPUT_SETTLE_MS = 3000;
+unsigned long lastInputAt = 0;
+
 enum ButtonPhase : uint8_t {
   BTN_RELEASED,    // up, no click sequence open
   BTN_PRESSED,     // down, not yet long enough for the hold event
@@ -1987,6 +1995,7 @@ bool knockIsReal() {
   if (shakeThreshold() == 0)                           { return false; }  // switched off
   if (anyButtonDown())                                 { return false; }  // a button press IS a knock: the
                                                                           // switches sit 20 mm from the sensor
+  if (millisNow - lastInputAt  < INPUT_SETTLE_MS)      { return false; }  // hands still on the clock
   if (orientCandidate != deviceRotation)               { return false; }  // a rotation is being debounced
   if (millisNow - setupDoneAt  < KNOCK_START_QUIET_MS) { return false; }  // just plugged in
   if (millisNow - rotatedAt    < SHAKE_SETTLE_MS)      { return false; }  // turning is not a knock
@@ -2491,6 +2500,8 @@ InputEvent closeSequence(Button &b) {
 InputEvent stepButton(Button &b) {
   bool down = (digitalRead(b.pin) == LOW);
   unsigned long t = millisNow;
+  bool wasDown = (b.phase == BTN_PRESSED || b.phase == BTN_HELD);
+  if (down != wasDown) { lastInputAt = t; }   // every press and every release is handling
   switch (b.phase) {
     case BTN_RELEASED:
     case BTN_COUNTING:

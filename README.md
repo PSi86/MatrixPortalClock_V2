@@ -383,9 +383,11 @@ so level 10 is 6 steps and level 1 is 24.
 
 Nothing is triggered while another screen owns the panel, in the config AP, for
 the first three seconds after start-up, for 1.2 s after a rotation or after an
-effect has run, while an animation is already running, or **while a button is
-held** — the switches sit next to the sensor, so a button press is a knock as far
-as it is concerned. A knock the sensor latched while the config AP was up is
+effect has run, while an animation is already running, **while a button is
+held, and for 3 s after a button was last pressed or let go** — the switches sit
+next to the sensor, so a button press is a knock as far as it is concerned, and
+so is everything around it: the release, steadying the clock, letting go after a
+brightness fade. A knock the sensor latched while the config AP was up is
 discarded when the face comes back. The reasons the sensor fires without a real
 knock sit together in `knockIsReal()`, the reasons the face cannot be knocked
 apart right now in `knockEffectReady()`.
