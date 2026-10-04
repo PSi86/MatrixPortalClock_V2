@@ -56,11 +56,16 @@ button pin cannot be carried over.
   - **hold long** -> adjust brightness (cyclic, perceptually linear); releasing
     saves it. With auto-brightness on, this trims the brightness *relative* to the
     measured ambient level (neutral in the middle) instead of setting an absolute level
-  - **Feedback:** the red board LED (D13) lights while the button is held. Once a
+  - **Feedback:** the red board LED (D13) lights while a button is held. Once a
     click sequence has triggered its function, it blinks once per click (1x, 2x or
     3x), starting after a short dark pause (~0.65 s after the last release). A sequence that triggers nothing (1x/2x while the config AP is open) gets
     no blink. A 2x2 square in the bottom-right matrix corner mirrors the LED
     (compile-time switch `BUTTON_FEEDBACK_ON_MATRIX`)
+  - The **DOWN button** (S3: GPIO7, M4: D3) is read as well and lights the
+    feedback, but has no function yet
+  - Under the hood every input becomes a named event first, and a profile table
+    (`PROFILE_CLASSIC_CLICKS`) says what each event does on the current screen:
+    the knock and the boot-time hold go through it too
 - **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time
 - All settings are stored outside the program image, so they survive a restart
   **and a firmware re-upload** (S3: the NVS partition, which a normal upload does
@@ -378,11 +383,14 @@ so level 10 is 6 steps and level 1 is 24.
 
 Nothing is triggered while another screen owns the panel, in the config AP, for
 the first three seconds after start-up, for 1.2 s after a rotation or after an
-effect has run, while an animation is already running, or **while the button is
-held** — the switch sits next to the sensor, so a button press is a knock as far
-as it is concerned. A knock the sensor latched while the config AP was up is
-discarded when the face comes back. All of these reasons sit together in
-`knockAccepted()`.
+effect has run, while an animation is already running, **while a button is
+held, and for 3 s after a button was last pressed or let go** — the switches sit
+next to the sensor, so a button press is a knock as far as it is concerned, and
+so is everything around it: the release, steadying the clock, letting go after a
+brightness fade. A knock the sensor latched while the config AP was up is
+discarded when the face comes back. The reasons the sensor fires without a real
+knock sit together in `knockIsReal()`, the reasons the face cannot be knocked
+apart right now in `knockEffectReady()`.
 
 With **Also use it when the time changes** ticked, the same effect replaces the
 plain swap when a digit changes: at a minute rollover only the digits that
