@@ -134,20 +134,55 @@ Settings settings;
 // See board_hal.h for why each board needs its own backend.
 SettingsStore<Settings> clockStore;
 
-// Input profile --------------------------------------------------------------
-// The tables and the rules they are checked against are in input_map.h. Until
-// the web UI can choose a profile, the build does: -DINPUT_PROFILE_CLASSIC=1
-// brings back the clicks the clock had before the menu.
+// Input profiles -------------------------------------------------------------
+// The tables and the rules they are checked against are in input_map.h; the
+// config page picks one, stored as its position in this list. So the order is
+// part of the stored data: new profiles go on the end, none is ever moved.
 struct InputProfile {
+  const char         *name;          // as the config page offers it
   const InputMapping *rows;
   uint8_t             count;
   bool                blinkClicks;   // confirm 1x/2x/3x with blinks of the board LED
 };
-#if INPUT_PROFILE_CLASSIC
-const InputProfile profile = { PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS), true };
-#else
-const InputProfile profile = { PROFILE_DEFAULT, PROFILE_ROWS(PROFILE_DEFAULT), false };
-#endif
+const InputProfile INPUT_PROFILES[] = {
+  { "Default",        PROFILE_DEFAULT,        PROFILE_ROWS(PROFILE_DEFAULT),        false },
+  { "Classic clicks", PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS), true  },
+};
+const uint8_t INPUT_PROFILE_COUNT = sizeof(INPUT_PROFILES) / sizeof(INPUT_PROFILES[0]);
+
+// UI settings ------------------------------------------------------------------
+// Settings of the operating concept, in a blob of their own (S3: NVS key "ui",
+// M4: an 8 KB flash block of its own), so the 32-byte main blob never grows.
+// Fields added later go on the end and are filled in by revision, as with the
+// other blobs; an older firmware does not read this one at all.
+#define UI_SETTINGS_MAGIC 0x5E71
+#define UI_SETTINGS_REV   1
+struct UiSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  inputProfile;   // position in INPUT_PROFILES
+};
+const UiSettings UI_DEFAULTS = { UI_SETTINGS_MAGIC, UI_SETTINGS_REV, 0 };
+UiSettings uiSettings;
+SettingsStore<UiSettings> uiStore;
+
+// Home WiFi --------------------------------------------------------------------
+// Stored in flash (S3: NVS key "wifi", M4: an 8 KB flash block of its own) and
+// changed on the config page. arduino_secrets.h is optional: on the first
+// start of a clock that has nothing stored, the credentials compiled in from
+// it are copied into flash, once - after that the stored ones count, and a
+// WiFi forgotten on the config page stays forgotten.
+#define WIFI_CREDS_MAGIC 0x57F1
+#define WIFI_CREDS_REV   1
+struct WifiCreds {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  reserved;
+  char     ssid[33];   // up to 32 bytes, NUL-terminated; empty = no WiFi stored
+  char     pass[64];   // WPA2: 8 to 63 characters, NUL-terminated
+};
+WifiCreds wifiCreds;
+SettingsStore<WifiCreds> wifiStore;
 
 // Buttons ------------------------------------------------------------------
 // UP_BUTTON_PIN / DOWN_BUTTON_PIN come from board_hal.h (M4: D2/D3, S3:
@@ -491,11 +526,11 @@ const unsigned long JOIN_POLL_MS  = 500;      // between looks at whether it has
 // status pixel. The hour covers the retries, so a sync in progress never shows.
 const unsigned long SYNC_LATE_MS = 60UL * 60UL * 1000UL;
 
-// Network Stuff
-#include "arduino_secrets.h"
-///////please enter your sensitive data in the Secret tab/arduino_secrets.h
-char ssid[] = SECRET_SSID;        // your network SSID (name)
-char pass[] = SECRET_PASS;    // your network password (use for WPA, or use as key for WEP)
+// Credentials a build may bring along (src/arduino_secrets.h, optional): only
+// ever copied into flash on the first start of a clock with nothing stored.
+#if __has_include("arduino_secrets.h")
+  #include "arduino_secrets.h"
+#endif
 
 /* ======================================================================
    Timezones
@@ -695,6 +730,8 @@ void setup(void) {
   pinMode(FEEDBACK_LED_PIN, OUTPUT);
   digitalWrite(FEEDBACK_LED_PIN, LOW);
   loadSettings(); // pulls brightness/colors/animation/tz from flash (or writes defaults)
+  loadUiSettings();
+  loadWifiCreds();
 
   // Onboard LIS3DH accelerometer -> automatic screen rotation. If it is not
   // found the clock simply stays in the default portrait orientation.
@@ -778,11 +815,13 @@ void setup(void) {
   // Start joining the home WiFi, without waiting for it: the clock comes up at
   // once and the join and the first sync run in the loop (SYNC_JOINING). The
   // config AP, if it was opened above, has the radio until it closes.
-  if (!apActive) {
+  if (!apActive && wifiStored()) {
     netRadioInit();
     netPrintRadioInfo();
     boardBootStageWrite(BOOT_STAGE_WIFI);   // the radio's first transmit burst comes now
     syncJoin();
+  } else if (!apActive) {
+    Serial.println("No home WiFi stored - set one on the config page");
   }
   // The boot screens are done; the config AP, if it was opened above, keeps its own.
   if (screen == SCREEN_BOOT) { setScreen(SCREEN_FACE); }
@@ -2767,10 +2806,17 @@ bool syncStateDue(SyncState s) {
   return s == SYNC_JOINING || s == SYNC_FETCHING || s == SYNC_RETRY_WAIT;
 }
 
-// Start joining the home WiFi, or start again. Never waits for it.
+// Whether a home WiFi is stored at all.
+bool wifiStored() {
+  return wifiCreds.ssid[0] != '\0';
+}
+
+// Start joining the home WiFi, or start again. Never waits for it. Without a
+// stored WiFi there is nothing to join, and a due sync simply stays due.
 void syncJoin() {
-  Serial.print("Joining WiFi "); Serial.println(ssid);
-  netStaBegin(ssid, pass);   // also arms a fresh NTP sync
+  if (!wifiStored()) { return; }
+  Serial.print("Joining WiFi "); Serial.println(wifiCreds.ssid);
+  netStaBegin(wifiCreds.ssid, wifiCreds.pass);   // also arms a fresh NTP sync
   joinAskedAt = millisNow;
 }
 
@@ -2830,6 +2876,9 @@ void syncSchedule() {
 void timeSync_WifiLib() {
   switch (syncState) {
     case SYNC_JOINING:
+      // No WiFi stored: the radio stays off, and the sync stays due - after
+      // SYNC_LATE_MS the status pixel says so.
+      if (!wifiStored()) { break; }
       // Looked at twice a second, not on every pass: on the M4 every look is
       // an SPI round trip to the radio.
       if (millisNow - joinPolledAt < JOIN_POLL_MS) { break; }
@@ -2954,6 +3003,60 @@ void saveTetrisSettings() {
 }
 #endif
 
+// UI settings from flash; the defaults on a clock that never had them, which
+// are only written once something is changed. Revision 1 is the first, so
+// there is nothing to migrate yet.
+void loadUiSettings() {
+  uiStore.begin("ui");
+  uiStore.read(uiSettings);
+  if (uiSettings.magic != UI_SETTINGS_MAGIC) { uiSettings = UI_DEFAULTS; }
+  if (uiSettings.inputProfile >= INPUT_PROFILE_COUNT) { uiSettings.inputProfile = 0; }
+  Serial.print("Input profile: "); Serial.println(INPUT_PROFILES[uiSettings.inputProfile].name);
+}
+
+void saveUiSettings() {
+  uiSettings.magic = UI_SETTINGS_MAGIC;
+  uiSettings.rev   = UI_SETTINGS_REV;
+  uiStore.write(uiSettings);
+}
+
+// The home WiFi from flash. A clock that has never stored one takes the
+// credentials the build brings (arduino_secrets.h), and stores them - once:
+// from then on the stored ones count, also when they have been forgotten.
+void loadWifiCreds() {
+  wifiStore.begin("wifi");
+  wifiStore.read(wifiCreds);
+  if (wifiCreds.magic == WIFI_CREDS_MAGIC) {
+    wifiCreds.ssid[sizeof(wifiCreds.ssid) - 1] = '\0';   // whatever is stored, the strings end
+    wifiCreds.pass[sizeof(wifiCreds.pass) - 1] = '\0';
+    return;
+  }
+  memset(&wifiCreds, 0, sizeof(wifiCreds));
+#if defined(SECRET_SSID) && defined(SECRET_PASS)
+  strncpy(wifiCreds.ssid, SECRET_SSID, sizeof(wifiCreds.ssid) - 1);
+  strncpy(wifiCreds.pass, SECRET_PASS, sizeof(wifiCreds.pass) - 1);
+  if (wifiStored()) {
+    saveWifiCreds();
+    Serial.println("WiFi: the credentials of the build were copied into flash");
+  }
+#endif
+}
+
+void saveWifiCreds() {
+  wifiCreds.magic = WIFI_CREDS_MAGIC;
+  wifiCreds.rev   = WIFI_CREDS_REV;
+  wifiStore.write(wifiCreds);
+}
+
+// Forget WiFi: an empty entry is stored, not none, so the credentials of the
+// build are not copied in again at the next start.
+void forgetWifi() {
+  memset(wifiCreds.ssid, 0, sizeof(wifiCreds.ssid));
+  memset(wifiCreds.pass, 0, sizeof(wifiCreds.pass));
+  saveWifiCreds();
+  Serial.println("WiFi: forgotten");
+}
+
 // Write current settings to flash.
 void saveSettings() {
   settings.magic       = SETTINGS_MAGIC;
@@ -3053,8 +3156,14 @@ InputContext inputContext() {
   return contextOf(screen == SCREEN_BANNER ? screenBeneath() : screen);
 }
 
+// The input profile chosen on the config page (checked when it is loaded).
+const InputProfile &activeProfile() {
+  return INPUT_PROFILES[uiSettings.inputProfile];
+}
+
 // What the active profile maps this event to in this context; FN_NONE if nothing.
 InputFunction mappedFunction(InputEvent ev, InputContext ctx) {
+  const InputProfile &profile = activeProfile();
   for (uint8_t i = 0; i < profile.count; i++) {
     if (profile.rows[i].event == ev && profile.rows[i].context == ctx) { return profile.rows[i].function; }
   }
@@ -3140,7 +3249,7 @@ InputFunction handleInput(InputEvent ev, uint8_t steps) {
   if (fn == FN_NONE) { return FN_NONE; }
   runFunction(fn, steps);
   uint8_t clicks = clickCount(ev);
-  if (clicks && profile.blinkClicks) { feedbackConfirm(clicks); }
+  if (clicks && activeProfile().blinkClicks) { feedbackConfirm(clicks); }
   return fn;
 }
 
@@ -3530,17 +3639,18 @@ void stopAPMode() {
   apActive = false;
   dnsUdp.stop();
   apServer.end(); // release the listening socket (a fresh begin() would leak one)
-  netApEnd(ssid, pass); // drop the softAP and rejoin the home WiFi
-  if (syncState == SYNC_IDLE) {
-    // Synced: back to how it is after a regular sync, radio off. It used to stay
-    // joined until the next sync while the code counted it as off.
+  netApEnd(); // drop the softAP
+  if (syncState == SYNC_IDLE || !wifiStored()) {
+    // Synced, or nothing to join: back to how it is after a regular sync, radio
+    // off. It used to stay joined until the next sync while the code counted
+    // it as off.
     netRadioOff();
     Serial.println("Disabled Wifi");
   } else {
     // A sync is pending or about to start (e.g. the AP was opened from the boot
-    // button): netApEnd() has started the join, and a due sync waits for it -
-    // the AP had the radio, so whatever the station had before is gone.
-    joinAskedAt = millisNow;
+    // button): join again, and a due sync waits for it - the AP had the radio,
+    // so whatever the station had before is gone.
+    syncJoin();
     if (syncStateDue(syncState)) { setSyncState(SYNC_JOINING); }
     Serial.println("Enabled Wifi for pending NTP sync");
   }
@@ -3725,13 +3835,25 @@ void handleAP() {
 #if defined(CLOCK_DEBUG)
   String host; // which host the client thinks it is talking to (probe detection)
 #endif
-  // discard the remaining request headers
+  // The remaining request headers: only the length of a form's body is kept.
+  long contentLength = 0;
   while (client.connected()) {
     String h = client.readStringUntil('\n');
     if (h.length() == 0 || h == "\r") { break; }
+    if (h.startsWith("Content-Length:") || h.startsWith("content-length:")) { contentLength = h.substring(15).toInt(); }
 #if defined(CLOCK_DEBUG)
     if (h.startsWith("Host:")) { host = h.substring(5); host.trim(); }
 #endif
+  }
+  // A form sent by POST - the home WiFi, so the password is not part of the
+  // URL (and of the request line a debug build logs). Small, and capped.
+  bool isPost = reqLine.startsWith("POST ");
+  String body;
+  if (isPost && contentLength > 0) {
+    char buf[257];
+    size_t n = client.readBytes(buf, (size_t)min(contentLength, (long)sizeof(buf) - 1));
+    buf[n] = '\0';
+    body = buf;
   }
 #if defined(CLOCK_DEBUG)
   String shown = reqLine;
@@ -3761,8 +3883,24 @@ void handleAP() {
 #if WATCHFACE_TETRIS
     saveTetrisSettings();
 #endif
+    saveUiSettings();
     sendSavedPage(out);
     reboot = true;
+  } else if (path == "/wifi" && isPost) {
+    // Save the home WiFi and restart, so the clock joins it at once.
+    String error = applyWifiForm(body);
+    if (error.length()) {
+      sendMessagePage(out, "Not saved", error.c_str());
+    } else {
+      saveWifiCreds();
+      sendMessagePage(out, "Saved", "The clock restarts and joins the WiFi.");
+      reboot = true;
+    }
+  } else if (path == "/forget" && isPost) {
+    // No restart: the clock keeps its time until the next power loss.
+    forgetWifi();
+    sendMessagePage(out, "WiFi forgotten",
+                    "The clock keeps its time until the next power loss. Store a WiFi here to get the time from the internet again.");
   } else if (path.startsWith("/live")) {
     applyLiveParams(query); // live preview: apply to RAM only, no save, no reboot
     sendNoContent(out);
@@ -3878,6 +4016,40 @@ void applyParams(const String &q) {
   v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
   v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
+  v = getParam(q, "prof");   if (v.length()) { uiSettings.inputProfile = constrain(v.toInt(), 0, INPUT_PROFILE_COUNT - 1); }
+}
+
+// The home WiFi form (/wifi, POST). Returns what is wrong with it, or "" once
+// the credentials in RAM have been replaced. A password left empty keeps the
+// stored one.
+String applyWifiForm(const String &body) {
+  String ssid = getParam(body, "ssid");
+  String pw   = getParam(body, "pw");
+  if (ssid.length() == 0 || ssid.length() > 32) { return "The network name must be 1 to 32 characters long."; }
+  if (pw.length() != 0 && (pw.length() < 8 || pw.length() > 63)) { return "The password must be 8 to 63 characters long."; }
+  memset(wifiCreds.ssid, 0, sizeof(wifiCreds.ssid));
+  strncpy(wifiCreds.ssid, ssid.c_str(), sizeof(wifiCreds.ssid) - 1);
+  if (pw.length()) {
+    memset(wifiCreds.pass, 0, sizeof(wifiCreds.pass));
+    strncpy(wifiCreds.pass, pw.c_str(), sizeof(wifiCreds.pass) - 1);
+  }
+  Serial.print("WiFi: stored "); Serial.println(wifiCreds.ssid);
+  return "";
+}
+
+// Text for an HTML attribute or element: the five characters that would end
+// or start markup are written as entities.
+void printHtmlEscaped(Print &c, const char *s) {
+  for (; *s; s++) {
+    switch (*s) {
+      case '&':  c.print("&amp;");  break;
+      case '"':  c.print("&quot;"); break;
+      case '\'': c.print("&#39;");  break;
+      case '<':  c.print("&lt;");   break;
+      case '>':  c.print("&gt;");   break;
+      default:   c.print(*s);       break;
+    }
+  }
 }
 
 // Live preview (/live): apply only the visual settings to RAM, no flash write,
@@ -3939,7 +4111,7 @@ void sendFormPage(Print &c) {
   c.println("<meta name=viewport content=\"width=device-width,initial-scale=1\">");
   c.println("<title>Matrix Clock</title><style>");
   c.println("body{font-family:sans-serif;background:#111;color:#eee;margin:0;padding:16px}");
-  c.println("h1{font-size:20px}label{display:block;margin:12px 0 4px}");
+  c.println("h1{font-size:20px}h2{font-size:17px;margin:28px 0 0}label{display:block;margin:12px 0 4px}");
   c.println("input,select{width:100%;max-width:320px;padding:6px;font-size:16px;box-sizing:border-box}");
   c.println("input[type=checkbox]{width:auto}.row{display:flex;gap:8px;max-width:320px}");
   c.println(".row>div{flex:1}button{margin-top:18px;padding:10px 18px;font-size:16px;background:#06c;color:#fff;border:0;border-radius:4px}");
@@ -4058,11 +4230,33 @@ void sendFormPage(Print &c) {
   c.print("<div><input type=number min=0 max=23 name=synch value="); c.print(settings.syncHour); c.println("></div>");
   c.print("<div><input type=number min=0 max=59 name=syncm value="); c.print(settings.syncMinute); c.println("></div></div>");
 
+  // Inputs: which input profile the buttons follow.
+  c.println("<h2>Inputs</h2><label>Buttons</label><select name=prof>");
+  for (uint8_t i = 0; i < INPUT_PROFILE_COUNT; i++) { printOption(c, uiSettings.inputProfile, i, INPUT_PROFILES[i].name); }
+  c.println("</select>");
+
   c.println("<button type=submit>Save &amp; Restart</button>");
   c.println("</form>");
   // Everything above previews live but is only in RAM until it is saved. This
   // puts the stored values back, so trying something out costs nothing.
   c.println("<button type=button onclick=\"fetch('/discard').then(function(){location.reload();});\">Discard changes</button>");
+
+  // Home WiFi: a form of its own, sent by POST so the password is not part of
+  // the URL. The stored password is never sent to the page.
+  c.println("<h2>Home WiFi</h2><form action=\"/wifi\" method=post>");
+  c.print("<label>Network name (SSID)</label><input name=ssid maxlength=32 value=\"");
+  printHtmlEscaped(c, wifiCreds.ssid);
+  c.println("\">");
+  c.print("<label>Password</label><input type=password name=pw maxlength=63 autocomplete=new-password placeholder=\"");
+  c.print(wifiCreds.pass[0] ? "unchanged" : "none stored");
+  c.println("\">");
+  c.println("<button type=submit>Save WiFi &amp; Restart</button></form>");
+  if (wifiStored()) {
+    c.println("<form action=\"/forget\" method=post onsubmit=\"return confirm('Forget the home WiFi? The clock then gets no time from the internet.')\">");
+    c.println("<button type=submit style=\"background:#933\">Forget WiFi</button></form>");
+  } else {
+    c.println("<p style=\"color:#c96;font-size:13px\">No home WiFi stored: the clock gets no time from the internet.</p>");
+  }
 
   // Live preview: throttle the flood of slider events, but always send a trailing
   // update so the final value lands. Colors are URL-encoded (# -> %23).
@@ -4100,6 +4294,17 @@ void sendFormPage(Print &c) {
   c.println("box.appendChild(s);});}");
   c.println("mkSw('swDigit','digit');mkSw('swTrail','trail');");
   c.println("</script>");
+  c.println("</body></html>");
+}
+
+// A short page with a heading, one line of text and the way back.
+void sendMessagePage(Print &c, const char *title, const char *text) {
+  sendHttpHeader(c);
+  c.println("<!DOCTYPE html><html><head><meta charset=utf-8>");
+  c.println("<meta name=viewport content=\"width=device-width,initial-scale=1\">");
+  c.print("<title>"); c.print(title); c.println("</title><style>body{font-family:sans-serif;background:#111;color:#eee;padding:24px}a{color:#6af}</style>");
+  c.print("</head><body><h1>"); c.print(title); c.println("</h1>");
+  c.print("<p>"); c.print(text); c.println("</p><p><a href=\"/\">Back to the settings</a></p>");
   c.println("</body></html>");
 }
 

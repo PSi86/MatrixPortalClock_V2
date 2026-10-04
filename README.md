@@ -53,20 +53,24 @@ button pin cannot be carried over.
 - **On-screen menu** with the UP and DOWN buttons: brightness, auto brightness,
   timezone, daylight saving and the config hotspot, set on the clock itself
   without WiFi (see [Menu and buttons](#menu-and-buttons))
-- **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time
-- All settings are stored outside the program image, so they survive a restart
-  **and a firmware re-upload** (S3: the NVS partition, which a normal upload does
-  not touch - `pio run -t erase` does; M4: a fixed flash block at 0x7E000)
+- **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, the button profile and the **home WiFi**
+- All settings, the home WiFi included, are stored outside the program image, so
+  they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
+  a normal upload does not touch - `pio run -t erase` does; M4: one 8 KB flash
+  block each at the top of the flash, from 0x7A000 up)
 - Recovery: the config hotspot is in the menu from the first second, also
   without the home WiFi; holding UP during boot opens it as well
 
 ## Setup
 
-1. Create the WiFi credentials:
+1. Optionally, compile in the home WiFi:
    ```
    copy src\arduino_secrets.h.example src\arduino_secrets.h
    ```
-   and enter SSID/password in `src/arduino_secrets.h`.
+   and enter SSID/password in `src/arduino_secrets.h`. A clock that has no WiFi
+   stored copies these into flash on its first start, once; from then on the
+   WiFi is changed or forgotten on the config page, and editing the file no
+   longer changes it. Without the file, set the WiFi on the config page.
 
 2. Build / upload. The default environment is the MatrixPortal S3:
    ```
@@ -167,13 +171,12 @@ and ice-blue otherwise. A button pressed while a banner is up only closes it.
 matrix corner light while a button is held (the square is the compile-time
 switch `BUTTON_FEEDBACK_ON_MATRIX`).
 
-**Classic clicks.** Building with `-D INPUT_PROFILE_CLASSIC=1` brings back the
-button codes the clock had before the menu: on the face UP 1x cycles daylight
-saving with a banner, 2x toggles auto brightness with a banner, 3x opens or
-closes the hotspot, and holding UP fades the brightness, saved on release. Each
-click sequence is confirmed by one blink of the LED per click. Holding DOWN
-opens the menu, which then works as above. Until the config page can choose the
-profile, the build does.
+**Classic clicks.** The profile *Classic clicks* (config page, **Inputs**)
+brings back the button codes the clock had before the menu: on the face UP 1x
+cycles daylight saving with a banner, 2x toggles auto brightness with a banner,
+3x opens or closes the hotspot, and holding UP fades the brightness, saved on
+release. Each click sequence is confirmed by one blink of the LED per click.
+Holding DOWN opens the menu, which then works as above.
 
 Under the hood every input becomes a named event (short, 2x, 3x, hold, hold
 repeat, boot, knock), and a profile table in `src/input_map.h` says what each
@@ -214,6 +217,17 @@ Restart" stores everything to flash and reboots.
 Everything on the page previews live but is only written to flash by "Save &
 Restart". **Discard changes** puts the stored settings back, so trying something
 out costs nothing.
+
+**Inputs** chooses the button profile (*Default* or *Classic clicks*), saved with
+the rest of the page.
+
+**Home WiFi** has a form of its own, sent by POST so the password is never part
+of a URL. It shows the stored network name; the stored password is never sent
+to the page, and a password field left empty keeps it. "Save WiFi & Restart"
+stores the network and restarts, so the clock joins it at once. **Forget WiFi**
+(after a confirmation) deletes network name and password; the clock keeps its
+time until the next power loss, and the credentials compiled in from
+`arduino_secrets.h` are not copied in again.
 
 The color palette offers **full colors only** for both the digit and the fly-in
 color. The fly-in (trail) is automatically dimmed relative to the master

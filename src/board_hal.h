@@ -174,20 +174,49 @@ class SettingsStore {
 
 #include <FlashStorage_SAMD.h>
 
-#define SETTINGS_FLASH_ADDR 0x0007E000UL   // last 8 KB erase block of the 512 KB flash
+// One 8 KB erase block per blob, counted down from the top of the 512 KB flash.
+// The SAMD51 erases flash a whole block at a time, so two blobs sharing a block
+// would rewrite each other on every save - a new WiFi password would rewrite
+// the settings, and a power cut at that moment could cost them.
+#define SETTINGS_FLASH_ADDR 0x0007E000UL   // the settings, where they have always been
+#define UI_FLASH_ADDR       0x0007C000UL   // UI settings
+#define WIFI_FLASH_ADDR     0x0007A000UL   // home WiFi credentials
+// The program has to end below the lowest of these. platformio.ini caps its
+// size (board_upload.maximum_size = 0x7A000 - 0x4000), so a sketch that grew
+// into them would fail to build instead of being overwritten by a save.
 
-// The key argument exists only so the call sites match the S3 backend; this
-// board has one fixed address and therefore room for a single blob.
+// The block of a key; 0 for a key that has none.
+inline uint32_t settingsFlashAddr(const char *key) {
+  if (strcmp(key, "settings") == 0) { return SETTINGS_FLASH_ADDR; }
+  if (strcmp(key, "ui") == 0)       { return UI_FLASH_ADDR; }
+  if (strcmp(key, "wifi") == 0)     { return WIFI_FLASH_ADDR; }
+  return 0;
+}
+
 template <typename T>
 class SettingsStore {
  public:
-  void begin(const char *key = "settings") { (void)key; }
-  bool read(T &dst)  { _flash.read(dst); return true; }
-  void write(T &src) { _flash.write(src); }
+  void begin(const char *key = "settings") {
+    _addr = settingsFlashAddr(key);
+    if (_addr == 0) { Serial.print("No flash block for the key "); Serial.println(key); }
+  }
+
+  // A key without a block reads as all zero, which the caller's magic check
+  // takes for "nothing stored", and is never written: no flash gets erased
+  // that is not ours.
+  bool read(T &dst) {
+    if (_addr == 0) { memset(&dst, 0, sizeof(T)); return false; }
+    FlashStorageClass<T>((const void *)_addr).read(dst);
+    return true;
+  }
+  void write(T &src) {
+    if (_addr == 0) { return; }
+    FlashStorageClass<T>((const void *)_addr).write(src);
+  }
 
  private:
   static_assert(sizeof(T) <= 8192, "Settings must fit in one 8 KB flash block");
-  FlashStorageClass<T> _flash{(const void *)SETTINGS_FLASH_ADDR};
+  uint32_t _addr = 0;
 };
 
 #endif
@@ -447,9 +476,10 @@ inline bool netApBegin(const char *ssid, const char *pass) {
   return ok;
 }
 
-inline void netApEnd(const char *ssid, const char *pass) {
+// Drop the softAP. Whether the station joins again or the radio goes off is
+// the caller's choice (netStaBegin() or netRadioOff()).
+inline void netApEnd() {
   WiFi.softAPdisconnect(true);
-  netStaBegin(ssid, pass);
 }
 
 inline bool netApHasStation() { return WiFi.softAPgetStationNum() > 0; }
@@ -527,10 +557,12 @@ inline bool netApBegin(const char *ssid, const char *pass) {
 // flag across modes and begin() then skips DHCP, which would leave the clock in
 // the home WiFi without an address (no NTP). A reboot clears it anyway, because
 // WiFiNINA hard-resets the co-processor at start-up.
-inline void netApEnd(const char *ssid, const char *pass) {
+// Drop the AP's static address, so a station join afterwards gets one by DHCP
+// again. Whether the station joins or the radio goes off is the caller's
+// choice (netStaBegin() or netRadioOff()).
+inline void netApEnd() {
   const IPAddress none(0, 0, 0, 0);
   WiFi.config(none, none, none, none);
-  netStaBegin(ssid, pass);
 }
 
 inline bool netApHasStation() { return WiFi.status() == WL_AP_CONNECTED; }
