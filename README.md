@@ -149,7 +149,9 @@ From the fourth of several quick presses on (less than 0.4 s apart), each press
 moves five steps, so the 16 brightness steps and the 26 zones are quick to cross.
 A value is written to flash only when it is saved and differs from the stored
 one; leaving an editor any other way puts the stored value back. The menu closes
-by itself after 20 s without input.
+by itself after 20 s without input. On the S3 the picture slides sideways
+between the list and an editor, deeper to the left (`MENU_SLIDE` in
+`board_hal.h`); the M4 changes it at once.
 
 Saving a new zone or daylight-saving mode shows a 3 s **banner** with the
 resulting time and its offset from UTC, orange while summer time is in effect

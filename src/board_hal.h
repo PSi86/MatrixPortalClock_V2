@@ -95,6 +95,8 @@
   // only been tested on the S3, so it stays switched off elsewhere until the M4
   // gets a hardware test.
   #define WATCHFACE_TETRIS 1
+  // Moving between the menu list and an editor slides the picture sideways.
+  #define MENU_SLIDE 1
   // The accelerometer's INT1 line. Not in Adafruit's pinout page - taken from
   // the board schematic (Adafruit-MatrixPortal-S3-PCB, "Adafruit MatrixPortal
   // S3.sch"), where the net list has U4 (the LIS3DH) pin INT1 on the net INT
@@ -111,6 +113,9 @@
   // it on also needs the AP preview to keep respecting AP_PREVIEW_INTERVAL_MS,
   // or the Tetris face would out-draw what WiFiNINA can serve around.
   #define WATCHFACE_TETRIS 0
+  // The menu changes its picture at once, without a slide (UI concept: the
+  // S class slides on the S3 only).
+  #define MENU_SLIDE 0
 #endif
 
 /* ======================================================================
