@@ -40,7 +40,10 @@ button pin cannot be carried over.
   positions)
 - **Automatic brightness** via an external BH1750 light sensor: a configurable
   lux → brightness mapping dims the clock once per second to match the room
-- NTP time synchronization with a daily resync
+- NTP time synchronization with a daily resync. The WiFi is switched on one
+  minute before the sync time and off again after the sync
+- **Status pixel**: off in normal operation; a single red pixel in the bottom-left
+  corner means a due NTP sync has not succeeded for an hour
 - **Automatic summer/winter time** for every timezone in the menu (rules from the
   IANA tz database), or a fixed summer or winter time
 - **User button** (UP button; S3: GPIO6, M4: D2):
@@ -183,8 +186,15 @@ and the **AP clock preview** all follow the accelerometer. The **AP info screen*
 it auto-flips (rotation 0/2) so it is never upside down.
 
 If the panel rotates the "wrong" way for your build, adjust the single
-`ORIENT_MAP` table in `updateOrientation()` — the serial console prints the raw
-axes and the chosen rotation to make calibration easy.
+`ORIENT_MAP` table in `sensorRotation()` — the serial console prints every
+rotation the clock switches to, which makes calibration easy.
+
+The firmware keeps two rotations apart: the **device rotation** (how the panel
+is held, from the accelerometer after the debounce) and the **screen rotation**
+(what the panel is drawn in right now). They only differ while the AP info
+screen is up, so leaving it always returns to how the panel is held — also when
+the panel lies flat or has no accelerometer, where the clock used to come back
+in the info screen's landscape rotation.
 
 ## Auto-brightness (BH1750 light sensor)
 
@@ -367,9 +377,12 @@ in high-resolution mode — which the threshold register takes in steps of 16 mg
 so level 10 is 6 steps and level 1 is 24.
 
 Nothing is triggered while another screen owns the panel, in the config AP, for
-the first three seconds after start-up, for 1.2 s after a rotation, while an
-animation is already running, or **while the button is held** — the switch sits
-next to the sensor, so a button press is a knock as far as it is concerned.
+the first three seconds after start-up, for 1.2 s after a rotation or after an
+effect has run, while an animation is already running, or **while the button is
+held** — the switch sits next to the sensor, so a button press is a knock as far
+as it is concerned. A knock the sensor latched while the config AP was up is
+discarded when the face comes back. All of these reasons sit together in
+`knockAccepted()`.
 
 With **Also use it when the time changes** ticked, the same effect replaces the
 plain swap when a digit changes: at a minute rollover only the digits that
@@ -427,7 +440,9 @@ Adafruit Unified Sensor, BH1750FVI_RT (Rob Tillaart). All versions are pinned.
 
 Timekeeping lives in `src/clock_time.h` and only uses the C library's `<time.h>`.
 It replaced the Time library (TimeLib), which is unmaintained since 2021 and does
-not build against picolibc, the default C library from ESP-IDF 6 on.
+not build against picolibc, the default C library from ESP-IDF 6 on. The clock
+keeps UTC, exactly as NTP delivers it; the timezone and daylight saving are added
+only where the time is shown, so changing either never touches the clock.
 
 MatrixPortal M4 only: WiFiNINA, FlashStorage_SAMD. On the S3 the WiFi stack and the
 NVS settings storage come from the ESP32 Arduino core, so no extra library is needed.

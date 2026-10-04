@@ -1,14 +1,16 @@
 /* ----------------------------------------------------------------------
-   Software clock: local time in seconds since 1970, counted from millis().
+   Software clock: UTC in seconds since 1970, counted from millis().
 
    Replaces the Time library (TimeLib 1.6.1, unmaintained since 2021), which
    declares its own time_t and does not compile against picolibc (the default
    C library from ESP-IDF 6 on). Only the C library's <time.h> is used here, so
    it builds the same with newlib and picolibc, on the M4 and on the S3.
 
-   The clock is set from NTP (UTC) and then shifted by the configured timezone
-   and DST offset, so the value it holds is LOCAL time; the hour/minute/second
-   helpers therefore break it down with gmtime_r(), not localtime_r().
+   The clock holds UTC, exactly as NTP delivers it. Timezone and daylight
+   saving are added where the time is shown (the sketch's localTime), so
+   changing either never touches the clock. The hour/minute/second helpers
+   break down whatever value they are given with gmtime_r(); pass them the
+   local time to get the local fields.
    ------------------------------------------------------------------------- */
 #pragma once
 
@@ -44,8 +46,6 @@ inline void clockSet(time_t t) {
   s.millisAt = millis();
   s.set      = true;
 }
-
-inline void clockAdjust(long deltaSeconds) { clockState().seconds += deltaSeconds; }
 
 inline bool clockIsSet() { return clockState().set; }
 

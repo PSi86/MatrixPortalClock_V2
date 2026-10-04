@@ -20,7 +20,7 @@ Todo Concept:
 ------------------------------------------------------------------------- */
 
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
-#include "clock_time.h"     // software clock: seconds since 1970 (local time), C library only
+#include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 
 #include <Adafruit_Protomatter.h>
 //#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font works
@@ -159,7 +159,6 @@ const unsigned long FB_BLINK_OFF_MS = 250;
 uint8_t       fbBlinkCount = 0;              // confirmation blinks of the running sequence
 unsigned long fbBlinkStart = 0;              // millis() when that sequence started
 bool          fbLit = false;                 // feedback state of this loop (LED and matrix)
-bool          apScreenFbLit = false;         // feedback state the static AP info screen shows
 
 // Perceptual brightness fade (long press) ----------------------------------
 const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep
@@ -167,19 +166,33 @@ const float FADE_GAMMA     = 2.2f;    // perceptual -> linear-light exponent
 float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the human eye)
 int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
-unsigned long dstMsgUntil = 0;        // show the daylight-saving banner until this millis()
-// Set by every screen that puts something other than the Tetris watchface on the
-// panel (boot messages, the daylight-saving banner, the AP info screen, the
-// classic watchface). The Tetris watchface skips redrawing a picture that has
-// not changed, so it needs to know when someone else has overwritten it.
-bool tetrisPanelStale = true;
-// Knocking the clock is ignored until this millis(): while it is starting up,
-// and for a moment after a rotation, where the movement would otherwise set off
-// the very animation the rotation already redraws around. Declared here rather
-// than with the rest of the shake code because applyOrientation() sets it and is
-// compiled on both boards.
-const unsigned long SHAKE_SETTLE_MS = 1200;
-unsigned long shakeBlockUntil = 3000;   // and nothing counts for the first 3 s
+
+// Screens ------------------------------------------------------------------
+// Exactly one screen owns the panel at a time, and it changes only through
+// setScreen(). Which screen is up used to be worked out from the AP flags, the
+// banner timer and whoever had drawn last; now it is this one value.
+enum Screen : uint8_t {
+  SCREEN_BOOT,             // status lines while setup() runs
+  SCREEN_FACE,             // the clock face, classic or Tetris
+  SCREEN_BANNER,           // a short text after a change - today the daylight-saving mode
+  SCREEN_HOTSPOT_INFO,     // config AP up, no client yet: SSID, password and IP
+  SCREEN_HOTSPOT_PREVIEW,  // config AP up and a client connected: the live clock
+};
+Screen        screen = SCREEN_BOOT;
+unsigned long bannerUntil = 0;   // SCREEN_BANNER: back to the face at this millis()
+// True while the panel may not show what the current screen would draw: after
+// every screen change, a watchface change and whenever the press indicator
+// flips. The screens that only repaint on a change (the Tetris face, the hotspot
+// info) repaint when it is set; every full repaint clears it.
+bool          panelDirty = true;
+// Knock gates: one reason and one timestamp each, read only by knockAccepted().
+// Declared here rather than with the rest of the shake code because setup() and
+// the orientation code set them, and those are compiled on both boards.
+const unsigned long KNOCK_START_QUIET_MS = 3000;  // after setup(): plugging the clock in
+const unsigned long SHAKE_SETTLE_MS      = 1200;  // after a turn, and after an effect
+unsigned long setupDoneAt  = 0;   // millis() at the end of setup()
+unsigned long rotatedAt    = 0;   // millis() when the device rotation last changed
+unsigned long shakeEndedAt = 0;   // millis() when the last effect had run its course
 // Boot breadcrumb stages, written to flash while starting (see board_hal.h).
 const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
 const uint8_t BOOT_STAGE_START = 1;   // setup() entered
@@ -194,7 +207,6 @@ bool dstAutoActive = false;           // DST_AUTO: whether summer time is in eff
 #define AP_SSID "MatrixClock"
 #define AP_PASS "clock1234"   // must be >= 8 characters
 bool        apActive = false;
-bool        apClientConnected = false; // true once a client talks to us (station joined / HTTP hit)
 unsigned long apStatusLast = 0;        // last time the AP connection status was polled
 unsigned long apClockLast = 0;         // last live-preview clock frame (throttled in AP mode)
 // While a client is connected serving the web UI has priority, so the clock
@@ -280,13 +292,7 @@ uint8_t BufferedWriter::_buf[2000];
 
 // Sundry globals used for animation ---------------------------------------
 
-int16_t  textX, // Current text position (X)
-         textY,                  // Current text position (Y)
-         textMin,                // Text pos. (X) when scrolled off left edge
-         hue = 0;
-char message[10] = "TERMIN";  // Buffer to hold scrolling message text
 char timeStr[7], animStr[7]; // 6 digits + null terminator
-uint8_t intensityValue, position;
 bool animTrigger[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
 bool animShow[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
 int8_t animXPos[6] = {0, 0, 0, 0, 0, 0};
@@ -314,8 +320,16 @@ const int8_t landYTarget[6] = {17, 17, 17, 17, 30, 30}; // HH/MM baseline 17, SS
 // rotate the display in 90 deg steps so the clock always shows the right way up.
 Adafruit_LIS3DH lis = Adafruit_LIS3DH();
 bool    accelOK = false;          // true once the LIS3DH was found on I2C
-uint8_t curRotation = 3;          // active matrix rotation (3 = portrait, today's default)
-bool    isLandscape = false;      // true for rotations 0/2 (64 wide x 32 tall)
+// Two rotations, kept apart on purpose:
+// - deviceRotation is how the panel is held: the accelerometer's reading after
+//   the debounce, or the default when there is no sensor. Only the orientation
+//   code below changes it, never a screen.
+// - screenRotation is what the panel is drawn in right now. Most screens draw in
+//   the device rotation; the hotspot info screen is landscape however the panel
+//   is held, so the two differ while it is up.
+const uint8_t ROTATION_NONE = 0xFF;   // sensorRotation(): the sensor cannot tell
+uint8_t deviceRotation = 3;       // 3 = portrait, today's default
+uint8_t screenRotation = 3;
 unsigned long orientLast = 0;     // last accelerometer poll (throttle)
 uint8_t orientCandidate = 3;      // debounce: rotation the sensor currently favours
 uint8_t orientStable = 0;         // consecutive polls the candidate has held
@@ -349,41 +363,41 @@ const float   AUTOBRIGHT_TAU_MS = 1200.0f;  // fade time constant (~1.2 s to 63%
 // darker, 255 = much brighter) and effectiveBrightness is the result.
 uint8_t       effectiveBrightness = 128;
 
-int16_t bgBrightness, counter;
-uint16_t color, colorBg;
-bool directionSwitch;
-
 //Time Related Variables
 uint8_t loopTime = 12; // ms per animation pixel (PANEL_PACED_LOOP: rounded to whole panel refreshes)
 uint16_t panelHz = 0;            // measured panel refresh rate, 0 until the first measurement
 unsigned long panelRateLast = 0; // start of the running refresh-rate measurement
 uint8_t hourNow, minuteNow, secondNow;
-long timeOffset;
 bool secondTrigger, minuteTrigger, hourTrigger;
 uint8_t syncTimeHour = 5, syncTimeMinute = 11;
-unsigned long millisNow, deltaT, lastSync, ntpTimeout = 3000; // ms between NTP fetch retries while unsynced
+unsigned long millisNow, deltaT;
+time_t localTime;   // what the panel shows: the clock's UTC plus zone and daylight saving
 
-bool ntpRequestActive, ntpSuccess, wifiEnabled;
-bool firstSync=true;
-time_t sysTime, ntpTime;
+// NTP sync -----------------------------------------------------------------
+// One state instead of the flags ntpSuccess, ntpRequestActive and wifiEnabled.
+// ntpSuccess used to do two jobs - colour the status pixel and, cleared at the
+// sync minute, ask for the daily sync - so the pixel turned red every day
+// without anything having failed. The state changes only through
+// setSyncState().
+enum SyncState : uint8_t {
+  SYNC_IDLE,        // synced, radio off, waiting for the next sync time
+  SYNC_WAKING,      // radio on one minute early, so it has joined by the sync time
+  SYNC_FETCHING,    // a sync is due: ask for the time on this pass
+  SYNC_RETRY_WAIT,  // the last ask came back empty: wait NTP_RETRY_MS, then ask again
+};
+SyncState     syncState    = SYNC_FETCHING;   // the first sync is due at start-up
+unsigned long syncDueSince = 0;               // millis() when the pending sync became due
+unsigned long syncLastAsk  = 0;               // millis() of the last ask, for the retry pace
+const unsigned long NTP_RETRY_MS = 3000;      // between asks while a sync is due
+// A due sync that has not succeeded for this long is an error, shown on the
+// status pixel. The hour covers the retries, so a sync in progress never shows.
+const unsigned long SYNC_LATE_MS = 60UL * 60UL * 1000UL;
 
 // Network Stuff
-#include "arduino_secrets.h" 
+#include "arduino_secrets.h"
 ///////please enter your sensitive data in the Secret tab/arduino_secrets.h
 char ssid[] = SECRET_SSID;        // your network SSID (name)
 char pass[] = SECRET_PASS;    // your network password (use for WPA, or use as key for WEP)
-int keyIndex = 0;            // your network key index number (needed only for WEP)
-
-unsigned int localPort = 2390;      // local port to listen for UDP packets
-
-//IPAddress timeServer(129, 6, 15, 28); // time.nist.gov NTP server
-IPAddress timeServer(192, 168, 2, 1); // fritz.box NTP server
-
-const int NTP_PACKET_SIZE = 48; // NTP timestamp is in the first 48 bytes of the message
-byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
-
-// A UDP instance to let us send and receive packets over UDP
-WiFiUDP Udp;
 
 /* ======================================================================
    Timezones
@@ -453,29 +467,25 @@ bool dstInEffect() {
   return settings.dst == DST_SUMMER;
 }
 
-// Switch the daylight-saving mode and shift the running clock by the change in
-// the effective offset (none, or one hour).
+// Switch the daylight-saving mode. The clock holds UTC, so the time on the panel
+// follows by itself (by one hour, or not at all); only the automatic mode needs
+// to know at once whether summer time is in effect.
 void setDstMode(uint8_t mode) {
-  long before = tzTotalOffset();
-  time_t utc = clockNow() - before;
   settings.dst = mode;
-  if (mode == DST_AUTO) { dstAutoActive = clockIsSet() && dstActiveAt(tzRule(settings.tzOffset), utc); }
-  long after = tzTotalOffset();
-  if (after != before) { clockAdjust(after - before); }
+  if (mode == DST_AUTO) { dstAutoActive = clockIsSet() && dstActiveAt(tzRule(settings.tzOffset), clockNow()); }
 }
 
-// DST_AUTO, once a minute: follow the rule's changes by shifting the running clock
-// (EU: 01:00 UTC on the last Sunday of March and October). Decided on UTC, so the
-// hour repeated in autumn does not switch back again.
+// DST_AUTO, once a minute: follow the rule's changes (EU: 01:00 UTC on the last
+// Sunday of March and October). Decided on UTC, so the hour repeated in autumn
+// does not switch back again.
 void updateAutoDst() {
   if (settings.dst != DST_AUTO || !clockIsSet()) { return; }
-  bool active = dstActiveAt(tzRule(settings.tzOffset), clockNow() - tzTotalOffset());
+  bool active = dstActiveAt(tzRule(settings.tzOffset), clockNow());
   if (active == dstAutoActive) { return; }
   dstAutoActive = active;
-  clockAdjust(active ? 3600 : -3600);
-  time_t now = clockNow();
+  time_t local = clockNow() + tzTotalOffset();
   Serial.print(active ? "DST auto -> summer, clock " : "DST auto -> winter, clock ");
-  Serial.print(clockHour(now)); Serial.print(':'); Serial.println(clockMinute(now));
+  Serial.print(clockHour(local)); Serial.print(':'); Serial.println(clockMinute(local));
 }
 
 #if defined(CLOCK_DEBUG)
@@ -630,11 +640,12 @@ void setup(void) {
     printWifiStatus();
     delay(1000);
   } // end if(!apActive)
-  // Set last, from the real clock: applyOrientation() ran several times during
-  // the boot screens and left this behind with a millisNow from before the WiFi
-  // join, which can be ten seconds ago. Ignore the handling that comes with
-  // plugging the clock in.
-  shakeBlockUntil = millis() + 3000;
+  // The boot screens are done; the config AP, if it was opened above, keeps its own.
+  if (screen == SCREEN_BOOT) { setScreen(SCREEN_FACE); }
+  // Set last, from the real clock - millisNow can be from before the WiFi join,
+  // ten seconds ago. Knocks are ignored for a moment from here on: that is the
+  // handling that comes with plugging the clock in.
+  setupDoneAt = millis();
 }
 
 // MAIN
@@ -652,6 +663,7 @@ void loop(void) {
   if (apActive) {      // config AP running
     apWatchdog();      // re-create the AP if the ESP32 silently rebooted
     handleAP();        // captive-portal DNS + web UI + live settings updates
+    updateOrientation();// the info screen and the preview follow the panel as well
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
     return;
@@ -664,39 +676,60 @@ void loop(void) {
   updateShake();        // a knock takes the Tetris digits apart and rebuilds them
 #endif
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
-  if (millisNow < dstMsgUntil) { drawDstMessage(); } // brief banner after a daylight-saving mode change
-  else                         { drawClock(); }
+  if (screen == SCREEN_BANNER && millisNow >= bannerUntil) { setScreen(SCREEN_FACE); }
+  switch (screen) {
+    case SCREEN_BANNER: drawDstMessage(); break;
+    case SCREEN_FACE:   drawClock();      break;
+    default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
+  }
+}
+
+// The one way to change the screen. Whatever a screen needs on the way in or out
+// happens here, so a caller only says where to go.
+void setScreen(Screen next) {
+  if (next == screen) { return; }
+  Screen prev = screen;
+  screen = next;
+  panelDirty = true;
+  DEBUG_LOG("screen %u -> %u\n", (unsigned)prev, (unsigned)next);
+  // Out: the hotspot screens leave the panel in a rotation of their own (the info
+  // screen is always landscape), so whatever comes next starts again from how
+  // the panel is actually held.
+  bool fromHotspot = (prev == SCREEN_HOTSPOT_INFO || prev == SCREEN_HOTSPOT_PREVIEW);
+  if (fromHotspot && next != SCREEN_HOTSPOT_INFO) { applyOrientation(deviceRotation); }
+  // In: the info screen is static and drawn once, at once - before the slow radio
+  // bring-up in startAPMode() freezes the loop.
+  if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
+#if WATCHFACE_TETRIS
+  // In: a knock latched while another screen was up is old news on the face.
+  if (next == SCREEN_FACE) { shakeDiscardLatched(); }
+#endif
 }
 
 // Leave the AP-info screen and show the live clock (called once a client appears).
 void apShowClock() {
-  if (apClientConnected) { return; }
-  apClientConnected = true;
-  applyOrientation(detectRotation()); // start the clock preview in the current orientation
+  if (screen == SCREEN_HOTSPOT_INFO) { setScreen(SCREEN_HOTSPOT_PREVIEW); }
 }
 
 // While the AP is up: show connection info until a client appears, then switch to
 // a throttled live clock so brightness/color/speed changes are visible in real time
 // without starving the (slow) WiFiNINA web serving.
 void updateApDisplay() {
-  if (!apClientConnected) {
+  if (screen == SCREEN_HOTSPOT_INFO) {
     if (millisNow - apStatusLast >= 500) { // periodically check whether a station joined
       apStatusLast = millisNow;
       if (netApHasStation()) { apShowClock(); return; }
-      if (apInfoRotation() != curRotation) { drawAPScreen(); } // re-orient the info if turned
     }
-#if BUTTON_FEEDBACK_ON_MATRIX
-    // The info screen is static, so redraw it whenever the button indicator flips.
-    if (fbLit != apScreenFbLit) { drawAPScreen(); }
-#endif
+    // The info screen is static, so it is only redrawn when the panel no longer
+    // shows it as it should, e.g. when the press indicator flipped.
+    if (panelDirty) { drawAPScreen(); }
     return;
   }
-  // A client is connected. Keep the animation advancing every loop so it runs at
-  // real time (stepClockAnim is cheap, no panel I/O), but only push the latest
-  // state to the panel at the board's preview rate (5 fps on the M4): skipped
-  // frames are computed, not slowed down. This leaves the radio free for the
-  // slow WiFiNINA web server; the S3 draws every frame.
-  updateOrientation(); // clock preview follows the accelerometer (all four rotations)
+  // SCREEN_HOTSPOT_PREVIEW: a client is connected. Keep the animation advancing
+  // every loop so it runs at real time (stepClockAnim is cheap, no panel I/O),
+  // but only push the latest state to the panel at the board's preview rate
+  // (5 fps on the M4): skipped frames are computed, not slowed down. This leaves
+  // the radio free for the slow WiFiNINA web server; the S3 draws every frame.
 #if WATCHFACE_TETRIS
   // The Tetris watchface throttles itself (it only repaints on an animation step
   // or a visible change), so it needs no preview rate on top of that.
@@ -734,13 +767,10 @@ uint8_t swapDir(uint8_t d) {
 // with the fly-in directions swapped. Digits snap to the new layout so an
 // in-flight animation never streaks across the screen during a rotation.
 void applyOrientation(uint8_t rot) {
-  matrix.setRotation(rot);
-  curRotation = rot;
-  isLandscape = (rot == 0 || rot == 2);
-  shakeBlockUntil = millisNow + SHAKE_SETTLE_MS;   // turning is not a knock
+  setScreenRotation(rot);
 
   for (uint8_t i = 0; i < 6; i++) {
-    if (isLandscape) {
+    if (screenIsLandscape()) {
       animXTarget[i]   = landXTarget[i];
       animYTarget[i]   = landYTarget[i];
       animDirection[i] = (int8_t)swapDir(settings.dir[i]);
@@ -757,22 +787,31 @@ void applyOrientation(uint8_t rot) {
   }
 }
 
-// Poll the LIS3DH (throttled) and rotate the display to match how the panel is
-// physically held. Gravity in the panel plane picks one of four quadrants; a
-// debounce + diagonal-rejection keeps the orientation from flickering near 45.
-// One-shot orientation read: returns the desired rotation (0..3) from gravity, or
-// the current rotation when the reading is undecided (panel flat / near the 45 deg
-// diagonal) or no sensor is present. Shared by the live updateOrientation() and by
-// the boot / AP screens so every screen aligns to the panel the same way.
-uint8_t detectRotation() {
-  if (!accelOK) { return curRotation; }
+// The one place the panel's drawing rotation is set.
+void setScreenRotation(uint8_t rot) {
+  matrix.setRotation(rot);
+  screenRotation = rot;
+}
+
+// Whether the panel is drawn 64 wide x 32 tall right now (rotations 0 and 2).
+bool screenIsLandscape() {
+  return screenRotation == 0 || screenRotation == 2;
+}
+
+// One-shot orientation read: the rotation (0..3) gravity points to, or
+// ROTATION_NONE when the reading is undecided (panel flat / near the 45 deg
+// diagonal) or there is no sensor. Gravity in the panel plane picks one of four
+// quadrants. What "undecided" means is up to the caller - it is never mixed up
+// with the rotation some screen happens to be drawn in.
+uint8_t sensorRotation() {
+  if (!accelOK) { return ROTATION_NONE; }
   lis.read();
   int16_t ax = lis.x, ay = lis.y;
   int16_t axAbs = abs(ax), ayAbs = abs(ay);
   int16_t hi = max(axAbs, ayAbs), lo = min(axAbs, ayAbs);
-  // Too flat (panel face up/down) or too close to the diagonal -> keep current.
+  // Too flat (panel face up/down) or too close to the diagonal -> undecided.
   // Require the dominant axis to be >25% larger: hi > lo*1.25  <=>  hi*4 > lo*5.
-  if (hi < 2000 || (int32_t)hi * 4 <= (int32_t)lo * 5) { return curRotation; }
+  if (hi < 2000 || (int32_t)hi * 4 <= (int32_t)lo * 5) { return ROTATION_NONE; }
   // Gravity quadrant: 0=+X down, 1=-X down, 2=+Y down, 3=-Y down.
   uint8_t quadrant;
   if (axAbs > ayAbs) { quadrant = (ax > 0) ? 0 : 1; }
@@ -783,20 +822,42 @@ uint8_t detectRotation() {
   return ORIENT_MAP[quadrant];
 }
 
-// Poll the LIS3DH (throttled) and rotate the clock to match how the panel is held,
-// with a debounce so it doesn't flicker near 45 deg.
+// Take the sensor's reading as the device rotation at once, without the
+// debounce. For the boot screens, which come and go faster than it settles.
+void adoptSensorRotation() {
+  uint8_t r = sensorRotation();
+  if (r == ROTATION_NONE) { return; }   // undecided: keep what we have
+  deviceRotation  = r;
+  orientCandidate = r;                  // the debounce carries on from here
+  orientStable    = 0;
+}
+
+// Poll the LIS3DH (throttled) and update the device rotation, with a debounce so
+// it doesn't flicker near 45 deg. Runs on every screen; each screen then follows
+// the new rotation in its own way.
 void updateOrientation() {
   if (!accelOK) { return; }
   if (millisNow - orientLast < ORIENT_POLL_MS) { return; }   // throttle to ~4 Hz
   orientLast = millisNow;
-  uint8_t wanted = detectRotation();
+  uint8_t sensed = sensorRotation();
+  uint8_t wanted = (sensed == ROTATION_NONE) ? deviceRotation : sensed;   // undecided: keep it
   // Debounce: a new orientation must persist a few polls before we commit.
   if (wanted == orientCandidate) { if (orientStable < 255) { orientStable++; } }
   else { orientCandidate = wanted; orientStable = 1; }
-  if (wanted != curRotation && orientStable >= ORIENT_DEBOUNCE) {
+  if (wanted != deviceRotation && orientStable >= ORIENT_DEBOUNCE) {
     Serial.print("Orientation -> rotation "); Serial.println(wanted);
-    applyOrientation(wanted);
+    deviceRotation = wanted;
+    rotatedAt = millisNow;   // turning is not a knock
+    followDeviceRotation();
   }
+}
+
+// The screen on the panel takes up a new device rotation. The hotspot info is
+// always landscape, so it only flips the right way up; everything else turns
+// with the panel.
+void followDeviceRotation() {
+  if (screen == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
+  else                               { applyOrientation(deviceRotation); }
 }
 
 /* ======================================================================
@@ -879,14 +940,15 @@ void drawCenteredText(const char *msg, uint16_t color) {
   matrix.print(msg);
   drawFeedbackIndicator();
   matrix.show();
-  tetrisPanelStale = true;
+  panelDirty = false;   // the whole panel shows this text now
 }
 
 // Boot status line: oriented to the panel and dimmed to the live clock brightness
 // (sensor-driven when auto-brightness is on), exactly like every other screen.
 void bootStatus(const char *msg) {
   millisNow = millis();                // setup() runs before timekeeper(), so refresh the clock
-  applyOrientation(detectRotation());  // follow the accelerometer
+  adoptSensorRotation();               // follow the accelerometer
+  applyOrientation(deviceRotation);
   updateBrightness();                  // same brightness logic as the clock
   drawCenteredText(msg, scaledColor(255, 255, 255));
 }
@@ -936,13 +998,9 @@ void stepClockAnim(void) {
   if (moveNow) { framesInStep = 0; }
 
   if (secondTrigger) {
-    sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime), clockMinute(sysTime), clockSecond(sysTime));
-    sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
-      //sprintf(animStr, "%02d%02d%02d", hourNow+1, minuteNow+1, secondNow+1 );
-    //animShow[4]=false; //right number [5] will be set true on the secondTrigger everytime so resetting it is not necessary
+    sprintf(timeStr, "%02d%02d%02d", clockHour(localTime), clockMinute(localTime), clockSecond(localTime));
+    sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
   }
- // if (minuteTrigger) { animShow[2]=false; animShow[3]=false; }
- // if (hourTrigger) { animShow[0]=false; animShow[1]=false; }
 
   // Concept: Iterate through the digits of the time display. If the animTrigger[i] is true, then create an location offset for the digit according to the fly-in direction that is configured for that digit.
   for (uint8_t i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
@@ -958,7 +1016,7 @@ void stepClockAnim(void) {
       // Fly-in start offset = the off-screen edge the digit comes from. The
       // vertical offset shrinks in landscape (short edge is 32 px) so the
       // swapped top/bottom entries don't sit far off-screen for many frames.
-      int8_t vOff = isLandscape ? 32 : 50;
+      int8_t vOff = screenIsLandscape() ? 32 : 50;
       int8_t hOff = 32;
       //animDirection: 0=from the top, 1=from the right, 2=from the bottom, 3=from the left
       if(animDirection[i]==0)       { animXPos[i] = animXTarget[i];
@@ -972,18 +1030,13 @@ void stepClockAnim(void) {
     }
     else if (animShow[i] && moveNow) {
       // as long as animShow is true, we need to update the position / do the animation of the corresponding digit (i)
-      //
-      //Serial.println(i);
       if      (animYPos[i] < animYTarget[i]) { animYPos[i]++; timeYPos[i]++; } // move animation digit and current time digit at the same time in the same direction
       else if (animYPos[i] > animYTarget[i]) { animYPos[i]--; timeYPos[i]--; }
-      //else if (animYPos[i] == animYTarget[i]) { timeYPos[i]=animYTarget[i];   }
 
       if      (animXPos[i] < animXTarget[i]) { animXPos[i]++; timeXPos[i]++; }
       else if (animXPos[i] > animXTarget[i]) { animXPos[i]--; timeXPos[i]--; }
-      //else if (animXPos[i] == animXTarget[i]) { timeXPos[i]=animXTarget[i];   }
     }
   }
-  if(secondTrigger) { Serial.println(deltaT); } // Debugging //timeOffset //deltaT //animTrigger[4] //animShow[i]
 }
 
 #if defined(CLOCK_DEBUG)
@@ -1010,17 +1063,29 @@ void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
 }
 #endif
 
-// NTP sync status pixel (green = synced, red = not), dimmed with the master
-// brightness but kept visible. It sits in the bottom-left corner of the current
-// rotation: (0,63) in portrait, (0,31) in landscape. A fixed (0,63) lies outside
-// the 32 px tall landscape canvas and was silently clipped, so landscape never
-// showed the sync status. Every watchface draws it the same way.
+// Whether a due NTP sync has failed for longer than SYNC_LATE_MS.
+bool syncOverdue() {
+  bool due = (syncState == SYNC_FETCHING || syncState == SYNC_RETRY_WAIT);
+  return due && (millisNow - syncDueSince > SYNC_LATE_MS);
+}
+
+// NTP status pixel: off in normal operation, red only on an error - a due sync
+// that has not succeeded within SYNC_LATE_MS - and then until a sync succeeds.
+// It sits in the bottom-left corner of the current rotation: (0,63) in
+// portrait, (0,31) in landscape. A fixed (0,63) lies outside the 32 px tall
+// landscape canvas and was silently clipped, so landscape never showed the sync
+// status. Every watchface draws it the same way.
+//
+// Dimmed with the master brightness, but never below STATUS_PIXEL_MIN:
+// color565() keeps only the top five bits of red, so any red under 8 comes out
+// black. With the old floor of 3 the red state vanished below a master
+// brightness of 48, while the old green one (six bits) still showed.
+const uint8_t STATUS_PIXEL_MIN = 24;
 void drawStatusPixel() {
-  uint8_t statusInt = effectiveBrightness / 6;
-  if (statusInt < 3) { statusInt = 3; }
-  matrix.drawPixel(0, matrix.height() - 1,
-                   ntpSuccess ? matrix.color565(0, statusInt, 0)
-                              : matrix.color565(statusInt, 0, 0));
+  if (!syncOverdue()) { return; }
+  uint8_t level = effectiveBrightness / 6;
+  if (level < STATUS_PIXEL_MIN) { level = STATUS_PIXEL_MIN; }
+  matrix.drawPixel(0, matrix.height() - 1, matrix.color565(level, 0, 0));
 }
 
 /* ======================================================================
@@ -1133,7 +1198,6 @@ bool          tetrisSettled     = false;  // true once every block has landed
 unsigned long tetrisStepLast    = 0;      // millis() of the last animation step
 uint8_t       tetrisBrightDrawn = 0xFF;   // effectiveBrightness of the frame on the panel
 bool          tetrisColonDrawn  = false;  // colon state of the frame on the panel
-bool          tetrisFbDrawn     = false;  // button indicator state of the frame on the panel
 uint8_t       tetrisSpinDrawn   = 0;      // turns still owed when that frame was drawn
 
 /* ----------------------------------------------------------------------
@@ -1351,12 +1415,10 @@ void tetrisStartDigit(uint8_t idx, uint8_t value) {
 // digits of a group sit TETRIS_PITCH apart; the coordinates below are the
 // top-left corner of each group.
 //
-// The orientation is taken from curRotation, not from the global isLandscape:
-// drawAPScreen() rotates the panel and updates curRotation without going
-// through applyOrientation(), so isLandscape can be one step behind.
+// The layout follows screenRotation, the rotation the panel is drawn in.
 void tetrisLayout() {
-  tetrisRotation  = curRotation;
-  tetrisLandscape = (curRotation == 0 || curRotation == 2);
+  tetrisRotation  = screenRotation;
+  tetrisLandscape = screenIsLandscape();
   if (tetrisLandscape) {
     // 64x32: one line. Hours x 2..27, minutes x 36..61, both rows 6..25.
     tetrisXHour = 2;  tetrisXMin = 36;
@@ -1386,7 +1448,7 @@ void tetrisLayout() {
 // Hand the current HH:MM to the four digits. Only a digit whose value really
 // changed is rebuilt - the others keep the blocks they have already dropped.
 void tetrisPushTime() {
-  uint8_t h = clockHour(sysTime), m = clockMinute(sysTime);
+  uint8_t h = clockHour(localTime), m = clockMinute(localTime);
   uint8_t d[4] = { (uint8_t)(h / 10), (uint8_t)(h % 10),
                    (uint8_t)(m / 10), (uint8_t)(m % 10) };
   uint8_t changeStyle = 0xFF;   // drawn once, so digits changing together match
@@ -1662,7 +1724,7 @@ void shakeDrawDigit(uint8_t d) {
 void drawTetrisFace() {
   // A rotation moves every coordinate a running animation holds, and a rotation
   // rebuilds the digits anyway - so it wins over the animation.
-  if (curRotation != tetrisRotation) {
+  if (screenRotation != tetrisRotation) {
     for (uint8_t i = 0; i < 4; i++) { shakeBusy[i] = false; }
     tetrisLayout();
   }
@@ -1693,7 +1755,7 @@ void drawTetrisFace() {
       // is already on its way down while the last of the old ones is still
       // leaving the panel, and the two read as one continuous movement.
       shakeHoldUntil[i] = millisNow + SHAKE_HOLD_MS;
-      shakeBlockUntil = millisNow + SHAKE_SETTLE_MS;  // do not retrigger on the same knock
+      shakeEndedAt = millisNow;   // do not retrigger on the same knock
     }
     if (shakeBusy[i]) { anyShake = true; }
   }
@@ -1701,12 +1763,7 @@ void drawTetrisFace() {
 
   tetrisPushTime();
 
-  bool colonOn = (sysTime % 2) == 0;   // 1 Hz blink, in step with the seconds
-#if BUTTON_FEEDBACK_ON_MATRIX
-  bool fbNow = fbLit;
-#else
-  bool fbNow = false;
-#endif
+  bool colonOn = (localTime % 2) == 0;   // 1 Hz blink, in step with the seconds
 
   // Turning runs on its own clock, so a flick between two fall steps has to be
   // painted when it happens - otherwise the drop rate would quietly limit how
@@ -1716,8 +1773,10 @@ void drawTetrisFace() {
 
   bool stepDue = !tetrisSettled &&
                  (millisNow - tetrisStepLast >= tetrisSettings.dropMs);
-  bool changed = tetrisPanelStale || colonOn != tetrisColonDrawn ||
-                 effectiveBrightness != tetrisBrightDrawn || fbNow != tetrisFbDrawn ||
+  // panelDirty covers everything outside the face itself: another screen having
+  // drawn over it, a change of watchface, the press indicator.
+  bool changed = panelDirty || colonOn != tetrisColonDrawn ||
+                 effectiveBrightness != tetrisBrightDrawn ||
                  spinPending != tetrisSpinDrawn;
   // Debris moving is a change in itself, so while anything is coming apart the
   // face repaints on the animation's clock rather than waiting to be asked.
@@ -1750,8 +1809,7 @@ void drawTetrisFace() {
 
   tetrisColonDrawn  = colonOn;
   tetrisBrightDrawn = effectiveBrightness;
-  tetrisFbDrawn     = fbNow;
-  tetrisPanelStale  = false;
+  panelDirty        = false;
   // After the step, because a piece may have landed and the next one armed.
   tetrisSpinDrawn = 0;
   for (uint8_t i = 0; i < 4; i++) { tetrisSpinDrawn += tetrisPendingTurns(i); }
@@ -1779,7 +1837,7 @@ void drawTetrisFace() {
 // The LIS3DH's own interrupt generator compares against a fixed threshold, which
 // would fire on gravity alone as soon as the clock is tilted. Its high-pass
 // filter solves that, and it is applied to the interrupt generator ONLY
-// (HP_IA1), not to the output registers (FDS stays 0) - so detectRotation()
+// (HP_IA1), not to the output registers (FDS stays 0) - so sensorRotation()
 // still reads gravity while the interrupt only sees what changes.
 const uint8_t LIS3DH_CTRL_REG2     = 0x21;
 const uint8_t LIS3DH_CTRL_REG3     = 0x22;
@@ -1853,16 +1911,32 @@ void updateShake() {
   // The interrupt is latched, so it has to be read away even when the knock is
   // going to be ignored - otherwise it would fire the moment the block lifts.
   (void)accelReadReg(LIS3DH_INT1_SRC);
+  if (knockAccepted()) { shakeStartAll(); }
+}
 
-  if (shakeThreshold() == 0)              { return; }  // switched off
-  if (tetrisPanelStale)                   { return; }  // boot screen, banner,
-                                                       // AP info or the classic face
-  if (apActive || shakeAnyBusy())         { return; }
-  if (btnPrev)                            { return; }  // a button press IS a knock:
-                                                       // the switch sits 20 mm from the sensor
-  if (orientCandidate != curRotation)     { return; }  // a rotation is being debounced
-  if (millisNow < shakeBlockUntil)        { return; }  // booting, just turned, cooling down
-  shakeStartAll();
+// Whether a knock may take the digits apart now. Every reason to ignore one is
+// here, one per line, each reading one explicit state or one gate with one
+// reason - so a new reason is one more line, not a new flag somewhere else.
+bool knockAccepted() {
+  if (shakeThreshold() == 0)                           { return false; }  // switched off
+  if (screen != SCREEN_FACE)                           { return false; }  // boot, banner or config AP
+  if (settings.watchface != WATCHFACE_TETRIS_ID)       { return false; }  // the classic face has nothing to throw
+  if (shakeAnyBusy())                                  { return false; }  // already coming apart
+  if (btnPrev)                                         { return false; }  // a button press IS a knock: the
+                                                                          // switch sits 20 mm from the sensor
+  if (orientCandidate != deviceRotation)               { return false; }  // a rotation is being debounced
+  if (millisNow - setupDoneAt  < KNOCK_START_QUIET_MS) { return false; }  // just plugged in
+  if (millisNow - rotatedAt    < SHAKE_SETTLE_MS)      { return false; }  // turning is not a knock
+  if (millisNow - shakeEndedAt < SHAKE_SETTLE_MS)      { return false; }  // the last knock, still ringing
+  return true;
+}
+
+// Throw away a knock the sensor has latched. updateShake() does not run while
+// the config AP is up, so a button press there - a knock as far as the sensor
+// is concerned - would otherwise still be waiting when the face comes back, and
+// fire at once. (A side effect of the old rotation block used to swallow it.)
+void shakeDiscardLatched() {
+  if (accelOK) { (void)accelReadReg(LIS3DH_INT1_SRC); }
 }
 #endif  // WATCHFACE_TETRIS
 
@@ -1882,7 +1956,6 @@ void renderClock(void) {
     else    { matrix.setFont(&FreeSansBold12pt7b); } // Bigger Font for displaying Minutes and Hours
 
     if(animShow[i] == true) {
-      //Serial.println(animXPos[i]);
       if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i]) { matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB)); } // digit has arrived
       else { matrix.setTextColor(scaledColorB(settings.trailR, settings.trailG, settings.trailB, trailBrightness())); } // dim trail (relative to brightness, never black)
       matrix.setCursor(animXPos[i], animYPos[i]);
@@ -1902,7 +1975,7 @@ void renderClock(void) {
   uint32_t showStart = micros();
 #endif
   matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
-  tetrisPanelStale = true;
+  panelDirty = false;
 #if defined(CLOCK_DEBUG)
   frameStatsAdd(showStart - drawStart, micros() - showStart);
 #endif
@@ -1918,12 +1991,13 @@ uint8_t activeWatchface() {
   static uint8_t shown = 0xFF;
   if (settings.watchface == shown) { return shown; }
   shown = settings.watchface;
-  sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime),   clockMinute(sysTime),   clockSecond(sysTime));
-  sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
-  applyOrientation(curRotation);   // snaps all six digits, clears animShow[]
+  sprintf(timeStr, "%02d%02d%02d", clockHour(localTime),   clockMinute(localTime),   clockSecond(localTime));
+  sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
+  applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
 #if WATCHFACE_TETRIS
   tetrisRotation = 0xFF;           // force a fresh layout and a fresh drop
 #endif
+  panelDirty = true;               // the other face's picture is still on the panel
   return shown;
 }
 
@@ -1940,10 +2014,10 @@ void drawClock(void) {
   renderClock();
 }
 
-/* Updates millisNow, sysTime. Keeps track of the looptime using delay(). Updates the animTrigger[] array. */
+/* Updates millisNow, localTime. Keeps track of the looptime using delay(). Updates the animTrigger[] array. */
 void timekeeper(void) { 
   /*Call this always in the beginning of an iteration in loop()
-    for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain sysTime with the clock_time.h helpers eg: clockHour(sysTime)
+    for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain localTime with the clock_time.h helpers eg: clockHour(localTime)
     Triggers are only active for one iteration: hourTrigger -> when the hour has changed
     animTrigger[]: for each individual clock digit (6) the corresponding bool goes high if this digit will change in one second. This gives enough time for the entry animation of the digit.
 
@@ -1964,15 +2038,15 @@ void timekeeper(void) {
 #endif
   
   millisNow=millis();
-  sysTime=clockNow();
- 
-  if(secondNow != clockSecond(sysTime)) { secondNow=clockSecond(sysTime); secondTrigger=true; }
+  localTime=clockNow() + tzTotalOffset();   // the clock keeps UTC; the panel shows local time
+
+  if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; }
   else { secondTrigger=false; }
  
-  if(secondTrigger && minuteNow != clockMinute(sysTime)) { minuteNow=clockMinute(sysTime); minuteTrigger=true; }
+  if(secondTrigger && minuteNow != clockMinute(localTime)) { minuteNow=clockMinute(localTime); minuteTrigger=true; }
   else { minuteTrigger=false; }
 
-  if(minuteTrigger && hourNow != clockHour(sysTime)) { hourNow=clockHour(sysTime); hourTrigger=true; }
+  if(minuteTrigger && hourNow != clockHour(localTime)) { hourNow=clockHour(localTime); hourTrigger=true; }
   else { hourTrigger=false; }
 
   if(secondTrigger) { 
@@ -1996,169 +2070,90 @@ void timekeeper(void) {
   }
 }
 
-// Updates sysTime from NTP (board_hal.h: the NINA's own SNTP client on the M4,
-// lwIP's on the S3). Enables/Disables WiFi when necessary.
-void timeSync_WifiLib() {
-  if (!ntpSuccess && !ntpRequestActive) {
-    ntpTime=netNtpEpoch();
-    lastSync=millisNow;
-    if(ntpTime != 0) {
+// The one way to change the sync state. A sync becomes due when it is entered
+// from a synced state; asking again after an empty answer keeps that moment, so
+// syncOverdue() measures from when the sync was first wanted.
+void setSyncState(SyncState next) {
+  if (next == syncState) { return; }
+  bool wasDue = (syncState == SYNC_FETCHING || syncState == SYNC_RETRY_WAIT);
+  if (next == SYNC_FETCHING && !wasDue) { syncDueSince = millisNow; }
+  DEBUG_LOG("sync %u -> %u\n", (unsigned)syncState, (unsigned)next);
+  syncState = next;
+}
+
+// Ask NTP for the time once (board_hal.h: the NINA's own SNTP client on the M4,
+// lwIP's on the S3). netNtpEpoch() returns 0 until SNTP has an answer, which takes
+// a few seconds after joining.
+void ntpAsk() {
+  syncLastAsk = millisNow;
+  time_t utc = netNtpEpoch();
+  if (utc == 0) {
+    Serial.println("NTP failed");
+    setSyncState(SYNC_RETRY_WAIT);
+    return;
+  }
 #if defined(CLOCK_DEBUG) && defined(DST_TEST_UTC)
-      ntpTime = DST_TEST_UTC;   // debug test: start just before a daylight-saving change
-      settings.dst = DST_AUTO;  // in RAM only
+  utc = DST_TEST_UTC;       // debug test: start just before a daylight-saving change
+  settings.dst = DST_AUTO;  // in RAM only
 #endif
-      if(clockIsSet()) { timeOffset=ntpTime+tzTotalOffset()-sysTime; } // timeOffset will be positive if acutal time is ahead of sysTime (=sysTime/ system clock is slow) and negative if acutal time is behind sysTime (=sysTime/ system clock is fast)
-      else { timeOffset=0; }
-      if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), ntpTime); }
-      clockSet(ntpTime + tzTotalOffset()); // local time: UTC + configurable timezone + daylight saving offset
-      Serial.println("NTP success");
-      Serial.print("NTP offset: ");
-      Serial.println(timeOffset);
-      ntpSuccess = true;
-      ntpRequestActive = false;
-      netRadioOff();
-      wifiEnabled = false;
-      Serial.println("Disabled Wifi");
-    }
-    else {
-      Serial.println("NTP failed"); // print the second
-      ntpSuccess = false;
-      ntpRequestActive = true; // First wait for timout period before new try
-    }
-  }
-  if(minuteTrigger) {
-    /* This code should to a smooth transition between shown time and NTP time but clockAdjust works on seconds as smallest increment. Need to find way to make the clock work not on systemtime directly or adjus system time in another way
-    if(timeOffset != 0) {
-      if(abs(timeOffset)<100 || firstSync) {
-        clockAdjust(timeOffset);
-        timeOffset=0;
-        firstSync=false;
-      }
-      else if(timeOffset>0) {
-        timeOffset-=100;
-        clockAdjust(100);
-      }
-      else if(timeOffset<0) {
-        timeOffset+=100;
-        clockAdjust(-100);
-      }
-    }
-    */
-    // Switch the radio on one minute before the sync time, counted in minutes
-    // since midnight so it wraps across the hour and midnight (sync 05:00 ->
-    // 04:59, 00:00 -> 23:59). "syncTimeMinute-1" alone is -1 for minute 00 and
-    // never matches: the radio stayed off, the sync at hh:00 failed and, with
-    // ntpSuccess then false for good, no daily resync ever happened again.
-    const uint16_t minutesPerDay = 24 * 60;
-    uint16_t nowMinute  = hourNow * 60 + minuteNow;
-    uint16_t syncMinute = syncTimeHour * 60 + syncTimeMinute;
-    if(!wifiEnabled && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay) { // 1 minute before next Sync
-      netStaBegin(ssid, pass); // Connect to wifi (and arm a fresh NTP sync)
-      wifiEnabled = true;
-      Serial.println("Enabled Wifi");
-    }
-    if(ntpSuccess && hourNow == syncTimeHour && minuteNow == syncTimeMinute) {
-      ntpSuccess=false; // Trigger Renewal of NTP sync
-      printWifiStatus();
-      Serial.println("Renew NTP sync");
-    }
-  }
+  // How far the clock had drifted from NTP, in seconds: positive when the clock
+  // was slow, negative when it was fast. Only logged.
+  long drift = clockIsSet() ? (long)(utc - clockNow()) : 0;
+  if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), utc); }
+  clockSet(utc); // UTC as delivered; zone and daylight saving are added for the panel
+  Serial.println("NTP success");
+  Serial.print("NTP offset: ");
+  Serial.println(drift);
+  netRadioOff();
+  Serial.println("Disabled Wifi");
+  setSyncState(SYNC_IDLE);
+}
 
-  // Retry a failed NTP fetch promptly, independent of the minute change above.
-  // netNtpEpoch() returns 0 until SNTP completes (a few seconds after
-  // associating); gating this retry behind minuteTrigger left the clock stuck at
-  // 1970 (00:00:00) for up to a minute after boot even though WiFi was connected.
-  if(ntpRequestActive && millisNow-lastSync > ntpTimeout) { // time to try getTime() again
-    ntpRequestActive=false; // allow a fresh getTime() on the next iteration
-    Serial.println("NTP Retry");
+// Once a minute: wake the radio one minute before the sync time, and make the
+// sync due at the sync time. Counted in minutes since midnight so it wraps
+// across the hour and midnight (sync 05:00 -> 04:59, 00:00 -> 23:59);
+// "syncTimeMinute-1" alone is -1 for minute 00 and never matched, which once
+// stopped the daily resync for good.
+void syncSchedule() {
+  const uint16_t minutesPerDay = 24 * 60;
+  uint16_t nowMinute  = hourNow * 60 + minuteNow;
+  uint16_t syncMinute = syncTimeHour * 60 + syncTimeMinute;
+  if (syncState == SYNC_IDLE && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay) {
+    netStaBegin(ssid, pass); // join (and arm a fresh NTP sync)
+    Serial.println("Enabled Wifi");
+    setSyncState(SYNC_WAKING);
+  }
+  if ((syncState == SYNC_IDLE || syncState == SYNC_WAKING) && nowMinute == syncMinute) {
+    // Still idle means the early wake-up was missed, e.g. because the config AP
+    // was up a minute ago; join now instead of failing until tomorrow.
+    if (syncState == SYNC_IDLE) { netStaBegin(ssid, pass); }
+    printWifiStatus();
+    Serial.println("Renew NTP sync");
+    setSyncState(SYNC_FETCHING);
   }
 }
 
-/*
-// Updates sysTime using UDP Packet based low level NTP. NOT maintained! Nice because it can contact a given server rather than a hardcoded one.
-// Server: 0.europe.pool.ntp.org
-// Server: ptbtime2.ptb.de
-// https://www.pool.ntp.org/zone/europe
-void timeSync_LowLevelUdp() {
-  if (!ntpSuccess && !ntpRequestActive) {
-    Serial.println(WiFi.status());
-    //Serial.println(WiFi.getTime());
-    Udp.begin(localPort);
-    Udp.flush();
-    sendNTPpacket(timeServer); // send an NTP packet to a time server
-    Serial.println("NTP request sent"); // print the second
-    lastSync=millisNow;
-    ntpRequestActive = true;
-    ntpSuccess = false;
+// Keeps the clock (UTC) in step with NTP and the radio on only while a sync
+// needs it.
+void timeSync_WifiLib() {
+  switch (syncState) {
+    case SYNC_FETCHING:
+      ntpAsk();
+      break;
+    case SYNC_RETRY_WAIT:
+      // Retried on its own pace, not on the minute change: gating the retry
+      // behind minuteTrigger once left the clock at 1970 for up to a minute
+      // after boot although the WiFi was connected.
+      if (millisNow - syncLastAsk > NTP_RETRY_MS) {
+        Serial.println("NTP Retry");
+        setSyncState(SYNC_FETCHING);
+      }
+      break;
+    default:
+      break;
   }
-  else if (Udp.parsePacket()) { // check for new packets
-    Serial.println("NTP packet received");
-    // We've received a packet, read the data from it
-    Udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
-
-    //the timestamp starts at byte 40 of the received packet and is four bytes,
-    // or two words, long. First, extract the two words:
-
-    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
-    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
-    // combine the four bytes (two words) into a long integer
-    // this is NTP time (seconds since Jan 1 1900):
-    unsigned long secsSince1900 = highWord << 16 | lowWord;
-
-    //ntpTime = secsSince1900;
-    //setTime(secsSince1900);
-    setTime(WiFi.getTime());
-    adjustTime(7200); // UTC+2 (60sec*60min*2h)
-
-    hourNow=hour(); 
-    minuteNow=minute();
-
-    Udp.stop();
-    ntpRequestActive = false;
-    ntpSuccess = true;
-  }
-  else if(ntpRequestActive && millisNow-lastSync > ntpTimeout) { // NTP Request Timed out
-    ntpRequestActive=false; // asume the request has timed out
-    Serial.println("NTP Timeout"); // print the second
-    Udp.stop();
-    // WiFi.disconnect(); // TEST
-  }
-  else if(ntpSuccess && millisNow-lastSync > syncInterval) {
-    ntpSuccess=false; // asume the request has timed out
-    Serial.println("Renew NTP sync"); // print the second
-  }
+  if (minuteTrigger) { syncSchedule(); }
 }
-
-// send an NTP request to the time server at the given address
-void sendNTPpacket(IPAddress& address) {
-  //Serial.println("1");
-  // set all bytes in the buffer to 0
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  //Serial.println("2");
-  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-  packetBuffer[1] = 0;     // Stratum, or type of clock
-  packetBuffer[2] = 6;     // Polling Interval
-  packetBuffer[3] = 0xEC;  // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  packetBuffer[12]  = 49;
-  packetBuffer[13]  = 0x4E;
-  packetBuffer[14]  = 49;
-  packetBuffer[15]  = 52;
-
-  //Serial.println("3");
-
-  // all NTP fields have been given values, now
-  // you can send a packet requesting a timestamp:
-  Udp.beginPacket(address, 123); //NTP requests are to port 123
-  //Serial.println("4");
-  Udp.write(packetBuffer, NTP_PACKET_SIZE);
-  //Serial.println("5");
-  Udp.endPacket();
-  //Serial.println("6");
-}
-*/
 
 // Prints Wifi connection status, SSID, IP and RSSI to console.
 // The numeric status is wl_status_t: 0 = idle, 3 = connected, 6 = disconnected.
@@ -2409,6 +2404,9 @@ void updateFeedbackLed() {
   if (lit != fbLit) {
     fbLit = lit;
     digitalWrite(FEEDBACK_LED_PIN, lit ? HIGH : LOW);
+#if BUTTON_FEEDBACK_ON_MATRIX
+    panelDirty = true;   // the matrix shows the same square, so the panel has to follow
+#endif
   }
 }
 
@@ -2424,13 +2422,14 @@ void drawFeedbackIndicator() {
 }
 
 // Single click: cycle the daylight-saving mode automatic -> summer -> winter ->
-// automatic, shift the running clock to match and show the new mode for ~3 s.
+// automatic; the time on the panel follows, and the new mode shows for ~3 s.
 void cycleDstMode() {
   uint8_t next = (settings.dst == DST_AUTO)   ? DST_SUMMER
                : (settings.dst == DST_SUMMER) ? DST_WINTER : DST_AUTO;
   setDstMode(next);
   saveSettings();
-  dstMsgUntil = millisNow + 3000;
+  bannerUntil = millisNow + 3000;   // a click while it is still up extends it
+  setScreen(SCREEN_BANNER);
   Serial.print("DST mode -> "); Serial.println(settings.dst);
 }
 
@@ -2488,7 +2487,7 @@ void startAPMode() {
   apActive = true;
   millisNow = millis();
   updateBrightness(); // resolve the live brightness for the immediate info screen
-  drawAPScreen(); // show SSID/PW/IP immediately, before the slow radio bring-up freezes the loop
+  setScreen(SCREEN_HOTSPOT_INFO); // draws SSID/PW/IP at once, before the slow radio bring-up freezes the loop
   apRadioUp();
 }
 
@@ -2499,19 +2498,20 @@ void stopAPMode() {
   if (!apActive) { return; }
   Serial.println("Stopping config AP...");
   apActive = false;
-  apClientConnected = false;
   dnsUdp.stop();
   apServer.end(); // release the listening socket (a fresh begin() would leak one)
   netApEnd(ssid, pass); // drop the softAP and rejoin the home WiFi
-  if (!ntpSuccess) {
-    // The clock has never been NTP-synced (AP opened via the boot button):
-    // leave the station side marked active so the pending sync can complete.
-    wifiEnabled = true;
-    Serial.println("Enabled Wifi for pending NTP sync");
+  if (syncState == SYNC_IDLE) {
+    // Synced: back to how it is after a regular sync, radio off. It used to stay
+    // joined until the next sync while the code counted it as off.
+    netRadioOff();
+    Serial.println("Disabled Wifi");
   } else {
-    wifiEnabled = false; // same state as after a regular daily sync
+    // A sync is pending or about to start (e.g. the AP was opened from the boot
+    // button): the rejoined station lets it go ahead.
+    Serial.println("Enabled Wifi for pending NTP sync");
   }
-  applyOrientation(detectRotation()); // back to the normal clock in the current orientation
+  setScreen(SCREEN_FACE); // back to the normal clock, in the current orientation
 }
 
 // Re-create the AP when the radio dropped it: the M4's NINA firmware can crash
@@ -2536,27 +2536,26 @@ void apWatchdog() {
   apBadStatus = 0;
   Serial.println("AP watchdog: restarting AP");
   apRadioUp();
-  apClientConnected = false; // any station is gone after the restart
-  drawAPScreen();            // back to the SSID/PW/IP info screen
+  // Any station is gone after the restart, and the address may have changed:
+  // back to the info screen, redrawn either way.
+  setScreen(SCREEN_HOTSPOT_INFO);
+  panelDirty = true;
 #endif
 }
 
 // AP info is always shown landscape (the SSID/PW text is too wide for portrait).
-// Pick rotation 0 or 2 from the accelerometer so it is never upside down; a
+// Pick rotation 0 or 2 from the device rotation so it is never upside down; a
 // portrait hold maps to the matching landscape rotation.
 uint8_t apInfoRotation() {
-  uint8_t r = detectRotation();
-  if (r == 3) { return 0; }   // portrait-normal  -> landscape-normal
-  if (r == 1) { return 2; }   // portrait-flipped -> landscape-flipped
-  return r;                   // already 0 or 2
+  if (deviceRotation == 3) { return 0; }   // portrait-normal  -> landscape-normal
+  if (deviceRotation == 1) { return 2; }   // portrait-flipped -> landscape-flipped
+  return deviceRotation;                   // already 0 or 2
 }
 
 // Show AP connection info on the matrix, landscape (64x32) and oriented upright
 // per the accelerometer, because the portrait width is too narrow for the text.
 void drawAPScreen() {
-  uint8_t r = apInfoRotation();
-  matrix.setRotation(r);
-  curRotation = r;
+  setScreenRotation(apInfoRotation());
   matrix.fillScreen(0);
   matrix.setFont(&Picopixel);
   // Full-saturation colors + a brightness floor so SSID/PW/IP never go black.
@@ -2567,9 +2566,8 @@ void drawAPScreen() {
   matrix.setTextColor(scaledColorVisible(255, 140, 0));
   matrix.setCursor(0, 28); matrix.print("IP "); matrix.print(apIP);
   drawFeedbackIndicator();
-  apScreenFbLit = fbLit;
   matrix.show();
-  tetrisPanelStale = true;
+  panelDirty = false;
 }
 
 #if defined(CLOCK_DEBUG)
