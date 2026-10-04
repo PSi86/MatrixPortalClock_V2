@@ -319,8 +319,16 @@ const int8_t landYTarget[6] = {17, 17, 17, 17, 30, 30}; // HH/MM baseline 17, SS
 // rotate the display in 90 deg steps so the clock always shows the right way up.
 Adafruit_LIS3DH lis = Adafruit_LIS3DH();
 bool    accelOK = false;          // true once the LIS3DH was found on I2C
-uint8_t curRotation = 3;          // active matrix rotation (3 = portrait, today's default)
-bool    isLandscape = false;      // true for rotations 0/2 (64 wide x 32 tall)
+// Two rotations, kept apart on purpose:
+// - deviceRotation is how the panel is held: the accelerometer's reading after
+//   the debounce, or the default when there is no sensor. Only the orientation
+//   code below changes it, never a screen.
+// - screenRotation is what the panel is drawn in right now. Most screens draw in
+//   the device rotation; the hotspot info screen is landscape however the panel
+//   is held, so the two differ while it is up.
+const uint8_t ROTATION_NONE = 0xFF;   // sensorRotation(): the sensor cannot tell
+uint8_t deviceRotation = 3;       // 3 = portrait, today's default
+uint8_t screenRotation = 3;
 unsigned long orientLast = 0;     // last accelerometer poll (throttle)
 uint8_t orientCandidate = 3;      // debounce: rotation the sensor currently favours
 uint8_t orientStable = 0;         // consecutive polls the candidate has held
@@ -641,6 +649,7 @@ void loop(void) {
   if (apActive) {      // config AP running
     apWatchdog();      // re-create the AP if the ESP32 silently rebooted
     handleAP();        // captive-portal DNS + web UI + live settings updates
+    updateOrientation();// the info screen and the preview follow the panel as well
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
     return;
@@ -673,7 +682,7 @@ void setScreen(Screen next) {
   // screen is always landscape), so whatever comes next starts again from how
   // the panel is actually held.
   bool fromHotspot = (prev == SCREEN_HOTSPOT_INFO || prev == SCREEN_HOTSPOT_PREVIEW);
-  if (fromHotspot && next != SCREEN_HOTSPOT_INFO) { applyOrientation(detectRotation()); }
+  if (fromHotspot && next != SCREEN_HOTSPOT_INFO) { applyOrientation(deviceRotation); }
   // In: the info screen is static and drawn once, at once - before the slow radio
   // bring-up in startAPMode() freezes the loop.
   if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
@@ -692,7 +701,6 @@ void updateApDisplay() {
     if (millisNow - apStatusLast >= 500) { // periodically check whether a station joined
       apStatusLast = millisNow;
       if (netApHasStation()) { apShowClock(); return; }
-      if (apInfoRotation() != curRotation) { drawAPScreen(); } // re-orient the info if turned
     }
     // The info screen is static, so it is only redrawn when the panel no longer
     // shows it as it should, e.g. when the press indicator flipped.
@@ -704,7 +712,6 @@ void updateApDisplay() {
   // but only push the latest state to the panel at the board's preview rate
   // (5 fps on the M4): skipped frames are computed, not slowed down. This leaves
   // the radio free for the slow WiFiNINA web server; the S3 draws every frame.
-  updateOrientation(); // clock preview follows the accelerometer (all four rotations)
 #if WATCHFACE_TETRIS
   // The Tetris watchface throttles itself (it only repaints on an animation step
   // or a visible change), so it needs no preview rate on top of that.
@@ -742,13 +749,11 @@ uint8_t swapDir(uint8_t d) {
 // with the fly-in directions swapped. Digits snap to the new layout so an
 // in-flight animation never streaks across the screen during a rotation.
 void applyOrientation(uint8_t rot) {
-  matrix.setRotation(rot);
-  curRotation = rot;
-  isLandscape = (rot == 0 || rot == 2);
+  setScreenRotation(rot);
   shakeBlockUntil = millisNow + SHAKE_SETTLE_MS;   // turning is not a knock
 
   for (uint8_t i = 0; i < 6; i++) {
-    if (isLandscape) {
+    if (screenIsLandscape()) {
       animXTarget[i]   = landXTarget[i];
       animYTarget[i]   = landYTarget[i];
       animDirection[i] = (int8_t)swapDir(settings.dir[i]);
@@ -765,22 +770,31 @@ void applyOrientation(uint8_t rot) {
   }
 }
 
-// Poll the LIS3DH (throttled) and rotate the display to match how the panel is
-// physically held. Gravity in the panel plane picks one of four quadrants; a
-// debounce + diagonal-rejection keeps the orientation from flickering near 45.
-// One-shot orientation read: returns the desired rotation (0..3) from gravity, or
-// the current rotation when the reading is undecided (panel flat / near the 45 deg
-// diagonal) or no sensor is present. Shared by the live updateOrientation() and by
-// the boot / AP screens so every screen aligns to the panel the same way.
-uint8_t detectRotation() {
-  if (!accelOK) { return curRotation; }
+// The one place the panel's drawing rotation is set.
+void setScreenRotation(uint8_t rot) {
+  matrix.setRotation(rot);
+  screenRotation = rot;
+}
+
+// Whether the panel is drawn 64 wide x 32 tall right now (rotations 0 and 2).
+bool screenIsLandscape() {
+  return screenRotation == 0 || screenRotation == 2;
+}
+
+// One-shot orientation read: the rotation (0..3) gravity points to, or
+// ROTATION_NONE when the reading is undecided (panel flat / near the 45 deg
+// diagonal) or there is no sensor. Gravity in the panel plane picks one of four
+// quadrants. What "undecided" means is up to the caller - it is never mixed up
+// with the rotation some screen happens to be drawn in.
+uint8_t sensorRotation() {
+  if (!accelOK) { return ROTATION_NONE; }
   lis.read();
   int16_t ax = lis.x, ay = lis.y;
   int16_t axAbs = abs(ax), ayAbs = abs(ay);
   int16_t hi = max(axAbs, ayAbs), lo = min(axAbs, ayAbs);
-  // Too flat (panel face up/down) or too close to the diagonal -> keep current.
+  // Too flat (panel face up/down) or too close to the diagonal -> undecided.
   // Require the dominant axis to be >25% larger: hi > lo*1.25  <=>  hi*4 > lo*5.
-  if (hi < 2000 || (int32_t)hi * 4 <= (int32_t)lo * 5) { return curRotation; }
+  if (hi < 2000 || (int32_t)hi * 4 <= (int32_t)lo * 5) { return ROTATION_NONE; }
   // Gravity quadrant: 0=+X down, 1=-X down, 2=+Y down, 3=-Y down.
   uint8_t quadrant;
   if (axAbs > ayAbs) { quadrant = (ax > 0) ? 0 : 1; }
@@ -791,20 +805,41 @@ uint8_t detectRotation() {
   return ORIENT_MAP[quadrant];
 }
 
-// Poll the LIS3DH (throttled) and rotate the clock to match how the panel is held,
-// with a debounce so it doesn't flicker near 45 deg.
+// Take the sensor's reading as the device rotation at once, without the
+// debounce. For the boot screens, which come and go faster than it settles.
+void adoptSensorRotation() {
+  uint8_t r = sensorRotation();
+  if (r == ROTATION_NONE) { return; }   // undecided: keep what we have
+  deviceRotation  = r;
+  orientCandidate = r;                  // the debounce carries on from here
+  orientStable    = 0;
+}
+
+// Poll the LIS3DH (throttled) and update the device rotation, with a debounce so
+// it doesn't flicker near 45 deg. Runs on every screen; each screen then follows
+// the new rotation in its own way.
 void updateOrientation() {
   if (!accelOK) { return; }
   if (millisNow - orientLast < ORIENT_POLL_MS) { return; }   // throttle to ~4 Hz
   orientLast = millisNow;
-  uint8_t wanted = detectRotation();
+  uint8_t sensed = sensorRotation();
+  uint8_t wanted = (sensed == ROTATION_NONE) ? deviceRotation : sensed;   // undecided: keep it
   // Debounce: a new orientation must persist a few polls before we commit.
   if (wanted == orientCandidate) { if (orientStable < 255) { orientStable++; } }
   else { orientCandidate = wanted; orientStable = 1; }
-  if (wanted != curRotation && orientStable >= ORIENT_DEBOUNCE) {
+  if (wanted != deviceRotation && orientStable >= ORIENT_DEBOUNCE) {
     Serial.print("Orientation -> rotation "); Serial.println(wanted);
-    applyOrientation(wanted);
+    deviceRotation = wanted;
+    followDeviceRotation();
   }
+}
+
+// The screen on the panel takes up a new device rotation. The hotspot info is
+// always landscape, so it only flips the right way up; everything else turns
+// with the panel.
+void followDeviceRotation() {
+  if (screen == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
+  else                               { applyOrientation(deviceRotation); }
 }
 
 /* ======================================================================
@@ -894,7 +929,8 @@ void drawCenteredText(const char *msg, uint16_t color) {
 // (sensor-driven when auto-brightness is on), exactly like every other screen.
 void bootStatus(const char *msg) {
   millisNow = millis();                // setup() runs before timekeeper(), so refresh the clock
-  applyOrientation(detectRotation());  // follow the accelerometer
+  adoptSensorRotation();               // follow the accelerometer
+  applyOrientation(deviceRotation);
   updateBrightness();                  // same brightness logic as the clock
   drawCenteredText(msg, scaledColor(255, 255, 255));
 }
@@ -962,7 +998,7 @@ void stepClockAnim(void) {
       // Fly-in start offset = the off-screen edge the digit comes from. The
       // vertical offset shrinks in landscape (short edge is 32 px) so the
       // swapped top/bottom entries don't sit far off-screen for many frames.
-      int8_t vOff = isLandscape ? 32 : 50;
+      int8_t vOff = screenIsLandscape() ? 32 : 50;
       int8_t hOff = 32;
       //animDirection: 0=from the top, 1=from the right, 2=from the bottom, 3=from the left
       if(animDirection[i]==0)       { animXPos[i] = animXTarget[i];
@@ -1349,12 +1385,10 @@ void tetrisStartDigit(uint8_t idx, uint8_t value) {
 // digits of a group sit TETRIS_PITCH apart; the coordinates below are the
 // top-left corner of each group.
 //
-// The orientation is taken from curRotation, not from the global isLandscape:
-// drawAPScreen() rotates the panel and updates curRotation without going
-// through applyOrientation(), so isLandscape can be one step behind.
+// The layout follows screenRotation, the rotation the panel is drawn in.
 void tetrisLayout() {
-  tetrisRotation  = curRotation;
-  tetrisLandscape = (curRotation == 0 || curRotation == 2);
+  tetrisRotation  = screenRotation;
+  tetrisLandscape = screenIsLandscape();
   if (tetrisLandscape) {
     // 64x32: one line. Hours x 2..27, minutes x 36..61, both rows 6..25.
     tetrisXHour = 2;  tetrisXMin = 36;
@@ -1660,7 +1694,7 @@ void shakeDrawDigit(uint8_t d) {
 void drawTetrisFace() {
   // A rotation moves every coordinate a running animation holds, and a rotation
   // rebuilds the digits anyway - so it wins over the animation.
-  if (curRotation != tetrisRotation) {
+  if (screenRotation != tetrisRotation) {
     for (uint8_t i = 0; i < 4; i++) { shakeBusy[i] = false; }
     tetrisLayout();
   }
@@ -1773,7 +1807,7 @@ void drawTetrisFace() {
 // The LIS3DH's own interrupt generator compares against a fixed threshold, which
 // would fire on gravity alone as soon as the clock is tilted. Its high-pass
 // filter solves that, and it is applied to the interrupt generator ONLY
-// (HP_IA1), not to the output registers (FDS stays 0) - so detectRotation()
+// (HP_IA1), not to the output registers (FDS stays 0) - so sensorRotation()
 // still reads gravity while the interrupt only sees what changes.
 const uint8_t LIS3DH_CTRL_REG2     = 0x21;
 const uint8_t LIS3DH_CTRL_REG3     = 0x22;
@@ -1854,7 +1888,7 @@ void updateShake() {
   if (shakeAnyBusy())                     { return; }
   if (btnPrev)                            { return; }  // a button press IS a knock:
                                                        // the switch sits 20 mm from the sensor
-  if (orientCandidate != curRotation)     { return; }  // a rotation is being debounced
+  if (orientCandidate != deviceRotation)  { return; }  // a rotation is being debounced
   if (millisNow < shakeBlockUntil)        { return; }  // booting, just turned, cooling down
   shakeStartAll();
 }
@@ -1913,7 +1947,7 @@ uint8_t activeWatchface() {
   shown = settings.watchface;
   sprintf(timeStr, "%02d%02d%02d", clockHour(sysTime),   clockMinute(sysTime),   clockSecond(sysTime));
   sprintf(animStr, "%02d%02d%02d", clockHour(sysTime+1), clockMinute(sysTime+1), clockSecond(sysTime+1));
-  applyOrientation(curRotation);   // snaps all six digits, clears animShow[]
+  applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
 #if WATCHFACE_TETRIS
   tetrisRotation = 0xFF;           // force a fresh layout and a fresh drop
 #endif
@@ -2439,21 +2473,18 @@ void apWatchdog() {
 }
 
 // AP info is always shown landscape (the SSID/PW text is too wide for portrait).
-// Pick rotation 0 or 2 from the accelerometer so it is never upside down; a
+// Pick rotation 0 or 2 from the device rotation so it is never upside down; a
 // portrait hold maps to the matching landscape rotation.
 uint8_t apInfoRotation() {
-  uint8_t r = detectRotation();
-  if (r == 3) { return 0; }   // portrait-normal  -> landscape-normal
-  if (r == 1) { return 2; }   // portrait-flipped -> landscape-flipped
-  return r;                   // already 0 or 2
+  if (deviceRotation == 3) { return 0; }   // portrait-normal  -> landscape-normal
+  if (deviceRotation == 1) { return 2; }   // portrait-flipped -> landscape-flipped
+  return deviceRotation;                   // already 0 or 2
 }
 
 // Show AP connection info on the matrix, landscape (64x32) and oriented upright
 // per the accelerometer, because the portrait width is too narrow for the text.
 void drawAPScreen() {
-  uint8_t r = apInfoRotation();
-  matrix.setRotation(r);
-  curRotation = r;
+  setScreenRotation(apInfoRotation());
   matrix.fillScreen(0);
   matrix.setFont(&Picopixel);
   // Full-saturation colors + a brightness floor so SSID/PW/IP never go black.

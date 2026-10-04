@@ -183,8 +183,15 @@ and the **AP clock preview** all follow the accelerometer. The **AP info screen*
 it auto-flips (rotation 0/2) so it is never upside down.
 
 If the panel rotates the "wrong" way for your build, adjust the single
-`ORIENT_MAP` table in `updateOrientation()` — the serial console prints the raw
-axes and the chosen rotation to make calibration easy.
+`ORIENT_MAP` table in `sensorRotation()` — the serial console prints every
+rotation the clock switches to, which makes calibration easy.
+
+The firmware keeps two rotations apart: the **device rotation** (how the panel
+is held, from the accelerometer after the debounce) and the **screen rotation**
+(what the panel is drawn in right now). They only differ while the AP info
+screen is up, so leaving it always returns to how the panel is held — also when
+the panel lies flat or has no accelerometer, where the clock used to come back
+in the info screen's landscape rotation.
 
 ## Auto-brightness (BH1750 light sensor)
 
