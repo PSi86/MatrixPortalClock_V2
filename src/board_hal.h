@@ -38,10 +38,11 @@
   #define MATRIX_LATCH_PIN  47
   #define MATRIX_OE_PIN     14
 
-  // UP button. CAUTION: D2 - the M4's UP button - is the matrix CLOCK line on
-  // this board, so the pin has to move. Neither button has an external pull-up
-  // on the S3; pressing pulls the input low, hence INPUT_PULLUP.
-  #define USER_BUTTON_PIN   PIN_BUTTON_UP   // GPIO6
+  // UP and DOWN buttons. CAUTION: D2 - the M4's UP button - is the matrix CLOCK
+  // line on this board, so the pins have to move. Neither button has an external
+  // pull-up on the S3; pressing pulls the input low, hence INPUT_PULLUP.
+  #define UP_BUTTON_PIN     PIN_BUTTON_UP     // GPIO6
+  #define DOWN_BUTTON_PIN   PIN_BUTTON_DOWN   // GPIO7
 
 #else // BOARD_MATRIXPORTAL_M4
 
@@ -52,7 +53,8 @@
   #define MATRIX_OE_PIN     16
 
   // UP button = D2, DOWN button = D3, both active LOW (INPUT_PULLUP).
-  #define USER_BUTTON_PIN   2
+  #define UP_BUTTON_PIN     2
+  #define DOWN_BUTTON_PIN   3
 
 #endif
 

@@ -132,23 +132,86 @@ Settings settings;
 // See board_hal.h for why each board needs its own backend.
 SettingsStore<Settings> clockStore;
 
-// User button / interaction ------------------------------------------------
-// USER_BUTTON_PIN comes from board_hal.h (M4: D2, S3: GPIO6) - the S3 drives the
-// matrix clock on D2. Active LOW with the internal pull-up on both boards.
+// Input events and mapping -------------------------------------------------
+// Every input is first turned into a named event; a mapping table then says
+// what that event does on the current screen. A function moves to another
+// input by changing a table row, not the code that reads the input.
+
+enum InputEvent : uint8_t {
+  EV_NONE,
+  EV_UP_SHORT,   EV_UP_2X,   EV_UP_3X,   EV_UP_HOLD,
+  EV_DOWN_SHORT, EV_DOWN_2X, EV_DOWN_3X, EV_DOWN_HOLD,
+  EV_UP_AT_BOOT,       // UP held while the clock starts
+  EV_KNOCK,            // the accelerometer felt a knock
+};
+
+// Where an event happens. The banner counts as the face: it sits on top of it.
+enum InputContext : uint8_t { CTX_BOOT, CTX_FACE, CTX_HOTSPOT };
+
+enum InputFunction : uint8_t {
+  FN_NONE,
+  FN_CYCLE_DST,        // daylight saving auto -> summer -> winter, with the banner
+  FN_TOGGLE_AUTO,      // auto brightness on/off
+  FN_TOGGLE_HOTSPOT,   // config AP on/off
+  FN_BRIGHT_FADE,      // cyclic brightness fade while the button stays held, saved on release
+  FN_KNOCK_EFFECT,     // the Tetris digits come apart
+};
+
+struct InputMapping { InputEvent event; InputContext context; InputFunction function; };
+
+// Profile "Classic clicks": the controls the clock has always had - UP 1x, 2x,
+// 3x and held, the boot-time hold and the knock. It stays the only profile
+// until the on-screen menu exists. An event without a row does nothing, which
+// is why 1x/2x and the hold do nothing while the config AP is up.
+const InputMapping PROFILE_CLASSIC_CLICKS[] = {
+  { EV_UP_SHORT,   CTX_FACE,    FN_CYCLE_DST      },
+  { EV_UP_2X,      CTX_FACE,    FN_TOGGLE_AUTO    },
+  { EV_UP_3X,      CTX_FACE,    FN_TOGGLE_HOTSPOT },
+  { EV_UP_3X,      CTX_HOTSPOT, FN_TOGGLE_HOTSPOT },
+  { EV_UP_HOLD,    CTX_FACE,    FN_BRIGHT_FADE    },
+  { EV_UP_AT_BOOT, CTX_BOOT,    FN_TOGGLE_HOTSPOT },
+  { EV_KNOCK,      CTX_FACE,    FN_KNOCK_EFFECT   },
+};
+const InputMapping *profileRows  = PROFILE_CLASSIC_CLICKS;
+const uint8_t       profileCount = sizeof(PROFILE_CLASSIC_CLICKS) / sizeof(PROFILE_CLASSIC_CLICKS[0]);
+
+// Buttons ------------------------------------------------------------------
+// UP_BUTTON_PIN / DOWN_BUTTON_PIN come from board_hal.h (M4: D2/D3, S3:
+// GPIO6/GPIO7) - the S3 drives the matrix clock on D2. Active LOW with the
+// internal pull-up on both boards. Every button runs the same small state
+// machine, which only turns presses into events.
 const unsigned long BTN_DEBOUNCE_MS  = 25;   // ignore bounces shorter than this
-const unsigned long BTN_LONGPRESS_MS = 600;  // hold longer than this -> brightness fade
+const unsigned long BTN_LONGPRESS_MS = 600;  // pressed this long -> the hold event
 const unsigned long BTN_MULTI_GAP_MS = 400;  // window to collect a click sequence
-bool          btnPrev = false;
-unsigned long btnPressStart = 0, btnLastRelease = 0;
-uint8_t       btnClicks = 0;
-bool          btnLong = false;
+
+enum ButtonPhase : uint8_t {
+  BTN_RELEASED,    // up, no click sequence open
+  BTN_PRESSED,     // down, not yet long enough for the hold event
+  BTN_HELD,        // down past BTN_LONGPRESS_MS; the hold event has fired
+  BTN_COUNTING,    // up after a click; another may follow within BTN_MULTI_GAP_MS
+};
+
+struct Button {
+  uint8_t       pin;
+  InputEvent    evShort, ev2x, ev3x, evHold;   // what this button reports
+  ButtonPhase   phase;
+  uint8_t       clicks;       // clicks in the open sequence
+  unsigned long pressedAt;    // millis() the current press began
+  unsigned long releasedAt;   // millis() of the last counted click
+  InputFunction holding;      // what its hold event started, running until it is let go
+};
+
+Button buttons[] = {
+  { UP_BUTTON_PIN,   EV_UP_SHORT,   EV_UP_2X,   EV_UP_3X,   EV_UP_HOLD,   BTN_RELEASED, 0, 0, 0, FN_NONE },
+  { DOWN_BUTTON_PIN, EV_DOWN_SHORT, EV_DOWN_2X, EV_DOWN_3X, EV_DOWN_HOLD, BTN_RELEASED, 0, 0, 0, FN_NONE },
+};
 
 // Button feedback ----------------------------------------------------------
 // The red board LED (FEEDBACK_LED_PIN) - and, if enabled, a small square in the
-// bottom-right corner of the matrix - is lit while the button is held. Once a
+// bottom-right corner of the matrix - is lit while a button is down. Once a
 // click sequence has triggered its function it blinks once per click, so 1x /
-// 2x / 3x can be told apart. A sequence that triggers nothing (1x/2x while the
-// config AP is up) gets no confirmation.
+// 2x / 3x can be told apart. A sequence that triggers nothing (no row in the
+// profile, e.g. 1x/2x while the config AP is up) gets no confirmation.
 #define BUTTON_FEEDBACK_ON_MATRIX 1          // 0 = board LED only
 // Dark pause before the first confirmation blink, on top of BTN_MULTI_GAP_MS
 // (the function itself still triggers after the gap). Separates the blinks
@@ -185,7 +248,8 @@ unsigned long bannerUntil = 0;   // SCREEN_BANNER: back to the face at this mill
 // flips. The screens that only repaint on a change (the Tetris face, the hotspot
 // info) repaint when it is set; every full repaint clears it.
 bool          panelDirty = true;
-// Knock gates: one reason and one timestamp each, read only by knockAccepted().
+// Knock gates: one reason and one timestamp each, read only by knockIsReal()
+// and knockEffectReady().
 // Declared here rather than with the rest of the shake code because setup() and
 // the orientation code set them, and those are compiled on both boards.
 const unsigned long KNOCK_START_QUIET_MS = 3000;  // after setup(): plugging the clock in
@@ -539,7 +603,8 @@ void setup(void) {
   prevBootStage = boardBootStageRead();
   boardBootStageWrite(BOOT_STAGE_START);
 
-  pinMode(USER_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
   pinMode(FEEDBACK_LED_PIN, OUTPUT);
   digitalWrite(FEEDBACK_LED_PIN, LOW);
   loadSettings(); // pulls brightness/colors/animation/tz from flash (or writes defaults)
@@ -611,10 +676,10 @@ void setup(void) {
 
   bootStatus("CLOCK");
 
-  // Recovery / manual entry: hold the user button during boot to open the config AP
-  // even when the home WiFi is unavailable.
-  if (digitalRead(USER_BUTTON_PIN) == LOW) {
-    startAPMode();
+  // Recovery / manual entry: UP held during boot opens the config AP even when
+  // the home WiFi is unavailable (the profile maps EV_UP_AT_BOOT to it).
+  if (digitalRead(UP_BUTTON_PIN) == LOW) {
+    handleInput(EV_UP_AT_BOOT);
   }
 
   // Initialize Network...... (skipped while the config AP is running)
@@ -658,7 +723,7 @@ void loop(void) {
   static bool dstTested = false;
   if (!dstTested && millisNow > 10000) { dstTested = true; dstSelfTest(); }
 #endif
-  handleButton(); // single click = daylight-saving mode, 3 clicks = config AP on/off, long press = brightness fade
+  updateInput();  // buttons -> events -> whatever the profile maps them to on this screen
 
   if (apActive) {      // config AP running
     apWatchdog();      // re-create the AP if the ESP32 silently rebooted
@@ -1911,23 +1976,30 @@ void updateShake() {
   // The interrupt is latched, so it has to be read away even when the knock is
   // going to be ignored - otherwise it would fire the moment the block lifts.
   (void)accelReadReg(LIS3DH_INT1_SRC);
-  if (knockAccepted()) { shakeStartAll(); }
+  if (knockIsReal()) { handleInput(EV_KNOCK); }
 }
 
-// Whether a knock may take the digits apart now. Every reason to ignore one is
-// here, one per line, each reading one explicit state or one gate with one
-// reason - so a new reason is one more line, not a new flag somewhere else.
-bool knockAccepted() {
+// Whether the sensor's latched event is worth reporting as a knock. These are
+// the reasons it fires without anyone knocking; one per line, each reading one
+// explicit state or one gate with one reason. What a knock then does is the
+// profile's business.
+bool knockIsReal() {
   if (shakeThreshold() == 0)                           { return false; }  // switched off
-  if (screen != SCREEN_FACE)                           { return false; }  // boot, banner or config AP
-  if (settings.watchface != WATCHFACE_TETRIS_ID)       { return false; }  // the classic face has nothing to throw
-  if (shakeAnyBusy())                                  { return false; }  // already coming apart
-  if (btnPrev)                                         { return false; }  // a button press IS a knock: the
-                                                                          // switch sits 20 mm from the sensor
+  if (anyButtonDown())                                 { return false; }  // a button press IS a knock: the
+                                                                          // switches sit 20 mm from the sensor
   if (orientCandidate != deviceRotation)               { return false; }  // a rotation is being debounced
   if (millisNow - setupDoneAt  < KNOCK_START_QUIET_MS) { return false; }  // just plugged in
   if (millisNow - rotatedAt    < SHAKE_SETTLE_MS)      { return false; }  // turning is not a knock
-  if (millisNow - shakeEndedAt < SHAKE_SETTLE_MS)      { return false; }  // the last knock, still ringing
+  return true;
+}
+
+// Whether the Tetris face can be knocked apart right now - what FN_KNOCK_EFFECT
+// needs, whichever input asked for it.
+bool knockEffectReady() {
+  if (screen != SCREEN_FACE)                           { return false; }  // the banner is on top of it
+  if (settings.watchface != WATCHFACE_TETRIS_ID)       { return false; }  // the classic face has nothing to throw
+  if (shakeAnyBusy())                                  { return false; }  // already coming apart
+  if (millisNow - shakeEndedAt < SHAKE_SETTLE_MS)      { return false; }  // the last one has only just ended
   return true;
 }
 
@@ -2323,57 +2395,151 @@ void normalizeColorFull(uint8_t &r, uint8_t &g, uint8_t &b) {
 }
 
 /* ======================================================================
-   User button: single click = daylight-saving mode, triple click = AP on/off,
-   long press = fade.
-   While the AP is running only the triple click (leave config mode) is active,
-   so DST/auto-brightness/fade cannot be changed accidentally while configuring.
+   Input: buttons -> events -> the function the profile maps them to on the
+   current screen. What each button does lives in the profile table at the top,
+   not here.
    ====================================================================== */
-void handleButton() {
-  bool pressed = (digitalRead(USER_BUTTON_PIN) == LOW);
+
+// The context an event happens in, from the screen that is up.
+InputContext inputContext() {
+  switch (screen) {
+    case SCREEN_BOOT:            return CTX_BOOT;
+    case SCREEN_HOTSPOT_INFO:
+    case SCREEN_HOTSPOT_PREVIEW: return CTX_HOTSPOT;
+    default:                     return CTX_FACE;   // the face and the banner on top of it
+  }
+}
+
+// What the active profile maps this event to in this context; FN_NONE if nothing.
+InputFunction mappedFunction(InputEvent ev, InputContext ctx) {
+  for (uint8_t i = 0; i < profileCount; i++) {
+    if (profileRows[i].event == ev && profileRows[i].context == ctx) { return profileRows[i].function; }
+  }
+  return FN_NONE;
+}
+
+// Whether the profile uses this event anywhere.
+bool profileUses(InputEvent ev) {
+  for (uint8_t i = 0; i < profileCount; i++) {
+    if (profileRows[i].event == ev) { return true; }
+  }
+  return false;
+}
+
+// How many clicks an event stands for, for the confirmation blinks; 0 = not a click.
+uint8_t clickCount(InputEvent ev) {
+  switch (ev) {
+    case EV_UP_SHORT: case EV_DOWN_SHORT: return 1;
+    case EV_UP_2X:    case EV_DOWN_2X:    return 2;
+    case EV_UP_3X:    case EV_DOWN_3X:    return 3;
+    default:                              return 0;
+  }
+}
+
+// Run a function once. A hold function (the fade) also runs on while its button
+// stays down: holdStep() and holdEnd() below.
+void runFunction(InputFunction fn) {
+  switch (fn) {
+    case FN_CYCLE_DST:      cycleDstMode();     break;
+    case FN_TOGGLE_AUTO:    toggleAutoBright(); break;
+    case FN_TOGGLE_HOTSPOT: if (apActive) { stopAPMode(); } else { startAPMode(); } break;
+    case FN_BRIGHT_FADE:    fadeStart();        break;
+#if WATCHFACE_TETRIS
+    case FN_KNOCK_EFFECT:   if (knockEffectReady()) { shakeStartAll(); } break;
+#endif
+    default:                break;
+  }
+}
+
+void holdStep(InputFunction fn) {
+  if (fn == FN_BRIGHT_FADE) { fadeStep(); }
+}
+
+void holdEnd(InputFunction fn) {
+  if (fn == FN_BRIGHT_FADE) {   // keep the faded brightness
+    saveSettings();
+    Serial.print("Brightness set to "); Serial.println(settings.brightness);
+  }
+}
+
+// Look an event up for the current screen and run what it maps to. Returns the
+// function, so a hold event's button can keep it running. A click sequence that
+// ran something is confirmed by blinks; one that maps to nothing is not.
+InputFunction handleInput(InputEvent ev) {
+  InputFunction fn = mappedFunction(ev, inputContext());
+  if (fn == FN_NONE) { return FN_NONE; }
+  runFunction(fn);
+  uint8_t clicks = clickCount(ev);
+  if (clicks) { feedbackConfirm(clicks); }
+  return fn;
+}
+
+// End a click sequence and name it: 1x, 2x, or 3x for three and more, as it
+// has always been.
+InputEvent closeSequence(Button &b) {
+  uint8_t n = b.clicks;
+  b.clicks = 0;
+  b.phase  = BTN_RELEASED;
+  if (n >= 3) { return b.ev3x; }
+  if (n == 2) { return b.ev2x; }
+  return b.evShort;
+}
+
+// Advance one button by one pass and return the event it produced, if any.
+// A button whose 2x/3x the profile does not use reports a click at once,
+// instead of waiting BTN_MULTI_GAP_MS for a second one.
+InputEvent stepButton(Button &b) {
+  bool down = (digitalRead(b.pin) == LOW);
   unsigned long t = millisNow;
-
-  if (pressed && !btnPrev) {           // press starts
-    btnPressStart = t;
-    btnLong = false;
-    fbBlinkCount = 0;                  // a new interaction cancels a pending confirmation
+  switch (b.phase) {
+    case BTN_RELEASED:
+    case BTN_COUNTING:
+      if (down) { b.phase = BTN_PRESSED; b.pressedAt = t; return EV_NONE; }
+      if (b.phase == BTN_COUNTING && t - b.releasedAt >= BTN_MULTI_GAP_MS) { return closeSequence(b); }
+      return EV_NONE;
+    case BTN_PRESSED:
+      if (down) {
+        if (t - b.pressedAt < BTN_LONGPRESS_MS) { return EV_NONE; }
+        b.phase  = BTN_HELD;
+        b.clicks = 0;           // a hold ends any open click sequence
+        return b.evHold;
+      }
+      if (t - b.pressedAt < BTN_DEBOUNCE_MS) {   // a bounce, not a click
+        b.phase = b.clicks ? BTN_COUNTING : BTN_RELEASED;
+        return EV_NONE;
+      }
+      b.clicks++;
+      b.releasedAt = t;
+      if (!profileUses(b.ev2x) && !profileUses(b.ev3x)) { return closeSequence(b); }
+      b.phase = BTN_COUNTING;
+      return EV_NONE;
+    case BTN_HELD:
+      if (!down) { b.phase = BTN_RELEASED; }
+      return EV_NONE;
   }
+  return EV_NONE;
+}
 
-  if (!apActive) { // long-press fade only in normal mode (AP: web page drives brightness)
-    if (pressed && !btnLong && (t - btnPressStart >= BTN_LONGPRESS_MS)) { // becomes a long press
-      btnLong = true;
-      fadeStart();
-    }
-    if (pressed && btnLong) {          // hold -> keep fading the brightness
-      fadeStep();
-    }
+// Whether any button is down right now.
+bool anyButtonDown() {
+  for (const Button &b : buttons) {
+    if (b.phase == BTN_PRESSED || b.phase == BTN_HELD) { return true; }
   }
+  return false;
+}
 
-  if (!pressed && btnPrev) {           // release
-    unsigned long dur = t - btnPressStart;
-    if (btnLong) {                     // long press just ended -> keep the faded brightness
-      saveSettings();
-      btnLong = false;
-      btnClicks = 0;
-      Serial.print("Brightness set to "); Serial.println(settings.brightness);
-    } else if (dur >= BTN_DEBOUNCE_MS) { // a valid short click
-      btnClicks++;
-      btnLastRelease = t;
-    }
+// Once per loop: read every button, run what its events map to, keep a hold
+// function going while its button stays down, and drive the press indicator.
+void updateInput() {
+  for (Button &b : buttons) {
+    ButtonPhase before = b.phase;
+    InputEvent ev = stepButton(b);
+    if (b.phase == BTN_PRESSED && before != BTN_PRESSED) { fbBlinkCount = 0; }   // a new press cancels a pending confirmation
+    if (ev == b.evHold) { b.holding = handleInput(ev); }
+    else if (ev != EV_NONE) { handleInput(ev); }
+    if (b.phase == BTN_HELD) { holdStep(b.holding); }
+    if (before == BTN_HELD && b.phase != BTN_HELD) { holdEnd(b.holding); b.holding = FN_NONE; }
   }
-
-  // Evaluate the click sequence once no further click arrived within the window.
-  if (!pressed && btnClicks > 0 && (t - btnLastRelease >= BTN_MULTI_GAP_MS)) {
-    uint8_t clicks = (btnClicks > 3) ? 3 : btnClicks; // 4+ clicks run the 3x function
-    bool triggered = true;
-    if (clicks == 3)         { if (apActive) { stopAPMode(); } else { startAPMode(); } }
-    else if (apActive)       { triggered = false; } // 1x/2x do nothing while configuring
-    else if (clicks == 2)    { toggleAutoBright(); }
-    else                     { cycleDstMode(); }
-    btnClicks = 0;
-    if (triggered) { feedbackConfirm(clicks); }
-  }
-
-  btnPrev = pressed;
   updateFeedbackLed();
 }
 
@@ -2385,9 +2551,9 @@ void feedbackConfirm(uint8_t clicks) {
   fbBlinkStart = millis();
 }
 
-// Lit while the button is held, or during an "on" phase of the confirmation.
+// Lit while a button is down, or during an "on" phase of the confirmation.
 bool feedbackLit() {
-  if (btnPrev) { return true; }
+  if (anyButtonDown()) { return true; }
   if (fbBlinkCount == 0) { return false; }
   const unsigned long period = FB_BLINK_ON_MS + FB_BLINK_OFF_MS;
   unsigned long elapsed = millis() - fbBlinkStart;
