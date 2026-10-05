@@ -81,16 +81,15 @@
    Frame pacing, and the clock preview while a config-AP client is connected
    ====================================================================== */
 #if BOARD_MATRIXPORTAL_S3
-  // Six bit planes, 64 levels per colour channel. The brightness scales the
-  // colours in software, so dimming uses up levels: at brightness 16 five
-  // planes leave 2 levels per channel and six leave 4, which keeps dimmed
-  // colours and GIF shades apart. The cost is the refresh rate: measured 88 Hz
-  // with six planes against 165 Hz with five, judged smooth enough on the panel.
-  #define MATRIX_BIT_DEPTH 6
+  // Five bit planes, 32 levels per colour channel. Six were tried: Protomatter
+  // draws into an RGB565 canvas and only stretches red and blue to six bits,
+  // so only green gains levels, while the refresh rate halves (measured 165 Hz
+  // with five planes, 88 Hz with six).
+  #define MATRIX_BIT_DEPTH 5
   // The refresh rate the pacing below assumes until the first measurement.
-  #define PANEL_HZ_TYPICAL 88
+  #define PANEL_HZ_TYPICAL 165
   // Drawing a frame takes about 0.5 ms on the S3, far less than one panel
-  // refresh (about 11 ms at the measured 88 Hz). So the loop runs in step with
+  // refresh (about 6 ms at the measured 165 Hz). So the loop runs in step with
   // the panel: show() waits for the refresh that takes over the new frame, and
   // the animation moves one pixel every whole number of refreshes, which keeps
   // every step equally long. A fixed millisecond loop drifts against the
