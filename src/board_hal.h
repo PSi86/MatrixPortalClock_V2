@@ -188,7 +188,24 @@ class PanelCanvas : public GFXcanvas16 {
     if (_dma->calculated_refresh_rate > 0) { _rate = _dma->calculated_refresh_rate; }
     _periodUs = 1000000UL / _rate;
     _countFrom = micros();
+    _instance = this;
+    esp_register_shutdown_handler(blankOnRestart);
     return true;
+  }
+
+  // A software restart leaves the panel with whatever it was sent last, and
+  // with nobody driving it while the chip restarts that row pair may light at
+  // full duty. So black frames go out first: both buffers cleared, each shown
+  // for a refresh, and the panel switched dark.
+  static void blankOnRestart() {
+    PanelCanvas *p = _instance;
+    if (!p || !p->_dma) { return; }
+    for (int i = 0; i < 2; i++) {
+      p->_dma->clearScreen();
+      p->flip();
+      delayMicroseconds(p->_periodUs + 1000);
+    }
+    p->_dma->setBrightness8(0);
   }
 
   // The canvas onto the panel. The buffer it writes into was on the panel
@@ -285,6 +302,7 @@ class PanelCanvas : public GFXcanvas16 {
   }
   uint32_t _dbgCalls = 0, _dbgUs = 0, _dbgPixels = 0, _dbgMaxUs = 0, _dbgSince = 0;
 #endif
+  inline static PanelCanvas *_instance = nullptr;   // for blankOnRestart()
   MatrixPanel_I2S_DMA *_dma = nullptr;
   uint32_t _rate = PANEL_HZ_TYPICAL;
   uint32_t _periodUs = 1000000UL / PANEL_HZ_TYPICAL;
@@ -441,6 +459,12 @@ inline void boardSerialBegin(unsigned long baud) {
   // (Built with -D ARDUINO_USB_CDC_ON_BOOT=0 the console is UART0 instead and
   // the board brings up no USB device at all.)
   Serial.setTxTimeoutMs(0);
+  // A host that sets 1200 baud, or toggles DTR and RTS in esptool's order (a
+  // serial tool did as it closed the port), would restart the clock into its
+  // bootloader, where nothing drives the panel and the last row pair it was
+  // sent stays lit at full duty. Uploads go by UF2 or the ROM bootloader
+  // (platformio.ini), so that path is switched off.
+  Serial.enableReboot(false);
 #endif
 }
 
