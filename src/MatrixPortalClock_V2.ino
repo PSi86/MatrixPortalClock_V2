@@ -177,12 +177,30 @@ SettingsStore<UiSettings> uiStore;
 struct WifiCreds {
   uint16_t magic;
   uint8_t  rev;
-  uint8_t  reserved;
+  uint8_t  verified;  // 1 once a sync over this WiFi has worked: a known-good config.
+                      // 0 for a new one - its failures show at once (syncOverdue())
   char     ssid[33];   // up to 32 bytes, NUL-terminated; empty = no WiFi stored
   char     pass[64];   // WPA2: 8 to 63 characters, NUL-terminated
 };
 WifiCreds wifiCreds;
 SettingsStore<WifiCreds> wifiStore;
+
+// Networks in range, from the scan the hotspot makes when it opens, strongest
+// first; the config page offers them. A name seen from several access points
+// is listed once, with its strongest signal.
+struct SeenNetwork { char ssid[33]; int8_t rssi; bool open; };
+const uint8_t SEEN_MAX = 12;
+SeenNetwork seenNetworks[SEEN_MAX];
+uint8_t     seenCount = 0;
+bool        scanFailed = false;   // the last scan did not run at all (not: found nothing)
+
+// How the last join of the home WiFi went, for the config page. The radio is
+// off between syncs, so "connected" is something that happened, with a time.
+enum JoinOutcome : uint8_t { JOIN_NOT_TRIED, JOIN_SUCCEEDED, JOIN_FAILED };
+JoinOutcome   joinOutcome    = JOIN_NOT_TRIED;
+uint8_t       joinFailStatus = 0;   // the station's wl_status_t when it failed
+int8_t        joinRssi       = 0;   // the signal when it succeeded
+unsigned long joinOutcomeAt  = 0;   // millis() of the outcome
 
 // Buttons ------------------------------------------------------------------
 // UP_BUTTON_PIN / DOWN_BUTTON_PIN come from board_hal.h (M4: D2/D3, S3:
@@ -534,6 +552,7 @@ const unsigned long SYNC_PAUSE_MS   = 10UL * 60UL * 1000UL;
 // Where the clock's time came from, for the config page.
 enum TimeSource : uint8_t { TIME_NONE, TIME_NTP, TIME_PHONE, TIME_MANUAL };
 TimeSource timeSource = TIME_NONE;
+
 // A due sync that has not succeeded for this long is an error, shown on the
 // status pixel. The hour covers the retries, so a sync in progress never shows.
 const unsigned long SYNC_LATE_MS = 60UL * 60UL * 1000UL;
@@ -1758,13 +1777,25 @@ void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
 }
 #endif
 
-// Whether a due NTP sync has failed for longer than SYNC_LATE_MS.
+// Whether a due NTP sync counts as failed, for the status pixel.
+//
+// A known-good WiFi config - one a sync has worked over - gets SYNC_LATE_MS
+// of retries first: a sync that fails now and then does not stop the clock.
+// A new config, one that has never worked yet, shows its first failure at
+// once - it was just set up, and whoever did that wants to know whether it
+// works: as soon as it fails to join, or the attempt gives up (the pause).
+// Without a WiFi stored the clock runs as it was told to, so that is not
+// counted as a new config's failure.
 bool syncOverdue() {
-  return syncStateDue(syncState) && (millisNow - syncDueSince > SYNC_LATE_MS);
+  if (!syncStateDue(syncState)) { return false; }
+  if (wifiStored() && !wifiCreds.verified) { return joinOutcome == JOIN_FAILED || syncState == SYNC_PAUSED; }
+  return millisNow - syncDueSince > SYNC_LATE_MS;
 }
 
 // NTP status pixel: off in normal operation, red only on an error - a due sync
-// that has not succeeded within SYNC_LATE_MS - and then until a sync succeeds.
+// that has not succeeded within SYNC_LATE_MS, or the first failure of a WiFi
+// config that has never worked yet (syncOverdue()) - and then until a sync
+// succeeds.
 // It sits in the bottom-left corner of the current rotation: (0,63) in
 // portrait, (0,31) in landscape. A fixed (0,63) lies outside the 32 px tall
 // landscape canvas and was silently clipped, so landscape never showed the sync
@@ -2815,6 +2846,7 @@ void setSyncState(SyncState next) {
   syncState = next;
 }
 
+
 // Whether a sync is due in this state: wanted, and not done yet.
 bool syncStateDue(SyncState s) {
   return s == SYNC_JOINING || s == SYNC_FETCHING || s == SYNC_RETRY_WAIT || s == SYNC_PAUSED;
@@ -2875,6 +2907,23 @@ String clockStatusText() {
   return String(line);
 }
 
+// A join that has not connected: keep why, for the config page.
+void noteJoinFailed() {
+  joinOutcome    = JOIN_FAILED;
+  joinFailStatus = netStaStatus();
+  joinOutcomeAt  = millisNow;
+}
+
+// Why a join failed, from the station's state when it gave up.
+const char *joinFailText(uint8_t status) {
+  switch (status) {
+    case WL_NO_SSID_AVAIL:   return "network not found";
+    case WL_CONNECT_FAILED:  return "the network refused the connection (wrong password?)";
+    case WL_CONNECTION_LOST: return "connection lost";
+    default:                 return "no connection";
+  }
+}
+
 // Whether a home WiFi is stored at all.
 bool wifiStored() {
   return wifiCreds.ssid[0] != '\0';
@@ -2908,6 +2957,11 @@ void ntpAsk() {
   // was slow, negative when it was fast. Only logged.
   long drift = clockIsSet() ? (long)(utc - clockNow()) : 0;
   setClockTo(utc, TIME_NTP); // UTC as delivered; zone and daylight saving are added for the panel
+  if (wifiStored() && !wifiCreds.verified) {   // the first sync over this WiFi: a known-good config now
+    wifiCreds.verified = 1;
+    saveWifiCreds();
+    Serial.println("WiFi: config works, stored as known good");
+  }
   Serial.println("NTP success");
   Serial.print("NTP offset: ");
   Serial.println(drift);
@@ -2946,6 +3000,7 @@ void timeSync_WifiLib() {
   // the clock it is not worth keeping the radio on, so pause and try later.
   if (syncAttempting(syncState) && clockIsSet() && millisNow - syncAttemptSince >= SYNC_ATTEMPT_MS) {
     Serial.println("NTP sync did not work out - trying again in 10 min");
+    if (syncState == SYNC_JOINING && wifiStored()) { noteJoinFailed(); }   // read before the radio goes
     netRadioOff();
     setSyncState(SYNC_PAUSED);
   }
@@ -2968,8 +3023,12 @@ void timeSync_WifiLib() {
         Serial.println("Connected to WiFi");
         printWifiStatus();
         if (!bootStageCleared) { boardBootStageWrite(BOOT_STAGE_RUN); }
+        joinOutcome   = JOIN_SUCCEEDED;
+        joinRssi      = netStaRssi();
+        joinOutcomeAt = millisNow;
         setSyncState(SYNC_FETCHING);
       } else if (millisNow - joinAskedAt >= JOIN_RETRY_MS) {
+        noteJoinFailed();
         syncJoin();   // not joined after all this time: start the join again
       }
       break;
@@ -3134,7 +3193,9 @@ void saveWifiCreds() {
 void forgetWifi() {
   memset(wifiCreds.ssid, 0, sizeof(wifiCreds.ssid));
   memset(wifiCreds.pass, 0, sizeof(wifiCreds.pass));
+  wifiCreds.verified = 0;
   saveWifiCreds();
+  joinOutcome = JOIN_NOT_TRIED;
   Serial.println("WiFi: forgotten");
 }
 
@@ -3711,7 +3772,41 @@ void startAPMode() {
   if (syncAttempting(syncState)) { setSyncState(SYNC_PAUSED); }
   updateBrightness(); // resolve the live brightness for the immediate info screen
   setScreen(SCREEN_HOTSPOT_INFO); // draws SSID/PW/IP at once, before the slow radio bring-up freezes the loop
+  scanNetworks();     // while the radio is still a station, for the config page's list
   apRadioUp();
+}
+
+// Scan the networks in range into seenNetworks: names only (no hidden ones),
+// each once with its strongest signal, the strongest SEEN_MAX, strongest first.
+void scanNetworks() {
+  int found = netScan();
+  seenCount = 0;
+  scanFailed = (found < 0);
+  if (scanFailed) { Serial.print("WiFi scan failed: "); Serial.println(found); }
+  for (int i = 0; i < found; i++) {
+    SeenNetwork net;
+    netScanResult(i, net.ssid, sizeof(net.ssid), net.rssi, net.open);
+    if (net.ssid[0] == '\0') { continue; }
+    int same = -1, weakest = 0;
+    for (uint8_t j = 0; j < seenCount; j++) {
+      if (strcmp(seenNetworks[j].ssid, net.ssid) == 0) { same = j; }
+      if (seenNetworks[j].rssi < seenNetworks[weakest].rssi) { weakest = j; }
+    }
+    if (same >= 0) {
+      if (net.rssi > seenNetworks[same].rssi) { seenNetworks[same].rssi = net.rssi; }
+    } else if (seenCount < SEEN_MAX) {
+      seenNetworks[seenCount++] = net;
+    } else if (net.rssi > seenNetworks[weakest].rssi) {
+      seenNetworks[weakest] = net;
+    }
+  }
+  netScanDone();
+  for (uint8_t i = 1; i < seenCount; i++) {   // strongest first
+    for (uint8_t j = i; j > 0 && seenNetworks[j].rssi > seenNetworks[j - 1].rssi; j--) {
+      SeenNetwork t = seenNetworks[j]; seenNetworks[j] = seenNetworks[j - 1]; seenNetworks[j - 1] = t;
+    }
+  }
+  Serial.print("WiFi scan: "); Serial.print(seenCount); Serial.println(" networks");
 }
 
 // Close the hotspot (BACK on its screen, or 3x with Classic clicks): leave
@@ -4168,6 +4263,8 @@ String applyWifiForm(const String &body) {
     memset(wifiCreds.pass, 0, sizeof(wifiCreds.pass));
     strncpy(wifiCreds.pass, pw.c_str(), sizeof(wifiCreds.pass) - 1);
   }
+  wifiCreds.verified = 0;          // a new config until a sync has worked over it
+  joinOutcome = JOIN_NOT_TRIED;   // whatever happened, happened with the network before
   Serial.print("WiFi: stored "); Serial.println(wifiCreds.ssid);
   return "";
 }
@@ -4185,6 +4282,39 @@ void printHtmlEscaped(Print &c, const char *s) {
       default:   c.print(*s);       break;
     }
   }
+}
+
+// The home WiFi as the clock last found it: which network, and how its last
+// join went and when. The radio is off between syncs, so this is a report of
+// the last attempt, never a claim that it is connected now.
+void printHomeWifiStatus(Print &c) {
+  if (!wifiStored()) {
+    c.print("Home WiFi: none stored - the clock gets no time from the internet.");
+    return;
+  }
+  c.print("Home WiFi: ");
+  printHtmlEscaped(c, wifiCreds.ssid);
+  switch (joinOutcome) {
+    case JOIN_SUCCEEDED:
+      c.print(" - last joined "); printAgo(c, joinOutcomeAt);
+      c.print(", signal "); c.print(joinRssi); c.print(" dBm.");
+      break;
+    case JOIN_FAILED:
+      c.print(" - could not join "); printAgo(c, joinOutcomeAt);
+      c.print(": "); c.print(joinFailText(joinFailStatus)); c.print(".");
+      break;
+    default:
+      c.print(" - not joined since the clock started.");
+      break;
+  }
+}
+
+// "just now", "12 min ago" or "3 h ago", for a millis() stamp.
+void printAgo(Print &c, unsigned long at) {
+  unsigned long minutes = (millisNow - at) / 60000UL;
+  if (minutes == 0)        { c.print("just now"); }
+  else if (minutes < 120)  { c.print(minutes); c.print(" min ago"); }
+  else                     { c.print(minutes / 60); c.print(" h ago"); }
 }
 
 // Live preview (/live): apply only the visual settings to RAM, no flash write,
@@ -4252,6 +4382,10 @@ void sendFormPage(Print &c) {
   c.println(".row>div{flex:1}button{margin-top:18px;padding:10px 18px;font-size:16px;background:#06c;color:#fff;border:0;border-radius:4px}");
   c.println(".swbox{max-width:320px}.sw{display:inline-block;width:30px;height:30px;margin:3px;border-radius:5px;border:2px solid #333;cursor:pointer;vertical-align:middle}.sw.sel{border-color:#fff;box-shadow:0 0 0 2px #06c}");
   c.println("</style></head><body><h1>Matrix Clock Settings</h1>");
+  // The state of the home WiFi, as the clock last found it.
+  c.print("<p style=\"font-size:14px;margin:0 0 8px\">");
+  printHomeWifiStatus(c);
+  c.println("</p>");
   c.println("<p style=\"color:#8c8;font-size:13px;margin:0 0 8px\">Brightness, colors and speed preview live on the clock.</p>");
   c.println("<form action=\"/save\" method=get>");
 
@@ -4389,7 +4523,26 @@ void sendFormPage(Print &c) {
   // Home WiFi: a form of its own, sent by POST so the password is not part of
   // the URL. The stored password is never sent to the page.
   c.println("<h2>Home WiFi</h2><form action=\"/wifi\" method=post>");
-  c.print("<label>Network name (SSID)</label><input name=ssid maxlength=32 value=\"");
+  // The networks in range when the hotspot opened; picking one fills in the
+  // name. A hidden network is typed into the name field.
+  if (seenCount) {
+    c.println("<label>Networks in range</label><select onchange=\"if(this.value)document.getElementsByName('ssid')[0].value=this.value\">");
+    c.println("<option value=\"\">Choose a network...</option>");
+    for (uint8_t i = 0; i < seenCount; i++) {
+      c.print("<option value=\"");
+      printHtmlEscaped(c, seenNetworks[i].ssid);
+      c.print("\">");
+      printHtmlEscaped(c, seenNetworks[i].ssid);
+      c.print(" ("); c.print(seenNetworks[i].rssi); c.print(" dBm");
+      if (seenNetworks[i].open) { c.print(", open"); }
+      c.println(")</option>");
+    }
+    c.println("</select>");
+  } else {
+    c.println(scanFailed ? "<p style=\"font-size:13px\">The scan for networks failed when the hotspot opened.</p>"
+                         : "<p style=\"font-size:13px\">No networks were in range when the hotspot opened.</p>");
+  }
+  c.print("<label>Network name (SSID), also for a hidden network</label><input name=ssid maxlength=32 value=\"");
   printHtmlEscaped(c, wifiCreds.ssid);
   c.println("\">");
   c.print("<label>Password</label><input type=password name=pw maxlength=63 autocomplete=new-password placeholder=\"");

@@ -51,7 +51,11 @@ button pin cannot be carried over.
   again every 10 s until it has joined) and shows dashes instead of digits until
   it has a time
 - **Status pixel**: off in normal operation; a single red pixel in the bottom-left
-  corner means a due NTP sync has not succeeded for an hour
+  corner means a due NTP sync has not succeeded for an hour. That hour is for a
+  known-good WiFi config, one a sync has worked over before. A new one - stored
+  on the config page, or copied from the build - has not proven itself yet, so
+  the pixel turns red at once when it fails to join (within about 10 s) or the
+  sync gives up (after a minute), also after a restart, until a sync works
 - **Automatic summer/winter time** for every timezone in the menu (rules from the
   IANA tz database), or a fixed summer or winter time
 - **On-screen menu** with the UP and DOWN buttons: brightness, auto brightness,
@@ -243,7 +247,12 @@ the rest of the page.
 
 **Home WiFi** has a form of its own, sent by POST so the password is never part
 of a URL. It shows the stored network name; the stored password is never sent
-to the page, and a password field left empty keeps it. "Save WiFi & connect"
+to the page, and a password field left empty keeps it. When the hotspot opens,
+the clock scans the networks in range (about 1.6 s, the info screen is already
+up) and the page offers the strongest 12 to pick from; a hidden network is
+typed into the name field. A line at the top of the page reports how the last
+join of the home WiFi went - when, and at what signal, or why it failed - since
+the radio is off between syncs. "Save WiFi & connect"
 stores the network, closes the hotspot and syncs over it at once. **Forget WiFi**
 (after a confirmation) deletes network name and password; the clock keeps its
 time until the next power loss, and the credentials compiled in from
