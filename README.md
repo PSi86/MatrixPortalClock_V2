@@ -61,13 +61,15 @@ button pin cannot be carried over.
 - **On-screen menu** with the UP and DOWN buttons: brightness, auto brightness,
   timezone, daylight saving and the config hotspot, set on the clock itself
   without WiFi (see [Menu and buttons](#menu-and-buttons))
-- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, the button profile and the **home WiFi**
+- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, the button profile, GIFs (S3) and the **home WiFi**
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
   a normal upload does not touch - `pio run -t erase` does; M4: one 8 KB flash
   block each at the top of the flash, from 0x7A000 up)
 - Recovery: the config hotspot is in the menu from the first second, also
   without the home WiFi; holding UP during boot opens it as well
+- **GIFs** (S3): now and then a GIF takes the panel for a few seconds, and holding
+  UP on the face plays one at once (see [GIF playback](#gif-playback))
 
 ## Setup
 
@@ -141,6 +143,7 @@ GPIO7, M4: D3). They keep their printed meaning in every orientation.
 | On the clock face | |
 |---|---|
 | UP or DOWN short, DOWN held | open the menu |
+| UP held | play a GIF (S3) |
 | UP held during boot | open the config hotspot, even without the home WiFi |
 
 | In the menu and its editors | |
@@ -192,6 +195,29 @@ event does on the current screen. The build checks every profile: no event may
 mean two things on one screen, the menu must be possible to open, move through
 and leave, and a boot event must open a hotspot that can be closed again on the
 clock. A profile that breaks one of these does not compile.
+
+## GIF playback
+
+On the MatrixPortal S3 a GIF takes the panel in place of the face now and then,
+at a random time between a minimum and a maximum (2 and 30 minutes by default),
+for a set time (7 s by default); all three and switching it off are on the config
+page under **GIFs**. Holding UP on the face plays one at once. A GIF comes up only
+over the plain face; while the menu, a banner or the hotspot is up it waits. Any
+button press ends it early and does nothing else; the hold that started it does
+not end it.
+
+A GIF plays at its own size, centred, unscaled, and only where it fits the panel
+as it is held: 64x32 GIFs in landscape, 32x64 upright, 32x32 either way. Turning
+the panel ends a GIF. It is drawn at 8 bits per colour straight into the panel
+driver, through a gamma table (GIF colours are made for screens, the light of an
+LED is linear in its on-time), and the panel's brightness dims it like the face.
+
+The GIFs are built into the firmware by `scripts/embed_gifs.py`: every GIF in
+[`gifs/`](gifs/README.md) that fits the panel (four examples with their licences
+and authors), and those of the folders listed in `gif_dirs.local`, smallest first,
+up to `custom_gif_budget_kb` (600 KB). That file is ignored by git, so private
+GIFs stay out of the repository; a firmware built with them must not be
+published. The build says how many it took and which it left out.
 
 ## AP configuration
 

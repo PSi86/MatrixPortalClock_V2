@@ -42,19 +42,22 @@ enum InputFunction : uint8_t {
   FN_TOGGLE_HOTSPOT,   // config AP on/off
   FN_BRIGHT_FADE,      // cyclic brightness fade while the button stays held, saved on release
   FN_KNOCK_EFFECT,     // the Tetris digits come apart
+  FN_PLAY_GIF,         // a GIF now, on boards with GIF playback
 };
 
 struct InputMapping { InputEvent event; InputContext context; InputFunction function; };
 
 // Profile "Default": on the face any press opens the menu - except holding
-// UP, whose repeats would close the menu again at once. In the menu a short
-// press moves; holding DOWN goes in, holding UP climbs out, one level for
-// every 600 ms it stays held. Nothing uses 2x or 3x, so a short press acts at
-// once. An event without a row does nothing.
+// UP, whose repeats would close the menu again at once; it plays a GIF, which
+// the repeats leave alone. In the menu a short press moves; holding DOWN goes
+// in, holding UP climbs out, one level for every 600 ms it stays held. Nothing
+// uses 2x or 3x, so a short press acts at once. An event without a row does
+// nothing.
 constexpr InputMapping PROFILE_DEFAULT[] = {
   { EV_UP_SHORT,       CTX_FACE,    FN_OPEN_MENU      },
   { EV_DOWN_SHORT,     CTX_FACE,    FN_OPEN_MENU      },
   { EV_DOWN_HOLD,      CTX_FACE,    FN_OPEN_MENU      },
+  { EV_UP_HOLD,        CTX_FACE,    FN_PLAY_GIF       },
   { EV_KNOCK,          CTX_FACE,    FN_KNOCK_EFFECT   },
   { EV_UP_SHORT,       CTX_MENU,    FN_PREV           },
   { EV_DOWN_SHORT,     CTX_MENU,    FN_NEXT           },
