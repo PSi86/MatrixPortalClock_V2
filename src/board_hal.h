@@ -482,6 +482,32 @@ inline void netApEnd() {
   WiFi.softAPdisconnect(true);
 }
 
+// Scan for networks in range, with the radio as a station. Blocks: an active
+// scan of 120 ms per channel, about 1.6 s. Returns how many it found (< 0 on
+// a failure); netScanResult() reads them, netScanDone() frees the list.
+inline int netScan() {
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_TX_POWER);
+  // A join under way makes the driver refuse the scan at once (seen: the
+  // hotspot opened while the clock was retrying a WiFi, and the scan came back
+  // empty within the same second), so stop it first.
+  WiFi.disconnect();
+  return WiFi.scanNetworks(false, false, false, 120);   // not async, no hidden ones, active
+}
+inline void netScanResult(int i, char *ssid, size_t size, int8_t &rssi, bool &open) {
+  strncpy(ssid, WiFi.SSID(i).c_str(), size - 1);
+  ssid[size - 1] = '\0';
+  rssi = (int8_t)WiFi.RSSI(i);
+  open = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+}
+inline void netScanDone() { WiFi.scanDelete(); }
+
+// The station's state (wl_status_t: WL_NO_SSID_AVAIL, WL_CONNECT_FAILED, ...)
+// and, once connected, its signal.
+inline uint8_t netStaStatus() { return (uint8_t)WiFi.status(); }
+inline int8_t  netStaRssi()   { return (int8_t)WiFi.RSSI(); }
+
 inline bool netApHasStation() { return WiFi.softAPgetStationNum() > 0; }
 inline bool netApHealthy()    { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
 inline IPAddress netApIP()    { return WiFi.softAPIP(); }
@@ -566,6 +592,26 @@ inline void netApEnd() {
   const IPAddress none(0, 0, 0, 0);
   WiFi.config(none, none, none, none);
 }
+
+// Scan for networks in range (the NINA scans as a station). Blocks for the
+// scan. Returns how many it found; netScanResult() reads them.
+inline int netScan() {
+  WiFi.disconnect();   // a join under way would get in the scan's way, as on the S3
+  return WiFi.scanNetworks();
+}
+inline void netScanResult(int i, char *ssid, size_t size, int8_t &rssi, bool &open) {
+  const char *s = WiFi.SSID((uint8_t)i);
+  strncpy(ssid, s ? s : "", size - 1);
+  ssid[size - 1] = '\0';
+  rssi = (int8_t)WiFi.RSSI((uint8_t)i);
+  open = (WiFi.encryptionType((uint8_t)i) == ENC_TYPE_NONE);
+}
+inline void netScanDone() {}
+
+// The station's state (wl_status_t: WL_NO_SSID_AVAIL, WL_CONNECT_FAILED, ...)
+// and, once connected, its signal.
+inline uint8_t netStaStatus() { return WiFi.status(); }
+inline int8_t  netStaRssi()   { return (int8_t)WiFi.RSSI(); }
 
 inline bool netApHasStation() { return WiFi.status() == WL_AP_CONNECTED; }
 inline bool netApHealthy() {
