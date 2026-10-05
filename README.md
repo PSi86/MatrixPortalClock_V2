@@ -521,19 +521,34 @@ per pixel in ms (default 12).
 The Tetris watchface has its own pair of settings instead (see above); the
 animation speed does not apply to it.
 
-On the S3 the loop runs in step with the panel refresh (about 165 Hz with the
-current 5 bit planes): `show()` waits for the refresh that takes the new frame, and
-a digit moves one pixel every whole number of refreshes. The speed setting is
-therefore rounded to steps of about 6 ms (12 ms = 2 refreshes per pixel), and every
-pixel step stays on the panel equally long. Drawing a frame takes about 0.5 ms, so
-the S3 has plenty of headroom. With a fixed millisecond loop, as before, the loop
-drifted against the refresh and single steps stayed on screen for 1, 2 or 3
-refreshes, which showed as a slight judder. The M4 keeps the fixed loop time.
+On the S3 the loop runs in step with the panel refresh (about 200 Hz):
+`show()` waits out one refresh period after the previous frame, and a digit moves
+one pixel every whole number of refreshes. The speed setting is therefore rounded
+to steps of about 5 ms (12 ms = 2 refreshes per pixel), and every pixel step stays
+on the panel equally long. Drawing a frame and handing it over takes well under a
+refresh period, so the S3 has plenty of headroom. With a fixed millisecond loop,
+as before, the loop drifted against the refresh and single steps stayed on screen
+for 1, 2 or 3 refreshes, which showed as a slight judder. The M4 keeps the fixed
+loop time.
 
-Both boards drive the panel with 5 bit planes, 32 levels per colour channel. Six
-were tried on the S3: Protomatter draws into an RGB565 canvas and only stretches
-red and blue to six bits, so only green gained levels, while the refresh rate
-halved to 88 Hz.
+### Panel driver
+
+The S3 drives the panel with ESP32-HUB75-MatrixPanel-DMA, the M4 with Adafruit
+Protomatter (5 bit planes). The clock draws into a 16-bit canvas on both; on the
+S3, `show()` hands the pixels that changed to the DMA driver, which keeps its own
+frame buffer at 8 bits per colour and dims the whole panel through the OE time.
+So dimming costs no colour levels there, while Protomatter dims by scaling the
+colours and loses levels at low brightness (six bit planes did not help: it draws
+into RGB565 and only green gains a level). Two settings matter on the
+MatrixPortal S3 (`PanelCanvas` in `src/board_hal.h`):
+
+- `clkphase = false`: with the driver's default the picture sits one column to the
+  left and the right column shows stale data.
+- GPIO drive strength 0 on all panel pins: the driver clocks the bus without a
+  pause, and at the strongest drive its edges disturbed the WiFi so badly that 20
+  of 30 TCP connections to the router failed and the hotspot's captive portal
+  hardly came up. At drive strength 0 none failed; the level shifters between the
+  S3 and the panel are all these pins drive.
 
 Debug builds (`CLOCK_DEBUG`, e.g. the `adafruit_matrixportal_s3_debug` env) print
 the frame rate, the measured panel refresh rate and the draw and `show()` times once
@@ -543,8 +558,12 @@ per second.
 
 Resolved automatically by PlatformIO from `platformio.ini`.
 
-Both boards: Adafruit Protomatter, Adafruit GFX, Adafruit BusIO, Adafruit LIS3DH,
-Adafruit Unified Sensor, BH1750FVI_RT (Rob Tillaart). All versions are pinned.
+Both boards: Adafruit GFX, Adafruit BusIO, Adafruit LIS3DH, Adafruit Unified
+Sensor, BH1750FVI_RT (Rob Tillaart). All versions are pinned.
+
+Panel driver: ESP32-HUB75-MatrixPanel-DMA (mrfaptastic) on the MatrixPortal S3,
+built with `NO_CIE1931` so colours and brightness stay linear as before; Adafruit
+Protomatter on the MatrixPortal M4.
 
 Timekeeping lives in `src/clock_time.h` and only uses the C library's `<time.h>`.
 It replaced the Time library (TimeLib), which is unmaintained since 2021 and does
