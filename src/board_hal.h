@@ -81,8 +81,16 @@
    Frame pacing, and the clock preview while a config-AP client is connected
    ====================================================================== */
 #if BOARD_MATRIXPORTAL_S3
+  // Six bit planes, 64 levels per colour channel. The brightness scales the
+  // colours in software, so dimming uses up levels: at brightness 16 five
+  // planes leave 2 levels per channel and six leave 4, which keeps dimmed
+  // colours and GIF shades apart. The cost is the refresh rate: measured 88 Hz
+  // with six planes against 165 Hz with five, judged smooth enough on the panel.
+  #define MATRIX_BIT_DEPTH 6
+  // The refresh rate the pacing below assumes until the first measurement.
+  #define PANEL_HZ_TYPICAL 88
   // Drawing a frame takes about 0.5 ms on the S3, far less than one panel
-  // refresh (about 6 ms at the measured 166 Hz). So the loop runs in step with
+  // refresh (about 11 ms at the measured 88 Hz). So the loop runs in step with
   // the panel: show() waits for the refresh that takes over the new frame, and
   // the animation moves one pixel every whole number of refreshes, which keeps
   // every step equally long. A fixed millisecond loop drifts against the
@@ -103,6 +111,8 @@
   // together with U3.IO15, U3 being the ESP32-S3. INT2 is on no net at all.
   #define ACCEL_INT_PIN 15
 #else
+  // Five bit planes, as before; six have not been tried on the M4.
+  #define MATRIX_BIT_DEPTH 5
   // The M4 keeps its fixed millisecond loop time.
   #define PANEL_PACED_LOOP 0
   // Every WiFiNINA socket write is an SPI round trip to the co-processor (and

@@ -521,11 +521,17 @@ per pixel in ms (default 12).
 The Tetris watchface has its own pair of settings instead (see above); the
 animation speed does not apply to it.
 
-On the S3 the loop runs in step with the panel refresh (about 165 Hz with the
-current 5 bit planes): `show()` waits for the refresh that takes the new frame, and
+On the S3 the loop runs in step with the panel refresh (about 88 Hz with the
+current 6 bit planes): `show()` waits for the refresh that takes the new frame, and
 a digit moves one pixel every whole number of refreshes. The speed setting is
-therefore rounded to steps of about 6 ms (12 ms = 2 refreshes per pixel), and every
-pixel step stays on the panel equally long. Drawing a frame takes about 0.5 ms, so
+therefore rounded to steps of about 11 ms (12 ms = 1 refresh per pixel; settings
+below that run at one refresh per pixel too), and every pixel step stays on the
+panel equally long.
+
+The S3 drives the panel with 6 bit planes, 64 levels per colour channel; the M4
+keeps 5. The brightness scales the colours in software, so dimming uses up levels,
+and the sixth plane keeps dimmed colours apart (at brightness 16: 4 levels per
+channel instead of 2). It halves the refresh rate, from 165 Hz with 5 planes. Drawing a frame takes about 0.5 ms, so
 the S3 has plenty of headroom. With a fixed millisecond loop, as before, the loop
 drifted against the refresh and single steps stayed on screen for 1, 2 or 3
 refreshes, which showed as a slight judder. The M4 keeps the fixed loop time.

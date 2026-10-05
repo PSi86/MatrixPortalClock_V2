@@ -57,7 +57,7 @@ uint8_t oePin      = MATRIX_OE_PIN;
 
 Adafruit_Protomatter matrix(
   64,          // Matrix width in pixels
-  5,           // Bit depth -- 6 here provides maximum color options // Default here: 5 (produces way less flickering)
+  MATRIX_BIT_DEPTH, // bit planes per colour channel (board_hal.h)
   1, rgbPins,  // # of matrix chains, array of 6 RGB pins for each
   4, addrPins, // # of address pins (height is inferred), array of pins
   clockPin, latchPin, oePin, // Other matrix control pins
@@ -1536,7 +1536,7 @@ uint16_t rawPixelIndex(int16_t x, int16_t y) {
 // Going deeper (dir +1) both move left and the new one comes in from the
 // right; going back the other way round. Eased out, so it settles softly. It
 // blocks for about SLIDE_FRAMES refreshes plus SLIDE_FRAME_MS each, some
-// 130 ms, and leaves the new picture in the framebuffer.
+// 160 ms, and leaves the new picture in the framebuffer.
 void playSlide(int8_t dir) {
   memcpy(slideTo, matrix.getBuffer(), sizeof(slideTo));
   uint16_t *panel = matrix.getBuffer();
@@ -1693,7 +1693,7 @@ void updatePanelRate() {
 // every loopTime ms and moves one pixel each time.
 uint8_t framesPerStep() {
 #if PANEL_PACED_LOOP
-  uint32_t hz = panelHz ? panelHz : 166;   // before the first measurement: typical S3 rate
+  uint32_t hz = panelHz ? panelHz : PANEL_HZ_TYPICAL;   // before the first measurement
   uint32_t frames = ((uint32_t)loopTime * hz + 500) / 1000;
   return frames ? frames : 1;
 #else
@@ -3224,7 +3224,7 @@ void applySettings() {
 
 // Scale a base color by an explicit brightness (0..255). Linear scaling keeps the
 // hue (channel ratios); rounding (+127) instead of truncating reduces drift when
-// dimming into the low end of the panel's 5-bit range.
+// dimming into the low end of the panel's few levels per channel.
 uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright) {
   return matrix.color565(((uint16_t)r * bright + 127) / 255,
                          ((uint16_t)g * bright + 127) / 255,
@@ -3237,7 +3237,7 @@ uint16_t scaledColor(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 // Like scaledColor(), but never dims below a floor that keeps the color visible
-// on the 5-bit panel. Used for the critical AP info (SSID/PW/IP) so it can never
+// on the panel. Used for the critical AP info (SSID/PW/IP) so it can never
 // quantise to black even when the clock brightness is very low.
 const uint8_t AP_INFO_MIN_BRIGHT = 24;
 uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b) {
@@ -4475,7 +4475,7 @@ void sendFormPage(Print &c) {
   c.print("<input type=number min=4 max=60 name=speed value="); c.print(settings.animSpeed);
   c.println(" onchange=liveNow(0)>");
 
-  // Colors (live) - palette swatches instead of a free color picker (5-bit panel)
+  // Colors (live) - palette swatches instead of a free color picker (few levels per channel)
   c.print("<label>Digit color</label><div class=swbox id=swDigit></div><input type=hidden name=digit value=");
   c.print(toHex(settings.digitR, settings.digitG, settings.digitB)); c.println(">");
   c.print("<label>Fly-in color (auto-dimmed)</label><div class=swbox id=swTrail></div><input type=hidden name=trail value=");
