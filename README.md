@@ -41,7 +41,11 @@ button pin cannot be carried over.
 - **Automatic brightness** via an external BH1750 light sensor: a configurable
   lux → brightness mapping dims the clock once per second to match the room
 - NTP time synchronization with a daily resync. The WiFi is switched on one
-  minute before the sync time and off again after the sync
+  minute before the sync time and off again after the sync. A sync that has not
+  worked out after a minute, on a clock that already has a time, switches the
+  radio off and tries again 10 minutes later
+- **Time from a phone** on the config page, or typed in, for a clock without
+  WiFi
 - **No waiting for the WiFi at start-up:** the clock is on the panel and
   operable at once, joins the home WiFi in the background (starting the join
   again every 10 s until it has joined) and shows dashes instead of digits until
@@ -53,7 +57,7 @@ button pin cannot be carried over.
 - **On-screen menu** with the UP and DOWN buttons: brightness, auto brightness,
   timezone, daylight saving and the config hotspot, set on the clock itself
   without WiFi (see [Menu and buttons](#menu-and-buttons))
-- **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, the button profile and the **home WiFi**
+- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, the button profile and the **home WiFi**
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
   a normal upload does not touch - `pio run -t erase` does; M4: one 8 KB flash
@@ -194,37 +198,53 @@ point; holding UP closes it again and returns to the normal clock:
 |---|---|
 | SSID | `MatrixClock` |
 | Password | `clock1234` |
-| Config page | `http://4.3.2.1` |
+| Config page | `http://4.3.2.1` (M4: `http://192.168.4.1`) |
 
 A built-in **captive portal** (DNS hijack + portal page) makes the config page pop
 up automatically on most phones right after connecting to the AP. If it does not,
 open the config page address manually.
 
-Both boards deliberately use a *public* address (4.3.2.1, same as WLED) for the
-AP. Current Android versions skip their captive-portal check when its host name
+The S3 deliberately uses a *public* address (4.3.2.1, same as WLED) for the AP.
+Current Android versions skip their captive-portal check when its host name
 resolves to a private address such as 192.168.4.1 and then report "connected
 without internet" instead of "sign in to network". The address only exists
 inside the clock's own isolated access point.
+
+**M4: open `http://192.168.4.1`.** The M4's WiFi co-processor runs Adafruit's
+nina-fw 3.3.0, which starts its AP with `WiFi.AP.create()` and offers no command
+to set the AP's address (its `setIPconfig` only configures the station). So the
+M4's AP is always 192.168.4.1, the web UI answers there, and Android shows no
+sign-in prompt for it. The firmware still asks for 4.3.2.1, and the info screen
+and the DNS answers show that address, which is wrong on this board (left as it
+is for now; new clocks are built on the S3).
 
 The matrix shows SSID, password and IP **immediately** when the AP opens (before
 the radio has finished coming up, so there is no frozen display), in landscape
 orientation, until a client connects; after that it switches to the live clock
 preview so that **brightness, colors and animation speed preview live** while you
 change them in the web UI (at the full frame rate on the S3, 5 fps on the M4 - every
-WiFiNINA socket write is an SPI round trip there). The timezone is chosen from a dropdown. "Save &
-Restart" stores everything to flash and reboots.
+WiFiNINA socket write is an SPI round trip there). The timezone is chosen from a dropdown. "Save"
+stores everything to flash, applies it at once and closes the hotspot, back to
+the clock face; the clock keeps its time (it used to restart, which lost a time
+set from a phone).
 
-Everything on the page previews live but is only written to flash by "Save &
-Restart". **Discard changes** puts the stored settings back, so trying something
-out costs nothing.
+Everything on the page previews live but is only written to flash by "Save".
+**Discard changes** puts the stored settings back, so trying something out costs
+nothing.
+
+**Time** shows the clock's date and time, its offset from UTC and where the time
+came from (NTP, a phone, typed in), or that it has none. **Set from this phone**
+takes the phone's own clock in one tap; date and time fields (local time in the
+clock's zone) are the fallback. Without an RTC such a time lasts until the next
+power loss, and the next NTP sync replaces it.
 
 **Inputs** chooses the button profile (*Default* or *Classic clicks*), saved with
 the rest of the page.
 
 **Home WiFi** has a form of its own, sent by POST so the password is never part
 of a URL. It shows the stored network name; the stored password is never sent
-to the page, and a password field left empty keeps it. "Save WiFi & Restart"
-stores the network and restarts, so the clock joins it at once. **Forget WiFi**
+to the page, and a password field left empty keeps it. "Save WiFi & connect"
+stores the network, closes the hotspot and syncs over it at once. **Forget WiFi**
 (after a confirmation) deletes network name and password; the clock keeps its
 time until the next power loss, and the credentials compiled in from
 `arduino_secrets.h` are not copied in again.
