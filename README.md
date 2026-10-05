@@ -633,3 +633,54 @@ installs). Two things to know on the build machine:
 - Command-line builds must run from PowerShell or cmd. ESP-IDF's tool installer
   refuses to start under Git Bash (it checks for the `MSYSTEM` variable). The
   build and upload buttons in VS Code are not affected.
+
+## Wall clock spike
+
+`src/spike/wallclock_spike.cpp` is not the clock: it is a test program for the
+planned wall clock, a Waveshare ESP32-S3-RGB-Matrix board driving a chain of 64x64
+panels (2x1 = 128x64, 3x2 = 192x128, 4x2 = 256x128). It runs the panel driver the
+S3 clock uses, with what the MatrixPortal S3 taught (drive strength 0 on the panel
+pins, clock phase 0 as the default, `NO_CIE1931`), and answers what the clock
+needs to know before it supports the board:
+
+- which driver chip init, clock phase and bus clock the panels need,
+- how the chain is cabled: which panel sits where, turned which way,
+- refresh rate, colour depth and frame buffer memory per layout,
+- how long drawing a full frame through the panel mapping takes,
+- whether WiFi works next to the running panel bus,
+- which I2C devices answer on the board bus (47/48) and on the header (45/46).
+
+Two envs: `wallclock_spike` keeps the driver's frame buffer in internal RAM,
+`wallclock_spike_psram` in PSRAM (room for long chains; the driver then limits
+the bus clock to 13 MHz). `pio run -e wallclock_spike -t upload` flashes the board
+over its USB-C port; the console (115200) runs on the same port. The clock's own
+envs leave `src/spike/` out.
+
+On the panel, the BOOT button steps through the screens (short press) and the
+brightness (held):
+
+| Screen | Shows |
+|---|---|
+| 1 Chain | every panel as the driver sees it: its number in the chain, an arrow to its own top, its left column red, its right column green. A missing red or a doubled green column means the wrong clock phase. |
+| 2 Layout | the whole wall through the panel placement: frame, diagonals, circle, an arrow up. Continuous and upright when the placement matches the cabling. |
+| 3 Ramps | red, green, blue and white from 0 to 255, and white from 0 to 32 |
+| 4 Motion | stripes moving across the wall, every pixel drawn each frame; the console prints the time per frame |
+| 5 GIFs | the built-in GIFs that fit the wall, ten seconds each |
+| 6 Info | settings, refresh rate, memory, I2C |
+
+`help` on the console lists the commands. Settings are kept in NVS. A change of
+the driver settings (layout, bit depth, clock, refresh, phase, chip, double buffer,
+latch blanking) restarts the board with the panel dark. The panel placement
+(`chain`, `panel`, `rot`), drive strength and brightness apply at once. Three starts
+in a row that do not get past the panel start bring the defaults back. The refresh
+rate is measured on the panel's top row-address line E (one rising edge per
+refresh); the driver's own figure assumes the clock it was asked for, which the
+S3 rounds (8 MHz asked gives 10 MHz on the bus).
+
+`wifi` runs the WiFi test after a restart, with the credentials of
+`src/arduino_secrets.h`: 30 TCP connects to the router before the panel starts,
+then 30 each with the panel running at drive strength 0 to 3.
+
+GIFs come from the same build step as the clock's (up to 1500 KB, for walls up to
+256x128). With a `gif_dirs.local` in place the spike's firmware holds those
+private GIFs too, so it must not be published either.
