@@ -105,6 +105,9 @@
   #define WATCHFACE_TETRIS 1
   // Moving between the menu list and an editor slides the picture sideways.
   #define MENU_SLIDE 1
+  // GIFs now and then in place of the face, built in by scripts/embed_gifs.py
+  // and drawn at 8 bits per colour straight into the panel driver.
+  #define GIF_PLAYBACK 1
   // The accelerometer's INT1 line. Not in Adafruit's pinout page - taken from
   // the board schematic (Adafruit-MatrixPortal-S3-PCB, "Adafruit MatrixPortal
   // S3.sch"), where the net list has U4 (the LIS3DH) pin INT1 on the net INT
@@ -127,6 +130,8 @@
   // The menu changes its picture at once, without a slide (UI concept: the
   // S class slides on the S3 only).
   #define MENU_SLIDE 0
+  // No GIFs: they are for the S3 boards (UI concept, GIF playback).
+  #define GIF_PLAYBACK 0
 #endif
 
 /* ======================================================================
@@ -241,8 +246,21 @@ class PanelCanvas : public GFXcanvas16 {
   }
 
   // For pictures with 8 bits per colour, drawn straight into the driver:
-  // waitForBackBuffer(), driver()->drawPixelRGB888(...), flip().
+  // waitForBackBuffer(), driver()->drawPixelRGB888(...) at panelXY(), flip(),
+  // forgetHeld().
   MatrixPanel_I2S_DMA *driver() { return _dma; }
+
+  // A point of the canvas in its current rotation, as the driver addresses it
+  // (unrotated), the same way GFXcanvas16::drawPixel() turns it.
+  void panelXY(int16_t &x, int16_t &y) const {
+    int16_t t;
+    switch (getRotation()) {
+      case 1: t = x; x = WIDTH - 1 - y; y = t; break;
+      case 2: x = WIDTH - 1 - x; y = HEIGHT - 1 - y; break;
+      case 3: t = x; x = y; y = HEIGHT - 1 - t; break;
+      default: break;
+    }
+  }
   void waitForBackBuffer() {
     uint32_t waited = micros() - _flippedAt;
     if (waited >= _periodUs) { return; }
