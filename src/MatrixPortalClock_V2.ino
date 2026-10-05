@@ -23,7 +23,9 @@ Todo Concept:
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 #include "input_map.h"      // input events, functions and the profiles mapping them
 
-#include <Adafruit_Protomatter.h>
+#if !PANEL_DRIVER_DMA
+#include <Adafruit_Protomatter.h>   // the M4's panel driver; the S3's is in board_hal.h
+#endif
 //#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font works
 //#include <Fonts/FreeMonoBold12pt7b.h> // Large friendly font
 //#include <Fonts/FreeSans12pt7b.h> // Large friendly font
@@ -49,6 +51,9 @@ microcontroller board. board_hal.h picks the set that belongs to the board
 being built for (MatrixPortal M4 or MatrixPortal S3).
 ------------------------------------------------------------------------- */
 
+#if PANEL_DRIVER_DMA
+PanelCanvas matrix(64, 32);   // the canvas the clock draws into; show() hands it to the DMA driver
+#else
 uint8_t rgbPins[]  = MATRIX_RGB_PINS;
 uint8_t addrPins[] = MATRIX_ADDR_PINS;
 uint8_t clockPin   = MATRIX_CLOCK_PIN;
@@ -62,6 +67,7 @@ Adafruit_Protomatter matrix(
   4, addrPins, // # of address pins (height is inferred), array of pins
   clockPin, latchPin, oePin, // Other matrix control pins
   true);       // HERE IS THE MAGIC FOR DOUBLE-BUFFERING!
+#endif
 
 // Persistent settings ------------------------------------------------------
 // Configurable at runtime via the WLAN AP config page and the on-screen menu.
@@ -748,6 +754,7 @@ void dstSelfTest() {
 #endif
 
 // SETUP
+
 void setup(void) {
   boardSerialBegin(115200);
 
@@ -798,11 +805,18 @@ void setup(void) {
   // Initialize matrix...
   matrix.setRotation(3); //1
   matrix.setTextWrap(false);      // Allow text off edge
+#if PANEL_DRIVER_DMA
+  bool matrixOk = matrix.begin();
+  Serial.println(matrixOk ? "Panel driver started" : "Panel driver FAILED");
+  matrix.setBrightness(effectiveBrightness);   // the colours are drawn at full strength
+#else
   ProtomatterStatus matrixstatus = matrix.begin();
-  matrix.setRotation(3); //1
   Serial.print("Protomatter status: ");
   Serial.println((int)matrixstatus);
-  if(matrixstatus != PROTOMATTER_OK) {
+  bool matrixOk = (matrixstatus == PROTOMATTER_OK);
+#endif
+  matrix.setRotation(3); //1
+  if(!matrixOk) {
     // DO NOT CONTINUE if matrix setup encountered an error. The delay keeps the
     // ESP32's task watchdog fed so the board reports the error instead of
     // rebooting in a loop.
@@ -875,11 +889,20 @@ void loop(void) {
   updateInput();  // buttons -> events -> whatever the profile maps them to on this screen
 
   if (apActive) {      // config AP running
+#if defined(CLOCK_DEBUG)
+    uint32_t apT0 = micros();
+#endif
     apWatchdog();      // re-create the AP if the ESP32 silently rebooted
     handleAP();        // captive-portal DNS + web UI + live settings updates
+#if defined(CLOCK_DEBUG)
+    uint32_t apT1 = micros();
+#endif
     updateOrientation();// the info screen and the preview follow the panel as well
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
+#if defined(CLOCK_DEBUG)
+    apLoopStats(apT1 - apT0, micros() - apT1);
+#endif
     return;
   }
 
@@ -1213,9 +1236,14 @@ void updateBrightness() {
     autoBrightCurrent += (relTarget - autoBrightCurrent) * (1.0f - expf(-dt / AUTOBRIGHT_TAU_MS));
     effectiveBrightness = (uint8_t)lroundf(autoBrightCurrent);
   }
-  // Every colour on the panel is scaled with it, so the screens that only
-  // repaint on a change have to repaint.
-  if (effectiveBrightness != before) { panelDirty = true; }
+  if (effectiveBrightness != before) {
+#if PANEL_DRIVER_DMA
+    matrix.setBrightness(effectiveBrightness);   // the panel dims as a whole
+#endif
+    // Colours are scaled with it (on the S3 only those asked dimmer than the
+    // panel), so the screens that only repaint on a change have to repaint.
+    panelDirty = true;
+  }
 }
 
 // Whether settings.brightness is a trim around the light sensor (auto
@@ -1679,7 +1707,8 @@ void drawEditor() {
   editDrawnAt = millisNow;
 }
 
-// Measure the panel refresh rate once per second (Protomatter counts refreshes).
+// Measure the panel refresh rate once per second (Protomatter counts refreshes;
+// on the S3 the rate is the one the DMA driver calculated).
 void updatePanelRate() {
   if (millisNow - panelRateLast < 1000) { return; }
   uint32_t refreshes = matrix.getFrameCount();
@@ -1755,12 +1784,31 @@ void stepClockAnim(void) {
 
 #if defined(CLOCK_DEBUG)
 // Debug build only: frame timing, printed once per second. "frames" is how often
-// the clock was rendered, "panel" the refresh rate Protomatter actually reached
-// (updatePanelRate()), "draw" the time to build a frame and "show" the time
-// show() spent handing it over (with double buffering it waits for the next
-// panel refresh).
+// the clock was rendered, "panel" the panel's refresh rate (updatePanelRate()),
+// "draw" the time to build a frame and "show" the time show() spent handing it
+// over (with double buffering it waits for the next panel refresh).
 struct FrameStats { uint32_t frames, drawSum, drawMax, showSum, showMax, since; };
 FrameStats frameStats = {};
+
+// Debug build only: the loop while the hotspot is up, printed every 2 s - how
+// often it ran, how long the web side (handleAP) and the panel side (preview)
+// took on average and at most, and the free internal RAM.
+void apLoopStats(uint32_t webUs, uint32_t panelUs) {
+  static uint32_t passes = 0, webSum = 0, webMax = 0, panelSum = 0, panelMax = 0, since = 0;
+  passes++;
+  webSum += webUs;     if (webUs > webMax)     { webMax = webUs; }
+  panelSum += panelUs; if (panelUs > panelMax) { panelMax = panelUs; }
+  if (millis() - since < 2000) { return; }
+  Serial.printf("AP loop: %lu passes, web avg %lu max %lu us, panel avg %lu max %lu us, "
+                "RAM free %u (min %u, largest %u)\n",
+                (unsigned long)passes, (unsigned long)(webSum / passes), (unsigned long)webMax,
+                (unsigned long)(panelSum / passes), (unsigned long)panelMax,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  passes = webSum = webMax = panelSum = panelMax = 0;
+  since = millis();
+}
 
 void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
   FrameStats &f = frameStats;
@@ -2455,7 +2503,7 @@ void shakeDrawDigit(uint8_t d) {
 // One pass of the watchface. While blocks are falling this runs at the animation
 // step interval; once everything has landed it only repaints when something it
 // shows has actually changed, so an idle clock costs almost nothing. Skipping
-// matrix.show() is safe: Protomatter keeps refreshing the last frame it was given.
+// matrix.show() is safe: the panel driver keeps refreshing the last frame it was given.
 void drawTetrisFace() {
   // A rotation moves every coordinate a running animation holds, and a rotation
   // rebuilds the digits anyway - so it wins over the animation.
@@ -3225,10 +3273,21 @@ void applySettings() {
 // Scale a base color by an explicit brightness (0..255). Linear scaling keeps the
 // hue (channel ratios); rounding (+127) instead of truncating reduces drift when
 // dimming into the low end of the panel's few levels per channel.
+// On the S3 the panel itself dims to effectiveBrightness, so a colour asked at
+// that brightness (or above) is drawn at full strength, and one asked dimmer
+// keeps its share of it: the fly-in trail stays the same fraction of the digits.
 uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright) {
+#if PANEL_DRIVER_DMA
+  if (bright >= effectiveBrightness || effectiveBrightness == 0) { return matrix.color565(r, g, b); }
+  uint16_t panel = effectiveBrightness;
+  return matrix.color565(((uint16_t)r * bright + panel / 2) / panel,
+                         ((uint16_t)g * bright + panel / 2) / panel,
+                         ((uint16_t)b * bright + panel / 2) / panel);
+#else
   return matrix.color565(((uint16_t)r * bright + 127) / 255,
                          ((uint16_t)g * bright + 127) / 255,
                          ((uint16_t)b * bright + 127) / 255);
+#endif
 }
 
 // Scale a base color by the brightness actually used for rendering.

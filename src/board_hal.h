@@ -30,8 +30,9 @@
    ====================================================================== */
 #if BOARD_MATRIXPORTAL_S3
 
-  // HUB75 pins of the MatrixPortal S3. Protomatter drives them through the
-  // ESP32-S3 LCD_CAM peripheral, which MUXes freely, so the order is arbitrary.
+  // HUB75 pins of the MatrixPortal S3 (R1 G1 B1 R2 G2 B2; A B C D E). The DMA
+  // driver drives them through the ESP32-S3 LCD_CAM peripheral, which MUXes
+  // freely, so the order is arbitrary. A 64x32 panel needs no E line.
   #define MATRIX_RGB_PINS   {42, 41, 40, 38, 39, 37}
   #define MATRIX_ADDR_PINS  {45, 36, 48, 35, 21}
   #define MATRIX_CLOCK_PIN  2
@@ -81,19 +82,19 @@
    Frame pacing, and the clock preview while a config-AP client is connected
    ====================================================================== */
 #if BOARD_MATRIXPORTAL_S3
-  // Five bit planes, 32 levels per colour channel. Six were tried: Protomatter
-  // draws into an RGB565 canvas and only stretches red and blue to six bits,
-  // so only green gains levels, while the refresh rate halves (measured 165 Hz
-  // with five planes, 88 Hz with six).
-  #define MATRIX_BIT_DEPTH 5
-  // The refresh rate the pacing below assumes until the first measurement.
-  #define PANEL_HZ_TYPICAL 165
-  // Drawing a frame takes about 0.5 ms on the S3, far less than one panel
-  // refresh (about 6 ms at the measured 165 Hz). So the loop runs in step with
-  // the panel: show() waits for the refresh that takes over the new frame, and
-  // the animation moves one pixel every whole number of refreshes, which keeps
-  // every step equally long. A fixed millisecond loop drifts against the
-  // refresh and shows steps for 1, 2 or 3 refreshes instead.
+  // Panel driver: ESP32-HUB75-MatrixPanel-DMA (PanelCanvas below), 8 bits per
+  // colour, dimmed through the OE time. Protomatter, which the S3 used before,
+  // draws into RGB565 and dims by scaling the colours, which costs levels.
+  #define PANEL_DRIVER_DMA 1
+  // The refresh rate the driver calculates for the 64x32 panel at 8 bits, and
+  // the rate the pacing below assumes.
+  #define PANEL_HZ_TYPICAL 200
+  // Drawing and handing over a frame takes a few ms on the S3, less than one
+  // panel refresh. So the loop runs in step with the panel: show() waits out a
+  // refresh period after the previous frame, and the animation moves one pixel
+  // every whole number of refreshes, which keeps every step equally long. A
+  // fixed millisecond loop drifts against the refresh and shows steps for 1, 2
+  // or 3 refreshes instead.
   #define PANEL_PACED_LOOP 1
   // The ESP32-S3 serves the page from its own RAM over lwIP, so the preview
   // runs at the full frame rate without getting in the web server's way.
@@ -110,7 +111,8 @@
   // together with U3.IO15, U3 being the ESP32-S3. INT2 is on no net at all.
   #define ACCEL_INT_PIN 15
 #else
-  // Five bit planes, as before; six have not been tried on the M4.
+  // Panel driver: Protomatter, five bit planes.
+  #define PANEL_DRIVER_DMA 0
   #define MATRIX_BIT_DEPTH 5
   // The M4 keeps its fixed millisecond loop time.
   #define PANEL_PACED_LOOP 0
@@ -125,6 +127,156 @@
   // The menu changes its picture at once, without a slide (UI concept: the
   // S class slides on the S3 only).
   #define MENU_SLIDE 0
+#endif
+
+/* ======================================================================
+   Panel driver (S3)
+
+   The clock draws into a 16-bit canvas, as it did with Protomatter, and
+   show() hands every finished frame to ESP32-HUB75-MatrixPanel-DMA. That
+   driver keeps its own frame buffer at 8 bits per colour and dims the whole
+   panel through the OE time, so the brightness costs no colour levels.
+   getBuffer(), setRotation() and the rest of the canvas behave as before.
+   The M4 keeps Protomatter, whose object is built in the sketch.
+   ====================================================================== */
+#if PANEL_DRIVER_DMA
+#include <Adafruit_GFX.h>
+#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+
+class PanelCanvas : public GFXcanvas16 {
+ public:
+  PanelCanvas(uint16_t w, uint16_t h) : GFXcanvas16(w, h) {}
+
+  // Starts the driver; false when it gets neither its memory nor its pins.
+  bool begin() {
+    const uint8_t rgb[] = MATRIX_RGB_PINS;
+    const uint8_t addr[] = MATRIX_ADDR_PINS;
+    HUB75_I2S_CFG::i2s_pins pins = {
+      (int8_t)rgb[0], (int8_t)rgb[1], (int8_t)rgb[2], (int8_t)rgb[3], (int8_t)rgb[4], (int8_t)rgb[5],
+      (int8_t)addr[0], (int8_t)addr[1], (int8_t)addr[2], (int8_t)addr[3],
+      (int8_t)(HEIGHT > 32 ? addr[4] : -1),
+      MATRIX_LATCH_PIN, MATRIX_OE_PIN, MATRIX_CLOCK_PIN };
+    HUB75_I2S_CFG cfg(WIDTH, HEIGHT, 1, pins);
+    cfg.double_buff = true;
+    // With the driver's default clock phase the picture sits one column to the
+    // left on this panel and the right column shows stale data (tested on the
+    // MatrixPortal S3 with its 64x32 panel).
+    cfg.clkphase = false;
+    cfg.min_refresh_rate = 120;
+    _held[0] = (uint16_t *)calloc((size_t)WIDTH * HEIGHT, sizeof(uint16_t));
+    _held[1] = (uint16_t *)calloc((size_t)WIDTH * HEIGHT, sizeof(uint16_t));
+    if (!_held[0] || !_held[1]) { return false; }
+    forgetHeld();   // whatever the driver's buffers start with, the first shows write all
+    _dma = new MatrixPanel_I2S_DMA(cfg);
+    if (!_dma->begin()) { return false; }
+    // The driver clocks the panel bus without a pause and sets its pins to the
+    // strongest drive; those edges disturb the WiFi. Measured on the
+    // MatrixPortal S3 with 30 TCP connections to the router: 0 failed before
+    // the driver started, 20 failed with it running (panel lit or dark), none
+    // at drive strength 0. The level shifters between the S3 and the panel are
+    // all these pins drive, so the weakest strength is enough.
+    for (uint8_t i = 0; i < 6; i++) { gpio_set_drive_capability((gpio_num_t)rgb[i], GPIO_DRIVE_CAP_0); }
+    for (uint8_t i = 0; i < (HEIGHT > 32 ? 5 : 4); i++) { gpio_set_drive_capability((gpio_num_t)addr[i], GPIO_DRIVE_CAP_0); }
+    gpio_set_drive_capability((gpio_num_t)MATRIX_CLOCK_PIN, GPIO_DRIVE_CAP_0);
+    gpio_set_drive_capability((gpio_num_t)MATRIX_LATCH_PIN, GPIO_DRIVE_CAP_0);
+    gpio_set_drive_capability((gpio_num_t)MATRIX_OE_PIN, GPIO_DRIVE_CAP_0);
+    if (_dma->calculated_refresh_rate > 0) { _rate = _dma->calculated_refresh_rate; }
+    _periodUs = 1000000UL / _rate;
+    _countFrom = micros();
+    return true;
+  }
+
+  // The canvas onto the panel. The buffer it writes into was on the panel
+  // until the last flip, and the driver only switches buffers at the end of a
+  // refresh, so it first waits out one refresh period since that flip. That
+  // also paces the loop to the refresh, as Protomatter's show() did.
+  //
+  // The driver spreads every pixel over its 8 bit planes, which makes a whole
+  // frame slow to hand over (the loop, and with it the config page, would stall
+  // on it). So it keeps a copy of what each of its two buffers holds and writes
+  // only the pixels that differ.
+  void show() {
+    if (!_dma) { return; }
+    waitForBackBuffer();
+#if defined(CLOCK_DEBUG)
+    uint32_t pushStart = micros(), pushed = 0;
+#endif
+    const uint16_t *src = getBuffer();
+    uint16_t *held = _held[_back];
+    for (int16_t y = 0; y < HEIGHT; y++) {
+      for (int16_t x = 0; x < WIDTH; x++) {
+        int i = y * WIDTH + x;
+        if (src[i] == held[i] && !_stale[_back]) { continue; }
+        _dma->drawPixel(x, y, src[i]);
+        held[i] = src[i];
+#if defined(CLOCK_DEBUG)
+        pushed++;
+#endif
+      }
+    }
+    _stale[_back] = false;
+#if defined(CLOCK_DEBUG)
+    debugShow(micros() - pushStart, pushed);
+#endif
+    flip();
+  }
+
+  // After a picture was drawn straight into the driver (driver() below), the
+  // copies no longer tell what its buffers hold: the next shows write all.
+  void forgetHeld() { _stale[0] = _stale[1] = true; }
+
+  // Brightness of the whole panel, 0..255, through the OE time.
+  void setBrightness(uint8_t b) { if (_dma) { _dma->setBrightness8(b); } }
+
+  // Refreshes since the last call, from the rate the driver calculated (it
+  // counts none itself).
+  uint32_t getFrameCount() {
+    uint32_t n = (uint32_t)((uint64_t)(uint32_t)(micros() - _countFrom) * _rate / 1000000UL);
+    _countFrom += (uint32_t)((uint64_t)n * 1000000UL / _rate);
+    return n;
+  }
+
+  static uint16_t color565(uint8_t r, uint8_t g, uint8_t b) {
+    return ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
+  }
+
+  // For pictures with 8 bits per colour, drawn straight into the driver:
+  // waitForBackBuffer(), driver()->drawPixelRGB888(...), flip().
+  MatrixPanel_I2S_DMA *driver() { return _dma; }
+  void waitForBackBuffer() {
+    uint32_t waited = micros() - _flippedAt;
+    if (waited >= _periodUs) { return; }
+    uint32_t rest = _periodUs - waited;
+    if (rest >= 1000) { delay(rest / 1000); }   // lets the WiFi tasks run meanwhile
+    delayMicroseconds(rest % 1000);
+  }
+  void flip() { _dma->flipDMABuffer(); _flippedAt = micros(); _back ^= 1; }
+
+ private:
+#if defined(CLOCK_DEBUG)
+  // Debug build: how long handing frames over takes, printed every 2 s.
+  void debugShow(uint32_t us, uint32_t pixels) {
+    _dbgCalls++; _dbgUs += us; _dbgPixels += pixels;
+    if (us > _dbgMaxUs) { _dbgMaxUs = us; }
+    if (millis() - _dbgSince < 2000) { return; }
+    Serial.printf("show: %lu frames, %lu px avg, push avg %lu max %lu us\n",
+                  (unsigned long)_dbgCalls, (unsigned long)(_dbgPixels / _dbgCalls),
+                  (unsigned long)(_dbgUs / _dbgCalls), (unsigned long)_dbgMaxUs);
+    _dbgCalls = _dbgUs = _dbgPixels = _dbgMaxUs = 0;
+    _dbgSince = millis();
+  }
+  uint32_t _dbgCalls = 0, _dbgUs = 0, _dbgPixels = 0, _dbgMaxUs = 0, _dbgSince = 0;
+#endif
+  MatrixPanel_I2S_DMA *_dma = nullptr;
+  uint32_t _rate = PANEL_HZ_TYPICAL;
+  uint32_t _periodUs = 1000000UL / PANEL_HZ_TYPICAL;
+  uint32_t _flippedAt = 0;
+  uint32_t _countFrom = 0;
+  // What the buffer written at every other show() holds; flip() alternates.
+  uint16_t *_held[2] = { nullptr, nullptr };
+  bool      _stale[2] = { true, true };
+  uint8_t   _back = 0;
+};
 #endif
 
 /* ======================================================================
