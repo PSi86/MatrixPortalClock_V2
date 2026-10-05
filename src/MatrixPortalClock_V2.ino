@@ -1536,7 +1536,7 @@ uint16_t rawPixelIndex(int16_t x, int16_t y) {
 // Going deeper (dir +1) both move left and the new one comes in from the
 // right; going back the other way round. Eased out, so it settles softly. It
 // blocks for about SLIDE_FRAMES refreshes plus SLIDE_FRAME_MS each, some
-// 160 ms, and leaves the new picture in the framebuffer.
+// 130 ms, and leaves the new picture in the framebuffer.
 void playSlide(int8_t dir) {
   memcpy(slideTo, matrix.getBuffer(), sizeof(slideTo));
   uint16_t *panel = matrix.getBuffer();
