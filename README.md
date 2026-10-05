@@ -88,10 +88,12 @@ button pin cannot be carried over.
    pio run -t upload       # flash
    pio device monitor      # serial output (115200 baud)
    ```
-   **Uploading to the S3 needs the board in a bootloader first.** The automatic
-   1200-baud reset through the running clock's USB port does not work here: the
-   board switches its USB over to the ROM bootloader, but Windows does not notice
-   the disconnect and keeps a dead serial port until the next reset. Use one of:
+   **Uploading to the S3 needs the board in a bootloader first.** The running
+   clock ignores the automatic reset into the bootloader over its USB port (1200
+   baud, or DTR and RTS toggled in esptool's order): it never worked here -
+   Windows kept a dead serial port - and a serial tool that happened to toggle
+   the lines that way sent the clock into its bootloader, where nothing drives
+   the panel and one row pair stays lit at full duty. Use one of:
    - **UF2 (simplest):** double-tap **RESET** (the second tap while the NeoPixel
      is purple), then copy `.pio/build/adafruit_matrixportal_s3/firmware.uf2`
      (written by every build) onto the `MATRXS3BOOT` drive. The board restarts
@@ -253,7 +255,10 @@ the radio has finished coming up, so there is no frozen display), in landscape
 orientation, until a client connects; after that it switches to the live clock
 preview so that **brightness, colors and animation speed preview live** while you
 change them in the web UI (at the full frame rate on the S3, 5 fps on the M4 - every
-WiFiNINA socket write is an SPI round trip there). The timezone is chosen from a dropdown. "Save"
+WiFiNINA socket write is an SPI round trip there). In the preview a small blue
+square blinks in the top right corner: the hotspot is still up, and only holding
+UP (close it) works. Once no client has been connected for 5 s, the info screen
+comes back. The timezone is chosen from a dropdown. "Save"
 stores everything to flash, applies it at once and closes the hotspot, back to
 the clock face; the clock keeps its time (it used to restart, which lost a time
 set from a phone).

@@ -401,6 +401,8 @@ bool dstAutoActive = false;           // DST_AUTO: whether summer time is in eff
 #define AP_PASS "clock1234"   // must be >= 8 characters
 bool        apActive = false;
 unsigned long apStatusLast = 0;        // last time the AP connection status was polled
+unsigned long apNoStationSince = 0;    // preview: since when no phone is connected; 0 = one is
+const unsigned long AP_NO_STATION_MS = 5000;   // then the info screen comes back
 unsigned long apClockLast = 0;         // last live-preview clock frame (throttled in AP mode)
 // While a client is connected serving the web UI has priority, so the clock
 // preview is throttled to the rate the board's radio can spare (board_hal.h:
@@ -1096,6 +1098,19 @@ void updateApDisplay() {
     // shows it as it should, e.g. when the press indicator flipped.
     if (panelDirty) { drawAPScreen(); }
     return;
+  }
+  // A phone that has left: after a few seconds without one the info screen
+  // comes back, so the panel no longer looks like the plain clock while the
+  // hotspot is still up and only holding UP works.
+  if (millisNow - apStatusLast >= 500) {
+    apStatusLast = millisNow;
+    if (netApHasStation())     { apNoStationSince = 0; }
+    else if (!apNoStationSince) { apNoStationSince = millisNow; }
+    else if (millisNow - apNoStationSince >= AP_NO_STATION_MS) {
+      apNoStationSince = 0;
+      setScreen(SCREEN_HOTSPOT_INFO);
+      return;
+    }
   }
   // SCREEN_HOTSPOT_PREVIEW: a client is connected. Keep the animation advancing
   // every loop so it runs at real time (stepClockAnim is cheap, no panel I/O),
@@ -1921,7 +1936,19 @@ void drawStatusPixel() {
   if (!syncOverdue()) { return; }
   uint8_t level = effectiveBrightness / 6;
   if (level < STATUS_PIXEL_MIN) { level = STATUS_PIXEL_MIN; }
-  matrix.drawPixel(0, matrix.height() - 1, matrix.color565(level, 0, 0));
+  // Through scaledColorB(), as every colour: on the S3 the panel itself dims,
+  // and a red of `level` drawn as it is would be dimmed twice.
+  matrix.drawPixel(0, matrix.height() - 1, scaledColorB(255, 0, 0, level));
+}
+
+// While the hotspot is up and the panel previews the clock for the phone, a
+// small blue square blinks in the top right corner: the clock looks as usual,
+// but only holding UP (close the hotspot) works.
+void drawHotspotMark() {
+  if (screen != SCREEN_HOTSPOT_PREVIEW || (localTime % 2) != 0) { return; }
+  uint8_t level = effectiveBrightness / 3;
+  if (level < STATUS_PIXEL_MIN) { level = STATUS_PIXEL_MIN; }
+  matrix.fillRect(matrix.width() - 2, 0, 2, 2, scaledColorB(0, 80, 255, level));
 }
 
 /* ======================================================================
@@ -2651,6 +2678,7 @@ void drawTetrisFace() {
 
   // Same overlays the classic watchface draws, so both behave alike.
   drawStatusPixel();
+  drawHotspotMark();
   drawFeedbackIndicator();
   matrix.show();
 
@@ -2824,6 +2852,7 @@ void renderClock(void) {
   }
 
   drawStatusPixel();
+  drawHotspotMark();
   drawFeedbackIndicator();
 #if defined(CLOCK_DEBUG)
   uint32_t showStart = micros();
