@@ -513,15 +513,27 @@ enum SyncState : uint8_t {
   SYNC_JOINING,     // a sync is due and the station is not connected: re-join every JOIN_RETRY_MS
   SYNC_FETCHING,    // a sync is due and the station is connected: ask for the time on this pass
   SYNC_RETRY_WAIT,  // the last ask came back empty: wait NTP_RETRY_MS, then ask again
+  SYNC_PAUSED,      // an attempt failed although the clock has a time: radio off, try again after SYNC_PAUSE_MS
 };
 SyncState     syncState    = SYNC_JOINING;    // the first sync is due at start-up
 unsigned long syncDueSince = 0;               // millis() when the pending sync became due
+unsigned long syncAttemptSince = 0;           // millis() the running attempt (joining and asking) began
+unsigned long syncPausedSince  = 0;           // millis() the pause began
 unsigned long syncLastAsk  = 0;               // millis() of the last ask, for the retry pace
 unsigned long joinAskedAt  = 0;               // millis() the join was last started, for the re-join pace
 unsigned long joinPolledAt = 0;               // millis() the station was last polled (an SPI round trip on the M4)
 const unsigned long NTP_RETRY_MS  = 3000;     // between asks while a sync is due
 const unsigned long JOIN_RETRY_MS = 10000;    // between joins while the station does not connect
 const unsigned long JOIN_POLL_MS  = 500;      // between looks at whether it has
+// A clock that has a time does not keep its radio on for a sync that does not
+// work out: after SYNC_ATTEMPT_MS it switches it off and tries again after
+// SYNC_PAUSE_MS. Without a time it keeps trying, since it has nothing to show.
+const unsigned long SYNC_ATTEMPT_MS = 60UL * 1000UL;
+const unsigned long SYNC_PAUSE_MS   = 10UL * 60UL * 1000UL;
+
+// Where the clock's time came from, for the config page.
+enum TimeSource : uint8_t { TIME_NONE, TIME_NTP, TIME_PHONE, TIME_MANUAL };
+TimeSource timeSource = TIME_NONE;
 // A due sync that has not succeeded for this long is an error, shown on the
 // status pixel. The hour covers the retries, so a sync in progress never shows.
 const unsigned long SYNC_LATE_MS = 60UL * 60UL * 1000UL;
@@ -2797,13 +2809,70 @@ void timekeeper(void) {
 void setSyncState(SyncState next) {
   if (next == syncState) { return; }
   if (syncStateDue(next) && !syncStateDue(syncState)) { syncDueSince = millisNow; }
+  if (syncAttempting(next) && !syncAttempting(syncState)) { syncAttemptSince = millisNow; }
+  if (next == SYNC_PAUSED) { syncPausedSince = millisNow; }
   DEBUG_LOG("sync %u -> %u\n", (unsigned)syncState, (unsigned)next);
   syncState = next;
 }
 
 // Whether a sync is due in this state: wanted, and not done yet.
 bool syncStateDue(SyncState s) {
+  return s == SYNC_JOINING || s == SYNC_FETCHING || s == SYNC_RETRY_WAIT || s == SYNC_PAUSED;
+}
+
+// Whether this state is part of an attempt, with the radio on: joining, then
+// asking NTP until it answers.
+bool syncAttempting(SyncState s) {
   return s == SYNC_JOINING || s == SYNC_FETCHING || s == SYNC_RETRY_WAIT;
+}
+
+// The one way to set the clock: UTC, and where it came from. The automatic
+// daylight saving is decided again at once for the new time.
+void setClockTo(time_t utc, TimeSource source) {
+  clockSet(utc);
+  timeSource = source;
+  if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), utc); }
+  panelDirty = true;
+}
+
+// Days from 1970-01-01 to a date of the Gregorian calendar (H. Hinnant's
+// days_from_civil), so a date typed on the config page needs no time zone of
+// the C library.
+long daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= (m <= 2) ? 1 : 0;
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);                          // 0..399
+  unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;    // 0..365
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;              // 0..146096
+  return era * 146097L + (long)doe - 719468L;
+}
+
+// The UTC instant of a wall-clock time in the clock's zone and daylight-saving
+// mode. In the automatic mode summer time counts if it is in effect an hour
+// before the standard-time reading; in the hour that repeats in autumn that
+// picks the summer-time one.
+time_t localToUtc(time_t local) {
+  time_t utc = local - settings.tzOffset;
+  bool summer = (settings.dst == DST_AUTO) ? dstActiveAt(tzRule(settings.tzOffset), utc - 3600)
+                                           : (settings.dst == DST_SUMMER);
+  return summer ? utc - 3600 : utc;
+}
+
+// One line for the config page: the clock's date and time, its offset from
+// UTC, and where the time came from - or that it has none.
+String clockStatusText() {
+  if (!clockIsSet()) { return "The clock has no time yet."; }
+  long offset = tzTotalOffset();
+  time_t local = clockNow() + offset;
+  struct tm t;
+  gmtime_r(&local, &t);
+  char line[64], zone[10];
+  formatOffset(zone, sizeof(zone), offset);
+  const char *source = (timeSource == TIME_NTP)   ? "from the internet (NTP)"
+                     : (timeSource == TIME_PHONE) ? "set from a phone" : "set by hand";
+  snprintf(line, sizeof(line), "Clock: %04d-%02d-%02d %02d:%02d %s, %s",
+           t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, zone, source);
+  return String(line);
 }
 
 // Whether a home WiFi is stored at all.
@@ -2838,8 +2907,7 @@ void ntpAsk() {
   // How far the clock had drifted from NTP, in seconds: positive when the clock
   // was slow, negative when it was fast. Only logged.
   long drift = clockIsSet() ? (long)(utc - clockNow()) : 0;
-  if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), utc); }
-  clockSet(utc); // UTC as delivered; zone and daylight saving are added for the panel
+  setClockTo(utc, TIME_NTP); // UTC as delivered; zone and daylight saving are added for the panel
   Serial.println("NTP success");
   Serial.print("NTP offset: ");
   Serial.println(drift);
@@ -2874,7 +2942,20 @@ void syncSchedule() {
 // needs it. Runs on every pass and never waits: the clock stays on the panel
 // and operable while the station joins.
 void timeSync_WifiLib() {
+  // An attempt that has not worked out within SYNC_ATTEMPT_MS: with a time on
+  // the clock it is not worth keeping the radio on, so pause and try later.
+  if (syncAttempting(syncState) && clockIsSet() && millisNow - syncAttemptSince >= SYNC_ATTEMPT_MS) {
+    Serial.println("NTP sync did not work out - trying again in 10 min");
+    netRadioOff();
+    setSyncState(SYNC_PAUSED);
+  }
   switch (syncState) {
+    case SYNC_PAUSED:
+      if (millisNow - syncPausedSince >= SYNC_PAUSE_MS) {
+        syncJoin();
+        setSyncState(SYNC_JOINING);
+      }
+      break;
     case SYNC_JOINING:
       // No WiFi stored: the radio stays off, and the sync stays due - after
       // SYNC_LATE_MS the status pixel says so.
@@ -3625,6 +3706,9 @@ void startAPMode() {
   Serial.println("Starting config AP...");
   apActive = true;
   millisNow = millis();
+  // The hotspot takes the radio: a sync attempt under way is cut off, and a
+  // fresh one starts when the hotspot closes (stopAPMode()).
+  if (syncAttempting(syncState)) { setSyncState(SYNC_PAUSED); }
   updateBrightness(); // resolve the live brightness for the immediate info screen
   setScreen(SCREEN_HOTSPOT_INFO); // draws SSID/PW/IP at once, before the slow radio bring-up freezes the loop
   apRadioUp();
@@ -3784,6 +3868,15 @@ void sendNoContent(Print &c) {
   c.println();
 }
 
+// A plain-text answer to a request of the page's script.
+void sendPlainText(Print &c, const char *text) {
+  c.println("HTTP/1.1 200 OK");
+  c.println("Content-Type: text/plain; charset=utf-8");
+  c.println("Connection: close");
+  c.println();
+  c.print(text);
+}
+
 // Tiny plain-text response "<brightness> <lux>" for the config page poll:
 // effectiveBrightness (slider value in manual mode, sensor-driven in auto mode)
 // and the raw unfiltered lux reading (-1 when no sensor / not read yet).
@@ -3876,26 +3969,36 @@ void handleAP() {
   WiFiClient &out = client;
 #endif
 
-  bool reboot = false;
+  // Saving used to restart the clock so a new timezone took effect. Since the
+  // clock holds UTC every setting works at once, and a restart would only throw
+  // away the time - one set from a phone, on a clock without WiFi, for good.
+  // So saving closes the hotspot instead, which is what the restart did too.
+  bool closeHotspot = false;
+  bool syncNow = false;   // try the WiFi as the hotspot closes
   if (path.startsWith("/save")) {
     applyParams(query);
+    applySettings();            // the runtime copies: animation, directions, sync time
+    setDstMode(settings.dst);   // a new zone's daylight-saving rule counts at once
     saveSettings();
 #if WATCHFACE_TETRIS
     saveTetrisSettings();
 #endif
     saveUiSettings();
-    sendSavedPage(out);
-    reboot = true;
+    sendMessagePage(out, "Saved", "The hotspot closes and the clock goes back to its face.");
+    closeHotspot = true;
   } else if (path == "/wifi" && isPost) {
-    // Save the home WiFi and restart, so the clock joins it at once.
+    // Save the home WiFi, close the hotspot and sync over the new WiFi at once.
     String error = applyWifiForm(body);
     if (error.length()) {
       sendMessagePage(out, "Not saved", error.c_str());
     } else {
       saveWifiCreds();
-      sendMessagePage(out, "Saved", "The clock restarts and joins the WiFi.");
-      reboot = true;
+      sendMessagePage(out, "Saved", "The hotspot closes and the clock joins the WiFi to fetch the time.");
+      closeHotspot = true;
+      syncNow = true;
     }
+  } else if (path == "/settime") {
+    handleSetTime(out, query);
   } else if (path == "/forget" && isPost) {
     // No restart: the clock keeps its time until the next power loss.
     forgetWifi();
@@ -3928,10 +4031,42 @@ void handleAP() {
   out.flushBuf();
 #endif
   client.stop();
-  if (reboot) {
-    delay(300);
-    boardReset(); // reboot so the new timezone/WiFi settings take full effect
+  if (closeHotspot) {
+    delay(300);   // the page has to reach the phone before the hotspot goes
+    if (syncNow) { setSyncState(SYNC_JOINING); }   // stopAPMode() then joins at once
+    stopAPMode();
   }
+}
+
+// /settime: the clock's time from the phone (?utc=, sent by the page's script,
+// answered with the new status line) or from the date and time fields
+// (?date=YYYY-MM-DD&time=HH:MM, local time in the clock's zone).
+void handleSetTime(Print &out, const String &query) {
+  const long UTC_PLAUSIBLE_FROM = 1704067200L;   // 2024-01-01: anything earlier is a phone without a time
+  String utc = getParam(query, "utc");
+  if (utc.length()) {
+    long t = utc.toInt();
+    if (t < UTC_PLAUSIBLE_FROM) {
+      sendPlainText(out, "Not set: the phone's time looks wrong.");
+      return;
+    }
+    setClockTo((time_t)t, TIME_PHONE);
+    Serial.print("Time set from a phone: "); Serial.println(t);
+    sendPlainText(out, clockStatusText().c_str());
+    return;
+  }
+  String date = getParam(query, "date"), hm = getParam(query, "time");
+  int y = date.substring(0, 4).toInt(), mo = date.substring(5, 7).toInt(), d = date.substring(8, 10).toInt();
+  int h = hm.substring(0, 2).toInt(), mi = hm.substring(3, 5).toInt();
+  if (date.length() != 10 || hm.length() < 5 || y < 2024 || y > 2099 || mo < 1 || mo > 12 ||
+      d < 1 || d > 31 || h < 0 || h > 23 || mi < 0 || mi > 59) {
+    sendMessagePage(out, "Not set", "Enter both a date and a time.");
+    return;
+  }
+  time_t local = (time_t)daysFromCivil(y, mo, d) * 86400 + h * 3600 + mi * 60;
+  setClockTo(localToUtc(local), TIME_MANUAL);
+  Serial.println("Time set by hand");
+  sendMessagePage(out, "Time set", clockStatusText().c_str());
 }
 
 /* ---- HTTP helpers -------------------------------------------------------- */
@@ -4235,11 +4370,21 @@ void sendFormPage(Print &c) {
   for (uint8_t i = 0; i < INPUT_PROFILE_COUNT; i++) { printOption(c, uiSettings.inputProfile, i, INPUT_PROFILES[i].name); }
   c.println("</select>");
 
-  c.println("<button type=submit>Save &amp; Restart</button>");
+  c.println("<button type=submit>Save</button>");
   c.println("</form>");
   // Everything above previews live but is only in RAM until it is saved. This
   // puts the stored values back, so trying something out costs nothing.
   c.println("<button type=button onclick=\"fetch('/discard').then(function(){location.reload();});\">Discard changes</button>");
+
+  // Time: what the clock has now, the phone's time in one tap, or date and time
+  // typed in (local time in the clock's zone).
+  c.println("<h2>Time</h2>");
+  c.print("<p id=tnow style=\"font-size:14px\">"); c.print(clockStatusText()); c.println("</p>");
+  c.println("<button type=button onclick=\"setPhone()\">Set from this phone</button>");
+  c.println("<form action=\"/settime\" method=get><div class=row>");
+  c.println("<div><label>Date</label><input type=date name=date></div>");
+  c.println("<div><label>Time</label><input type=time name=time></div>");
+  c.println("</div><button type=submit>Set date and time</button></form>");
 
   // Home WiFi: a form of its own, sent by POST so the password is not part of
   // the URL. The stored password is never sent to the page.
@@ -4250,7 +4395,7 @@ void sendFormPage(Print &c) {
   c.print("<label>Password</label><input type=password name=pw maxlength=63 autocomplete=new-password placeholder=\"");
   c.print(wifiCreds.pass[0] ? "unchanged" : "none stored");
   c.println("\">");
-  c.println("<button type=submit>Save WiFi &amp; Restart</button></form>");
+  c.println("<button type=submit>Save WiFi &amp; connect</button></form>");
   if (wifiStored()) {
     c.println("<form action=\"/forget\" method=post onsubmit=\"return confirm('Forget the home WiFi? The clock then gets no time from the internet.')\">");
     c.println("<button type=submit style=\"background:#933\">Forget WiFi</button></form>");
@@ -4280,6 +4425,8 @@ void sendFormPage(Print &c) {
   // The argument says whether the control is one that changes how the Tetris face
   // behaves; those ask for a run, everything else does not.
   c.println("function liveNow(p){_send(p);}");
+  // The phone's own clock, as UTC seconds; the answer is the clock's new status.
+  c.println("function setPhone(){fetch('/settime?utc='+Math.floor(Date.now()/1000)).then(function(r){return r.text();}).then(function(t){document.getElementById('tnow').textContent=t;}).catch(function(){});}");
   // Live brightness readout: poll the rendered brightness once a second, with a
   // single in-flight request so the slow WiFiNINA server is never stacked up.
   c.println("var _bf=false;");
@@ -4308,12 +4455,3 @@ void sendMessagePage(Print &c, const char *title, const char *text) {
   c.println("</body></html>");
 }
 
-void sendSavedPage(Print &c) {
-  sendHttpHeader(c);
-  c.println("<!DOCTYPE html><html><head><meta charset=utf-8>");
-  c.println("<meta name=viewport content=\"width=device-width,initial-scale=1\">");
-  c.println("<title>Saved</title><style>body{font-family:sans-serif;background:#111;color:#eee;padding:24px}</style>");
-  c.println("</head><body><h1>Saved</h1>");
-  c.println("<p>Settings have been saved. The clock restarts and reconnects to the WiFi.</p>");
-  c.println("</body></html>");
-}

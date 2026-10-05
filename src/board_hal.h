@@ -511,6 +511,7 @@ inline void netPrintRadioInfo() {
 
 #include <SPI.h>
 #include <WiFiNINA.h>
+#include <Arduino_SpiNINA.h>   // SpiDrv: the co-processor's reset line, see netRadioOff()
 
 inline void netRadioInit() {
   WiFi.status();  // first SPI transaction wakes the co-processor
@@ -526,7 +527,13 @@ inline void netStaBegin(const char *ssid, const char *pass) {
 
 inline bool netStaConnected() { return WiFi.status() == WL_CONNECTED; }
 
-inline void netRadioOff() { WiFi.end(); }
+// Radio off, for real: the co-processor is held in reset. WiFi.end() cannot do
+// it - it only calls WiFiDrv::wifiDriverDeinit(), an empty function in WiFiNINA
+// 2.0.1 - so the NINA kept its station joined, or its AP beaconing with nobody
+// serving it. The next WiFi call brings it back by itself: Arduino_SpiNINA's
+// WAIT_FOR_SLAVE_SELECT runs SpiDrv::begin(), which releases the reset and
+// waits 750 ms for the module to boot - clearing its static-IP flag as well.
+inline void netRadioOff() { SpiDrv::end(); }
 
 inline uint32_t netNtpEpoch() { return (uint32_t)WiFi.getTime(); }
 
@@ -549,17 +556,12 @@ inline bool netApBegin(const char *ssid, const char *pass) {
   return false;
 }
 
-// WiFi.end() is useless here - wifiDriverDeinit() is an empty function in this
-// driver, so the co-processor would keep beaconing the AP forever. What actually
-// tears the softAP down is switching the module back to station mode via
-// WiFi.begin(); whether the home-WiFi join succeeds does not matter.
-// The static AP address has to be dropped first: the NINA keeps its "static IP"
-// flag across modes and begin() then skips DHCP, which would leave the clock in
-// the home WiFi without an address (no NTP). A reboot clears it anyway, because
-// WiFiNINA hard-resets the co-processor at start-up.
-// Drop the AP's static address, so a station join afterwards gets one by DHCP
-// again. Whether the station joins or the radio goes off is the caller's
-// choice (netStaBegin() or netRadioOff()).
+// Leaving AP mode. The NINA's AP itself only ends with what the caller does
+// next: netStaBegin() switches the module to station mode, netRadioOff() holds
+// it in reset - one of the two has to follow. Here the AP's static address is
+// dropped first: the NINA keeps its "static IP" flag across modes and begin()
+// then skips DHCP, which would leave the clock in the home WiFi without an
+// address (no NTP).
 inline void netApEnd() {
   const IPAddress none(0, 0, 0, 0);
   WiFi.config(none, none, none, none);
