@@ -13,5 +13,6 @@ src/arduino_secrets.h
 # Python bytecode from the table generator in scripts/
 __pycache__/
 
-# Folders of private GIFs for your own build (see gifs/README.md)
+# Folders of private GIFs for your own build and GIF pack (see gifs/README.md)
 gif_dirs.local
+gif_pack.local

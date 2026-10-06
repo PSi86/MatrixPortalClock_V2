@@ -239,6 +239,39 @@ up to `custom_gif_budget_kb` (600 KB). That file is ignored by git, so private
 GIFs stay out of the repository; a firmware built with them must not be
 published. The build says how many it took and which it left out.
 
+Which GIFs fit depends on how the clock stands, `custom_gif_orientation` in
+`platformio.ini`: `landscape` (the default) takes GIFs up to 64x32, `portrait`
+up to 32x64, `both` those that fit one way or the other, for a clock that gets
+turned. A clock that always stands the same way then carries no GIFs it could
+never play.
+
+### GIF pack
+
+More GIFs than fit into the firmware go into the GIF pack, in the board's
+`ffat` partition (3776 KB), which the clock uses for nothing else. List the
+folders for it in `gif_pack.local` in the project folder, one per line (ignored
+by git; an `exclude.txt` works as for `gif_dirs.local`), then:
+
+    pio run -e adafruit_matrixportal_s3 -t gifpack                         # builds gifpack.bin
+    pio run -e adafruit_matrixportal_s3 -t uploadgifs --upload-port COMx   # builds and writes it
+
+Writing goes through the ROM bootloader: hold BOOT, tap RESET, release BOOT,
+run the upload with that port, then press RESET. A UF2 copy cannot write the
+pack (TinyUF2 writes the app partition only), so the firmware's UF2 uploads
+leave it alone; `pio run -t erase` wipes it.
+
+`scripts/gif_pack.py` takes the GIFs that fit the panel the way the clock
+stands, leaves out those the firmware has built in and second copies, and puts
+them in smallest first while there is room. Each GIF is kept as it is or
+deflated, whichever is smaller (deflating saves about a fifth on typical
+pixel-art GIFs). The clock reads the pack's index at start-up, checks a GIF's
+CRC each time it is about to play, and inflates a deflated one into PSRAM with
+the inflate in the chip's ROM before it plays; the pack's GIFs then come up
+like the built-in ones. The console and the config page say how many it holds.
+Private GIFs in the pack stay in the pack: the firmware does not contain them,
+so a firmware built without `gif_dirs.local` can be passed on while the pack
+is not.
+
 ## AP configuration
 
 Open the menu, select **Hotspot** and hold DOWN -> the board opens the access
