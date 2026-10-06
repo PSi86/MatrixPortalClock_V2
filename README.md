@@ -46,6 +46,9 @@ button pin cannot be carried over.
   radio off and tries again 10 minutes later
 - **Time from a phone** on the config page, or typed in, for a clock without
   WiFi
+- **Real-time clock (optional):** with a DS3231 on the I2C bus the clock has its
+  time at power-up, keeps it without WiFi, and syncs with NTP only every 7 days
+  by default (up to 12 months, or never); see [Real-time clock](#real-time-clock-ds3231)
 - **No waiting for the WiFi at start-up:** the clock is on the panel and
   operable at once, joins the home WiFi in the background (starting the join
   again every 10 s until it has joined) and shows dashes instead of digits until
@@ -59,8 +62,9 @@ button pin cannot be carried over.
 - **Automatic summer/winter time** for every timezone in the menu (rules from the
   IANA tz database), or a fixed summer or winter time
 - **On-screen menu** with the UP and DOWN buttons: brightness, auto brightness,
-  timezone, daylight saving and the config hotspot, set on the clock itself
-  without WiFi (see [Menu and buttons](#menu-and-buttons))
+  timezone, daylight saving, the config hotspot and, with a real-time clock, the
+  time and date, set on the clock itself without WiFi (see
+  [Menu and buttons](#menu-and-buttons))
 - **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, the button profile, GIFs (S3) and the **home WiFi**
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
@@ -155,7 +159,8 @@ GPIO7, M4: D3). They keep their printed meaning in every orientation.
 | UP held (0.6 s) | back, without saving; held on, one more level every 0.6 s, out to the face |
 
 The menu holds five items, shown with their current value: **Bright**, **Auto**
-(only with a light sensor), **Zone**, **DST** and **Hotspot**.
+(only with a light sensor), **Zone**, **DST** and **Hotspot**, and a sixth,
+**Time**, on a clock with a real-time clock.
 
 - **Bright** shows the brightness large with a scale under it and changes the
   panel live. Manual: 16 steps on a perceptual scale. With auto brightness the
@@ -167,6 +172,11 @@ The menu holds five items, shown with their current value: **Bright**, **Auto**
   are too long. UP goes west, DOWN east.
 - **DST** chooses Auto, Summer or Winter, with the time each choice would show.
 - **Hotspot** opens the config hotspot; holding UP closes it again.
+- **Time** (with a real-time clock) sets the local time and date in five fields
+  in turn: hour, minute, year, month, day. UP and DOWN change the field on show
+  (UP is later), DOWN held goes to the next field and saves on the last, UP held
+  goes back a field and leaves without saving on the first. The seconds start
+  at zero, and a banner shows the new time.
 
 From the fourth of several quick presses on (less than 0.4 s apart), each press
 moves five steps, so the 16 brightness steps and the 26 zones are quick to cross.
@@ -268,10 +278,13 @@ Everything on the page previews live but is only written to flash by "Save".
 nothing.
 
 **Time** shows the clock's date and time, its offset from UTC and where the time
-came from (NTP, a phone, typed in), or that it has none. **Set from this phone**
-takes the phone's own clock in one tap; date and time fields (local time in the
-clock's zone) are the fallback. Without an RTC such a time lasts until the next
-power loss, and the next NTP sync replaces it.
+came from (NTP, a phone, typed in, the real-time clock), or that it has none, and
+whether a real-time clock was found. **Set from this phone** takes the phone's
+own clock in one tap; date and time fields (local time in the clock's zone) are
+the fallback. Without a real-time clock such a time lasts until the next power
+loss, and the next NTP sync replaces it; with one, the real-time clock keeps it.
+On a clock with a real-time clock the page also offers how often to sync with
+NTP, next to the sync time.
 
 **Inputs** chooses the button profile (*Default* or *Classic clicks*), saved with
 the rest of the page.
@@ -286,8 +299,8 @@ join of the home WiFi went - when, and at what signal, or why it failed - since
 the radio is off between syncs. "Save WiFi & connect"
 stores the network, closes the hotspot and syncs over it at once. **Forget WiFi**
 (after a confirmation) deletes network name and password; the clock keeps its
-time until the next power loss, and the credentials compiled in from
-`arduino_secrets.h` are not copied in again.
+time until the next power loss (with a real-time clock for good), and the
+credentials compiled in from `arduino_secrets.h` are not copied in again.
 
 The color palette offers **full colors only** for both the digit and the fly-in
 color. The fly-in (trail) is automatically dimmed relative to the master
@@ -585,12 +598,44 @@ Debug builds (`CLOCK_DEBUG`, e.g. the `adafruit_matrixportal_s3_debug` env) prin
 the frame rate, the measured panel refresh rate and the draw and `show()` times once
 per second.
 
+## Real-time clock (DS3231)
+
+A DS3231 on the I2C bus (address 0x68; on the MatrixPortal through the STEMMA QT
+port, next to the BH1750) keeps the time without power, from its coin cell, to
+±2 ppm (about a minute a year). The clock looks for it at start-up; without one
+everything works as before.
+
+| | Without RTC | With DS3231 |
+|---|---|---|
+| Power-up | `--:--` until the first NTP sync or a time set from a phone | the time from the RTC at once |
+| NTP sync | daily at the sync time, and at every power-up | at the sync time on the day the interval runs out (7 days by default; daily, 30 days, 3, 6 or 12 months, or never), and at every power-up unless it is never |
+| Sync never | not offered | the radio stays off unless the hotspot is opened, and the status pixel stays off |
+| Setting the time | phone or date and time fields on the config page | the same, plus the menu item **Time** |
+
+- The RTC holds UTC, like the clock; the zone and daylight saving stay on top,
+  so changing them never touches it.
+- Every time the clock is given (from NTP, a phone, the config page or the
+  menu) is written to the RTC.
+- The clock itself counts on `millis()`, whose crystal drifts far more than the
+  DS3231. Once a minute, half way through it, the clock reads the RTC and takes
+  its time when they are two seconds or more apart (one second apart can be
+  the moment of reading alone).
+- An RTC whose oscillator had stopped (empty coin cell, or never set) reports
+  it, and its time is not used: the clock shows dashes until NTP or the user
+  gives it a time, and the config page says so.
+- The sync interval is counted in the clock's calendar days since the last good
+  sync, so the sync time of the day it runs out counts, whatever time of day
+  that sync was made. Stored with the UI settings (`syncDays`).
+
+Not yet tested on hardware: no DS3231 has been connected so far.
+
 ## Libraries
 
 Resolved automatically by PlatformIO from `platformio.ini`.
 
 Both boards: Adafruit GFX, Adafruit BusIO, Adafruit LIS3DH, Adafruit Unified
-Sensor, BH1750FVI_RT (Rob Tillaart). All versions are pinned.
+Sensor, BH1750FVI_RT (Rob Tillaart), RTClib (Adafruit, for the DS3231). All
+versions are pinned.
 
 Panel driver: ESP32-HUB75-MatrixPanel-DMA (mrfaptastic) on the MatrixPortal S3,
 built with `NO_CIE1931` so colours and brightness stay linear as before; Adafruit
