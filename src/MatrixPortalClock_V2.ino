@@ -45,6 +45,7 @@ Todo Concept:
 #include <Adafruit_LIS3DH.h>  // onboard LIS3DH accelerometer (both boards)
 #include <BH1750FVI.h>         // external BH1750 ambient light sensor (auto-brightness)
 #include <RTClib.h>            // DS3231 real-time clock (optional)
+#include <RevEng_PAJ7620.h>    // PAJ7620U2 gesture sensor (optional)
 
 #if GIF_PLAYBACK
 #include <AnimatedGIF.h>       // GIF decoder
@@ -155,13 +156,17 @@ SettingsStore<Settings> clockStore;
 // part of the stored data: new profiles go on the end, none is ever moved.
 struct InputProfile {
   const char         *name;          // as the config page offers it
-  const InputMapping *rows;
+  const InputMapping *rows;          // the buttons and the knock
   uint8_t             count;
+  const InputMapping *gestures;      // the gesture sensor
+  uint8_t             gestureCount;
   bool                blinkClicks;   // confirm 1x/2x/3x with blinks of the board LED
 };
 const InputProfile INPUT_PROFILES[] = {
-  { "Default",        PROFILE_DEFAULT,        PROFILE_ROWS(PROFILE_DEFAULT),        false },
-  { "Classic clicks", PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS), true  },
+  { "Default",        PROFILE_DEFAULT,        PROFILE_ROWS(PROFILE_DEFAULT),
+                      GESTURES_DEFAULT,       PROFILE_ROWS(GESTURES_DEFAULT),       false },
+  { "Classic clicks", PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS),
+                      GESTURES_DEFAULT,       PROFILE_ROWS(GESTURES_DEFAULT),       true  },
 };
 const uint8_t INPUT_PROFILE_COUNT = sizeof(INPUT_PROFILES) / sizeof(INPUT_PROFILES[0]);
 
@@ -171,15 +176,17 @@ const uint8_t INPUT_PROFILE_COUNT = sizeof(INPUT_PROFILES) / sizeof(INPUT_PROFIL
 // Fields added later go on the end and are filled in by revision, as with the
 // other blobs; an older firmware does not read this one at all.
 #define UI_SETTINGS_MAGIC 0x5E71
-#define UI_SETTINGS_REV   2        // 1 = before syncDays
+#define UI_SETTINGS_REV   3        // 1 = before syncDays, 2 = before gestureMount
 struct UiSettings {
   uint16_t magic;
   uint8_t  rev;
   uint8_t  inputProfile;   // position in INPUT_PROFILES
   uint16_t syncDays;       // with a real-time clock: days between NTP syncs, 0 = no sync (rev 2)
+  uint8_t  gestureMount;   // quarter turns clockwise the gesture sensor sits at against the panel (rev 3)
+  uint8_t  reserved;
 };
 const uint16_t SYNC_DAYS_MAX = 366;
-const UiSettings UI_DEFAULTS = { UI_SETTINGS_MAGIC, UI_SETTINGS_REV, 0, 7 };
+const UiSettings UI_DEFAULTS = { UI_SETTINGS_MAGIC, UI_SETTINGS_REV, 0, 7, 0, 0 };
 UiSettings uiSettings;
 SettingsStore<UiSettings> uiStore;
 
@@ -304,6 +311,29 @@ Button buttons[] = {
     BTN_RELEASED, 0, 0, 0, 0, 0, FN_NONE },
 };
 
+// Gesture sensor -----------------------------------------------------------
+// A PAJ7620U2 on the I2C bus (0x73), optional, found at boot or not at all. It
+// recognises the gestures itself and holds the last one until it is read;
+// reading it clears it. With its INT line wired (GESTURE_INT_PIN, board_hal.h)
+// the sensor is read only when the line is low; without, it is asked every
+// GESTURE_POLL_MS, and whether a hand is near (for the hints) every
+// APPROACH_POLL_MS while the screen on top maps that.
+RevEng_PAJ7620 gestureSensor;
+bool          gestureOK = false;
+const int     GESTURE_INT = GESTURE_INT_PIN;   // -1: no INT line
+const unsigned long GESTURE_POLL_MS    = 50;    // gestures take some 200 ms, and the sensor holds them
+const unsigned long GESTURE_LOCKOUT_MS = 300;   // after a gesture: the hand pulled back is not the opposite swipe
+const unsigned long APPROACH_POLL_MS   = 100;
+const unsigned long APPROACH_MS        = 400;   // near this long: a hand that stays, not one passing by
+const unsigned long APPROACH_REARM_MS  = 1000;  // gone this long before the next approach counts
+const unsigned long APPROACH_BOOT_MS   = 3000;  // held over the sensor this long at boot: the recovery
+unsigned long gesturePolledAt  = 0;
+unsigned long gestureAt        = 0;   // millis() of the last gesture that counted
+unsigned long approachPolledAt = 0;
+unsigned long objectNearSince  = 0;   // 0 = nothing near
+unsigned long objectGoneSince  = 0;
+bool          approachReported = false;
+
 // Button feedback ----------------------------------------------------------
 // The red board LED (FEEDBACK_LED_PIN) - and, if enabled, a small square in the
 // bottom-right corner of the matrix - is lit while a button is down. With the
@@ -368,7 +398,9 @@ int8_t   slideDir = 0;              // the slide the next menu picture starts wi
 
 // Banner: what it says and in which colour comes from the function that opened
 // it. A time banner shows the time the clock shows now, read when it is drawn.
-enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME };
+// A hint is text as well, but only explains what comes next, so an input on it
+// is not used up (handleInput()).
+enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT };
 BannerKind    bannerKind = BANNER_TEXT;
 char          bannerText[2][12] = { "", "" };   // one or two lines; an empty second one is not drawn
 uint8_t       bannerR = 255, bannerG = 255, bannerB = 255;
@@ -885,6 +917,8 @@ void setup(void) {
 
   // DS3231 real-time clock on the same bus: the time at once, if it has one.
   rtcBegin();
+  // PAJ7620U2 gesture sensor, also on the bus.
+  gestureBegin();
 
   // Initialize matrix...
   matrix.setRotation(3); //1
@@ -939,6 +973,11 @@ void setup(void) {
   }
   if (digitalRead(UP_BUTTON_PIN) == LOW) {
     handleInput(EV_UP_AT_BOOT, 1);
+  }
+  // The same for a hand held over the gesture sensor - the only way on a clock
+  // without buttons.
+  if (!apActive && gestureHeldAtBoot()) {
+    handleInput(EV_APPROACH_AT_BOOT, 1);
   }
 
   // Start joining the home WiFi, without waiting for it: the clock comes up at
@@ -1490,6 +1529,14 @@ void showBanner(const char *first, const char *second, uint8_t r, uint8_t g, uin
   bannerOpen();
 }
 
+// FN_SHOW_HINTS: a hand has come near the gesture sensor, on the face. What a
+// swipe does there, for BANNER_MS; the swipe itself closes it and goes on to
+// the face.
+void showHints() {
+  showBanner("swipe", "menu", 110, 110, 110);
+  bannerKind = BANNER_HINT;
+}
+
 // A banner with the time the clock now shows and its offset from UTC, after a
 // change of zone or daylight saving.
 void showTimeBanner() {
@@ -1498,7 +1545,7 @@ void showTimeBanner() {
 }
 
 void drawBanner() {
-  if (bannerKind == BANNER_TEXT) {
+  if (bannerKind != BANNER_TIME) {
     drawCenteredLines(bannerText[0], bannerText[1][0] ? bannerText[1] : nullptr,
                       scaledColorVisible(bannerR, bannerG, bannerB));
     return;
@@ -3462,8 +3509,10 @@ void loadUiSettings() {
   uiStore.read(uiSettings);
   if (uiSettings.magic != UI_SETTINGS_MAGIC) { uiSettings = UI_DEFAULTS; }
   if (uiSettings.rev < 2) { uiSettings.syncDays = UI_DEFAULTS.syncDays; }
+  if (uiSettings.rev < 3) { uiSettings.gestureMount = UI_DEFAULTS.gestureMount; uiSettings.reserved = 0; }
   if (uiSettings.inputProfile >= INPUT_PROFILE_COUNT) { uiSettings.inputProfile = 0; }
   if (uiSettings.syncDays > SYNC_DAYS_MAX) { uiSettings.syncDays = UI_DEFAULTS.syncDays; }
+  uiSettings.gestureMount &= 3;
   Serial.print("Input profile: "); Serial.println(INPUT_PROFILES[uiSettings.inputProfile].name);
 }
 
@@ -3630,8 +3679,10 @@ const InputProfile &activeProfile() {
 // What the active profile maps this event to in this context; FN_NONE if nothing.
 InputFunction mappedFunction(InputEvent ev, InputContext ctx) {
   const InputProfile &profile = activeProfile();
-  for (uint8_t i = 0; i < profile.count; i++) {
-    if (profile.rows[i].event == ev && profile.rows[i].context == ctx) { return profile.rows[i].function; }
+  const InputMapping *rows = isGestureEvent(ev) ? profile.gestures : profile.rows;
+  uint8_t count = isGestureEvent(ev) ? profile.gestureCount : profile.count;
+  for (uint8_t i = 0; i < count; i++) {
+    if (rows[i].event == ev && rows[i].context == ctx) { return rows[i].function; }
   }
   return FN_NONE;
 }
@@ -3654,13 +3705,15 @@ uint8_t clickCount(InputEvent ev) {
 }
 
 // Whether an event closes a banner. A banner closes on the next thing the user
-// does, but not on a knock, which is not operating the clock, and not on the
-// repeats of a hold that was already going when the banner came up: holding
-// DOWN to save a zone would otherwise close its banner at once.
+// does, but not on a knock or a hand coming near, which are not operating the
+// clock, and not on the repeats of a hold that was already going when the
+// banner came up: holding DOWN to save a zone would otherwise close its banner
+// at once.
 bool closesBanner(InputEvent ev) {
   switch (ev) {
     case EV_NONE:
     case EV_KNOCK:
+    case EV_APPROACH:
     case EV_UP_HOLD_REPEAT:
     case EV_DOWN_HOLD_REPEAT: return false;
     default:                  return true;
@@ -3688,6 +3741,7 @@ void runFunction(InputFunction fn, uint8_t steps) {
 #if GIF_PLAYBACK
     case FN_PLAY_GIF:       gifPlayNow(); break;
 #endif
+    case FN_SHOW_HINTS:     showHints(); break;
     default:                break;
   }
 }
@@ -3710,8 +3764,12 @@ void holdEnd(InputFunction fn) {
 // up, since it was meant for a screen the banner hid. With the Classic clicks
 // profile a click sequence that ran something is confirmed by blinks.
 InputFunction handleInput(InputEvent ev, uint8_t steps) {
-  // A GIF takes it the same way: the hold that started one does not end it.
-  if (screen == SCREEN_BANNER || screen == SCREEN_GIF) {
+  if (screen == SCREEN_BANNER && bannerKind == BANNER_HINT) {
+    // A hint only says what comes next: it goes, and the input goes on to the
+    // screen beneath.
+    if (closesBanner(ev)) { closeScreen(); }
+  } else if (screen == SCREEN_BANNER || screen == SCREEN_GIF) {
+    // A GIF takes it the same way: the hold that started one does not end it.
     if (closesBanner(ev)) { closeScreen(); }
     return FN_NONE;
   }
@@ -3811,7 +3869,116 @@ void updateInput() {
     if (b.phase == BTN_HELD) { holdStep(b.holding); }
     if (before == BTN_HELD && b.phase != BTN_HELD) { holdEnd(b.holding); b.holding = FN_NONE; }
   }
+  updateGestures();
   updateFeedbackLed();
+}
+
+/* ---- Gesture sensor ------------------------------------------------------ */
+
+// At boot: whether a PAJ7620U2 answers. The driver's own waits after a
+// gesture (it sleeps 200 ms after push and pull) are switched off; the
+// lockout below does that job without stopping the clock.
+void gestureBegin() {
+  gestureOK = gestureSensor.begin(&Wire) != 0;
+  if (!gestureOK) { Serial.println("PAJ7620U2 not found - no gestures"); return; }
+  gestureSensor.setGestureEntryTime(0);
+  gestureSensor.setGestureExitTime(0);
+  if (GESTURE_INT >= 0) { pinMode((uint8_t)GESTURE_INT, INPUT_PULLUP); }
+  Serial.print("PAJ7620U2 found, read ");
+  Serial.println(GESTURE_INT >= 0 ? "on its INT line" : "by asking it every 50 ms");
+}
+
+// A gesture of the sensor as an event. A swipe's direction is turned into the
+// screen's: the direction the sensor reports, plus the quarter turns it is
+// mounted at against the panel (config page), minus the rotation the panel is
+// drawn in now. Directions count clockwise from up: 0 up, 1 right, 2 down,
+// 3 left. Push, pull, the circles and the wave have no direction on the panel.
+InputEvent gestureEvent(Gesture g) {
+  uint8_t dir;
+  switch (g) {
+    case GES_UP:            dir = 0; break;
+    case GES_RIGHT:         dir = 1; break;
+    case GES_DOWN:          dir = 2; break;
+    case GES_LEFT:          dir = 3; break;
+    case GES_FORWARD:       return EV_PUSH;
+    case GES_BACKWARD:      return EV_PULL;
+    case GES_CLOCKWISE:     return EV_CIRCLE_CW;
+    case GES_ANTICLOCKWISE: return EV_CIRCLE_CCW;
+    case GES_WAVE:          return EV_WAVE;
+    default:                return EV_NONE;
+  }
+  static const InputEvent SWIPES[4] = { EV_SWIPE_UP, EV_SWIPE_RIGHT, EV_SWIPE_DOWN, EV_SWIPE_LEFT };
+  return SWIPES[(dir + uiSettings.gestureMount + 4 - screenRotation) % 4];
+}
+
+// Once per loop: a gesture the sensor holds, as an event, unless it comes
+// within GESTURE_LOCKOUT_MS of the last one. A circle moves five steps, as a
+// fast tap burst does. Every gesture is handling the clock (lastInputAt), as
+// every button press is.
+void updateGestures() {
+  if (!gestureOK) { return; }
+  if (GESTURE_INT >= 0) {
+    if (digitalRead((uint8_t)GESTURE_INT) == HIGH) { return; }   // nothing waiting
+  } else {
+    updateApproach();
+    if (millisNow - gesturePolledAt < GESTURE_POLL_MS) { return; }
+    gesturePolledAt = millisNow;
+  }
+  InputEvent ev = gestureEvent(gestureSensor.readGesture());   // reading clears it, and the INT line
+  if (ev == EV_NONE) { return; }
+  if (millisNow - gestureAt < GESTURE_LOCKOUT_MS) { return; }
+  gestureAt   = millisNow;
+  lastInputAt = millisNow;
+  objectNearSince = 0;        // a gesture is no approach
+  approachReported = true;    // nor is the hand that made it, until it has gone
+  DEBUG_LOG("gesture event %u\n", (unsigned)ev);
+  handleInput(ev, (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) ? BURST_FAST_STEPS : 1);
+}
+
+// Without the INT line: whether a hand has come near and stays, asked only
+// while the screen on top maps the approach (the hints on the face). The INT
+// line reports gestures only, so with it there are no hints.
+void updateApproach() {
+  if (mappedFunction(EV_APPROACH, inputContext()) == FN_NONE) { objectNearSince = 0; return; }
+  if (millisNow - approachPolledAt < APPROACH_POLL_MS) { return; }
+  approachPolledAt = millisNow;
+  if (gestureSensor.isObjectInView()) {
+    objectGoneSince = 0;
+    if (!objectNearSince) { objectNearSince = millisNow; }
+    if (!approachReported && millisNow - objectNearSince >= APPROACH_MS) {
+      approachReported = true;
+      handleInput(EV_APPROACH, 1);
+    }
+  } else {
+    objectNearSince = 0;
+    if (!objectGoneSince) { objectGoneSince = millisNow; }
+    if (millisNow - objectGoneSince >= APPROACH_REARM_MS) { approachReported = false; }
+  }
+}
+
+// At boot: whether a hand is held over the sensor for APPROACH_BOOT_MS, the
+// recovery of a clock without buttons. Asked here whether the INT line is
+// wired or not, since the line reports gestures only. The sensor has only just
+// been set up, so it gets APPROACH_BOOT_LOOK_MS to see a hand that is already
+// there; with nothing near the start goes on after that.
+const unsigned long APPROACH_BOOT_LOOK_MS = 300;
+bool gestureHeldAtBoot() {
+  if (!gestureOK) { return false; }
+  bool near = false;
+  for (unsigned long t0 = millis(); !near && millis() - t0 < APPROACH_BOOT_LOOK_MS; ) {
+    near = gestureSensor.isObjectInView();
+    if (!near) { delay(30); }
+  }
+  if (!near) { return false; }
+  Serial.print("Gesture sensor: something near at boot, brightness ");
+  Serial.print(gestureSensor.getObjectBrightness());
+  Serial.print(", size "); Serial.println(gestureSensor.getObjectSize());
+  bootStatus("HOLD");
+  for (unsigned long t0 = millis(); millis() - t0 < APPROACH_BOOT_MS; ) {
+    delay(50);
+    if (!gestureSensor.isObjectInView()) { Serial.println("Gesture sensor: gone again"); return false; }
+  }
+  return true;
 }
 
 /* ======================================================================
@@ -4665,6 +4832,7 @@ void applyParams(const String &q) {
   v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "prof");   if (v.length()) { uiSettings.inputProfile = constrain(v.toInt(), 0, INPUT_PROFILE_COUNT - 1); }
   v = getParam(q, "syncd");  if (v.length()) { uiSettings.syncDays = constrain(v.toInt(), 0, SYNC_DAYS_MAX); }
+  v = getParam(q, "gmount"); if (v.length()) { uiSettings.gestureMount = constrain(v.toInt(), 0, 3); }
 }
 
 // The home WiFi form (/wifi, POST). Returns what is wrong with it, or "" once
@@ -4942,6 +5110,21 @@ void sendFormPage(Print &c) {
   c.println("<h2>Inputs</h2><label>Buttons</label><select name=prof>");
   for (uint8_t i = 0; i < INPUT_PROFILE_COUNT; i++) { printOption(c, uiSettings.inputProfile, i, INPUT_PROFILES[i].name); }
   c.println("</select>");
+  // The gesture sensor, if one was found: how it is turned against the panel,
+  // so that a swipe up is up on the panel.
+  if (gestureOK) {
+    c.print("<p style=\"font-size:13px\">Gesture sensor (PAJ7620U2) found, read ");
+    c.print(GESTURE_INT >= 0 ? "on its INT line." : "by asking it every 50 ms (no INT line, so the hints when a hand comes near work too).");
+    c.println("</p>");
+    c.println("<label>Gesture sensor turned against the panel (if a swipe up acts as another direction, try the next)</label><select name=gmount>");
+    printOption(c, uiSettings.gestureMount, 0, "not turned");
+    printOption(c, uiSettings.gestureMount, 1, "90 degrees clockwise");
+    printOption(c, uiSettings.gestureMount, 2, "180 degrees");
+    printOption(c, uiSettings.gestureMount, 3, "90 degrees counter-clockwise");
+    c.println("</select>");
+  } else {
+    c.println("<p style=\"font-size:13px\">No gesture sensor found.</p>");
+  }
 
 #if GIF_PLAYBACK
   // GIFs: whether they come up by themselves, how often and for how long.
