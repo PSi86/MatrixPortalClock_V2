@@ -74,6 +74,9 @@ button pin cannot be carried over.
   without the home WiFi; holding UP during boot opens it as well
 - **GIFs** (S3): now and then a GIF takes the panel for a few seconds, and holding
   UP on the face plays one at once (see [GIF playback](#gif-playback))
+- **Gesture sensor (optional):** with a PAJ7620U2 on the I2C bus, swipes, push,
+  circles and a wave work the menu next to the buttons, or instead of them (see
+  [Gesture sensor](#gesture-sensor-paj7620u2))
 
 ## Setup
 
@@ -202,11 +205,16 @@ release. Each click sequence is confirmed by one blink of the LED per click.
 Holding DOWN opens the menu, which then works as above.
 
 Under the hood every input becomes a named event (short, 2x, 3x, hold, hold
-repeat, boot, knock), and a profile table in `src/input_map.h` says what each
-event does on the current screen. The build checks every profile: no event may
-mean two things on one screen, the menu must be possible to open, move through
-and leave, and a boot event must open a hotspot that can be closed again on the
-clock. A profile that breaks one of these does not compile.
+repeat, boot, knock, and the gestures), and a profile table in `src/input_map.h`
+says what each event does on the current screen. The build checks every
+profile: no event may mean two things on one screen, the menu must be possible
+to open, move through and leave, and a boot event must open a hotspot that can
+be closed again on the clock. These rules hold for each source on its own: the
+button table of a profile maps only buttons (and the knock) and keeps them, so a
+clock without a gesture sensor can be operated with its buttons; the gesture
+table maps only gestures and keeps them as well, so a clock with nothing but
+the sensor can be operated too. A table that breaks one of these does not
+compile.
 
 ## GIF playback
 
@@ -598,6 +606,52 @@ Debug builds (`CLOCK_DEBUG`, e.g. the `adafruit_matrixportal_s3_debug` env) prin
 the frame rate, the measured panel refresh rate and the draw and `show()` times once
 per second.
 
+## Gesture sensor (PAJ7620U2)
+
+A PAJ7620U2 on the I2C bus (address 0x73; on the MatrixPortal through the STEMMA
+QT port) recognises nine gestures by itself. The clock looks for it at
+start-up; without one everything works as before. Its gestures do the same in
+both input profiles:
+
+| Gesture | On the clock face | In the menu and its editors |
+|---|---|---|
+| swipe up / down | open the menu | previous / next item, or change the value |
+| swipe right, push | open the menu | open the item; in an editor: save |
+| swipe left | - | back, without saving |
+| wave | the knock effect | out to the face |
+| circle clockwise / counter-clockwise | play a GIF | previous / next; in an editor five steps (clockwise is up) |
+| a hand comes near and stays | a hint: `swipe` / `menu` | - |
+| a hand held over the sensor for 3 s during boot | open the config hotspot | - |
+
+On the hotspot screen a swipe to the left closes the hotspot again. Pull (a
+hand moving away) does nothing yet.
+
+- **Directions follow the panel.** The direction the sensor reports, plus the
+  turn it is mounted at, minus the rotation the panel is drawn in, gives the
+  direction on the panel: a swipe up is up as the viewer sees it, however the
+  clock is held. The mount turn is set once on the config page (**Inputs**);
+  if a swipe up acts as another direction, try the next setting.
+- **One gesture at a time:** for 300 ms after a gesture the sensor's next one
+  is ignored, so the hand pulled back is not read as the opposite swipe. The
+  driver library's own pauses after a gesture (200 ms of blocking) are
+  switched off. Every gesture counts as handling the clock, so it holds off the
+  knock effect for 3 s, as a button press does.
+- **The hint** is a banner that only explains: the swipe that follows closes it
+  and goes on to the face, instead of being used up as on other banners.
+- **INT line or not.** STEMMA QT carries no interrupt line. Without one the
+  clock asks the sensor for a gesture every 50 ms, and on the face also every
+  100 ms whether a hand is near (for the hint). With the sensor's INT line
+  wired to a free pin and that pin given at build time
+  (`-D GESTURE_INT_PIN=A0` in `build_flags`), the sensor is read only when the
+  line is low, and nothing is polled; the line reports gestures only, so there
+  is no hint then. The 3 s hold at boot is asked either way, once at start-up.
+
+Not yet tested on hardware: no gesture sensor has been connected so far. Still
+to be tried with the part: how reliably it tells a hand that stays from one
+passing by (the hint and the boot hold), whether the panel's own light or a
+cover in front of the sensor makes it see an object that is not there, and
+which mount turn its modules need.
+
 ## Real-time clock (DS3231)
 
 A DS3231 on the I2C bus (address 0x68; on the MatrixPortal through the STEMMA QT
@@ -634,8 +688,8 @@ Not yet tested on hardware: no DS3231 has been connected so far.
 Resolved automatically by PlatformIO from `platformio.ini`.
 
 Both boards: Adafruit GFX, Adafruit BusIO, Adafruit LIS3DH, Adafruit Unified
-Sensor, BH1750FVI_RT (Rob Tillaart), RTClib (Adafruit, for the DS3231). All
-versions are pinned.
+Sensor, BH1750FVI_RT (Rob Tillaart), RTClib (Adafruit, for the DS3231), RevEng
+PAJ7620 (Aaron S. Crandall, for the gesture sensor). All versions are pinned.
 
 Panel driver: ESP32-HUB75-MatrixPanel-DMA (mrfaptastic) on the MatrixPortal S3,
 built with `NO_CIE1931` so colours and brightness stay linear as before; Adafruit

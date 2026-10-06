@@ -66,6 +66,15 @@
 // on both boards. Wire.begin() picks up each variant's default SDA/SCL.
 #define ACCEL_I2C_ADDR 0x19
 
+// Gesture sensor (PAJ7620U2, optional, I2C 0x73, e.g. on STEMMA QT): its INT
+// line, if it is wired to a free pin - STEMMA QT carries none - for instance
+// with -D GESTURE_INT_PIN=A0 in build_flags. With it the sensor is read only
+// when the line says a gesture is waiting; without it (-1) the sketch asks the
+// sensor over I2C now and then.
+#ifndef GESTURE_INT_PIN
+  #define GESTURE_INT_PIN -1
+#endif
+
 /* ======================================================================
    Address of the config access point (and of its web UI), both boards
    ====================================================================== */

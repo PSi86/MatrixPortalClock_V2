@@ -24,7 +24,21 @@ enum InputEvent : uint8_t {
   EV_DOWN_SHORT, EV_DOWN_2X, EV_DOWN_3X, EV_DOWN_HOLD, EV_DOWN_HOLD_REPEAT,
   EV_UP_AT_BOOT,       // UP held while the clock starts
   EV_KNOCK,            // the accelerometer felt a knock
+  // Gesture sensor. Swipes come in screen directions: up is up on the panel as
+  // the viewer sees it, whichever way the clock and the sensor are turned.
+  EV_SWIPE_UP, EV_SWIPE_DOWN, EV_SWIPE_LEFT, EV_SWIPE_RIGHT,
+  EV_PUSH,             // a hand moved towards the sensor
+  EV_PULL,             // and away from it
+  EV_CIRCLE_CW, EV_CIRCLE_CCW,
+  EV_WAVE,             // a hand waved to and fro over it
+  EV_APPROACH,         // a hand came near and stays (not a gesture: it closes nothing)
+  EV_APPROACH_AT_BOOT, // a hand held over the sensor while the clock starts
 };
+
+// Which source an event comes from. Every clock has a different set of them
+// (buttons on the MatrixPortals, only the gesture sensor on the wall clock),
+// so the rules below are checked for each source on its own.
+constexpr bool isGestureEvent(InputEvent ev) { return ev >= EV_SWIPE_UP && ev <= EV_APPROACH_AT_BOOT; }
 
 // Where an event happens. The editors count as the menu; a banner takes the
 // context of the screen it covers.
@@ -43,6 +57,7 @@ enum InputFunction : uint8_t {
   FN_BRIGHT_FADE,      // cyclic brightness fade while the button stays held, saved on release
   FN_KNOCK_EFFECT,     // the Tetris digits come apart
   FN_PLAY_GIF,         // a GIF now, on boards with GIF playback
+  FN_SHOW_HINTS,       // what the gestures do, for a moment
 };
 
 struct InputMapping { InputEvent event; InputContext context; InputFunction function; };
@@ -88,7 +103,38 @@ constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
   { EV_UP_AT_BOOT,     CTX_BOOT,    FN_TOGGLE_HOTSPOT },
 };
 
+// Gestures, for every profile. Swipes and push move as UP and DOWN do; a
+// circle is the knob - clockwise is up, five steps at a time in an editor;
+// waving is the knock on the face and the way home in the menu. A hand held
+// over the sensor at boot is the recovery, as holding UP is, and a swipe to
+// the left closes the hotspot again.
+constexpr InputMapping GESTURES_DEFAULT[] = {
+  { EV_SWIPE_UP,         CTX_FACE,    FN_OPEN_MENU      },
+  { EV_SWIPE_DOWN,       CTX_FACE,    FN_OPEN_MENU      },
+  { EV_SWIPE_RIGHT,      CTX_FACE,    FN_OPEN_MENU      },
+  { EV_PUSH,             CTX_FACE,    FN_OPEN_MENU      },
+  { EV_WAVE,             CTX_FACE,    FN_KNOCK_EFFECT   },
+  { EV_CIRCLE_CW,        CTX_FACE,    FN_PLAY_GIF       },
+  { EV_CIRCLE_CCW,       CTX_FACE,    FN_PLAY_GIF       },
+  { EV_APPROACH,         CTX_FACE,    FN_SHOW_HINTS     },
+  { EV_SWIPE_UP,         CTX_MENU,    FN_PREV           },
+  { EV_SWIPE_DOWN,       CTX_MENU,    FN_NEXT           },
+  { EV_SWIPE_RIGHT,      CTX_MENU,    FN_ENTER          },
+  { EV_PUSH,             CTX_MENU,    FN_ENTER          },
+  { EV_SWIPE_LEFT,       CTX_MENU,    FN_BACK           },
+  { EV_WAVE,             CTX_MENU,    FN_HOME           },
+  { EV_CIRCLE_CW,        CTX_MENU,    FN_PREV           },
+  { EV_CIRCLE_CCW,       CTX_MENU,    FN_NEXT           },
+  { EV_SWIPE_LEFT,       CTX_HOTSPOT, FN_BACK           },
+  { EV_APPROACH_AT_BOOT, CTX_BOOT,    FN_TOGGLE_HOTSPOT },
+};
+
 #define PROFILE_ROWS(p) ((unsigned)(sizeof(p) / sizeof((p)[0])))
+
+// Whether every row's event comes from the source asked for.
+constexpr bool rowsFromSource(const InputMapping *r, unsigned n, bool gesture) {
+  return n == 0 || (isGestureEvent(r->event) == gesture && rowsFromSource(r + 1, n - 1, gesture));
+}
 
 // Whether some row maps a function in a context.
 constexpr bool profileMaps(const InputMapping *r, unsigned n, InputContext ctx, InputFunction fn) {
@@ -120,13 +166,23 @@ constexpr bool profileRecoverable(const InputMapping *r, unsigned n) {
          (profileMaps(r, n, CTX_HOTSPOT, FN_BACK) || profileMaps(r, n, CTX_HOTSPOT, FN_TOGGLE_HOTSPOT));
 }
 
-// Today every row above comes from the two buttons, which every MatrixPortal
-// has. Once a profile maps sensor events, these checks have to be made per set
-// of fitted sources.
-#define CHECK_PROFILE(p)                                                              \
+// The rules hold for each source on its own: a profile's table maps the
+// buttons (and the knock) and keeps to them, so a MatrixPortal without a
+// gesture sensor can be operated and recovered with its buttons; the gesture
+// table maps only gestures and keeps the same rules, so a clock that has
+// nothing but the sensor can be as well. An event belongs to one source, so
+// the two tables together never map one twice.
+#define CHECK_RULES(p)                                                                \
   static_assert(profileUnique(p, PROFILE_ROWS(p)),       #p ": an event is mapped twice on one screen"); \
   static_assert(profileMenuOperable(p, PROFILE_ROWS(p)), #p ": the menu cannot be opened, moved through or left"); \
   static_assert(profileRecoverable(p, PROFILE_ROWS(p)),  #p ": no boot event opens the hotspot, or it cannot be closed")
+#define CHECK_PROFILE(p)                                                              \
+  CHECK_RULES(p);                                                                     \
+  static_assert(rowsFromSource(p, PROFILE_ROWS(p), false), #p ": a button profile maps a gesture")
+#define CHECK_GESTURES(g)                                                             \
+  CHECK_RULES(g);                                                                     \
+  static_assert(rowsFromSource(g, PROFILE_ROWS(g), true), #g ": a gesture table maps a button")
 
 CHECK_PROFILE(PROFILE_DEFAULT);
 CHECK_PROFILE(PROFILE_CLASSIC_CLICKS);
+CHECK_GESTURES(GESTURES_DEFAULT);
