@@ -104,6 +104,53 @@ def test_copies_and_built_in_gifs_are_left_out():
         assert [g[0] for g in gifs] == [b"b"] and copies == 2, ([g[0] for g in gifs], copies)
 
 
+def table_entry(label, kind, sub, offset, size):
+    return b"\xaa\x50" + struct.pack("<BBII", kind, sub, offset, size) + label.encode().ljust(16, b"\0") + bytes(4)
+
+
+TINYUF2_8MB = (table_entry("nvs", 1, 0x02, 0x9000, 0x5000) + table_entry("otadata", 1, 0x00, 0xE000, 0x2000)
+               + table_entry("ota_0", 0, 0x10, 0x10000, 0x200000) + table_entry("ota_1", 0, 0x11, 0x210000, 0x200000)
+               + table_entry("uf2", 0, 0x00, 0x410000, 0x40000) + table_entry("ffat", 1, 0x81, 0x450000, 0x3B0000)
+               + b"\xeb\xeb" + bytes(30) + b"\xff" * 2880)
+
+
+def test_only_a_board_with_this_ffat_partition_is_written():
+    table = gif_pack.read_partitions(TINYUF2_8MB)
+    assert len(table) == 6 and table[-1] == ("ffat", 1, 0x81, 0x450000, 0x3B0000), table
+    assert gif_pack.has_ffat(table, 0x450000, 0x3B0000)
+    assert not gif_pack.has_ffat(table, 0x450000, 0x3A0000), "a smaller ffat passed"
+    assert not gif_pack.has_ffat(table, 0x410000, 0x3B0000), "another offset passed"
+    # Another board: a default 8 MB Arduino table, app partitions where the pack would go.
+    other = (table_entry("nvs", 1, 0x02, 0x9000, 0x5000) + table_entry("app0", 0, 0x10, 0x10000, 0x330000)
+             + table_entry("app1", 0, 0x11, 0x340000, 0x330000) + table_entry("spiffs", 1, 0x82, 0x670000, 0x180000))
+    assert not gif_pack.has_ffat(gif_pack.read_partitions(other), 0x450000, 0x3B0000)
+    assert not gif_pack.has_ffat(gif_pack.read_partitions(b"\xff" * 3072), 0x450000, 0x3B0000), "erased flash passed"
+
+
+def test_the_built_partition_table_has_the_ffat_of_the_csv():
+    built = os.path.join(os.path.dirname(HERE), ".pio", "build", "adafruit_matrixportal_s3", "partitions.bin")
+    if not os.path.isfile(built):
+        print("     (skipped: no S3 build yet)")
+        return
+    assert gif_pack.has_ffat(gif_pack.read_partitions(open(built, "rb").read()), 0x450000, 3776 * 1024)
+
+
+def test_the_port_is_an_esp32s3_usb_serial_jtag_one():
+    # COM9: another ESP32-S3 running an app with a TinyUSB port (Espressif VID, other PID).
+    ports = [("COM5", 0x303A, 0x1001), ("COM6", 0x239A, 0x8125), ("COM7", 0x1395, 0x009A), ("COM8", None, None),
+             ("COM9", 0x303A, 0x0002)]
+    assert gif_pack.rom_ports(ports) == ["COM5"], gif_pack.rom_ports(ports)
+    assert gif_pack.rom_ports(ports[1:]) == []
+
+
+def test_the_mac_esptool_prints_is_read():
+    out = "Chip type:          ESP32-S3 (QFN56) (revision v0.2)\nUSB mode:           USB-Serial/JTAG\n" \
+          "MAC:                7c:4f:ad:06:c1:6c\nUploading stub flasher...\n"
+    assert gif_pack.mac_in(out) == "7c:4f:ad:06:c1:6c"
+    assert gif_pack.mac_in(out.upper()) == "7c:4f:ad:06:c1:6c"
+    assert gif_pack.mac_in("Connecting...\nA fatal error occurred") is None
+
+
 def test_ffat_partition_of_the_board_table():
     csv = os.path.expanduser("~/.platformio-pioarduino/packages/framework-arduinoespressif32/tools/partitions/"
                              "tinyuf2-partitions-8MB.csv")

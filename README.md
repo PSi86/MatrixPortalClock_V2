@@ -245,20 +245,74 @@ up to 32x64, `both` those that fit one way or the other, for a clock that gets
 turned. A clock that always stands the same way then carries no GIFs it could
 never play.
 
+### Building the firmware with your own GIFs
+
+The commands are for PowerShell on Windows (not Git Bash: the S3 platform's
+tools refuse to run there). Replace `<project folder>` with the folder of this
+repository and `<GIF folder>` with a folder of your GIFs outside it. If `pio` is
+on your PATH, `pio` does instead of the full path.
+
+1. Name the folder for the build. Either list it in `gif_dirs.local` in the
+   project folder, one folder per line - then every build takes it, the build
+   button in VS Code too - or name it for one build only with `GIF_DIRS`
+   (several folders separated by `;`), which then stands in for that file:
+
+       $env:GIF_DIRS = '<GIF folder>'
+
+2. Build:
+
+       & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -d '<project folder>' -e adafruit_matrixportal_s3
+
+   The build says how many GIFs it took (`GIFs: ... built in`) and how many
+   did not fit the panel or the budget. Afterwards `Remove-Item Env:GIF_DIRS`,
+   so that later builds in the same window go without them.
+
+3. Double-tap RESET on the clock: the drive `MATRXS3BOOT` appears. Copy the
+   firmware onto it (or drag the file there in Explorer); the clock restarts
+   with it by itself:
+
+       $d = (Get-Volume | Where-Object FileSystemLabel -eq 'MATRXS3BOOT').DriveLetter
+       Copy-Item '<project folder>\.pio\build\adafruit_matrixportal_s3\firmware.uf2' "${d}:\"
+
+On macOS and Linux the same goes as `GIF_DIRS=<GIF folder> pio run -e
+adafruit_matrixportal_s3` (folders separated by `:`), and the UF2 is copied onto
+the `MATRXS3BOOT` volume with the file manager or `cp`.
+
 ### GIF pack
 
 More GIFs than fit into the firmware go into the GIF pack, in the board's
-`ffat` partition (3776 KB), which the clock uses for nothing else. List the
-folders for it in `gif_pack.local` in the project folder, one per line (ignored
-by git; an `exclude.txt` works as for `gif_dirs.local`), then:
+`ffat` partition (3776 KB), which the clock uses for nothing else. It is
+written through the ROM bootloader, not by UF2 (TinyUF2 writes the app
+partition only), so the firmware's UF2 uploads leave it alone;
+`pio run -t erase` wipes it. Placeholders as above, plus `<board MAC>`:
 
-    pio run -e adafruit_matrixportal_s3 -t gifpack                         # builds gifpack.bin
-    pio run -e adafruit_matrixportal_s3 -t uploadgifs --upload-port COMx   # builds and writes it
+1. Name the folder for the pack: list it in `gif_pack.local` in the project
+   folder (one per line, ignored by git) or name it with `GIF_PACK_DIRS`. Set
+   `GIF_PACK_MAC` too if more than one ESP32-S3 is ever plugged in: then only
+   the board with that MAC is written. esptool prints a board's MAC when it
+   connects (`MAC: 7c:4f:...`), so the first run without it shows it.
 
-Writing goes through the ROM bootloader: hold BOOT, tap RESET, release BOOT,
-run the upload with that port, then press RESET. A UF2 copy cannot write the
-pack (TinyUF2 writes the app partition only), so the firmware's UF2 uploads
-leave it alone; `pio run -t erase` wipes it.
+       $env:GIF_PACK_DIRS = '<GIF folder>'
+       $env:GIF_PACK_MAC = '<board MAC>'
+
+2. Put the clock into its ROM bootloader: hold BOOT, tap RESET, release BOOT.
+
+3. Build the pack and write it:
+
+       & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -d '<project folder>' -e adafruit_matrixportal_s3 -t uploadgifs
+
+   Without `--upload-port COMx` it takes the one ESP32-S3 USB port there is
+   (USB 303A:1001, how the ROM bootloader shows up). Before it writes, it reads
+   the board's MAC and partition table and stops without writing when the MAC
+   is not `GIF_PACK_MAC` or the board has no ffat partition where this build
+   expects one - another ESP32-S3 board is never written over. `-t gifpack`
+   only builds `.pio\build\adafruit_matrixportal_s3\gifpack.bin`.
+
+4. The clock then starts by itself: the upload ends with a watchdog reset (a
+   reset through RTS would leave an ESP32-S3 in its ROM bootloader). Its
+   console and config page say how many GIFs the pack holds. If the target
+   stopped without writing, nothing changed on the board; press RESET to start
+   it again.
 
 `scripts/gif_pack.py` takes the GIFs that fit the panel the way the clock
 stands, leaves out those the firmware has built in and second copies, and puts
@@ -267,10 +321,9 @@ deflated, whichever is smaller (deflating saves about a fifth on typical
 pixel-art GIFs). The clock reads the pack's index at start-up, checks a GIF's
 CRC each time it is about to play, and inflates a deflated one into PSRAM with
 the inflate in the chip's ROM before it plays; the pack's GIFs then come up
-like the built-in ones. The console and the config page say how many it holds.
-Private GIFs in the pack stay in the pack: the firmware does not contain them,
-so a firmware built without `gif_dirs.local` can be passed on while the pack
-is not.
+like the built-in ones. Private GIFs in the pack stay in the pack: the firmware
+does not contain them, so a firmware built without `gif_dirs.local` can be
+passed on while the pack is not.
 
 ## AP configuration
 

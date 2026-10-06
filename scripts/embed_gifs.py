@@ -3,9 +3,10 @@
 #
 # Sources: every .gif in gifs/ (the repository's examples, always taken) and in
 # the folders listed in gif_dirs.local, one per line (git ignores that file, so
-# private GIFs stay out of the repository). An exclude.txt in such a folder or
-# its parent names files to leave out, one per line; a line matches the end of
-# a file's path.
+# private GIFs stay out of the repository) - or, when GIF_DIRS is set, in the
+# folders it names instead (separated by ";" on Windows, ":" elsewhere). An
+# exclude.txt in such a folder or its parent names files to leave out, one per
+# line; a line matches the end of a file's path.
 #
 # A GIF fits when it is no larger than the panel (custom_gif_panel, e.g. 64x32)
 # the way the clock stands (custom_gif_orientation: landscape, the default,
@@ -70,7 +71,12 @@ def build():
         elif size:
             too_big.append(path)
 
-    extra_dirs = [d for d in gif_common.listed_dirs(PROJECT_DIR, "gif_dirs.local") if os.path.isdir(d)]
+    listed = os.environ.get("GIF_DIRS")
+    if listed:
+        dirs, source = [d.strip() for d in listed.split(os.pathsep) if d.strip()], "GIF_DIRS"
+    else:
+        dirs, source = gif_common.listed_dirs(PROJECT_DIR, "gif_dirs.local"), "gif_dirs.local"
+    extra_dirs = [d for d in dirs if os.path.isdir(d)]
     candidates = []
     for folder in extra_dirs:
         skip = gif_common.exclusions(folder)
@@ -123,8 +129,8 @@ def build():
     print("GIFs: %d built in (%d KB) for a %dx%d panel standing %s; %d do not fit, %d over the %d KB budget"
           % (len(chosen), total // 1024, pw, ph, orientation, len(too_big), len(over_budget), budget // 1024))
     if extra_dirs:
-        print("GIFs: including folders from gif_dirs.local (%s) - do not publish this firmware"
-              % ", ".join(extra_dirs))
+        print("GIFs: including folders from %s (%s) - do not publish this firmware"
+              % (source, ", ".join(extra_dirs)))
 
 
 build()

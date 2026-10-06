@@ -5,18 +5,27 @@
 # As a PlatformIO script (extra_scripts of the S3 env) it adds two targets:
 #   pio run -e adafruit_matrixportal_s3 -t gifpack
 #       builds .pio/build/<env>/gifpack.bin
-#   pio run -e adafruit_matrixportal_s3 -t uploadgifs --upload-port COMx
+#   pio run -e adafruit_matrixportal_s3 -t uploadgifs [--upload-port COMx]
 #       builds it and writes it into the ffat partition. Only the ROM bootloader
-#       takes it: hold BOOT, tap RESET, release BOOT; press RESET afterwards.
+#       takes it: hold BOOT, tap RESET, release BOOT. Afterwards the clock starts
+#       by itself (a watchdog reset: esptool's reset through RTS leaves an
+#       ESP32-S3 on its USB-Serial/JTAG in the ROM bootloader).
 #       A UF2 copy cannot write it (TinyUF2 writes the app partition only), so
 #       uploading the firmware by UF2 leaves the pack alone; "pio run -t erase"
 #       wipes it.
+#       Without --upload-port it takes the one ESP32-S3 USB-Serial/JTAG port
+#       there is (USB 303A:1001, what the ROM bootloader shows up as). Before it
+#       writes, it reads the board's partition table and writes only when the
+#       board has the ffat partition this build expects, so another ESP32-S3
+#       board on the PC is never written over; with GIF_PACK_MAC set (the
+#       board's MAC, as esptool prints it when it connects) only that board.
 # The GIFs come from the folders listed in gif_pack.local in the project folder
-# (one per line, git ignores the file), with their exclude.txt, and have to fit
-# the panel the way the clock stands (custom_gif_panel, custom_gif_orientation,
-# as for the GIFs built in). A GIF the firmware has built in anyway is left
-# out, and so is a second copy. They go in smallest first while the partition
-# has room.
+# (one per line, git ignores the file), or from GIF_PACK_DIRS if that is set
+# (folders separated by ";" on Windows, ":" elsewhere), with their
+# exclude.txt, and have to fit the panel the way the clock stands
+# (custom_gif_panel, custom_gif_orientation, as for the GIFs built in). A GIF
+# the firmware has built in anyway is left out, and so is a second copy. They
+# go in smallest first while the partition has room.
 #
 # Each GIF is kept as it is or deflated (zlib, level 9), whichever is smaller;
 # the clock inflates a deflated one into PSRAM with the inflate in the chip's
@@ -37,6 +46,7 @@
 
 import hashlib
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -49,6 +59,8 @@ ENTRY = struct.Struct("<32sHHB3xIIII")
 STORED, DEFLATED = 0, 1
 COUNT_MAX = 4000            # the firmware refuses a pack with more
 GIF_MAX = 614400            # nor a GIF larger than this once inflated
+ROM_USB = (0x303A, 0x1001)  # an ESP32-S3's USB-Serial/JTAG, as its ROM bootloader shows up
+PART_DATA, PART_FAT = 0x01, 0x81
 
 
 def payload(data):
@@ -115,6 +127,33 @@ def collect(folders, panel, orientation, skip_sha1=()):
     return [(entry_name(p), s[0], s[1], d) for _n, p, s, d in found], too_big, copies
 
 
+def rom_ports(ports):
+    """The ESP32-S3 USB-Serial/JTAG ports among ports, [(device, vid, pid)]."""
+    return [device for device, vid, pid in ports if (vid, pid) == ROM_USB]
+
+
+def read_partitions(blob):
+    """[(label, type, subtype, offset, size)] of a binary ESP-IDF partition
+    table, as it sits in flash at 0x8000."""
+    found = []
+    for i in range(0, len(blob) - 31, 32):
+        if blob[i:i + 2] != b"\xaa\x50":     # the MD5 entry or the empty rest
+            break
+        kind, sub, offset, size = struct.unpack_from("<BBII", blob, i + 2)
+        found.append((blob[i + 12:i + 28].split(b"\0")[0].decode("ascii", "replace"), kind, sub, offset, size))
+    return found
+
+
+def has_ffat(table, offset, size):
+    return ("ffat", PART_DATA, PART_FAT, offset, size) in table
+
+
+def mac_in(esptool_output):
+    """The MAC esptool printed when it connected, lower case, or None."""
+    m = re.search(r"MAC:\s*([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})", esptool_output)
+    return m.group(1).lower() if m else None
+
+
 def partition(csv_path, name="ffat"):
     """(offset, size) of a partition in an ESP-IDF partition table CSV."""
     def number(text):
@@ -144,9 +183,14 @@ def _pio(env):
     def build_pack(target, source, env):   # noqa: ARG001 - SCons passes env by name
         panel = gif_common.panel_size(env.GetProjectOption("custom_gif_panel", "64x32"))
         orientation = gif_common.check_orientation(env.GetProjectOption("custom_gif_orientation", "landscape"))
-        folders = [d for d in gif_common.listed_dirs(project, "gif_pack.local") if os.path.isdir(d)]
+        listed = os.environ.get("GIF_PACK_DIRS")
+        if listed:
+            folders, source = [d for d in listed.split(os.pathsep) if d.strip()], "GIF_PACK_DIRS"
+        else:
+            folders, source = gif_common.listed_dirs(project, "gif_pack.local"), "gif_pack.local"
+        folders = [d.strip() for d in folders if os.path.isdir(d.strip())]
         if not folders:
-            sys.stderr.write("GIF pack: gif_pack.local lists no folder that exists\n")
+            sys.stderr.write("GIF pack: %s names no folder that exists\n" % source)
             return 1
         offset, capacity = where()
         built_in = env.get("GIF_BUILT_IN_SHA1", "").split()
@@ -164,14 +208,44 @@ def _pio(env):
     def upload_pack(target, source, env):  # noqa: ARG001
         port = env.subst("$UPLOAD_PORT")
         if not port:
-            sys.stderr.write("GIF pack: give the ROM bootloader's port with --upload-port\n")
+            from serial.tools import list_ports
+            found = rom_ports([(p.device, p.vid, p.pid) for p in list_ports.comports()])
+            if not found:
+                sys.stderr.write("GIF pack: no ESP32-S3 in its ROM bootloader (USB 303A:1001) - hold BOOT, tap "
+                                 "RESET, release BOOT, then try again\n")
+                return 1
+            if len(found) > 1:
+                sys.stderr.write("GIF pack: several ESP32-S3 USB ports (%s) - name one with --upload-port\n"
+                                 % ", ".join(found))
+                return 1
+            port = found[0]
+            print("GIF pack: ESP32-S3 USB-Serial/JTAG on %s" % port)
+        offset, size = where()
+        esptool = [env.subst("$UPLOADER").strip('"'), "--chip", env.BoardConfig().get("build.mcu"), "--port", port,
+                   "--baud", env.subst("$UPLOAD_SPEED")]
+        # Whose board is it: its MAC and its partition table, before anything is written.
+        table_file = os.path.join(os.path.dirname(out), "partitions_on_board.bin")
+        read = subprocess.run(esptool + ["--before", "default-reset", "--after", "no-reset",
+                                         "read-flash", "0x8000", "0xc00", table_file], capture_output=True, text=True)
+        sys.stdout.write(read.stdout)
+        sys.stderr.write(read.stderr)
+        if read.returncode != 0:
+            sys.stderr.write("GIF pack: could not read the board's partition table - nothing written\n")
+            return read.returncode
+        mac, wanted = mac_in(read.stdout), os.environ.get("GIF_PACK_MAC", "").strip().lower()
+        problem = None
+        if wanted and mac != wanted:
+            problem = "the board on %s is %s, not %s (GIF_PACK_MAC)" % (port, mac, wanted)
+        elif not has_ffat(read_partitions(open(table_file, "rb").read()), offset, size):
+            problem = "the board on %s has no ffat partition at 0x%x of %d bytes" % (port, offset, size)
+        if problem:
+            sys.stderr.write("GIF pack: %s - nothing written\n" % problem)
+            # Out of the ROM bootloader into its firmware again; a reset through RTS would leave it there.
+            subprocess.call(esptool + ["--before", "no-reset", "--after", "watchdog-reset", "read-mac"])
             return 1
-        offset, _capacity = where()
-        cmd = [env.subst("$UPLOADER").strip('"'), "--chip", env.BoardConfig().get("build.mcu"), "--port", port,
-               "--baud", env.subst("$UPLOAD_SPEED"), "--before", "default-reset", "--after", "hard-reset",
-               "write-flash", "-z", "0x%x" % offset, out]
-        print(" ".join(cmd))
-        return subprocess.call(cmd)
+        print("GIF pack: board %s, ffat at 0x%x as expected - writing" % (mac, offset))
+        return subprocess.call(esptool + ["--before", "default-reset", "--after", "watchdog-reset",
+                                          "write-flash", "-z", "0x%x" % offset, out])
 
     env.AddCustomTarget(name="gifpack", dependencies=None, actions=[build_pack],
                         title="Build GIF pack", description="GIFs of gif_pack.local -> gifpack.bin")
