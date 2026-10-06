@@ -44,6 +44,7 @@ Todo Concept:
 #include <Adafruit_Sensor.h>  // sensor base class
 #include <Adafruit_LIS3DH.h>  // onboard LIS3DH accelerometer (both boards)
 #include <BH1750FVI.h>         // external BH1750 ambient light sensor (auto-brightness)
+#include <RTClib.h>            // DS3231 real-time clock (optional)
 
 #if GIF_PLAYBACK
 #include <AnimatedGIF.h>       // GIF decoder
@@ -170,13 +171,15 @@ const uint8_t INPUT_PROFILE_COUNT = sizeof(INPUT_PROFILES) / sizeof(INPUT_PROFIL
 // Fields added later go on the end and are filled in by revision, as with the
 // other blobs; an older firmware does not read this one at all.
 #define UI_SETTINGS_MAGIC 0x5E71
-#define UI_SETTINGS_REV   1
+#define UI_SETTINGS_REV   2        // 1 = before syncDays
 struct UiSettings {
   uint16_t magic;
   uint8_t  rev;
   uint8_t  inputProfile;   // position in INPUT_PROFILES
+  uint16_t syncDays;       // with a real-time clock: days between NTP syncs, 0 = no sync (rev 2)
 };
-const UiSettings UI_DEFAULTS = { UI_SETTINGS_MAGIC, UI_SETTINGS_REV, 0 };
+const uint16_t SYNC_DAYS_MAX = 366;
+const UiSettings UI_DEFAULTS = { UI_SETTINGS_MAGIC, UI_SETTINGS_REV, 0, 7 };
 UiSettings uiSettings;
 SettingsStore<UiSettings> uiStore;
 
@@ -602,8 +605,22 @@ const unsigned long SYNC_ATTEMPT_MS = 60UL * 1000UL;
 const unsigned long SYNC_PAUSE_MS   = 10UL * 60UL * 1000UL;
 
 // Where the clock's time came from, for the config page.
-enum TimeSource : uint8_t { TIME_NONE, TIME_NTP, TIME_PHONE, TIME_MANUAL };
+enum TimeSource : uint8_t { TIME_NONE, TIME_NTP, TIME_PHONE, TIME_MANUAL, TIME_RTC };
 TimeSource timeSource = TIME_NONE;
+time_t     ntpSyncedAt = 0;   // UTC of the last good NTP sync since the start; 0 = none yet
+
+// The range a time has to lie in to be taken: anything before 2024 is a phone
+// or a real-time clock without a time, and the DS3231 counts only to 2099.
+const long UTC_PLAUSIBLE_FROM = 1704067200L;   // 2024-01-01
+const long UTC_PLAUSIBLE_TO   = 4102444799L;   // 2099-12-31 23:59:59
+
+// Real-time clock: a DS3231 on the I2C bus (0x68), optional. It holds UTC, as
+// the clock does, so the zone and daylight saving never touch it. Found at
+// boot or not at all; with one, the clock has its time at power-up and the
+// NTP sync needs to run only now and then (uiSettings.syncDays).
+RTC_DS3231 rtc;
+bool rtcOK        = false;   // a DS3231 answered at boot
+bool rtcLostPower = false;   // its oscillator had stopped, so its time is not used until it is set again
 
 // A due sync that has not succeeded for this long is an error, shown on the
 // status pixel. The hour covers the retries, so a sync in progress never shows.
@@ -660,13 +677,15 @@ const uint8_t ZONE_COUNT = sizeof(TZONES) / sizeof(TZONES[0]);
 
 // One flat list. Each item names the kind of editor it uses; what the item
 // changes is decided where its kind needs it (editorOpen() and friends).
-enum MenuItem : uint8_t { ITEM_BRIGHT, ITEM_AUTO, ITEM_ZONE, ITEM_DST, ITEM_HOTSPOT, ITEM_COUNT };
+enum MenuItem : uint8_t { ITEM_BRIGHT, ITEM_AUTO, ITEM_ZONE, ITEM_DST, ITEM_HOTSPOT, ITEM_TIME, ITEM_COUNT };
 enum EditorKind : uint8_t {
   KIND_NUMBER,   // a value on a scale: PREV / NEXT step it, ENTER saves, BACK reverts
   KIND_TOGGLE,   // no editor: ENTER on the row flips it and saves
   KIND_ZONE,     // the timezone picker
   KIND_CHOICE,   // one of a few named options
   KIND_ACTION,   // no editor: ENTER on the row does it
+  KIND_DATETIME, // several fields in turn: ENTER goes to the next and saves on the last,
+                 // BACK goes to the one before and leaves without saving on the first
 };
 struct MenuEntry { const char *label; const char *longLabel; EditorKind kind; };
 // Short labels have at most 8 characters, what a 32 px wide portrait panel
@@ -677,8 +696,15 @@ const MenuEntry MENU_ITEMS[ITEM_COUNT] = {
   { "Zone",    "Timezone",        KIND_ZONE   },
   { "DST",     "Daylight saving", KIND_CHOICE },
   { "Hotspot", "Config hotspot",  KIND_ACTION },
+  { "Time",    "Time and date",   KIND_DATETIME },
 };
 MenuItem menuFocus = ITEM_BRIGHT;
+
+// Fields of the time editor, in the order they are set. The date is part of
+// it because the daylight-saving rule depends on it.
+enum TimeField : uint8_t { TF_HOUR, TF_MINUTE, TF_YEAR, TF_MONTH, TF_DAY, TF_COUNT };
+const char *const TIME_FIELD_NAMES[TF_COUNT] = { "hour", "min", "year", "month", "day" };
+const int16_t TIME_YEAR_MIN = 2024, TIME_YEAR_MAX = 2099;   // what the DS3231 can hold, and plausible
 
 // Options of the daylight-saving editor, in the order shown.
 const uint8_t     DST_OPTIONS[]     = { DST_AUTO, DST_SUMMER, DST_WINTER };
@@ -696,6 +722,10 @@ unsigned long editDrawnAt    = 0;   // millis() of the last editor frame, paces 
 // settings.brightness as flash holds it, while the Bright editor changes it
 // live (the panel itself is the preview).
 uint8_t       brightSaved    = 0;
+// The time editor: the local time and date being set, and the field on show.
+// Nothing changes before ENTER on the last field.
+int16_t       editTime[TF_COUNT];
+uint8_t       editTimeField  = TF_HOUR;
 
 // Brightness steps. Manual: 16 levels evenly spaced on the perceptual scale of
 // the brightness fade (FADE_GAMMA), from the lowest brightness at which the blue
@@ -853,6 +883,9 @@ void setup(void) {
     Serial.println("BH1750 not found - auto-brightness disabled");
   }
 
+  // DS3231 real-time clock on the same bus: the time at once, if it has one.
+  rtcBegin();
+
   // Initialize matrix...
   matrix.setRotation(3); //1
   matrix.setTextWrap(false);      // Allow text off edge
@@ -910,8 +943,12 @@ void setup(void) {
 
   // Start joining the home WiFi, without waiting for it: the clock comes up at
   // once and the join and the first sync run in the loop (SYNC_JOINING). The
-  // config AP, if it was opened above, has the radio until it closes.
-  if (!apActive && wifiStored()) {
+  // config AP, if it was opened above, has the radio until it closes. With the
+  // NTP sync switched off (a clock with a real-time clock only) nothing is due.
+  if (!ntpSyncOn()) {
+    setSyncState(SYNC_IDLE);
+    Serial.println("NTP sync off - the clock runs on its real-time clock");
+  } else if (!apActive && wifiStored()) {
     netRadioInit();
     netPrintRadioInfo();
     boardBootStageWrite(BOOT_STAGE_WIFI);   // the radio's first transmit burst comes now
@@ -930,6 +967,7 @@ void setup(void) {
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
   if (minuteTrigger) { panelDirty = true; }   // whatever shows the time has to follow it
+  if (secondTrigger && secondNow == 30) { rtcFollow(); }   // half way through every minute
   updatePanelRate();
   // Ran fine for 15 s: clear the breadcrumb, so only a real early death leaves one.
   if (!bootStageCleared && millisNow > 15000) { bootStageCleared = true; boardBootStageWrite(BOOT_STAGE_CLEAR); }
@@ -1574,6 +1612,7 @@ void drawList(const char *title, const char *const *labels, uint8_t count, uint8
 // Whether a menu item is offered on this clock.
 bool menuItemShown(MenuItem item) {
   if (item == ITEM_AUTO) { return luxOK; }   // nothing to switch without a light sensor
+  if (item == ITEM_TIME) { return rtcOK; }   // without a real-time clock the time is set on the config page
   return true;
 }
 
@@ -1587,6 +1626,7 @@ void menuItemValue(MenuItem item, char *buf, size_t size) {
     case ITEM_AUTO:  snprintf(buf, size, "%s", settings.autoBright ? "On" : "Off"); break;
     case ITEM_ZONE:  formatOffset(buf, size, settings.tzOffset); break;
     case ITEM_DST:   snprintf(buf, size, "%s", DST_OPTION_NAMES[dstOptionIndex(settings.dst)]); break;
+    case ITEM_TIME:  formatClockTime(buf, size, clockNow() + tzTotalOffset()); break;
     default:         buf[0] = '\0'; break;
   }
 }
@@ -1766,6 +1806,40 @@ void drawDstEditor() {
   drawList(MENU_ITEMS[ITEM_DST].label, DST_OPTION_NAMES, DST_OPTION_COUNT, editIndex, hhmm);
 }
 
+// One field of the time editor in 5x7 text: the one being set in the accent
+// colour, the others in ink. Returns the column after it.
+int16_t drawTimeFieldText(int16_t x, int16_t top, const char *text, bool focused) {
+  uiSmall(x, top, text, focused ? uiAccent() : uiInk());
+  return x + 6 * (int16_t)strlen(text);
+}
+
+// Editor of the time and date: HH:MM, then the date, the field being set in
+// the accent colour and named in the title row (landscape) or at the foot
+// (portrait).
+void drawTimeEditor() {
+  char f[TF_COUNT][7];   // room for any int16_t, though every field is 2 or 4 digits
+  snprintf(f[TF_HOUR],   sizeof(f[0]), "%02d", editTime[TF_HOUR]);
+  snprintf(f[TF_MINUTE], sizeof(f[0]), "%02d", editTime[TF_MINUTE]);
+  snprintf(f[TF_YEAR],   sizeof(f[0]), "%04d", editTime[TF_YEAR]);
+  snprintf(f[TF_MONTH],  sizeof(f[0]), "%02d", editTime[TF_MONTH]);
+  snprintf(f[TF_DAY],    sizeof(f[0]), "%02d", editTime[TF_DAY]);
+  uiTiny(1, 1, MENU_ITEMS[ITEM_TIME].label, uiQuiet());
+  bool land = screenIsLandscape();
+  if (land) { uiTinyRight(62, 1, TIME_FIELD_NAMES[editTimeField], uiAccent()); }
+  else      { uiTiny(1, 57, TIME_FIELD_NAMES[editTimeField], uiAccent()); }
+  // Landscape: "HH:MM" and "YYYY-MM-DD" (60 px) in two rows; portrait (32 px
+  // wide): "HH:MM", then "YYYY" and "MM-DD".
+  int16_t x = drawTimeFieldText(1, land ? 10 : 12, f[TF_HOUR], editTimeField == TF_HOUR);
+  x = drawTimeFieldText(x, land ? 10 : 12, ":", false);
+  drawTimeFieldText(x, land ? 10 : 12, f[TF_MINUTE], editTimeField == TF_MINUTE);
+  x = drawTimeFieldText(1, land ? 21 : 26, f[TF_YEAR], editTimeField == TF_YEAR);
+  int16_t dateTop = land ? 21 : 36;
+  if (land) { x = drawTimeFieldText(x, dateTop, "-", false); } else { x = 1; }
+  x = drawTimeFieldText(x, dateTop, f[TF_MONTH], editTimeField == TF_MONTH);
+  x = drawTimeFieldText(x, dateTop, "-", false);
+  drawTimeFieldText(x, dateTop, f[TF_DAY], editTimeField == TF_DAY);
+}
+
 // Whether the editor has to be redrawn without an input: a scrolling name, at
 // its own pace.
 bool editorMoving() {
@@ -1779,6 +1853,7 @@ void drawEditor() {
     case ITEM_BRIGHT: drawBrightEditor(); break;
     case ITEM_ZONE:   drawZoneEditor();   break;
     case ITEM_DST:    drawDstEditor();    break;
+    case ITEM_TIME:   drawTimeEditor();   break;
     default:          break;
   }
   presentUi();
@@ -2999,12 +3074,88 @@ bool syncAttempting(SyncState s) {
 }
 
 // The one way to set the clock: UTC, and where it came from. The automatic
-// daylight saving is decided again at once for the new time.
+// daylight saving is decided again at once for the new time. A real-time
+// clock keeps every time the clock is given; a time read from it is not
+// written back, since every write starts its second afresh.
 void setClockTo(time_t utc, TimeSource source) {
   clockSet(utc);
   timeSource = source;
+  if (source != TIME_RTC) { rtcWrite(utc); }
   if (settings.dst == DST_AUTO) { dstAutoActive = dstActiveAt(tzRule(settings.tzOffset), utc); }
   panelDirty = true;
+}
+
+/* ---- Real-time clock (DS3231) -------------------------------------------- */
+
+// At boot: whether a DS3231 answers, and its time if it has one. One whose
+// oscillator has stopped (the coin cell ran empty, or it never had one) has
+// no time worth showing, so the clock stays without one until NTP or the user
+// sets it - the face never shows a time it does not have.
+void rtcBegin() {
+  rtcOK = rtc.begin(&Wire);
+  if (!rtcOK) { Serial.println("DS3231 not found - no real-time clock"); return; }
+  if (rtc.lostPower()) {
+    rtcLostPower = true;
+    Serial.println("DS3231 found, but it lost power - no time until NTP or a time set by hand");
+    return;
+  }
+  time_t utc = rtcRead();
+  if (utc == 0) {
+    rtcLostPower = true;   // running, but not with a time of this century: as good as none
+    Serial.println("DS3231 found, but its time is not plausible");
+    return;
+  }
+  setClockTo(utc, TIME_RTC);
+  Serial.print("DS3231 found, clock set from it: UTC "); Serial.println((long)utc);
+}
+
+// The RTC's time as UTC, or 0 when it is outside the plausible range (a read
+// that went wrong reads as garbage).
+time_t rtcRead() {
+  uint32_t utc = rtc.now().unixtime();
+  if ((long)utc < UTC_PLAUSIBLE_FROM || (long)utc > UTC_PLAUSIBLE_TO) { return 0; }
+  return (time_t)utc;
+}
+
+// Set the RTC; that also clears its lost-power flag.
+void rtcWrite(time_t utc) {
+  if (!rtcOK || utc < UTC_PLAUSIBLE_FROM || utc > UTC_PLAUSIBLE_TO) { return; }
+  rtc.adjust(DateTime((uint32_t)utc));
+  rtcLostPower = false;
+  Serial.println("DS3231 set");
+}
+
+// Once a minute, half way through it: the clock counts on millis(), whose
+// crystal drifts far more than the DS3231's 2 ppm, so it is pulled back to the
+// RTC once they are two seconds apart. One second apart can be the moment of
+// reading alone - the RTC's second has a phase of its own - and is left be.
+void rtcFollow() {
+  if (!rtcOK || rtcLostPower || !clockIsSet()) { return; }
+  time_t utc = rtcRead();
+  if (utc == 0) { return; }
+  long apart = (long)(utc - clockNow());
+  if (apart >= -1 && apart <= 1) { return; }
+  setClockTo(utc, TIME_RTC);
+  Serial.print("Clock pulled back to the DS3231 by "); Serial.print(apart); Serial.println(" s");
+}
+
+// Whether the clock syncs with NTP at all. Without a real-time clock always,
+// daily as it always has; with one, unless the interval is set to none.
+bool ntpSyncOn() {
+  return !rtcOK || uiSettings.syncDays > 0;
+}
+
+// Whether the sync time at `when` (UTC) brings a sync. Without a real-time
+// clock every day. With one, once the interval has run out: counted in the
+// clock's own calendar days since the last good sync, so the sync time of the
+// day it runs out counts, whatever time of day that sync was made.
+bool syncDueAt(time_t when) {
+  if (!rtcOK) { return true; }
+  if (uiSettings.syncDays == 0) { return false; }
+  if (ntpSyncedAt == 0) { return true; }
+  long offset = tzTotalOffset();
+  long days = (long)((when + offset) / 86400) - (long)((ntpSyncedAt + offset) / 86400);
+  return days >= (long)uiSettings.syncDays;
 }
 
 // Days from 1970-01-01 to a date of the Gregorian calendar (H. Hinnant's
@@ -3041,10 +3192,21 @@ String clockStatusText() {
   char line[64], zone[10];
   formatOffset(zone, sizeof(zone), offset);
   const char *source = (timeSource == TIME_NTP)   ? "from the internet (NTP)"
-                     : (timeSource == TIME_PHONE) ? "set from a phone" : "set by hand";
+                     : (timeSource == TIME_PHONE) ? "set from a phone"
+                     : (timeSource == TIME_RTC)   ? "kept by the real-time clock" : "set by hand";
   snprintf(line, sizeof(line), "Clock: %04d-%02d-%02d %02d:%02d %s, %s",
            t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, zone, source);
   return String(line);
+}
+
+// The clock's line, and what keeps its time over a power loss: the config
+// page's status of the time, sent again whenever the time is set there.
+String timeStatusText() {
+  String s = clockStatusText();
+  if (!rtcOK)            { s += " No real-time clock: a time set here lasts until the next power loss."; }
+  else if (rtcLostPower) { s += " The real-time clock (DS3231) had lost power and has no time until one is set here or comes from the internet."; }
+  else                   { s += " The real-time clock (DS3231) keeps the time without power."; }
+  return s;
 }
 
 // A join that has not connected: keep why, for the config page.
@@ -3097,6 +3259,7 @@ void ntpAsk() {
   // was slow, negative when it was fast. Only logged.
   long drift = clockIsSet() ? (long)(utc - clockNow()) : 0;
   setClockTo(utc, TIME_NTP); // UTC as delivered; zone and daylight saving are added for the panel
+  ntpSyncedAt = utc;
   if (wifiStored() && !wifiCreds.verified) {   // the first sync over this WiFi: a known-good config now
     wifiCreds.verified = 1;
     saveWifiCreds();
@@ -3114,16 +3277,24 @@ void ntpAsk() {
 // sync due at the sync time. Counted in minutes since midnight so it wraps
 // across the hour and midnight (sync 05:00 -> 04:59, 00:00 -> 23:59);
 // "syncTimeMinute-1" alone is -1 for minute 00 and never matched, which once
-// stopped the daily resync for good.
+// stopped the daily resync for good. With a real-time clock only the sync
+// times syncDueAt() picks count; the wake-up asks about the minute to come.
 void syncSchedule() {
   const uint16_t minutesPerDay = 24 * 60;
   uint16_t nowMinute  = hourNow * 60 + minuteNow;
   uint16_t syncMinute = syncTimeHour * 60 + syncTimeMinute;
-  if (syncState == SYNC_IDLE && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay) {
+  if (syncState == SYNC_IDLE && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay &&
+      syncDueAt(clockNow() + 60)) {
     syncJoin();
     setSyncState(SYNC_WAKING);
   }
   if ((syncState == SYNC_IDLE || syncState == SYNC_WAKING) && nowMinute == syncMinute) {
+    if (!syncDueAt(clockNow())) {
+      // Woken for a sync that is no longer wanted (the interval was changed
+      // in the minute between): back to sleep.
+      if (syncState == SYNC_WAKING) { netRadioOff(); setSyncState(SYNC_IDLE); }
+      return;
+    }
     // Still idle means the early wake-up was missed, e.g. because the config AP
     // was up a minute ago; join now instead of failing until tomorrow.
     if (syncState == SYNC_IDLE) { syncJoin(); }
@@ -3284,13 +3455,15 @@ void saveTetrisSettings() {
 #endif
 
 // UI settings from flash; the defaults on a clock that never had them, which
-// are only written once something is changed. Revision 1 is the first, so
-// there is nothing to migrate yet.
+// are only written once something is changed. Fields an older revision did
+// not have get their default, here in RAM; the next save stores them.
 void loadUiSettings() {
   uiStore.begin("ui");
   uiStore.read(uiSettings);
   if (uiSettings.magic != UI_SETTINGS_MAGIC) { uiSettings = UI_DEFAULTS; }
+  if (uiSettings.rev < 2) { uiSettings.syncDays = UI_DEFAULTS.syncDays; }
   if (uiSettings.inputProfile >= INPUT_PROFILE_COUNT) { uiSettings.inputProfile = 0; }
+  if (uiSettings.syncDays > SYNC_DAYS_MAX) { uiSettings.syncDays = UI_DEFAULTS.syncDays; }
   Serial.print("Input profile: "); Serial.println(INPUT_PROFILES[uiSettings.inputProfile].name);
 }
 
@@ -3731,6 +3904,7 @@ void editorOpen(MenuItem item) {
     case ITEM_BRIGHT: brightSaved = settings.brightness; break;
     case ITEM_ZONE:   editIndex = zoneIndex(settings.tzOffset); break;
     case ITEM_DST:    editIndex = dstOptionIndex(settings.dst); break;
+    case ITEM_TIME:   timeEditorOpen(); break;
     default:          break;
   }
   editIndexSaved = editIndex;
@@ -3738,7 +3912,84 @@ void editorOpen(MenuItem item) {
   openScreen(SCREEN_EDITOR);
 }
 
+// The time editor starts from the time the clock shows, or, while it has
+// none, from noon on the day the firmware was built.
+void timeEditorOpen() {
+  editTimeField = TF_HOUR;
+  if (clockIsSet()) {
+    time_t local = clockNow() + tzTotalOffset();
+    struct tm t;
+    gmtime_r(&local, &t);
+    editTime[TF_HOUR] = t.tm_hour;  editTime[TF_MINUTE] = t.tm_min;
+    editTime[TF_YEAR] = t.tm_year + 1900;  editTime[TF_MONTH] = t.tm_mon + 1;  editTime[TF_DAY] = t.tm_mday;
+  } else {
+    // __DATE__ is "Mmm dd yyyy".
+    static const char MONTHS[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    const char *built = __DATE__;
+    char mon[4] = { built[0], built[1], built[2], '\0' };
+    const char *at = strstr(MONTHS, mon);
+    editTime[TF_HOUR] = 12;  editTime[TF_MINUTE] = 0;
+    editTime[TF_YEAR] = (int16_t)atoi(built + 7);
+    editTime[TF_MONTH] = at ? (int16_t)((at - MONTHS) / 3 + 1) : 1;
+    editTime[TF_DAY] = (int16_t)atoi(built + 4);
+  }
+  editTime[TF_YEAR] = constrain(editTime[TF_YEAR], TIME_YEAR_MIN, TIME_YEAR_MAX);
+}
+
+// Days in a month of the Gregorian calendar.
+int16_t daysInMonth(int16_t year, int16_t month) {
+  static const uint8_t DAYS[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+  bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  return (month == 2 && leap) ? 29 : DAYS[(month - 1) % 12];
+}
+
+// PREV / NEXT on a time field: up is later, as on a scale. Hours, minutes,
+// months and days go round; the year stops at its ends. A day past the end of
+// a shorter month moves back to its last.
+void timeEditorStep(int delta) {
+  int16_t &v = editTime[editTimeField];
+  switch (editTimeField) {
+    case TF_HOUR:   v = (int16_t)(((v + delta) % 24 + 24) % 24); break;
+    case TF_MINUTE: v = (int16_t)(((v + delta) % 60 + 60) % 60); break;
+    case TF_YEAR:   v = (int16_t)constrain(v + delta, TIME_YEAR_MIN, TIME_YEAR_MAX); break;
+    case TF_MONTH:  v = (int16_t)(((v - 1 + delta) % 12 + 12) % 12 + 1); break;
+    case TF_DAY: {
+      int16_t dim = daysInMonth(editTime[TF_YEAR], editTime[TF_MONTH]);
+      v = (int16_t)(((v - 1 + delta) % dim + dim) % dim + 1);
+      break;
+    }
+    default: break;
+  }
+  int16_t dim = daysInMonth(editTime[TF_YEAR], editTime[TF_MONTH]);
+  if (editTime[TF_DAY] > dim) { editTime[TF_DAY] = dim; }
+}
+
+// ENTER on the last field: the local time entered, with the seconds at zero,
+// becomes the clock's time (and the real-time clock's), converted to UTC with
+// the zone and its daylight-saving rule. A banner shows the time the clock now
+// shows.
+void timeEditorCommit() {
+  time_t local = (time_t)daysFromCivil(editTime[TF_YEAR], editTime[TF_MONTH], editTime[TF_DAY]) * 86400
+               + editTime[TF_HOUR] * 3600L + editTime[TF_MINUTE] * 60L;
+  setClockTo(localToUtc(local), TIME_MANUAL);
+  Serial.println("Time set in the menu");
+  closeScreen();
+  showTimeBanner();
+}
+
 void editorNavigate(InputFunction fn, uint8_t steps) {
+  if (editItem == ITEM_TIME) {
+    switch (fn) {
+      case FN_ENTER:
+        if (editTimeField + 1 < TF_COUNT) { editTimeField++; panelDirty = true; } else { timeEditorCommit(); }
+        return;
+      case FN_BACK:
+        if (editTimeField > 0) { editTimeField--; panelDirty = true; } else { closeScreen(); }
+        return;
+      default:
+        break;   // PREV, NEXT and HOME as in every editor
+    }
+  }
   switch (fn) {
     case FN_PREV:  editorStep(-(int)steps); break;
     case FN_NEXT:  editorStep(steps); break;
@@ -3757,6 +4008,7 @@ void editorStep(int delta) {
     case ITEM_BRIGHT: brightnessStep(-delta); break;   // applied at once: the panel is the preview
     case ITEM_ZONE:   editIndex = (uint8_t)constrain((int)editIndex + delta, 0, (int)ZONE_COUNT - 1); break;
     case ITEM_DST:    editIndex = (uint8_t)constrain((int)editIndex + delta, 0, (int)DST_OPTION_COUNT - 1); break;
+    case ITEM_TIME:   timeEditorStep(-delta); break;   // UP (PREV) is later
     default:          break;
   }
   editShownAt = millisNow;
@@ -4234,6 +4486,9 @@ void handleAP() {
     saveTetrisSettings();
 #endif
     saveUiSettings();
+    // NTP sync switched off: a sync that is due or about to start is dropped,
+    // and stopAPMode() below then leaves the radio off.
+    if (!ntpSyncOn() && syncState != SYNC_IDLE) { setSyncState(SYNC_IDLE); }
 #if GIF_PLAYBACK
     applyGifParams(query);
     saveGifSettings();
@@ -4255,10 +4510,13 @@ void handleAP() {
   } else if (path == "/settime") {
     handleSetTime(out, query);
   } else if (path == "/forget" && isPost) {
-    // No restart: the clock keeps its time until the next power loss.
+    // No restart: the clock keeps its time (until the next power loss, unless
+    // a real-time clock keeps it).
     forgetWifi();
     sendMessagePage(out, "WiFi forgotten",
-                    "The clock keeps its time until the next power loss. Store a WiFi here to get the time from the internet again.");
+                    (rtcOK && !rtcLostPower)
+                      ? "The real-time clock keeps the time. Store a WiFi here to get the time from the internet again."
+                      : "The clock keeps its time until the next power loss. Store a WiFi here to get the time from the internet again.");
   } else if (path.startsWith("/live")) {
     applyLiveParams(query); // live preview: apply to RAM only, no save, no reboot
     sendNoContent(out);
@@ -4297,17 +4555,16 @@ void handleAP() {
 // answered with the new status line) or from the date and time fields
 // (?date=YYYY-MM-DD&time=HH:MM, local time in the clock's zone).
 void handleSetTime(Print &out, const String &query) {
-  const long UTC_PLAUSIBLE_FROM = 1704067200L;   // 2024-01-01: anything earlier is a phone without a time
   String utc = getParam(query, "utc");
   if (utc.length()) {
     long t = utc.toInt();
-    if (t < UTC_PLAUSIBLE_FROM) {
+    if (t < UTC_PLAUSIBLE_FROM || t > UTC_PLAUSIBLE_TO) {
       sendPlainText(out, "Not set: the phone's time looks wrong.");
       return;
     }
     setClockTo((time_t)t, TIME_PHONE);
     Serial.print("Time set from a phone: "); Serial.println(t);
-    sendPlainText(out, clockStatusText().c_str());
+    sendPlainText(out, timeStatusText().c_str());
     return;
   }
   String date = getParam(query, "date"), hm = getParam(query, "time");
@@ -4321,7 +4578,7 @@ void handleSetTime(Print &out, const String &query) {
   time_t local = (time_t)daysFromCivil(y, mo, d) * 86400 + h * 3600 + mi * 60;
   setClockTo(localToUtc(local), TIME_MANUAL);
   Serial.println("Time set by hand");
-  sendMessagePage(out, "Time set", clockStatusText().c_str());
+  sendMessagePage(out, "Time set", timeStatusText().c_str());
 }
 
 /* ---- HTTP helpers -------------------------------------------------------- */
@@ -4407,6 +4664,7 @@ void applyParams(const String &q) {
   v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "prof");   if (v.length()) { uiSettings.inputProfile = constrain(v.toInt(), 0, INPUT_PROFILE_COUNT - 1); }
+  v = getParam(q, "syncd");  if (v.length()) { uiSettings.syncDays = constrain(v.toInt(), 0, SYNC_DAYS_MAX); }
 }
 
 // The home WiFi form (/wifi, POST). Returns what is wrong with it, or "" once
@@ -4658,6 +4916,27 @@ void sendFormPage(Print &c) {
   c.println("<label>NTP sync time</label><div class=row>");
   c.print("<div><input type=number min=0 max=23 name=synch value="); c.print(settings.syncHour); c.println("></div>");
   c.print("<div><input type=number min=0 max=59 name=syncm value="); c.print(settings.syncMinute); c.println("></div></div>");
+  // With a real-time clock the sync is needed only now and then, or not at
+  // all; without one it stays daily.
+  if (rtcOK) {
+    c.println("<label>NTP sync (the real-time clock keeps the time in between)</label><select name=syncd>");
+    struct SyncChoice { uint16_t days; const char *label; };
+    static const SyncChoice SYNC_CHOICES[] = {
+      { 1, "daily" }, { 7, "every 7 days" }, { 30, "every 30 days" }, { 91, "every 3 months" },
+      { 182, "every 6 months" }, { 365, "every 12 months" }, { 0, "never (no WiFi needed)" } };
+    bool listed = false;
+    for (const SyncChoice &s : SYNC_CHOICES) { listed |= (s.days == uiSettings.syncDays); }
+    for (const SyncChoice &s : SYNC_CHOICES) {
+      c.print("<option value="); c.print(s.days);
+      if (s.days == uiSettings.syncDays) { c.print(" selected"); }
+      c.print(">"); c.print(s.label); c.println("</option>");
+    }
+    if (!listed) {   // a value stored by hand: shown as it is, so saving keeps it
+      c.print("<option value="); c.print(uiSettings.syncDays); c.print(" selected>every ");
+      c.print(uiSettings.syncDays); c.println(" days</option>");
+    }
+    c.println("</select>");
+  }
 
   // Inputs: which input profile the buttons follow.
   c.println("<h2>Inputs</h2><label>Buttons</label><select name=prof>");
@@ -4688,7 +4967,7 @@ void sendFormPage(Print &c) {
   // Time: what the clock has now, the phone's time in one tap, or date and time
   // typed in (local time in the clock's zone).
   c.println("<h2>Time</h2>");
-  c.print("<p id=tnow style=\"font-size:14px\">"); c.print(clockStatusText()); c.println("</p>");
+  c.print("<p id=tnow style=\"font-size:14px\">"); c.print(timeStatusText()); c.println("</p>");
   c.println("<button type=button onclick=\"setPhone()\">Set from this phone</button>");
   c.println("<form action=\"/settime\" method=get><div class=row>");
   c.println("<div><label>Date</label><input type=date name=date></div>");
