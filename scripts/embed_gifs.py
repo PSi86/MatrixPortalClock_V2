@@ -3,65 +3,32 @@
 #
 # Sources: every .gif in gifs/ (the repository's examples, always taken) and in
 # the folders listed in gif_dirs.local, one per line (git ignores that file, so
-# private GIFs stay out of the repository). An exclude.txt in such a folder or
-# its parent names files to leave out, one per line; a line matches the end of
-# a file's path.
+# private GIFs stay out of the repository) - or, when GIF_DIRS is set, in the
+# folders it names instead (separated by ";" on Windows, ":" elsewhere). An
+# exclude.txt in such a folder or its parent names files to leave out, one per
+# line; a line matches the end of a file's path.
 #
-# A GIF fits when it is no larger than the panel either way round
-# (custom_gif_panel, e.g. 64x32): the clock draws it centred and unscaled, in
-# landscape or upright. GIFs from gif_dirs.local go in smallest first as long as
+# A GIF fits when it is no larger than the panel (custom_gif_panel, e.g. 64x32)
+# the way the clock stands (custom_gif_orientation: landscape, the default,
+# portrait or both, see gif_common.py): the clock draws it centred and
+# unscaled. GIFs from gif_dirs.local go in smallest first as long as
 # custom_gif_budget_kb allows. The result is gif_library.h in the build folder:
-# one array per GIF and the table BUILT_IN_GIFS.
+# one array per GIF and the table BUILT_IN_GIFS. The SHA-1s of the GIFs built
+# in go to GIF_BUILT_IN_SHA1 in the build environment, so that the GIF pack
+# (scripts/gif_pack.py) does not hold them twice.
 
 import hashlib
 import os
+import sys
 
 Import("env")  # noqa: F821 - provided by PlatformIO/SCons
 
 PROJECT_DIR = env.subst("$PROJECT_DIR")
+sys.path.insert(0, os.path.join(PROJECT_DIR, "scripts"))
+import gif_common  # noqa: E402
+
 OUT_DIR = os.path.join(env.subst("$BUILD_DIR"), "gifgen")
 OUT_FILE = os.path.join(OUT_DIR, "gif_library.h")
-
-
-def gif_size(path):
-    """(width, height) from the GIF header, or None if it is not a GIF."""
-    with open(path, "rb") as f:
-        head = f.read(10)
-    if len(head) < 10 or head[:4] != b"GIF8":
-        return None
-    return head[6] | (head[7] << 8), head[8] | (head[9] << 8)
-
-
-def gifs_in(folder):
-    found = []
-    for root, _dirs, files in os.walk(folder):
-        for name in sorted(files):
-            if name.lower().endswith(".gif"):
-                found.append(os.path.join(root, name))
-    return sorted(found)
-
-
-def exclusions(folder):
-    lines = []
-    for where in (folder, os.path.dirname(os.path.abspath(folder))):
-        path = os.path.join(where, "exclude.txt")
-        if os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
-                lines += [l.strip().replace("\\", "/") for l in f if l.strip() and not l.startswith("#")]
-    return lines
-
-
-def local_dirs():
-    path = os.path.join(PROJECT_DIR, "gif_dirs.local")
-    if not os.path.isfile(path):
-        return []
-    dirs = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                dirs.append(line if os.path.isabs(line) else os.path.join(PROJECT_DIR, line))
-    return dirs
 
 
 def c_name(stem, used):
@@ -77,12 +44,12 @@ def build():
     panel = env.GetProjectOption("custom_gif_panel", "")
     if not panel:
         return
-    pw, ph = (int(v) for v in panel.lower().split("x"))
+    pw, ph = gif_common.panel_size(panel)
+    orientation = gif_common.check_orientation(env.GetProjectOption("custom_gif_orientation", "landscape"))
     budget = int(env.GetProjectOption("custom_gif_budget_kb", "600")) * 1024
 
     def fits(size):
-        w, h = size
-        return (w <= pw and h <= ph) or (w <= ph and h <= pw)
+        return gif_common.fits(size, (pw, ph), orientation)
 
     chosen, too_big, over_budget, seen = [], [], [], set()
 
@@ -97,22 +64,26 @@ def build():
         return len(data)
 
     total = 0
-    for path in gifs_in(os.path.join(PROJECT_DIR, "gifs")):
-        size = gif_size(path)
+    for path in gif_common.gifs_in(os.path.join(PROJECT_DIR, "gifs")):
+        size = gif_common.gif_size(path)
         if size and fits(size):
             total += take(path, size)
         elif size:
             too_big.append(path)
 
-    extra_dirs = [d for d in local_dirs() if os.path.isdir(d)]
+    listed = os.environ.get("GIF_DIRS")
+    if listed:
+        dirs, source = [d.strip() for d in listed.split(os.pathsep) if d.strip()], "GIF_DIRS"
+    else:
+        dirs, source = gif_common.listed_dirs(PROJECT_DIR, "gif_dirs.local"), "gif_dirs.local"
+    extra_dirs = [d for d in dirs if os.path.isdir(d)]
     candidates = []
     for folder in extra_dirs:
-        skip = exclusions(folder)
-        for path in gifs_in(folder):
-            rel = path.replace("\\", "/")
-            if any(rel.endswith(s) for s in skip):
+        skip = gif_common.exclusions(folder)
+        for path in gif_common.gifs_in(folder):
+            if gif_common.excluded(path, skip):
                 continue
-            size = gif_size(path)
+            size = gif_common.gif_size(path)
             if size and fits(size):
                 candidates.append((os.path.getsize(path), path, size))
             elif size:
@@ -153,12 +124,13 @@ def build():
     if old != text:   # rewriting an unchanged file would rebuild the sketch every time
         with open(OUT_FILE, "w", encoding="utf-8") as f:
             f.write(text)
+    env["GIF_BUILT_IN_SHA1"] = " ".join(sorted(seen))
 
-    print("GIFs: %d built in (%d KB) for a %dx%d panel; %d larger than the panel, %d over the %d KB budget"
-          % (len(chosen), total // 1024, pw, ph, len(too_big), len(over_budget), budget // 1024))
+    print("GIFs: %d built in (%d KB) for a %dx%d panel standing %s; %d do not fit, %d over the %d KB budget"
+          % (len(chosen), total // 1024, pw, ph, orientation, len(too_big), len(over_budget), budget // 1024))
     if extra_dirs:
-        print("GIFs: including folders from gif_dirs.local (%s) - do not publish this firmware"
-              % ", ".join(extra_dirs))
+        print("GIFs: including folders from %s (%s) - do not publish this firmware"
+              % (source, ", ".join(extra_dirs)))
 
 
 build()
