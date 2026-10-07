@@ -232,6 +232,15 @@ the panel ends a GIF. It is drawn at 8 bits per colour straight into the panel
 driver, through a gamma table (GIF colours are made for screens, the light of an
 LED is linear in its on-time), and the panel's brightness dims it like the face.
 
+A GIF needs more light than the face to be made out: at the clock's darkest most
+GIFs are hard to see unless they have strong contrast and clear lines. So while a
+GIF plays the panel runs at least at the **lowest brightness for GIFs** (config
+page, 0–255, 0 = as the clock); when the clock is brighter its own brightness
+applies. When the clock has switched the panel dark (brightness 0), a GIF stays
+dark too. For now a knock on the face plays the last GIF again (a random one when
+none has played yet), so that GIFs can be compared at that brightness; the wave
+gesture still sets off the knock effect.
+
 The GIFs are built into the firmware by `scripts/embed_gifs.py`: every GIF in
 [`gifs/`](gifs/README.md) that fits the panel (four examples with their licences
 and authors), and those of the folders listed in `gif_dirs.local`, smallest first,
@@ -591,6 +600,9 @@ gives way and drops), **Scatter** (the pieces fly off and tumble) and **Clear
 rows** (rows flash and vanish from the bottom, everything above dropping into the
 gap), plus *Random each time*. The effect is drawn once per event, so all the
 digits involved always come apart the same way.
+
+On the S3 a knock on the face plays the last GIF again for now (see [GIF
+playback](#gif-playback)); the wave gesture sets off this effect there.
 
 **The sensor raises the knock itself.** Its own interrupt generator watches for
 it and pulls INT1, which is wired to GPIO15 — not documented on Adafruit's pinout

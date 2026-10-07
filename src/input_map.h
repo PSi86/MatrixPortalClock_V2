@@ -57,10 +57,20 @@ enum InputFunction : uint8_t {
   FN_BRIGHT_FADE,      // cyclic brightness fade while the button stays held, saved on release
   FN_KNOCK_EFFECT,     // the Tetris digits come apart
   FN_PLAY_GIF,         // a GIF now, on boards with GIF playback
+  FN_GIF_AGAIN,        // the last GIF shown once more, on boards with GIF playback
   FN_SHOW_HINTS,       // what the gestures do, for a moment
 };
 
 struct InputMapping { InputEvent event; InputContext context; InputFunction function; };
+
+// For now a knock on the face plays the last GIF again on boards with GIF
+// playback, so that GIFs can be compared at their own lowest brightness
+// (2026-10-07). Elsewhere it stays the knock effect, as the wave gesture does.
+#if GIF_PLAYBACK
+constexpr InputFunction KNOCK_ON_FACE = FN_GIF_AGAIN;
+#else
+constexpr InputFunction KNOCK_ON_FACE = FN_KNOCK_EFFECT;
+#endif
 
 // Profile "Default": on the face any press opens the menu - except holding
 // UP, whose repeats would close the menu again at once; it plays a GIF, which
@@ -73,7 +83,7 @@ constexpr InputMapping PROFILE_DEFAULT[] = {
   { EV_DOWN_SHORT,     CTX_FACE,    FN_OPEN_MENU      },
   { EV_DOWN_HOLD,      CTX_FACE,    FN_OPEN_MENU      },
   { EV_UP_HOLD,        CTX_FACE,    FN_PLAY_GIF       },
-  { EV_KNOCK,          CTX_FACE,    FN_KNOCK_EFFECT   },
+  { EV_KNOCK,          CTX_FACE,    KNOCK_ON_FACE     },
   { EV_UP_SHORT,       CTX_MENU,    FN_PREV           },
   { EV_DOWN_SHORT,     CTX_MENU,    FN_NEXT           },
   { EV_DOWN_HOLD,      CTX_MENU,    FN_ENTER          },
@@ -92,7 +102,7 @@ constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
   { EV_UP_3X,          CTX_FACE,    FN_TOGGLE_HOTSPOT },
   { EV_UP_HOLD,        CTX_FACE,    FN_BRIGHT_FADE    },
   { EV_DOWN_HOLD,      CTX_FACE,    FN_OPEN_MENU      },
-  { EV_KNOCK,          CTX_FACE,    FN_KNOCK_EFFECT   },
+  { EV_KNOCK,          CTX_FACE,    KNOCK_ON_FACE     },
   { EV_UP_SHORT,       CTX_MENU,    FN_PREV           },
   { EV_DOWN_SHORT,     CTX_MENU,    FN_NEXT           },
   { EV_DOWN_HOLD,      CTX_MENU,    FN_ENTER          },
