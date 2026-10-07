@@ -394,9 +394,9 @@ class PanelCanvas : public GFXcanvas16 {
   // For the brightness: per colour, the value whose light is nearest to the
   // canvas value's share of it. Blue steps the coarsest at the dark end (8.5 %
   // of full is followed by 12.6 %), so the light blue really gives for 255 is
-  // the full share all three aim at: white stays white (red and green within
-  // 7 % of blue, by the measurement), and the brightness keeps to blue's steps
-  // there (up to 19 % off the asked one) instead of the colours drifting apart.
+  // the full share all three aim at: white stays white (measured: blue at 0.94 to
+  // 1.07 of red, green at 1.00 to 1.13), and the brightness keeps to blue's steps
+  // there (up to 21 % off the asked one) instead of the colours drifting apart.
   void buildLuts() {
     uint16_t k = 0;
     uint32_t full = _light[2][nearest(2, (uint32_t)_bright * 65535UL / 255UL, k)];

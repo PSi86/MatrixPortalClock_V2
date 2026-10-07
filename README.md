@@ -694,12 +694,11 @@ changes; GIFs go through the same tables. Blue steps the coarsest at the dark en
 (its weak low bits leave nothing between 8.5 % and 12.6 % of full), so the light
 blue really gives sets the share all three colours aim at: white stays white
 (red and green within 7 % of blue), and at the dark end the brightness follows
-blue's steps, up to 19 % off the one asked for. Measured through this path
-while each colour still picked its nearest value on its own, blue stayed within
-0.98 to 1.03 of red from brightness 48 up and at 0.91 to 0.95 at 32 and 40, where
-the OE time had left 0 to 0.62; the measured light agreed with the bit weights
-it is worked out from, and by them red and green now stay within 7 % of blue at
-every brightness. A brightness step costs one full frame to the driver, 3.7 ms.
+blue's steps, up to 21 % off the one asked for. Measured through this path,
+blue stayed within 0.94 to 1.07 of red at every brightness and green within 1.00
+to 1.13 (the widest at the darkest, where red gives the sensor only about 1.6 lx),
+where the OE time had left blue at 0 to 0.62 of red. A brightness step costs one
+full frame to the driver, 3.6 ms.
 
 Two more settings matter on the MatrixPortal S3 (`PanelCanvas` in
 `src/board_hal.h`):
