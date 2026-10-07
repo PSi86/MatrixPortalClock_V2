@@ -500,8 +500,9 @@ class SettingsStore {
 #define SETTINGS_FLASH_ADDR 0x0007E000UL   // the settings, where they have always been
 #define UI_FLASH_ADDR       0x0007C000UL   // UI settings
 #define WIFI_FLASH_ADDR     0x0007A000UL   // home WiFi credentials
+#define KEYS_FLASH_ADDR     0x00078000UL   // face shortcuts
 // The program has to end below the lowest of these. platformio.ini caps its
-// size (board_upload.maximum_size = 0x7A000 - 0x4000), so a sketch that grew
+// size (board_upload.maximum_size = 0x78000 - 0x4000), so a sketch that grew
 // into them would fail to build instead of being overwritten by a save.
 
 // The block of a key; 0 for a key that has none.
@@ -509,6 +510,7 @@ inline uint32_t settingsFlashAddr(const char *key) {
   if (strcmp(key, "settings") == 0) { return SETTINGS_FLASH_ADDR; }
   if (strcmp(key, "ui") == 0)       { return UI_FLASH_ADDR; }
   if (strcmp(key, "wifi") == 0)     { return WIFI_FLASH_ADDR; }
+  if (strcmp(key, "keys") == 0)     { return KEYS_FLASH_ADDR; }
   return 0;
 }
 

@@ -195,6 +195,23 @@ const UiSettings UI_DEFAULTS = { UI_SETTINGS_MAGIC, UI_SETTINGS_REV, 0, 7, 0, 0 
 UiSettings uiSettings;
 SettingsStore<UiSettings> uiStore;
 
+// Face shortcuts: what each face event does (input_map.h: FACE_EVENTS), as
+// FACE_ACTIONS codes. A blob of its own (NVS key "keys"; on the M4 a flash
+// block of its own); nothing stored means the profile's own face rows.
+#define FACE_KEYS_MAGIC 0xFA5C
+#define FACE_KEYS_REV   1
+const uint8_t FACE_KEYS_MAX = 32;          // room for face events added later
+struct FaceKeys {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  count;                          // events stored (FACE_EVENT_COUNT when written)
+  uint8_t  action[FACE_KEYS_MAX];          // a FACE_ACTIONS code per event, in FACE_EVENTS order
+};
+static_assert(FACE_EVENT_COUNT <= FACE_KEYS_MAX, "FaceKeys has no room for every face event");
+uint8_t faceKeys[FACE_EVENT_COUNT];        // what applies now
+bool    faceKeysOwn = false;               // false: the profile's own face rows apply
+SettingsStore<FaceKeys> keysStore;
+
 #if GIF_PLAYBACK
 // GIF settings: a blob of its own (NVS key "gif"), so no other blob changes.
 #define GIF_SETTINGS_MAGIC 0x61F5
@@ -975,6 +992,7 @@ void setup(void) {
   rtcBegin();
   // PAJ7620U2 gesture sensor, also on the bus.
   gestureBegin();
+  loadFaceKeys();         // needs to know which sensors were found
 
   // Initialize matrix...
   matrix.setRotation(3); //1
@@ -1605,8 +1623,19 @@ void showBanner(const char *first, const char *second, uint8_t r, uint8_t g, uin
 // swipe does there, for BANNER_MS; the swipe itself closes it and goes on to
 // the face.
 void showHints() {
-  showBanner("swipe", "menu", 110, 110, 110);
-  bannerKind = BANNER_HINT;
+  // The gesture to show: the first found that opens the menu, else the first
+  // that does anything; nothing to say, no banner.
+  for (uint8_t pass = 0; pass < 2; pass++) {
+    for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+      const FaceEvent &e = FACE_EVENTS[i];
+      const FaceAction &a = FACE_ACTIONS[faceKeys[i]];
+      if (!e.word[0] || !faceEventFitted(e.event) || a.function == FN_NONE) { continue; }
+      if (pass == 0 && a.function != FN_OPEN_MENU) { continue; }
+      showBanner(e.word, a.word, 110, 110, 110);
+      bannerKind = BANNER_HINT;
+      return;
+    }
+  }
 }
 
 // A banner with the time the clock now shows and its offset from UTC, after a
@@ -3744,12 +3773,113 @@ InputContext inputContext() {
 }
 
 // The input profile chosen on the config page (checked when it is loaded).
+/* ----------------------------------------------------------------------
+   Face shortcuts (concept doc: "Face shortcuts")
+
+   On the face every event of a fitted source does what the Inputs page gave
+   it (faceKeys); the menu, the hotspot screen and the start keep the
+   profile's rows. Stored shortcuts that would leave no input found able to
+   open the menu - a gesture sensor that has gone, say - give way to the
+   profile's own face rows, so the menu can never be locked away.
+   ---------------------------------------------------------------------- */
+
+// The position of an event in FACE_EVENTS; -1 for one that is no face event.
+int8_t faceEventIndex(InputEvent ev) {
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+    if (FACE_EVENTS[i].event == ev) { return (int8_t)i; }
+  }
+  return -1;
+}
+
+// Whether the source of a face event was found: the buttons always, the knock
+// with the accelerometer, the gestures with the gesture sensor.
+bool faceEventFitted(InputEvent ev) {
+  if (ev == EV_KNOCK) { return accelOK; }
+  if (isGestureEvent(ev)) { return gestureOK; }
+  return true;
+}
+
+// Whether an action can sit on a face event of this clock.
+bool faceActionOffered(uint8_t code, InputEvent ev) {
+  if (code >= FACE_ACTION_COUNT) { return false; }
+  switch (FACE_ACTIONS[code].needs) {
+    case NEEDS_HOLD:   return ev == EV_UP_HOLD || ev == EV_DOWN_HOLD;
+    case NEEDS_GIFS:   return GIF_PLAYBACK != 0;
+    case NEEDS_TETRIS: return WATCHFACE_TETRIS != 0;
+    default:           return true;
+  }
+}
+
+// A profile's own face rows, as shortcuts.
+void faceKeysOfProfile(uint8_t profile, uint8_t *codes) {
+  const InputProfile &p = INPUT_PROFILES[profile];
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+    InputEvent ev = FACE_EVENTS[i].event;
+    const InputMapping *rows = isGestureEvent(ev) ? p.gestures : p.rows;
+    uint8_t count = isGestureEvent(ev) ? p.gestureCount : p.count;
+    codes[i] = 0;
+    for (uint8_t r = 0; r < count; r++) {
+      if (rows[r].event != ev || rows[r].context != CTX_FACE) { continue; }
+      for (uint8_t a = 0; a < FACE_ACTION_COUNT; a++) {
+        if (FACE_ACTIONS[a].function == rows[r].function) { codes[i] = a; }
+      }
+    }
+  }
+}
+
+// Whether some input found opens the menu with these shortcuts.
+bool faceKeysReachMenu(const uint8_t *codes) {
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+    if (faceEventFitted(FACE_EVENTS[i].event) && FACE_ACTIONS[codes[i]].function == FN_OPEN_MENU) { return true; }
+  }
+  return false;
+}
+
+// At start-up, once the sensors have been looked for.
+void loadFaceKeys() {
+  keysStore.begin("keys");
+  FaceKeys stored;
+  keysStore.read(stored);
+  faceKeysOfProfile(uiSettings.inputProfile, faceKeys);
+  faceKeysOwn = false;
+  if (stored.magic == FACE_KEYS_MAGIC && stored.rev == FACE_KEYS_REV) {
+    uint8_t codes[FACE_EVENT_COUNT];
+    memcpy(codes, faceKeys, sizeof(codes));   // events stored by an older firmware keep the profile's
+    for (uint8_t i = 0; i < FACE_EVENT_COUNT && i < stored.count; i++) {
+      codes[i] = faceActionOffered(stored.action[i], FACE_EVENTS[i].event) ? stored.action[i] : 0;
+    }
+    if (faceKeysReachMenu(codes)) {
+      memcpy(faceKeys, codes, sizeof(codes));
+      faceKeysOwn = true;
+    } else {
+      Serial.println("Face shortcuts: with the inputs found none opens the menu - the profile's apply");
+    }
+  }
+  Serial.print("Face shortcuts: ");
+  Serial.println(faceKeysOwn ? "set on the Inputs page" : "the profile's");
+}
+
+void saveFaceKeys() {
+  FaceKeys k;
+  memset(&k, 0, sizeof(k));
+  k.magic = FACE_KEYS_MAGIC;
+  k.rev   = FACE_KEYS_REV;
+  k.count = FACE_EVENT_COUNT;
+  memcpy(k.action, faceKeys, FACE_EVENT_COUNT);
+  keysStore.write(k);
+}
+
 const InputProfile &activeProfile() {
   return INPUT_PROFILES[uiSettings.inputProfile];
 }
 
-// What the active profile maps this event to in this context; FN_NONE if nothing.
+// What this event does in this context: on the face the shortcuts, elsewhere
+// the active profile's rows; FN_NONE if nothing.
 InputFunction mappedFunction(InputEvent ev, InputContext ctx) {
+  if (ctx == CTX_FACE) {
+    int8_t i = faceEventIndex(ev);
+    return i < 0 ? FN_NONE : FACE_ACTIONS[faceKeys[i]].function;
+  }
   const InputProfile &profile = activeProfile();
   const InputMapping *rows = isGestureEvent(ev) ? profile.gestures : profile.rows;
   uint8_t count = isGestureEvent(ev) ? profile.gestureCount : profile.count;
@@ -4770,6 +4900,18 @@ void handleAP() {
 #if WATCHFACE_TETRIS
     shakePreviewReq = true;   // show what was restored
 #endif
+  } else if (path == "/inputs") {
+    sendInputsPage(out);
+  } else if (path == "/keys") {
+    String error = applyKeysForm(query);
+    if (error.length()) {
+      sendMessagePage(out, "Not saved", error.c_str());
+    } else {
+      saveUiSettings();
+      saveFaceKeys();
+      sendMessagePage(out, "Saved", "The hotspot closes and the clock goes back to its face.");
+      closeHotspot = true;
+    }
   } else if (path == "/b") {
     sendBrightness(out); // tiny plain-text poll of the currently rendered brightness
   } else if (path == "/" || path.startsWith("/index")) {
@@ -4903,9 +5045,7 @@ void applyParams(const String &q) {
   v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
   v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "prof");   if (v.length()) { uiSettings.inputProfile = constrain(v.toInt(), 0, INPUT_PROFILE_COUNT - 1); }
   v = getParam(q, "syncd");  if (v.length()) { uiSettings.syncDays = constrain(v.toInt(), 0, SYNC_DAYS_MAX); }
-  v = getParam(q, "gmount"); if (v.length()) { uiSettings.gestureMount = constrain(v.toInt(), 0, 3); }
 }
 
 // The home WiFi form (/wifi, POST). Returns what is wrong with it, or "" once
@@ -5180,24 +5320,10 @@ void sendFormPage(Print &c) {
   }
 
   // Inputs: which input profile the buttons follow.
-  c.println("<h2>Inputs</h2><label>Buttons</label><select name=prof>");
-  for (uint8_t i = 0; i < INPUT_PROFILE_COUNT; i++) { printOption(c, uiSettings.inputProfile, i, INPUT_PROFILES[i].name); }
-  c.println("</select>");
-  // The gesture sensor, if one was found: how it is turned against the panel,
-  // so that a swipe up is up on the panel.
-  if (gestureOK) {
-    c.print("<p style=\"font-size:13px\">Gesture sensor (PAJ7620U2) found, read ");
-    c.print(GESTURE_INT >= 0 ? "on its INT line." : "by asking it every 50 ms (no INT line, so the hints when a hand comes near work too).");
-    c.println("</p>");
-    c.println("<label>Gesture sensor turned against the panel (if a swipe up acts as another direction, try the next)</label><select name=gmount>");
-    printOption(c, uiSettings.gestureMount, 0, "not turned");
-    printOption(c, uiSettings.gestureMount, 1, "90 degrees clockwise");
-    printOption(c, uiSettings.gestureMount, 2, "180 degrees");
-    printOption(c, uiSettings.gestureMount, 3, "90 degrees counter-clockwise");
-    c.println("</select>");
-  } else {
-    c.println("<p style=\"font-size:13px\">No gesture sensor found.</p>");
-  }
+  // The inputs found; what they do is set on a page of its own.
+  c.println("<h2>Inputs</h2>");
+  printInputsFound(c);
+  c.println("<p><a href=\"/inputs\" style=\"color:#6af\">Buttons, knock and gestures: what they do</a></p>");
 
 #if GIF_PLAYBACK
   // GIFs: whether they come up by themselves, how often and for how long.
@@ -5314,6 +5440,102 @@ void sendFormPage(Print &c) {
 }
 
 // A short page with a heading, one line of text and the way back.
+// The inputs this clock found, as a line of the config pages.
+void printInputsFound(Print &c) {
+  c.print("<p style=\"font-size:13px\">Found: buttons UP and DOWN");
+  if (accelOK) { c.print(", the knock (accelerometer)"); }
+  if (gestureOK) {
+    c.print(", a gesture sensor (PAJ7620U2), read ");
+    c.print(GESTURE_INT >= 0 ? "on its INT line" : "by asking it every 50 ms");
+  } else {
+    c.print("; no gesture sensor");
+  }
+  c.println(".</p>");
+}
+
+// /inputs: the profile, the gesture sensor's turn, and what every face event of
+// the inputs found does (concept doc: "Face shortcuts").
+void sendInputsPage(Print &c) {
+  sendHttpHeader(c);
+  c.println("<!DOCTYPE html><html><head><meta charset=utf-8>");
+  c.println("<meta name=viewport content=\"width=device-width,initial-scale=1\">");
+  c.println("<title>Inputs</title><style>");
+  c.println("body{font-family:sans-serif;background:#111;color:#eee;margin:0;padding:16px}a{color:#6af}");
+  c.println("h1{font-size:20px}h2{font-size:17px;margin:28px 0 0}label{display:block;margin:12px 0 4px}");
+  c.println("select{width:100%;max-width:320px;padding:6px;font-size:16px;box-sizing:border-box}p{max-width:320px}");
+  c.println("button{margin-top:18px;padding:10px 18px;font-size:16px;background:#06c;color:#fff;border:0;border-radius:4px}");
+  c.println("</style></head><body><h1>Inputs</h1>");
+  printInputsFound(c);
+  c.println("<form action=\"/keys\" method=get>");
+  c.println("<label>Profile: the menu, the hotspot screen and the start, and to begin with the face below</label>");
+  c.println("<select name=prof id=prof onchange=\"fill()\">");
+  for (uint8_t i = 0; i < INPUT_PROFILE_COUNT; i++) { printOption(c, uiSettings.inputProfile, i, INPUT_PROFILES[i].name); }
+  c.println("</select>");
+  // The gesture sensor, if one was found: how it is turned against the panel,
+  // so that a swipe up is up on the panel.
+  if (gestureOK) {
+    c.println("<label>Gesture sensor turned against the panel (if a swipe up acts as another direction, try the next)</label><select name=gmount>");
+    printOption(c, uiSettings.gestureMount, 0, "not turned");
+    printOption(c, uiSettings.gestureMount, 1, "90 degrees clockwise");
+    printOption(c, uiSettings.gestureMount, 2, "180 degrees");
+    printOption(c, uiSettings.gestureMount, 3, "90 degrees counter-clockwise");
+    c.println("</select>");
+  }
+  c.println("<h2>On the clock face</h2>");
+  c.println("<p style=\"font-size:13px\">Choosing a profile above fills these with its own. Giving a button's "
+            "twice or three times something to do makes its single press wait 0.4 s for the next. At least "
+            "one of them has to open the menu.</p>");
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+    const FaceEvent &e = FACE_EVENTS[i];
+    if (!faceEventFitted(e.event)) { continue; }
+    c.print("<label>"); c.print(e.label); c.print("</label><select name=k"); c.print(i); c.println(">");
+    for (uint8_t a = 0; a < FACE_ACTION_COUNT; a++) {
+      if (faceActionOffered(a, e.event)) { printOption(c, faceKeys[i], a, FACE_ACTIONS[a].label); }
+    }
+    c.println("</select>");
+  }
+  c.println("<button type=submit>Save</button></form>");
+  c.println("<p><a href=\"/\">Back to the settings</a></p>");
+  // Each profile's own face rows, for fill() when the profile changes.
+  c.print("<script>var T=[");
+  for (uint8_t p = 0; p < INPUT_PROFILE_COUNT; p++) {
+    uint8_t codes[FACE_EVENT_COUNT];
+    faceKeysOfProfile(p, codes);
+    c.print(p ? ",[" : "[");
+    for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) { if (i) { c.print(','); } c.print(codes[i]); }
+    c.print(']');
+  }
+  c.println("];");
+  c.println("function fill(){var t=T[document.getElementById('prof').value];for(var i=0;i<t.length;i++){"
+            "var s=document.getElementsByName('k'+i)[0];if(s){s.value=t[i];if(s.selectedIndex<0){s.value=0;}}}}");
+  c.println("</script></body></html>");
+}
+
+// /keys: the Inputs page sent. Nothing is taken unless an input found still
+// opens the menu; the error says why.
+String applyKeysForm(const String &q) {
+  uint8_t codes[FACE_EVENT_COUNT];
+  memcpy(codes, faceKeys, sizeof(codes));
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+    String v = getParam(q, String("k") + i);
+    if (v.length()) {
+      long a = v.toInt();
+      codes[i] = (a >= 0 && faceActionOffered((uint8_t)a, FACE_EVENTS[i].event)) ? (uint8_t)a : 0;
+    }
+  }
+  if (!faceKeysReachMenu(codes)) {
+    return "None of the inputs found would open the menu, so nothing was saved. "
+           "<a href=\"/inputs\">Back to the inputs</a> to give one of them \"open the menu\".";
+  }
+  String v = getParam(q, "prof");
+  if (v.length()) { uiSettings.inputProfile = constrain(v.toInt(), 0, INPUT_PROFILE_COUNT - 1); }
+  v = getParam(q, "gmount");
+  if (v.length()) { uiSettings.gestureMount = constrain(v.toInt(), 0, 3); }
+  memcpy(faceKeys, codes, sizeof(codes));
+  faceKeysOwn = true;
+  return String();
+}
+
 void sendMessagePage(Print &c, const char *title, const char *text) {
   sendHttpHeader(c);
   c.println("<!DOCTYPE html><html><head><meta charset=utf-8>");
