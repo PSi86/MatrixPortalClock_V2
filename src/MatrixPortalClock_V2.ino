@@ -800,12 +800,18 @@ int16_t       editTime[TF_COUNT];
 uint8_t       editTimeField  = TF_HOUR;
 
 // Brightness steps. Manual: 16 levels evenly spaced on the perceptual scale of
-// the brightness fade (FADE_GAMMA), from the lowest brightness at which the blue
-// digits still light (8: color565 keeps the top five bits of blue) to full.
+// the brightness fade (FADE_GAMMA), from the lowest brightness to full: on the
+// S3 the panel's floor (PANEL_BRIGHT_FLOOR, 13, about 5 %), on the M4 the
+// lowest at which the blue digits still light (8: color565 keeps the top five
+// bits of blue).
 // Auto brightness: settings.brightness is a trim around the sensor value (128 =
 // as measured), stepped by a factor of 2^(1/8) from half to twice the sensor.
 const uint8_t BRIGHT_LEVELS    = 16;
+#if PANEL_DRIVER_DMA
+const float   BRIGHT_PHASE_MIN = 0.2585f;  // perceptual position of brightness 13
+#else
 const float   BRIGHT_PHASE_MIN = 0.207f;   // perceptual position of brightness 8
+#endif
 const int8_t  BRIGHT_TRIM_MAX  = 8;
 
 /* ======================================================================
@@ -967,7 +973,7 @@ void setup(void) {
 #if PANEL_DRIVER_DMA
   bool matrixOk = matrix.begin();
   Serial.println(matrixOk ? "Panel driver started" : "Panel driver FAILED");
-  matrix.setBrightness(effectiveBrightness);   // the colours are drawn at full strength
+  matrix.setBrightness(effectiveBrightness);   // the canvas colours are shares of it
 #else
   ProtomatterStatus matrixstatus = matrix.begin();
   Serial.print("Protomatter status: ");
@@ -5301,8 +5307,8 @@ void sendMessagePage(Print &c, const char *title, const char *text) {
    decoded into an RGB canvas here, so transparency and disposal work the same
    whatever the GIF does, and drawn at 8 bits per colour straight into the
    panel driver through a gamma table: GIF colours are made for screens, while
-   the light of an LED is linear in its on-time. The panel's brightness dims a
-   GIF as it dims the face.
+   the light of an LED is linear in its on-time. The panel's tables for the
+   brightness (PanelCanvas::panelValue) dim a GIF as they dim the face.
    ====================================================================== */
 
 // Keeps the settings in range: whole minutes, the maximum not below the minimum.
@@ -5483,7 +5489,8 @@ void gifDispose() {
   }
 }
 
-// The canvas onto the panel, centred, the rest dark, through the gamma table.
+// The canvas onto the panel, centred, the rest dark, through the gamma table
+// and the panel's table for the brightness.
 void gifRender() {
   int16_t lw = matrix.width(), lh = matrix.height();
   int16_t x0 = (lw - gifW) / 2, y0 = (lh - gifH) / 2;
@@ -5495,7 +5502,9 @@ void gifRender() {
       int16_t gx = x - x0, gy = y - y0;
       if (gx >= 0 && gy >= 0 && gx < gifW && gy < gifH) {
         const uint8_t *c = &gifPlayer->canvas[(gy * gifW + gx) * 3];
-        r = gifGamma[c[0]]; g = gifGamma[c[1]]; b = gifGamma[c[2]];
+        r = matrix.panelValue(0, gifGamma[c[0]]);
+        g = matrix.panelValue(1, gifGamma[c[1]]);
+        b = matrix.panelValue(2, gifGamma[c[2]]);
       }
       int16_t px = x, py = y;
       matrix.panelXY(px, py);
