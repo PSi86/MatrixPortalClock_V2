@@ -245,8 +245,12 @@ at a random time between a minimum and a maximum (2 and 30 minutes by default),
 for a set time (7 s by default); all three and switching it off are on the config
 page under **GIFs**. Holding UP on the face plays one at once. A GIF plays in whole
 loops, as many as fit into the set time and at least one, so it is never cut off in
-the middle: with 8 s a GIF of 3.5 s plays twice, one of 12 s once. A GIF whose
-single loop runs longer than a minute is ended after a minute. A GIF comes up only
+the middle: with 8 s a GIF of 3.5 s plays twice, one of 12 s once. The length of a
+loop is worked out from the file when the GIF starts, from its frame delays (a
+frame given less than 20 ms, or no delay at all, shows for 100 ms, as in browsers),
+and the frames follow the file's own timeline, so a frame drawn a few ms late does
+not stretch the loop. A GIF whose single loop runs longer than a minute is ended
+after a minute. A GIF comes up only
 over the plain face; while the menu, a banner or the hotspot is up it waits. Any
 button press ends it early and does nothing else; the hold that started it does
 not end it.

@@ -253,9 +253,12 @@ uint8_t       gifRotation = 0;               // the rotation it started in
 unsigned long gifShownAt = 0, gifNextFrameAt = 0, gifDueAt = 0;
 bool          gifRestartDue = false;         // its last frame is on the panel: start over with the next
 uint16_t      gifLoops = 0;                  // whole loops of it shown so far
-// A GIF ends at the end of a loop (drawGif()); one whose single loop runs
-// longer than the longest setting is ended there anyway, so a very long GIF
-// cannot hide the clock for minutes.
+uint16_t      gifLoopsPlanned = 1;           // as many as fit into gifSettings.seconds, at least one
+uint32_t      gifLoopTime = 0;               // one loop by its frame delays, 0 if unknown
+uint16_t      gifFrames = 0, gifFrame = 0;   // frames of a loop (0 if unknown), of this loop shown so far
+// A GIF ends at the end of its last loop (drawGif()); one whose single loop
+// runs longer than the longest setting is ended there anyway, so a very long
+// GIF cannot hide the clock for minutes.
 const unsigned long GIF_PLAY_MAX_MS = GIF_SECONDS_MAX * 1000UL;
 struct GifArea { int16_t x, y, w, h; uint8_t disposal; bool valid; };
 GifArea       gifPrev;                       // the last frame's area, for its disposal
@@ -5725,11 +5728,16 @@ bool gifStart(int16_t i) {
   gifPrev.valid = false;
   gifRestartDue = false;
   gifLoops = 0;
+  gifFrame = 0;
+  gifLoopTime = gifLoopMs(data, size, gifFrames);
+  uint32_t playMs = gifSettings.seconds * 1000UL;
+  gifLoopsPlanned = (gifLoopTime > 0 && gifLoopTime <= playMs) ? (uint16_t)(playMs / gifLoopTime) : 1;
   gifRotation = matrix.getRotation();
   gifShownAt = millisNow;
   gifNextFrameAt = millisNow;
-  Serial.printf("GIF: %s (%ux%u%s), brightness %u (clock %u)\n", name, w, h,
-                i < BUILT_IN_GIF_COUNT ? "" : ", from the pack", panelBrightness(), effectiveBrightness);
+  Serial.printf("GIF: %s (%ux%u%s), %u x %lu ms, brightness %u (clock %u)\n", name, w, h,
+                i < BUILT_IN_GIF_COUNT ? "" : ", from the pack", gifLoopsPlanned, (unsigned long)gifLoopTime,
+                panelBrightness(), effectiveBrightness);
   openScreen(SCREEN_GIF);
   return true;
 }
@@ -5814,13 +5822,12 @@ void drawGif() {
   if (!gifPlayer || matrix.getRotation() != gifRotation) { closeScreen(); return; }
   if ((long)(millisNow - gifNextFrameAt) < 0) { return; }
   if (gifRestartDue) {
-    // A whole loop is over. Another only if it still fits into the time a GIF
-    // plays (gifSettings.seconds), going by the loops so far: so a GIF is never
-    // cut off in the middle, and it plays at least once.
+    // A whole loop is over; the next only while the loops worked out at the
+    // start (gifStart()) are not done, so a GIF is never cut off in the middle.
     gifLoops++;
-    unsigned long shown = millisNow - gifShownAt;
-    if (shown + shown / gifLoops > gifSettings.seconds * 1000UL) {
-      Serial.printf("GIF: %u whole loops in %lu ms\n", gifLoops, shown);
+    if (gifLoops >= gifLoopsPlanned) {
+      Serial.printf("GIF: %u whole loops of %lu ms in %lu ms\n", gifLoops, (unsigned long)gifLoopTime,
+                    millisNow - gifShownAt);
       closeScreen();
       return;
     }
@@ -5828,16 +5835,63 @@ void drawGif() {
     memset(gifPlayer->canvas, 0, sizeof(gifPlayer->canvas));
     gifPrev.valid = false;
     gifRestartDue = false;
+    gifFrame = 0;
   } else {
     gifDispose();
   }
   int delayMs = 0;
   int more = gifPlayer->decoder.playFrame(false, &delayMs);   // 0: this was the last frame, it still gets shown
   if (more < 0) { Serial.printf("GIF decode error %d\n", gifPlayer->decoder.getLastError()); }
-  if (more <= 0) { gifRestartDue = true; }
+  // The last frame is the last one gifLoopMs() found: with more blocks after
+  // it (a comment, other data) AnimatedGIF reports more frames and then hands
+  // out an empty one, which would stand for 100 ms with the last frame's
+  // disposal already done.
+  if (more <= 0 || ++gifFrame == gifFrames) { gifRestartDue = true; }
   if (delayMs < 20) { delayMs = 100; }         // what browsers make of 0 and 10 ms
-  gifNextFrameAt = millisNow + delayMs;
+  // On the file's own timeline: the next frame is due its delay after this one
+  // was due, not after it was drawn, so frames drawn a few ms late do not add
+  // up over the loops. Far behind - a long pause of the loop - it goes on from
+  // now instead of rushing through the frames it missed.
+  gifNextFrameAt += delayMs;
+  if ((long)(millisNow - gifNextFrameAt) > 250) { gifNextFrameAt = millisNow + delayMs; }
   gifRender();
+}
+
+// One loop of a GIF in memory, as drawGif() times it: each frame's delay from
+// the Graphic Control Extension before it (in 10 ms), and 100 ms for a frame
+// with less than 20 ms or without one, as AnimatedGIF and drawGif() make it;
+// frames gets the number of frames. Both 0 when the file cannot be walked.
+uint32_t gifLoopMs(const uint8_t *d, uint32_t n, uint16_t &frames) {
+  frames = 0;
+  if (n < 13 || memcmp(d, "GIF", 3) != 0) { return 0; }
+  uint32_t i = 13, total = 0, delay = 0;
+  if (d[10] & 0x80) { i += 3u << ((d[10] & 7) + 1); }   // the global colour table
+  while (i < n) {
+    if (d[i] == 0x21) {                                  // an extension
+      if (i + 1 >= n) { frames = 0; return 0; }
+      if (d[i + 1] == 0xF9 && i + 5 < n && d[i + 2] == 4) { delay = (uint32_t)(d[i + 4] | (d[i + 5] << 8)) * 10; }
+      i += 2;
+      while (i < n && d[i]) { i += d[i] + 1; }           // its sub-blocks
+      i++;
+    } else if (d[i] == 0x2C) {                           // an image: one frame
+      if (i + 10 > n) { frames = 0; return 0; }
+      uint8_t flags = d[i + 9];
+      i += 10;
+      if (flags & 0x80) { i += 3u << ((flags & 7) + 1); }   // a local colour table
+      i++;                                               // the LZW code size
+      while (i < n && d[i]) { i += d[i] + 1; }           // the image data
+      i++;
+      total += delay < 20 ? 100 : delay;
+      frames++;
+      delay = 0;                                         // the extension was for this frame only
+    } else if (d[i] == 0x3B || n - i < 32) {             // the trailer, or stray bytes at the end as
+      break;                                             // AnimatedGIF takes them
+    } else {
+      frames = 0;
+      return 0;
+    }
+  }
+  return total;
 }
 
 /* ----------------------------------------------------------------------
