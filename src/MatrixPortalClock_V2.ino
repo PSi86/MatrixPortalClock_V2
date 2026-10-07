@@ -198,7 +198,7 @@ SettingsStore<UiSettings> uiStore;
 #if GIF_PLAYBACK
 // GIF settings: a blob of its own (NVS key "gif"), so no other blob changes.
 #define GIF_SETTINGS_MAGIC 0x61F5
-#define GIF_SETTINGS_REV   1
+#define GIF_SETTINGS_REV   3
 struct GifSettings {
   uint16_t magic;
   uint8_t  rev;
@@ -206,11 +206,20 @@ struct GifSettings {
   uint16_t minMinutes;    // shortest time from one GIF to the next
   uint16_t maxMinutes;    // longest
   uint8_t  seconds;       // how long one plays
-  uint8_t  reserved[3];
+  uint8_t  minBright;     // rev 2: the panel's brightness at least while a GIF plays
+  uint8_t  brightTimes;   // rev 3: and at least this many tenths of the clock's (20 = twice)
+  uint8_t  reserved[1];
 };
 const uint16_t GIF_MINUTES_MAX = 1440;
 const uint8_t  GIF_SECONDS_MIN = 2, GIF_SECONDS_MAX = 60;
-const GifSettings GIF_DEFAULTS = { GIF_SETTINGS_MAGIC, GIF_SETTINGS_REV, 1, 2, 30, 7, { 0, 0, 0 } };
+// The GIF brightness, found on the MatrixPortal S3 (2026-10-07) with the GIFs
+// that are hardest to make out (a log fire's dark logs and glow, a city of
+// many like colours): 54 in a dark room, twice the clock's with a lamp on.
+// Below about 48 the panel's colours step too coarsely for such GIFs anyway.
+const uint8_t  GIF_BRIGHT_MIN_DEFAULT = 54, GIF_BRIGHT_TIMES_DEFAULT = 20;
+const uint8_t  GIF_BRIGHT_TIMES_MIN = 10, GIF_BRIGHT_TIMES_MAX = 50;
+const GifSettings GIF_DEFAULTS = { GIF_SETTINGS_MAGIC, GIF_SETTINGS_REV, 1, 2, 30, 7,
+                                   GIF_BRIGHT_MIN_DEFAULT, GIF_BRIGHT_TIMES_DEFAULT, { 0 } };
 GifSettings gifSettings;
 SettingsStore<GifSettings> gifStore;
 
@@ -800,12 +809,18 @@ int16_t       editTime[TF_COUNT];
 uint8_t       editTimeField  = TF_HOUR;
 
 // Brightness steps. Manual: 16 levels evenly spaced on the perceptual scale of
-// the brightness fade (FADE_GAMMA), from the lowest brightness at which the blue
-// digits still light (8: color565 keeps the top five bits of blue) to full.
+// the brightness fade (FADE_GAMMA), from the lowest brightness to full: on the
+// S3 the panel's floor (PANEL_BRIGHT_FLOOR, 13, about 5 %), on the M4 the
+// lowest at which the blue digits still light (8: color565 keeps the top five
+// bits of blue).
 // Auto brightness: settings.brightness is a trim around the sensor value (128 =
 // as measured), stepped by a factor of 2^(1/8) from half to twice the sensor.
 const uint8_t BRIGHT_LEVELS    = 16;
+#if PANEL_DRIVER_DMA
+const float   BRIGHT_PHASE_MIN = 0.2585f;  // perceptual position of brightness 13
+#else
 const float   BRIGHT_PHASE_MIN = 0.207f;   // perceptual position of brightness 8
+#endif
 const int8_t  BRIGHT_TRIM_MAX  = 8;
 
 /* ======================================================================
@@ -967,7 +982,7 @@ void setup(void) {
 #if PANEL_DRIVER_DMA
   bool matrixOk = matrix.begin();
   Serial.println(matrixOk ? "Panel driver started" : "Panel driver FAILED");
-  matrix.setBrightness(effectiveBrightness);   // the colours are drawn at full strength
+  matrix.setBrightness(panelBrightness());     // the canvas colours are shares of it
 #else
   ProtomatterStatus matrixstatus = matrix.begin();
   Serial.print("Protomatter status: ");
@@ -1434,12 +1449,28 @@ void updateBrightness() {
   }
   if (effectiveBrightness != before) {
 #if PANEL_DRIVER_DMA
-    matrix.setBrightness(effectiveBrightness);   // the panel dims as a whole
+    matrix.setBrightness(panelBrightness());     // the panel dims as a whole
 #endif
     // Colours are scaled with it (on the S3 only those asked dimmer than the
     // panel), so the screens that only repaint on a change have to repaint.
     panelDirty = true;
   }
+}
+
+// The brightness the panel runs at: the clock's, and while a GIF plays the
+// higher of the GIFs' own lowest (gifSettings.minBright) and a multiple of the
+// clock's (gifSettings.brightTimes tenths) - a GIF needs more light than the
+// face, the more so the lighter the room - unless the clock has switched the
+// panel dark (0).
+uint8_t panelBrightness() {
+#if GIF_PLAYBACK
+  if (gifPlayer && effectiveBrightness > 0) {
+    uint32_t times = (uint32_t)effectiveBrightness * gifSettings.brightTimes / 10;
+    uint32_t b = max((uint32_t)gifSettings.minBright, times);
+    return (uint8_t)min(max(b, (uint32_t)effectiveBrightness), (uint32_t)255);
+  }
+#endif
+  return effectiveBrightness;
 }
 
 // Whether settings.brightness is a trim around the light sensor (auto
@@ -3781,6 +3812,7 @@ void runFunction(InputFunction fn, uint8_t steps) {
 #endif
 #if GIF_PLAYBACK
     case FN_PLAY_GIF:       gifPlayNow(); break;
+    case FN_GIF_AGAIN:      gifPlayAgain(); break;
 #endif
     case FN_SHOW_HINTS:     showHints(); break;
     default:                break;
@@ -5182,6 +5214,10 @@ void sendFormPage(Print &c) {
   c.print("<div><input type=number min=1 max=1440 name=gifmax value="); c.print(gifSettings.maxMinutes); c.println("></div></div>");
   c.print("<label>Seconds each GIF plays</label><input type=number min=2 max=60 name=gifsec value=");
   c.print(gifSettings.seconds); c.println(">");
+  c.println("<label>Brightness while a GIF plays: at least, and at least times the clock's</label><div class=row>");
+  c.print("<div><input type=number min=0 max=255 name=gifbr value="); c.print(gifSettings.minBright); c.println("></div>");
+  c.print("<div><input type=number min=1 max=5 step=0.1 name=gifbx value=");
+  c.print(gifSettings.brightTimes / 10); c.print('.'); c.print(gifSettings.brightTimes % 10); c.println("></div></div>");
 #endif
 
   c.println("<button type=submit>Save</button>");
@@ -5301,8 +5337,8 @@ void sendMessagePage(Print &c, const char *title, const char *text) {
    decoded into an RGB canvas here, so transparency and disposal work the same
    whatever the GIF does, and drawn at 8 bits per colour straight into the
    panel driver through a gamma table: GIF colours are made for screens, while
-   the light of an LED is linear in its on-time. The panel's brightness dims a
-   GIF as it dims the face.
+   the light of an LED is linear in its on-time. The panel's tables for the
+   brightness (PanelCanvas::panelValue) dim a GIF as they dim the face.
    ====================================================================== */
 
 // Keeps the settings in range: whole minutes, the maximum not below the minimum.
@@ -5311,22 +5347,43 @@ void gifSettingsCheck() {
   gifSettings.minMinutes = constrain(gifSettings.minMinutes, (uint16_t)1, GIF_MINUTES_MAX);
   gifSettings.maxMinutes = constrain(gifSettings.maxMinutes, gifSettings.minMinutes, GIF_MINUTES_MAX);
   gifSettings.seconds    = constrain(gifSettings.seconds, GIF_SECONDS_MIN, GIF_SECONDS_MAX);
+  gifSettings.brightTimes = constrain(gifSettings.brightTimes, GIF_BRIGHT_TIMES_MIN, GIF_BRIGHT_TIMES_MAX);
 }
 
 void loadGifSettings() {
   gifStore.begin("gif");
   gifStore.read(gifSettings);
   if (gifSettings.magic != GIF_SETTINGS_MAGIC) { gifSettings = GIF_DEFAULTS; }
+  if (gifSettings.rev < 3) {
+    // Rev 3 brings the GIF brightness rule; its start values replace what rev 2
+    // (a test build only) had and the 0 rev 1 held in those reserved bytes.
+    gifSettings.minBright = GIF_BRIGHT_MIN_DEFAULT;
+    gifSettings.brightTimes = GIF_BRIGHT_TIMES_DEFAULT;
+    gifSettings.rev = GIF_SETTINGS_REV;
+    gifStore.write(gifSettings);
+  }
   gifSettingsCheck();
-  Serial.printf("GIFs: %u built in, %s, every %u to %u min for %u s\n", (unsigned)BUILT_IN_GIF_COUNT,
-                gifSettings.randomOn ? "random on" : "random off", gifSettings.minMinutes,
-                gifSettings.maxMinutes, gifSettings.seconds);
+  Serial.printf("GIFs: %u built in, %s, every %u to %u min for %u s\n",
+                (unsigned)BUILT_IN_GIF_COUNT, gifSettings.randomOn ? "random on" : "random off",
+                gifSettings.minMinutes, gifSettings.maxMinutes, gifSettings.seconds);
+  Serial.printf("GIFs: at least %u bright and %u.%u times the clock's\n", gifSettings.minBright,
+                gifSettings.brightTimes / 10, gifSettings.brightTimes % 10);
 }
 
 void saveGifSettings() {
   gifSettings.magic = GIF_SETTINGS_MAGIC;
   gifSettings.rev   = GIF_SETTINGS_REV;
   gifStore.write(gifSettings);
+}
+
+// A number such as 2, 2.5 or 2,5 in tenths, without the C library's float
+// parser (it would cost 7 KB of flash for this one field).
+long tenthsOf(const String &v) {
+  int dot = v.indexOf('.');
+  if (dot < 0) { dot = v.indexOf(','); }
+  long tenths = (dot < 0 ? v : v.substring(0, dot)).toInt() * 10;
+  if (dot >= 0 && dot + 1 < (int)v.length() && isDigit(v.charAt(dot + 1))) { tenths += v.charAt(dot + 1) - '0'; }
+  return tenths;
 }
 
 // The GIF section of the config page (/save).
@@ -5336,7 +5393,10 @@ void applyGifParams(const String &q) {
   v = getParam(q, "gifmin"); if (v.length()) { gifSettings.minMinutes = constrain(v.toInt(), 1, GIF_MINUTES_MAX); }
   v = getParam(q, "gifmax"); if (v.length()) { gifSettings.maxMinutes = constrain(v.toInt(), 1, GIF_MINUTES_MAX); }
   v = getParam(q, "gifsec"); if (v.length()) { gifSettings.seconds = constrain(v.toInt(), GIF_SECONDS_MIN, GIF_SECONDS_MAX); }
+  v = getParam(q, "gifbr");  if (v.length()) { gifSettings.minBright = constrain(v.toInt(), 0, 255); }
+  v = getParam(q, "gifbx");  if (v.length()) { gifSettings.brightTimes = (uint8_t)constrain(tenthsOf(v), (long)GIF_BRIGHT_TIMES_MIN, (long)GIF_BRIGHT_TIMES_MAX); }
   gifSettingsCheck();
+  matrix.setBrightness(panelBrightness());     // a GIF on show takes the new lowest at once
 }
 
 void gifGammaInit() {
@@ -5433,13 +5493,15 @@ bool gifStart(int16_t i) {
   gifIndex = i;
   gifW = w;
   gifH = h;
+  matrix.setBrightness(panelBrightness());     // a GIF may run brighter than the clock
   memset(gifPlayer->canvas, 0, sizeof(gifPlayer->canvas));
   gifPrev.valid = false;
   gifRestartDue = false;
   gifRotation = matrix.getRotation();
   gifShownAt = millisNow;
   gifNextFrameAt = millisNow;
-  Serial.printf("GIF: %s (%ux%u%s)\n", name, w, h, i < BUILT_IN_GIF_COUNT ? "" : ", from the pack");
+  Serial.printf("GIF: %s (%ux%u%s), brightness %u (clock %u)\n", name, w, h,
+                i < BUILT_IN_GIF_COUNT ? "" : ", from the pack", panelBrightness(), effectiveBrightness);
   openScreen(SCREEN_GIF);
   return true;
 }
@@ -5448,6 +5510,14 @@ bool gifStart(int16_t i) {
 void gifPlayNow() {
   if (screen != SCREEN_FACE) { return; }
   if (!gifStart(gifPick())) { gifScheduleNext(); }
+}
+
+// The last GIF shown once more (FN_GIF_AGAIN): on the face only; a random one
+// when none has played yet or the last no longer fits the panel as it is held.
+void gifPlayAgain() {
+  if (screen != SCREEN_FACE) { return; }
+  int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifPick();
+  if (!gifStart(i)) { gifScheduleNext(); }
 }
 
 // A GIF of its own accord once it is due, over the plain face only: while
@@ -5467,6 +5537,7 @@ void gifEnd() {
     gifPlayer = nullptr;
   }
   gifPackClose();
+  matrix.setBrightness(panelBrightness());     // back to the clock's
   gifLast = gifIndex;
   gifIndex = -1;
   matrix.forgetHeld();
@@ -5483,7 +5554,8 @@ void gifDispose() {
   }
 }
 
-// The canvas onto the panel, centred, the rest dark, through the gamma table.
+// The canvas onto the panel, centred, the rest dark, through the gamma table
+// and the panel's table for the brightness.
 void gifRender() {
   int16_t lw = matrix.width(), lh = matrix.height();
   int16_t x0 = (lw - gifW) / 2, y0 = (lh - gifH) / 2;
@@ -5495,7 +5567,9 @@ void gifRender() {
       int16_t gx = x - x0, gy = y - y0;
       if (gx >= 0 && gy >= 0 && gx < gifW && gy < gifH) {
         const uint8_t *c = &gifPlayer->canvas[(gy * gifW + gx) * 3];
-        r = gifGamma[c[0]]; g = gifGamma[c[1]]; b = gifGamma[c[2]];
+        r = matrix.panelValue(0, gifGamma[c[0]]);
+        g = matrix.panelValue(1, gifGamma[c[1]]);
+        b = matrix.panelValue(2, gifGamma[c[2]]);
       }
       int16_t px = x, py = y;
       matrix.panelXY(px, py);

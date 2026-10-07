@@ -232,6 +232,17 @@ the panel ends a GIF. It is drawn at 8 bits per colour straight into the panel
 driver, through a gamma table (GIF colours are made for screens, the light of an
 LED is linear in its on-time), and the panel's brightness dims it like the face.
 
+A GIF needs more light than the face to be made out, the more so the lighter the
+room: a lamp lights the switched-off LEDs too, so dark parts of a picture no
+longer look dark. So while a GIF plays the panel runs at the higher of two values
+from the config page, **at least** a brightness of its own (54) and **at least
+times the clock's** (2.0). They were found on the MatrixPortal S3 with the GIFs
+hardest to make out, a log fire's dark logs and glow and a city drawn in many
+like colours: 54 in a dark room, twice the clock's with a lamp on (108 against
+the clock's 52). Below about 48 the panel's colours also step too coarsely for
+such pictures. When the clock has switched the panel dark (brightness 0), a GIF
+stays dark too.
+
 The GIFs are built into the firmware by `scripts/embed_gifs.py`: every GIF in
 [`gifs/`](gifs/README.md) that fits the panel (four examples with their licences
 and authors), and those of the folders listed in `gif_dirs.local`, smallest first,
@@ -449,7 +460,7 @@ brightness through a configurable linear curve, set on the AP config page:
 |---|---|
 | Dark lux | at/below this lux → **Min brightness** |
 | Bright lux | at/above this lux → **Max brightness** |
-| Min / Max brightness | brightness endpoints (0–255) |
+| Min / Max brightness | brightness endpoints (0–255); on the S3, 1 to 13 all give its darkest, about 5 % (see [Panel driver](#panel-driver)), and 0 switches the panel dark |
 
 Between the two lux values the brightness is interpolated linearly and clamped.
 Toggle the feature with the **Auto brightness** checkbox or the menu item
@@ -674,11 +685,34 @@ loop time.
 The S3 drives the panel with ESP32-HUB75-MatrixPanel-DMA, the M4 with Adafruit
 Protomatter (5 bit planes). The clock draws into a 16-bit canvas on both; on the
 S3, `show()` hands the pixels that changed to the DMA driver, which keeps its own
-frame buffer at 8 bits per colour and dims the whole panel through the OE time.
-So dimming costs no colour levels there, while Protomatter dims by scaling the
-colours and loses levels at low brightness (six bit planes did not help: it draws
-into RGB565 and only green gains a level). Two settings matter on the
-MatrixPortal S3 (`PanelCanvas` in `src/board_hal.h`):
+frame buffer at 8 bits per colour. Protomatter dims by scaling the colours and
+loses levels at low brightness (six bit planes did not help: it draws into
+RGB565 and only green gains a level).
+
+The S3 dims through the colour values at the full OE time, not through the OE
+time as the driver would. The panel's LED drivers need a minimum on-time per
+colour, longest for blue, so a short OE time dims blue first, then green.
+Measured with a BH1750 in front of the panel: at OE brightness 64 blue was down
+to a fifth of red and white turned yellow, at 48 and below only red was left.
+With the values turned down instead, red, green and blue stayed together down to
+about 5 % of full (blue at 0.84 of red there, 0.95 at 13 %), which is as dark as
+the S3 goes: brightness 1 to 13 all give that. The same measurement gave the
+light of each of the driver's bit planes per colour (`PANEL_BIT_LIGHT`); they are
+not weighted in powers of two (bit 7 gives 46 % instead of 50 %). For every
+colour value and brightness, `show()` hands the driver the value whose measured
+light comes nearest, from a table per colour that is rebuilt when the brightness
+changes; GIFs go through the same tables. Blue steps the coarsest at the dark end
+(its weak low bits leave nothing between 8.5 % and 12.6 % of full), so the light
+blue really gives sets the share all three colours aim at: white stays white
+(red and green within 7 % of blue), and at the dark end the brightness follows
+blue's steps, up to 21 % off the one asked for. Measured through this path,
+blue stayed within 0.94 to 1.07 of red at every brightness and green within 1.00
+to 1.13 (the widest at the darkest, where red gives the sensor only about 1.6 lx),
+where the OE time had left blue at 0 to 0.62 of red. A brightness step costs one
+full frame to the driver, 3.6 ms.
+
+Two more settings matter on the MatrixPortal S3 (`PanelCanvas` in
+`src/board_hal.h`):
 
 - `clkphase = false`: with the driver's default the picture sits one column to the
   left and the right column shows stale data.

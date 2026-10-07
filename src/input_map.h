@@ -57,6 +57,7 @@ enum InputFunction : uint8_t {
   FN_BRIGHT_FADE,      // cyclic brightness fade while the button stays held, saved on release
   FN_KNOCK_EFFECT,     // the Tetris digits come apart
   FN_PLAY_GIF,         // a GIF now, on boards with GIF playback
+  FN_GIF_AGAIN,        // the last GIF shown once more, on boards with GIF playback
   FN_SHOW_HINTS,       // what the gestures do, for a moment
 };
 

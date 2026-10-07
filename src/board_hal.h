@@ -147,15 +147,44 @@
    Panel driver (S3)
 
    The clock draws into a 16-bit canvas, as it did with Protomatter, and
-   show() hands every finished frame to ESP32-HUB75-MatrixPanel-DMA. That
-   driver keeps its own frame buffer at 8 bits per colour and dims the whole
-   panel through the OE time, so the brightness costs no colour levels.
-   getBuffer(), setRotation() and the rest of the canvas behave as before.
-   The M4 keeps Protomatter, whose object is built in the sketch.
+   show() hands every finished frame to ESP32-HUB75-MatrixPanel-DMA, which
+   keeps its own frame buffer at 8 bits per colour. getBuffer(), setRotation()
+   and the rest of the canvas behave as before. The M4 keeps Protomatter,
+   whose object is built in the sketch.
+
+   Brightness goes through the colour values, at the full OE time. Dimming
+   through the OE time, as the driver does, cuts the LEDs' on-time, and the
+   panel's LED drivers need a minimum on-time per colour, longest for blue:
+   measured 2026-10-07 with a BH1750 in front of this panel, blue was down to
+   a fifth of red at OE brightness 64 and gone at 48, green gone at 28, so
+   white turned yellow and then red. With the values turned down instead the
+   three stayed together down to about 5 % (blue 0.84 of red at 5 %, 0.95 at
+   13 %), so that is as dark as the clock goes (PANEL_BRIGHT_FLOOR).
+   The same measurement gave the light of each bit plane per colour
+   (PANEL_BIT_LIGHT): the driver's planes are not weighted in powers of two
+   (bit 7 gives 46 % instead of 50 %, so 127 is brighter than 128). For each
+   colour value and brightness, show() hands the driver the value whose
+   measured light comes nearest, from a table per colour (_lut) built when
+   the brightness changes. A canvas colour is a share of the panel's light:
+   255 is the colour at the current brightness, 128 half of that.
    ====================================================================== */
 #if PANEL_DRIVER_DMA
 #include <Adafruit_GFX.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+
+// Light of each bit plane at the full OE time, per colour (red, green, blue),
+// out of 65535 for the value 255: fitted to the BH1750 readings of 2026-10-07
+// (17 values per colour on the MatrixPortal S3's 64x32 panel). Bits that give
+// a colour almost no light (blue below bit 3) are about as dim as the sensor
+// could tell; the two it could not tell from nothing count 1, so that no two
+// values have the same light (255 would otherwise go out as 254).
+const uint16_t PANEL_BIT_LIGHT[3][8] = {
+  {   259,   237,   733,  3403,  5383,  8867, 16428, 30225 },   // red
+  {     1,   185,   680,  3324,  5260,  8956, 16563, 30566 },   // green
+  {     1,    22,   390,  3051,  5175,  8773, 16702, 31421 },   // blue
+};
+const uint8_t PANEL_BRIGHT_FLOOR = 13;   // brightness 1..13 all give 13/255, about 5 %
+const uint8_t PANEL_OE_FULL = 255;       // the driver's brightness, kept at full
 
 class PanelCanvas : public GFXcanvas16 {
  public:
@@ -181,8 +210,10 @@ class PanelCanvas : public GFXcanvas16 {
     _held[1] = (uint16_t *)calloc((size_t)WIDTH * HEIGHT, sizeof(uint16_t));
     if (!_held[0] || !_held[1]) { return false; }
     forgetHeld();   // whatever the driver's buffers start with, the first shows write all
+    buildLight();
     _dma = new MatrixPanel_I2S_DMA(cfg);
     if (!_dma->begin()) { return false; }
+    _dma->setBrightness8(0);   // dark until the sketch sets a brightness
     // The driver clocks the panel bus without a pause and sets its pins to the
     // strongest drive; those edges disturb the WiFi. Measured on the
     // MatrixPortal S3 with 30 TCP connections to the router: 0 failed before
@@ -238,7 +269,10 @@ class PanelCanvas : public GFXcanvas16 {
       for (int16_t x = 0; x < WIDTH; x++) {
         int i = y * WIDTH + x;
         if (src[i] == held[i] && !_stale[_back]) { continue; }
-        _dma->drawPixel(x, y, src[i]);
+        uint16_t c = src[i];
+        uint8_t r = c >> 11, g = (c >> 5) & 0x3F, b = c & 0x1F;
+        _dma->drawPixelRGB888(x, y, _lut[0][(r << 3) | (r >> 2)], _lut[1][(g << 2) | (g >> 4)],
+                              _lut[2][(b << 3) | (b >> 2)]);
         held[i] = src[i];
 #if defined(CLOCK_DEBUG)
         pushed++;
@@ -256,8 +290,28 @@ class PanelCanvas : public GFXcanvas16 {
   // copies no longer tell what its buffers hold: the next shows write all.
   void forgetHeld() { _stale[0] = _stale[1] = true; }
 
-  // Brightness of the whole panel, 0..255, through the OE time.
-  void setBrightness(uint8_t b) { if (_dma) { _dma->setBrightness8(b); } }
+  // Brightness of the whole panel, 0..255: 0 switches it dark (through the OE
+  // time), anything else sets the light the colour values give (see above),
+  // at least PANEL_BRIGHT_FLOOR. Another brightness rebuilds the tables, and
+  // the next shows write every pixel.
+  void setBrightness(uint8_t b) {
+    if (!_dma) { return; }
+    if (b == 0) {
+      if (_bright != 0) { _dma->setBrightness8(0); _bright = 0; }
+      return;
+    }
+    if (b < PANEL_BRIGHT_FLOOR) { b = PANEL_BRIGHT_FLOOR; }
+    if (b == _bright) { return; }
+    if (_bright == 0) { _dma->setBrightness8(PANEL_OE_FULL); }
+    _bright = b;
+    buildLuts();
+    forgetHeld();
+  }
+
+  // The driver's value for colour c (0 red, 1 green, 2 blue) of the canvas
+  // value v at the current brightness, for pictures drawn straight into the
+  // driver.
+  uint8_t panelValue(uint8_t c, uint8_t v) const { return _lut[c][v]; }
 
   // Refreshes since the last call, from the rate the driver calculated (it
   // counts none itself).
@@ -297,6 +351,61 @@ class PanelCanvas : public GFXcanvas16 {
   void flip() { _dma->flipDMABuffer(); _flippedAt = micros(); _back ^= 1; }
 
  private:
+  // The light of every value per colour (out of 65535, from PANEL_BIT_LIGHT)
+  // and the values sorted by it, the smaller value first among equals.
+  void buildLight() {
+    for (uint8_t c = 0; c < 3; c++) {
+      uint16_t *light = _light[c];
+      uint8_t *order = _order[c];
+      for (uint16_t v = 0; v < 256; v++) {
+        uint32_t sum = 0;
+        for (uint8_t bit = 0; bit < 8; bit++) { if ((v >> bit) & 1) { sum += PANEL_BIT_LIGHT[c][bit]; } }
+        light[v] = (uint16_t)sum;
+        order[v] = (uint8_t)v;
+      }
+      for (int16_t i = 1; i < 256; i++) {   // insertion sort, once at start-up
+        uint8_t v = order[i];
+        int16_t j = i - 1;
+        while (j >= 0 && (light[order[j]] > light[v] || (light[order[j]] == light[v] && order[j] > v))) {
+          order[j + 1] = order[j];
+          j--;
+        }
+        order[j + 1] = v;
+      }
+    }
+  }
+
+  // The value of colour c whose light is nearest to want, searched from
+  // position k of its order on (k only grows while want does).
+  uint8_t nearest(uint8_t c, uint32_t want, uint16_t &k) const {
+    const uint16_t *light = _light[c];
+    const uint8_t *order = _order[c];
+    while (k < 255 && light[order[k]] < want) { k++; }
+    uint32_t above = light[order[k]];
+    uint8_t pick = order[k];
+    if (k > 0) {
+      uint32_t below = light[order[k - 1]];
+      uint32_t offAbove = above >= want ? above - want : want - above;
+      if (want - below < offAbove) { pick = order[k - 1]; }
+    }
+    return pick;
+  }
+
+  // For the brightness: per colour, the value whose light is nearest to the
+  // canvas value's share of it. Blue steps the coarsest at the dark end (8.5 %
+  // of full is followed by 12.6 %), so the light blue really gives for 255 is
+  // the full share all three aim at: white stays white (measured: blue at 0.94 to
+  // 1.07 of red, green at 1.00 to 1.13), and the brightness keeps to blue's steps
+  // there (up to 21 % off the asked one) instead of the colours drifting apart.
+  void buildLuts() {
+    uint16_t k = 0;
+    uint32_t full = _light[2][nearest(2, (uint32_t)_bright * 65535UL / 255UL, k)];
+    for (uint8_t c = 0; c < 3; c++) {
+      k = 0;
+      for (uint16_t v = 0; v < 256; v++) { _lut[c][v] = nearest(c, (uint32_t)v * full / 255UL, k); }
+    }
+  }
+
 #if defined(CLOCK_DEBUG)
   // Debug build: how long handing frames over takes, printed every 2 s.
   void debugShow(uint32_t us, uint32_t pixels) {
@@ -321,6 +430,10 @@ class PanelCanvas : public GFXcanvas16 {
   uint16_t *_held[2] = { nullptr, nullptr };
   bool      _stale[2] = { true, true };
   uint8_t   _back = 0;
+  uint8_t   _bright = 0;          // 0 = dark
+  uint16_t  _light[3][256];
+  uint8_t   _order[3][256];
+  uint8_t   _lut[3][256] = {};    // canvas value -> driver value, per colour
 };
 #endif
 
