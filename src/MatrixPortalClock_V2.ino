@@ -198,7 +198,7 @@ SettingsStore<UiSettings> uiStore;
 #if GIF_PLAYBACK
 // GIF settings: a blob of its own (NVS key "gif"), so no other blob changes.
 #define GIF_SETTINGS_MAGIC 0x61F5
-#define GIF_SETTINGS_REV   2
+#define GIF_SETTINGS_REV   3
 struct GifSettings {
   uint16_t magic;
   uint8_t  rev;
@@ -206,13 +206,20 @@ struct GifSettings {
   uint16_t minMinutes;    // shortest time from one GIF to the next
   uint16_t maxMinutes;    // longest
   uint8_t  seconds;       // how long one plays
-  uint8_t  minBright;     // rev 2: the panel's brightness at least while a GIF plays, 0 = as the
-                          // clock (what a rev 1 blob holds there, it was reserved)
-  uint8_t  reserved[2];
+  uint8_t  minBright;     // rev 2: the panel's brightness at least while a GIF plays
+  uint8_t  brightTimes;   // rev 3: and at least this many tenths of the clock's (20 = twice)
+  uint8_t  reserved[1];
 };
 const uint16_t GIF_MINUTES_MAX = 1440;
 const uint8_t  GIF_SECONDS_MIN = 2, GIF_SECONDS_MAX = 60;
-const GifSettings GIF_DEFAULTS = { GIF_SETTINGS_MAGIC, GIF_SETTINGS_REV, 1, 2, 30, 7, 0, { 0, 0 } };
+// The GIF brightness, found on the MatrixPortal S3 (2026-10-07) with the GIFs
+// that are hardest to make out (a log fire's dark logs and glow, a city of
+// many like colours): 54 in a dark room, twice the clock's with a lamp on.
+// Below about 48 the panel's colours step too coarsely for such GIFs anyway.
+const uint8_t  GIF_BRIGHT_MIN_DEFAULT = 54, GIF_BRIGHT_TIMES_DEFAULT = 20;
+const uint8_t  GIF_BRIGHT_TIMES_MIN = 10, GIF_BRIGHT_TIMES_MAX = 50;
+const GifSettings GIF_DEFAULTS = { GIF_SETTINGS_MAGIC, GIF_SETTINGS_REV, 1, 2, 30, 7,
+                                   GIF_BRIGHT_MIN_DEFAULT, GIF_BRIGHT_TIMES_DEFAULT, { 0 } };
 GifSettings gifSettings;
 SettingsStore<GifSettings> gifStore;
 
@@ -1450,13 +1457,17 @@ void updateBrightness() {
   }
 }
 
-// The brightness the panel runs at: the clock's, and while a GIF plays at
-// least the GIFs' own lowest (gifSettings.minBright) - unless the clock has
-// switched the panel dark (0).
+// The brightness the panel runs at: the clock's, and while a GIF plays the
+// higher of the GIFs' own lowest (gifSettings.minBright) and a multiple of the
+// clock's (gifSettings.brightTimes tenths) - a GIF needs more light than the
+// face, the more so the lighter the room - unless the clock has switched the
+// panel dark (0).
 uint8_t panelBrightness() {
 #if GIF_PLAYBACK
-  if (gifPlayer && effectiveBrightness > 0 && gifSettings.minBright > effectiveBrightness) {
-    return gifSettings.minBright;
+  if (gifPlayer && effectiveBrightness > 0) {
+    uint32_t times = (uint32_t)effectiveBrightness * gifSettings.brightTimes / 10;
+    uint32_t b = max((uint32_t)gifSettings.minBright, times);
+    return (uint8_t)min(max(b, (uint32_t)effectiveBrightness), (uint32_t)255);
   }
 #endif
   return effectiveBrightness;
@@ -5203,9 +5214,10 @@ void sendFormPage(Print &c) {
   c.print("<div><input type=number min=1 max=1440 name=gifmax value="); c.print(gifSettings.maxMinutes); c.println("></div></div>");
   c.print("<label>Seconds each GIF plays</label><input type=number min=2 max=60 name=gifsec value=");
   c.print(gifSettings.seconds); c.println(">");
-  c.print("<label>Lowest brightness while a GIF plays (0-255, 0 = as the clock)</label>"
-          "<input type=number min=0 max=255 name=gifbr value=");
-  c.print(gifSettings.minBright); c.println(">");
+  c.println("<label>Brightness while a GIF plays: at least, and at least times the clock's</label><div class=row>");
+  c.print("<div><input type=number min=0 max=255 name=gifbr value="); c.print(gifSettings.minBright); c.println("></div>");
+  c.print("<div><input type=number min=1 max=5 step=0.1 name=gifbx value=");
+  c.print(gifSettings.brightTimes / 10); c.print('.'); c.print(gifSettings.brightTimes % 10); c.println("></div></div>");
   c.println("<p style=\"font-size:14px\">A knock on the clock plays the last GIF again.</p>");
 #endif
 
@@ -5336,16 +5348,27 @@ void gifSettingsCheck() {
   gifSettings.minMinutes = constrain(gifSettings.minMinutes, (uint16_t)1, GIF_MINUTES_MAX);
   gifSettings.maxMinutes = constrain(gifSettings.maxMinutes, gifSettings.minMinutes, GIF_MINUTES_MAX);
   gifSettings.seconds    = constrain(gifSettings.seconds, GIF_SECONDS_MIN, GIF_SECONDS_MAX);
+  gifSettings.brightTimes = constrain(gifSettings.brightTimes, GIF_BRIGHT_TIMES_MIN, GIF_BRIGHT_TIMES_MAX);
 }
 
 void loadGifSettings() {
   gifStore.begin("gif");
   gifStore.read(gifSettings);
   if (gifSettings.magic != GIF_SETTINGS_MAGIC) { gifSettings = GIF_DEFAULTS; }
+  if (gifSettings.rev < 3) {
+    // Rev 3 brings the GIF brightness rule; its start values replace what rev 2
+    // (a test build only) had and the 0 rev 1 held in those reserved bytes.
+    gifSettings.minBright = GIF_BRIGHT_MIN_DEFAULT;
+    gifSettings.brightTimes = GIF_BRIGHT_TIMES_DEFAULT;
+    gifSettings.rev = GIF_SETTINGS_REV;
+    gifStore.write(gifSettings);
+  }
   gifSettingsCheck();
-  Serial.printf("GIFs: %u built in, %s, every %u to %u min for %u s, lowest brightness %u\n",
+  Serial.printf("GIFs: %u built in, %s, every %u to %u min for %u s\n",
                 (unsigned)BUILT_IN_GIF_COUNT, gifSettings.randomOn ? "random on" : "random off",
-                gifSettings.minMinutes, gifSettings.maxMinutes, gifSettings.seconds, gifSettings.minBright);
+                gifSettings.minMinutes, gifSettings.maxMinutes, gifSettings.seconds);
+  Serial.printf("GIFs: at least %u bright and %u.%u times the clock's\n", gifSettings.minBright,
+                gifSettings.brightTimes / 10, gifSettings.brightTimes % 10);
 }
 
 void saveGifSettings() {
@@ -5362,6 +5385,7 @@ void applyGifParams(const String &q) {
   v = getParam(q, "gifmax"); if (v.length()) { gifSettings.maxMinutes = constrain(v.toInt(), 1, GIF_MINUTES_MAX); }
   v = getParam(q, "gifsec"); if (v.length()) { gifSettings.seconds = constrain(v.toInt(), GIF_SECONDS_MIN, GIF_SECONDS_MAX); }
   v = getParam(q, "gifbr");  if (v.length()) { gifSettings.minBright = constrain(v.toInt(), 0, 255); }
+  v = getParam(q, "gifbx");  if (v.length()) { gifSettings.brightTimes = (uint8_t)constrain(lroundf(v.toFloat() * 10.0f), (long)GIF_BRIGHT_TIMES_MIN, (long)GIF_BRIGHT_TIMES_MAX); }
   gifSettingsCheck();
   matrix.setBrightness(panelBrightness());     // a GIF on show takes the new lowest at once
 }

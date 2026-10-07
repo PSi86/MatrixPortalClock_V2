@@ -232,12 +232,16 @@ the panel ends a GIF. It is drawn at 8 bits per colour straight into the panel
 driver, through a gamma table (GIF colours are made for screens, the light of an
 LED is linear in its on-time), and the panel's brightness dims it like the face.
 
-A GIF needs more light than the face to be made out: at the clock's darkest most
-GIFs are hard to see unless they have strong contrast and clear lines. So while a
-GIF plays the panel runs at least at the **lowest brightness for GIFs** (config
-page, 0–255, 0 = as the clock); when the clock is brighter its own brightness
-applies. When the clock has switched the panel dark (brightness 0), a GIF stays
-dark too. For now a knock on the face plays the last GIF again (a random one when
+A GIF needs more light than the face to be made out, the more so the lighter the
+room: a lamp lights the switched-off LEDs too, so dark parts of a picture no
+longer look dark. So while a GIF plays the panel runs at the higher of two values
+from the config page, **at least** a brightness of its own (54) and **at least
+times the clock's** (2.0). They were found on the MatrixPortal S3 with the GIFs
+hardest to make out, a log fire's dark logs and glow and a city drawn in many
+like colours: 54 in a dark room, twice the clock's with a lamp on (108 against
+the clock's 52). Below about 48 the panel's colours also step too coarsely for
+such pictures. When the clock has switched the panel dark (brightness 0), a GIF
+stays dark too. For now a knock on the face plays the last GIF again (a random one when
 none has played yet), so that GIFs can be compared at that brightness; the wave
 gesture still sets off the knock effect.
 
