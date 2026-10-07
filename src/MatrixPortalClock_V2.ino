@@ -252,6 +252,11 @@ int16_t       gifIndex = -1, gifLast = -1;   // the GIF on show, the one before
 uint8_t       gifRotation = 0;               // the rotation it started in
 unsigned long gifShownAt = 0, gifNextFrameAt = 0, gifDueAt = 0;
 bool          gifRestartDue = false;         // its last frame is on the panel: start over with the next
+uint16_t      gifLoops = 0;                  // whole loops of it shown so far
+// A GIF ends at the end of a loop (drawGif()); one whose single loop runs
+// longer than the longest setting is ended there anyway, so a very long GIF
+// cannot hide the clock for minutes.
+const unsigned long GIF_PLAY_MAX_MS = GIF_SECONDS_MAX * 1000UL;
 struct GifArea { int16_t x, y, w, h; uint8_t disposal; bool valid; };
 GifArea       gifPrev;                       // the last frame's area, for its disposal
 
@@ -1223,7 +1228,7 @@ void updateScreenTimeouts() {
       break;
 #if GIF_PLAYBACK
     case SCREEN_GIF:
-      if (millisNow - gifShownAt >= gifSettings.seconds * 1000UL) { closeScreen(); }
+      if (millisNow - gifShownAt >= GIF_PLAY_MAX_MS) { closeScreen(); }
       break;
 #endif
     default:
@@ -5338,7 +5343,7 @@ void sendFormPage(Print &c) {
   c.println("<label>Minutes between two GIFs: at least, at most</label><div class=row>");
   c.print("<div><input type=number min=1 max=1440 name=gifmin value="); c.print(gifSettings.minMinutes); c.println("></div>");
   c.print("<div><input type=number min=1 max=1440 name=gifmax value="); c.print(gifSettings.maxMinutes); c.println("></div></div>");
-  c.print("<label>Seconds each GIF plays</label><input type=number min=2 max=60 name=gifsec value=");
+  c.print("<label>Seconds each GIF plays, in whole loops: as many as fit, at least one</label><input type=number min=2 max=60 name=gifsec value=");
   c.print(gifSettings.seconds); c.println(">");
   c.println("<label>Brightness while a GIF plays: at least, and at least times the clock's</label><div class=row>");
   c.print("<div><input type=number min=0 max=255 name=gifbr value="); c.print(gifSettings.minBright); c.println("></div>");
@@ -5719,6 +5724,7 @@ bool gifStart(int16_t i) {
   memset(gifPlayer->canvas, 0, sizeof(gifPlayer->canvas));
   gifPrev.valid = false;
   gifRestartDue = false;
+  gifLoops = 0;
   gifRotation = matrix.getRotation();
   gifShownAt = millisNow;
   gifNextFrameAt = millisNow;
@@ -5808,6 +5814,16 @@ void drawGif() {
   if (!gifPlayer || matrix.getRotation() != gifRotation) { closeScreen(); return; }
   if ((long)(millisNow - gifNextFrameAt) < 0) { return; }
   if (gifRestartDue) {
+    // A whole loop is over. Another only if it still fits into the time a GIF
+    // plays (gifSettings.seconds), going by the loops so far: so a GIF is never
+    // cut off in the middle, and it plays at least once.
+    gifLoops++;
+    unsigned long shown = millisNow - gifShownAt;
+    if (shown + shown / gifLoops > gifSettings.seconds * 1000UL) {
+      Serial.printf("GIF: %u whole loops in %lu ms\n", gifLoops, shown);
+      closeScreen();
+      return;
+    }
     gifPlayer->decoder.reset();
     memset(gifPlayer->canvas, 0, sizeof(gifPlayer->canvas));
     gifPrev.valid = false;

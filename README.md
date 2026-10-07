@@ -243,7 +243,10 @@ in a blob of their own (S3: NVS key `keys`, M4: the flash block at 0x78000).
 On the MatrixPortal S3 a GIF takes the panel in place of the face now and then,
 at a random time between a minimum and a maximum (2 and 30 minutes by default),
 for a set time (7 s by default); all three and switching it off are on the config
-page under **GIFs**. Holding UP on the face plays one at once. A GIF comes up only
+page under **GIFs**. Holding UP on the face plays one at once. A GIF plays in whole
+loops, as many as fit into the set time and at least one, so it is never cut off in
+the middle: with 8 s a GIF of 3.5 s plays twice, one of 12 s once. A GIF whose
+single loop runs longer than a minute is ended after a minute. A GIF comes up only
 over the plain face; while the menu, a banner or the hotspot is up it waits. Any
 button press ends it early and does nothing else; the hold that started it does
 not end it.
