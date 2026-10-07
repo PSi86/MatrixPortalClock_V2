@@ -187,3 +187,76 @@ constexpr bool profileRecoverable(const InputMapping *r, unsigned n) {
 CHECK_PROFILE(PROFILE_DEFAULT);
 CHECK_PROFILE(PROFILE_CLASSIC_CLICKS);
 CHECK_GESTURES(GESTURES_DEFAULT);
+
+// ----------------------------------------------------------------------------
+// Face shortcuts (concept doc: "Face shortcuts"). On the face every event of a
+// fitted source can be given one of FACE_ACTIONS on the config page's Inputs
+// page; the menu, the hotspot screen and the start keep the profile's rows,
+// and a profile's face rows are the shortcuts to begin with. Both tables are
+// stored data - a shortcut is saved as its event's position in FACE_EVENTS and
+// its action's code - so neither is ever reordered: a new event or action goes
+// at the end.
+struct FaceEvent { InputEvent event; const char *label; const char *word; };
+constexpr FaceEvent FACE_EVENTS[] = {
+  { EV_UP_SHORT,    "UP pressed",                       "" },
+  { EV_UP_2X,       "UP pressed twice",                 "" },
+  { EV_UP_3X,       "UP pressed three times",           "" },
+  { EV_UP_HOLD,     "UP held",                          "" },
+  { EV_DOWN_SHORT,  "DOWN pressed",                     "" },
+  { EV_DOWN_2X,     "DOWN pressed twice",               "" },
+  { EV_DOWN_3X,     "DOWN pressed three times",         "" },
+  { EV_DOWN_HOLD,   "DOWN held",                        "" },
+  { EV_KNOCK,       "Knock on the clock",               "" },
+  { EV_SWIPE_UP,    "Swipe up",                         "swipe" },
+  { EV_SWIPE_DOWN,  "Swipe down",                       "swipe" },
+  { EV_SWIPE_LEFT,  "Swipe left",                       "swipe" },
+  { EV_SWIPE_RIGHT, "Swipe right",                      "swipe" },
+  { EV_PUSH,        "Hand towards the sensor",          "push" },
+  { EV_PULL,        "Hand away from the sensor",        "pull" },
+  { EV_CIRCLE_CW,   "Circle clockwise",                 "circle" },
+  { EV_CIRCLE_CCW,  "Circle counter-clockwise",         "circle" },
+  { EV_WAVE,        "Wave",                             "wave" },
+  { EV_APPROACH,    "Hand comes near and stays",        "" },
+};
+constexpr uint8_t FACE_EVENT_COUNT = sizeof(FACE_EVENTS) / sizeof(FACE_EVENTS[0]);
+
+// What an action needs to be offered: a held button (it runs while the button
+// stays down), GIF playback, the Tetris face.
+enum FaceActionNeeds : uint8_t { NEEDS_NOTHING, NEEDS_HOLD, NEEDS_GIFS, NEEDS_TETRIS };
+struct FaceAction { uint8_t code; InputFunction function; FaceActionNeeds needs; const char *label; const char *word; };
+constexpr FaceAction FACE_ACTIONS[] = {
+  { 0, FN_NONE,           NEEDS_NOTHING, "nothing",                               ""      },
+  { 1, FN_OPEN_MENU,      NEEDS_NOTHING, "open the menu",                         "menu"  },
+  { 2, FN_PLAY_GIF,       NEEDS_GIFS,    "play a GIF",                            "GIF"   },
+  { 3, FN_GIF_AGAIN,      NEEDS_GIFS,    "play the last GIF again",               "again" },
+  { 4, FN_KNOCK_EFFECT,   NEEDS_TETRIS,  "the digits come apart (Tetris face)",   "knock" },
+  { 5, FN_TOGGLE_AUTO,    NEEDS_NOTHING, "auto brightness on / off",              "auto"  },
+  { 6, FN_CYCLE_DST,      NEEDS_NOTHING, "daylight saving: auto, summer, winter", "DST"   },
+  { 7, FN_TOGGLE_HOTSPOT, NEEDS_NOTHING, "hotspot on / off",                      "AP"    },
+  { 8, FN_BRIGHT_FADE,    NEEDS_HOLD,    "brightness fade while held",            "fade"  },
+  { 9, FN_SHOW_HINTS,     NEEDS_NOTHING, "show what the gestures do",             "hints" },
+};
+constexpr uint8_t FACE_ACTION_COUNT = sizeof(FACE_ACTIONS) / sizeof(FACE_ACTIONS[0]);
+
+constexpr bool faceActionsInOrder(unsigned i = 0) {
+  return i >= FACE_ACTION_COUNT || (FACE_ACTIONS[i].code == i && faceActionsInOrder(i + 1));
+}
+constexpr bool isFaceEvent(InputEvent ev, unsigned i = 0) {
+  return i < FACE_EVENT_COUNT && (FACE_EVENTS[i].event == ev || isFaceEvent(ev, i + 1));
+}
+constexpr bool isFaceFunction(InputFunction fn, unsigned i = 0) {
+  return i < FACE_ACTION_COUNT && (FACE_ACTIONS[i].function == fn || isFaceFunction(fn, i + 1));
+}
+constexpr bool faceEventsUnique(unsigned i = 0) {
+  return i >= FACE_EVENT_COUNT || (!isFaceEvent(FACE_EVENTS[i].event, i + 1) && faceEventsUnique(i + 1));
+}
+// Every face row of a table can be shown and stored as a shortcut.
+constexpr bool faceRowsAreShortcuts(const InputMapping *r, unsigned n) {
+  return n == 0 || ((r->context != CTX_FACE || (isFaceEvent(r->event) && isFaceFunction(r->function))) &&
+                    faceRowsAreShortcuts(r + 1, n - 1));
+}
+static_assert(faceActionsInOrder(), "FACE_ACTIONS: an action's code has to be its position (add at the end only)");
+static_assert(faceEventsUnique(), "FACE_EVENTS: an event is listed twice");
+static_assert(faceRowsAreShortcuts(PROFILE_DEFAULT, PROFILE_ROWS(PROFILE_DEFAULT)), "PROFILE_DEFAULT: a face row is no shortcut");
+static_assert(faceRowsAreShortcuts(PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS)), "PROFILE_CLASSIC_CLICKS: a face row is no shortcut");
+static_assert(faceRowsAreShortcuts(GESTURES_DEFAULT, PROFILE_ROWS(GESTURES_DEFAULT)), "GESTURES_DEFAULT: a face row is no shortcut");

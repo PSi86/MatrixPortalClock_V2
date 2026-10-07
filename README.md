@@ -65,11 +65,12 @@ button pin cannot be carried over.
   timezone, daylight saving, the config hotspot and, with a real-time clock, the
   time and date, set on the clock itself without WiFi (see
   [Menu and buttons](#menu-and-buttons))
-- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, the button profile, GIFs (S3) and the **home WiFi**
+- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, GIFs (S3) and the **home WiFi**; on a page of its own the input profile and what
+  buttons, knock and gestures do on the face (see [Face shortcuts](#face-shortcuts))
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
   a normal upload does not touch - `pio run -t erase` does; M4: one 8 KB flash
-  block each at the top of the flash, from 0x7A000 up)
+  block each at the top of the flash, from 0x78000 up)
 - Recovery: the config hotspot is in the menu from the first second, also
   without the home WiFi; holding UP during boot opens it as well
 - **GIFs** (S3): now and then a GIF takes the panel for a few seconds, and holding
@@ -197,7 +198,7 @@ and ice-blue otherwise. A button pressed while a banner is up only closes it.
 matrix corner light while a button is held (the square is the compile-time
 switch `BUTTON_FEEDBACK_ON_MATRIX`).
 
-**Classic clicks.** The profile *Classic clicks* (config page, **Inputs**)
+**Classic clicks.** The profile *Classic clicks* (config page, **Inputs** page)
 brings back the button codes the clock had before the menu: on the face UP 1x
 cycles daylight saving with a banner, 2x toggles auto brightness with a banner,
 3x opens or closes the hotspot, and holding UP fades the brightness, saved on
@@ -216,12 +217,40 @@ table maps only gestures and keeps them as well, so a clock with nothing but
 the sensor can be operated too. A table that breaks one of these does not
 compile.
 
+### Face shortcuts
+
+What every input does on the face is set on the config page's **Inputs** page
+(`/inputs`, linked from the settings): UP and DOWN pressed, pressed twice or
+three times and held, the knock (with the accelerometer) and each gesture (with
+a gesture sensor), each to one of: nothing, open the menu, play a GIF, play the
+last GIF again (both S3), the digits come apart (Tetris face), auto brightness
+on/off, daylight saving auto / summer / winter, hotspot on/off, brightness fade
+while held (held buttons only), show what the gestures do. The page lists only
+the inputs found. The profile chosen there keeps the menu, the hotspot screen
+and the start; choosing it fills the face with its own rows to begin with, and
+nothing set means the profile's rows. Saving is refused unless an input found
+opens the menu, and should stored shortcuts leave none that does (a gesture
+sensor unplugged, say), the clock falls back to the profile's rows. Giving a
+button's twice or three times something to do makes its single press wait 0.4 s
+for a second one. The hint a hand coming near shows follows the shortcuts.
+
+The shortcuts are stored as codes that a later firmware never renumbers
+(`FACE_EVENTS` and `FACE_ACTIONS` in `src/input_map.h`, checked at build time),
+in a blob of their own (S3: NVS key `keys`, M4: the flash block at 0x78000).
+
 ## GIF playback
 
 On the MatrixPortal S3 a GIF takes the panel in place of the face now and then,
 at a random time between a minimum and a maximum (2 and 30 minutes by default),
 for a set time (7 s by default); all three and switching it off are on the config
-page under **GIFs**. Holding UP on the face plays one at once. A GIF comes up only
+page under **GIFs**. Holding UP on the face plays one at once. A GIF plays in whole
+loops, as many as fit into the set time and at least one, so it is never cut off in
+the middle: with 8 s a GIF of 3.5 s plays twice, one of 12 s once. The length of a
+loop is worked out from the file when the GIF starts, from its frame delays (a
+frame given less than 20 ms, or no delay at all, shows for 100 ms, as in browsers),
+and the frames follow the file's own timeline, so a frame drawn a few ms late does
+not stretch the loop. A GIF whose single loop runs longer than a minute is ended
+after a minute. A GIF comes up only
 over the plain face; while the menu, a banner or the hotspot is up it waits. Any
 button press ends it early and does nothing else; the hold that started it does
 not end it.
@@ -731,7 +760,8 @@ per second.
 A PAJ7620U2 on the I2C bus (address 0x73; on the MatrixPortal through the STEMMA
 QT port) recognises nine gestures by itself. The clock looks for it at
 start-up; without one everything works as before. Its gestures do the same in
-both input profiles:
+both input profiles; on the face these are the shortcuts to begin with, which
+the Inputs page can change (see [Face shortcuts](#face-shortcuts)):
 
 | Gesture | On the clock face | In the menu and its editors |
 |---|---|---|
@@ -744,12 +774,12 @@ both input profiles:
 | a hand held over the sensor for 3 s during boot | open the config hotspot | - |
 
 On the hotspot screen a swipe to the left closes the hotspot again. Pull (a
-hand moving away) does nothing yet.
+hand moving away) does nothing unless the Inputs page gives it something.
 
 - **Directions follow the panel.** The direction the sensor reports, plus the
   turn it is mounted at, minus the rotation the panel is drawn in, gives the
   direction on the panel: a swipe up is up as the viewer sees it, however the
-  clock is held. The mount turn is set once on the config page (**Inputs**);
+  clock is held. The mount turn is set once on the config page (**Inputs** page);
   if a swipe up acts as another direction, try the next setting.
 - **One gesture at a time:** for 300 ms after a gesture the sensor's next one
   is ignored, so the hand pulled back is not read as the opposite swipe. The
