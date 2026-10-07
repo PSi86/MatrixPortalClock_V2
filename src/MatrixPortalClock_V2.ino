@@ -5218,7 +5218,6 @@ void sendFormPage(Print &c) {
   c.print("<div><input type=number min=0 max=255 name=gifbr value="); c.print(gifSettings.minBright); c.println("></div>");
   c.print("<div><input type=number min=1 max=5 step=0.1 name=gifbx value=");
   c.print(gifSettings.brightTimes / 10); c.print('.'); c.print(gifSettings.brightTimes % 10); c.println("></div></div>");
-  c.println("<p style=\"font-size:14px\">A knock on the clock plays the last GIF again.</p>");
 #endif
 
   c.println("<button type=submit>Save</button>");
@@ -5377,6 +5376,16 @@ void saveGifSettings() {
   gifStore.write(gifSettings);
 }
 
+// A number such as 2, 2.5 or 2,5 in tenths, without the C library's float
+// parser (it would cost 7 KB of flash for this one field).
+long tenthsOf(const String &v) {
+  int dot = v.indexOf('.');
+  if (dot < 0) { dot = v.indexOf(','); }
+  long tenths = (dot < 0 ? v : v.substring(0, dot)).toInt() * 10;
+  if (dot >= 0 && dot + 1 < (int)v.length() && isDigit(v.charAt(dot + 1))) { tenths += v.charAt(dot + 1) - '0'; }
+  return tenths;
+}
+
 // The GIF section of the config page (/save).
 void applyGifParams(const String &q) {
   String v;
@@ -5385,7 +5394,7 @@ void applyGifParams(const String &q) {
   v = getParam(q, "gifmax"); if (v.length()) { gifSettings.maxMinutes = constrain(v.toInt(), 1, GIF_MINUTES_MAX); }
   v = getParam(q, "gifsec"); if (v.length()) { gifSettings.seconds = constrain(v.toInt(), GIF_SECONDS_MIN, GIF_SECONDS_MAX); }
   v = getParam(q, "gifbr");  if (v.length()) { gifSettings.minBright = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "gifbx");  if (v.length()) { gifSettings.brightTimes = (uint8_t)constrain(lroundf(v.toFloat() * 10.0f), (long)GIF_BRIGHT_TIMES_MIN, (long)GIF_BRIGHT_TIMES_MAX); }
+  v = getParam(q, "gifbx");  if (v.length()) { gifSettings.brightTimes = (uint8_t)constrain(tenthsOf(v), (long)GIF_BRIGHT_TIMES_MIN, (long)GIF_BRIGHT_TIMES_MAX); }
   gifSettingsCheck();
   matrix.setBrightness(panelBrightness());     // a GIF on show takes the new lowest at once
 }
