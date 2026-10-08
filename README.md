@@ -506,16 +506,18 @@ gravity and rotates the display in 90° increments so the clock is always uprigh
 The per-digit fly-in directions mean the same in both: a digit set to come
 from the top comes from the top edge as the clock is held. Each flight is long
 enough that the incoming digit starts wholly off the panel and the outgoing one
-leaves it wholly; both digits of a pair (hours, minutes, seconds) fly the longer
-of their two distances, so when both change they land together. A flight lasts
-at most 0.85 s, so the digit has landed before
-the next second; at a slow animation speed a long flight is sped up to fit. On
-the S3 the speed is kept in real time by the loop rate the face really had in
-its last second, so a web page asking for the panel picture does not slow the
-digits down. (Until
-2026-10-08 landscape swapped the directions — from right ↔ from top, from left
-↔ from bottom — but a save set them back until the next screen change, and a
-sideways flight was only 32 px long, half the landscape width.)
+leaves it wholly. All flights take the same time: what the longest flight the
+face has with its directions takes at the animation speed, at most 0.85 s. So
+whatever flies at a tick lands together, the shorter flights moving slower,
+every second looks the same whether one digit flies or six, and every digit has
+landed before the next second. On the S3 the speed is kept in real time by the
+loop rate the face really had in its last second, so a web page asking for the
+panel picture does not slow the digits down. (Until 2026-10-08 landscape
+swapped the directions — from right ↔ from top, from left ↔ from bottom — but a
+save set them back until the next screen change, a sideways flight was only
+32 px long, half the landscape width, and later that day, briefly, each flight
+took as long as its own distance, so hours, minutes and seconds landed one
+after the other.)
 
 The rotation switches with a short debounce and ignores near-45° tilts to avoid
 flicker. If the accelerometer is not found, the clock stays in portrait.
@@ -760,8 +762,9 @@ whose config page therefore has no watchface selector.
 
 ## Animation timing
 
-The digits fly in one pixel per step; the **animation speed** setting is the time
-per pixel in ms (default 12).
+The **animation speed** setting is the time per pixel in ms (default 12) of the
+longest flight the classic face has with its fly-in directions; every other
+flight covers its shorter way in the same time, so all land together.
 
 The Tetris watchface has its own pair of settings instead (see above); the
 animation speed does not apply to it.
@@ -769,8 +772,9 @@ animation speed does not apply to it.
 On the S3 the loop runs in step with the panel refresh (about 200 Hz):
 `show()` waits out one refresh period after the previous frame, and a digit moves
 one pixel every whole number of refreshes. The speed setting is therefore rounded
-to steps of about 5 ms (12 ms = 2 refreshes per pixel), and every pixel step stays
-on the panel equally long. Drawing a frame and handing it over takes well under a
+to steps of about 5 ms (12 ms = 2 refreshes per pixel), and every pixel step of the
+longest flight stays on the panel equally long (the shorter flights, covering
+their way in the same time, step a little less evenly). Drawing a frame and handing it over takes well under a
 refresh period, so the S3 has plenty of headroom. With a fixed millisecond loop,
 as before, the loop drifted against the refresh and single steps stayed on screen
 for 1, 2 or 3 refreshes, which showed as a slight judder. The M4 keeps the fixed

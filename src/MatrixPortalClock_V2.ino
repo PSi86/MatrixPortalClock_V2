@@ -707,12 +707,13 @@ int8_t animXTarget[6] = {0, 13, 6, 19, 6, 17}; // Todo check 25 abd 31 value
 int8_t animYTarget[6] = {16, 16, 35, 35, 50, 50};
 // Each digit's flight, set when it starts (startFlight()): the side it comes
 // from (settings.dir: 0 = from the top, 1 = from the right, 2 = from the
-// bottom, 3 = from the left), how many pixels it flies, and its pace - every
-// flightIters loop iterations it moves flightPx pixels.
-uint8_t flightDir[6]   = {0, 0, 0, 0, 0, 0};
-uint8_t flightDist[6]  = {1, 1, 1, 1, 1, 1};
-uint8_t flightIters[6] = {1, 1, 1, 1, 1, 1};
-uint8_t flightPx[6]    = {1, 1, 1, 1, 1, 1};
+// bottom, 3 = from the left) and how many pixels it flies.
+uint8_t flightDir[6]  = {0, 0, 0, 0, 0, 0};
+uint8_t flightDist[6] = {1, 1, 1, 1, 1, 1};
+// The loop iterations every flight takes, set at each second tick
+// (flightIterations()): all flights take the same time, so whatever flies at a
+// tick lands together.
+uint16_t flightTime = 1;
 // A flight takes at most this long, however slow the animation speed and long
 // the way, so every digit has landed before the next second's flights start.
 const uint16_t FLIGHT_MAX_MS = 850;
@@ -2196,6 +2197,7 @@ void stepClockAnim(void) {
     }
     faceTickMs = millisNow;
     itersSinceTick = 0;
+    flightTime = flightIterations();
   }
   else if (itersSinceTick < 0xFFFF) { itersSinceTick++; }
 
@@ -2237,51 +2239,48 @@ int16_t flightNeed(uint8_t i, uint8_t dir) {
   return max((int16_t)(size - pos - lo), (int16_t)(pos + hi));
 }
 
-// The pace of a flight of d pixels: one pixel every itersPerPixel() loop
-// iterations, the animation speed, unless the flight would then take longer
-// than FLIGHT_MAX_MS - then fewer iterations per pixel, or, where one
-// iteration is already too slow (the M4 runs one every loopTime ms), several
-// pixels per step.
-void flightPace(uint8_t d, uint8_t &iters, uint8_t &px) {
+// The loop iterations every flight takes: as long as the longest flight the
+// face can have now (the digit with the furthest to go from its side) takes at
+// the animation speed, one pixel every itersPerPixel() iterations - but at most
+// FLIGHT_MAX_MS. All flights take this time, the shorter ones moving slower, so
+// whatever flies at a tick lands together, and every second looks the same
+// whether one digit flies or six. (Until 2026-10-08 each flight took as long
+// as its own distance: the hours, minutes and seconds landed one after the
+// other.)
+uint16_t flightIterations() {
+  int16_t longest = 1;
+  for (uint8_t i = 0; i < 6; i++) { longest = max(longest, flightNeed(i, settings.dir[i] & 3)); }
 #if PANEL_PACED_LOOP
   uint32_t maxIters = faceLoopHz() * FLIGHT_MAX_MS / 1000;
 #else
   uint32_t maxIters = FLIGHT_MAX_MS / loopTime;
 #endif
-  if (maxIters < 1) { maxIters = 1; }
-  iters = itersPerPixel();
-  px = 1;
-  if ((uint32_t)d * iters <= maxIters) { return; }
-  if (maxIters >= d) { iters = (uint8_t)min(maxIters / d, (uint32_t)255); return; }
-  iters = 1;
-  px = (uint8_t)((d + maxIters - 1) / maxIters);
+  uint32_t iters = (uint32_t)longest * itersPerPixel();
+  if (iters > maxIters) { iters = maxIters; }
+  return (uint16_t)max(iters, (uint32_t)1);
 }
 
-// Digit i starts its flight from the side settings.dir names for it. Both
-// digits of a pair (hours, minutes, seconds) fly the same distance, the longer
-// of the two they need, so when both change they land together - at the same
-// speed, from whichever sides they come. (Each flying only as far as it needs,
-// the hours' tens from the left landed 13 px after the ones from the right.)
+// Digit i starts its flight from the side settings.dir names for it, as far
+// as it needs (flightNeed()), in the time all flights take (flightTime).
 void startFlight(uint8_t i) {
-  uint8_t mate = i ^ 1;   // 0-1, 2-3, 4-5
   flightDir[i] = settings.dir[i] & 3;
-  int16_t d = max(flightNeed(i, flightDir[i]), flightNeed(mate, settings.dir[mate] & 3));
+  int16_t d = flightNeed(i, flightDir[i]);
   bool across = (flightDir[i] == 1 || flightDir[i] == 3);
   int16_t pos = across ? animXTarget[i] : animYTarget[i];
   if (d > 127 - pos) { d = 127 - pos; }   // the positions are int8_t
   flightDist[i] = (uint8_t)max(d, (int16_t)1);
-  flightPace(flightDist[i], flightIters[i], flightPx[i]);
   animShow[i] = true;
 }
 
 // Put digit i where its flight is after iters loop iterations: the incoming
 // digit (animStr) the rest of the way out from its place, the outgoing one
-// (timeStr) as far past it on the other side as the flight has come.
+// (timeStr) as far past it on the other side as the flight has come. The
+// longest flight moves one pixel every itersPerPixel() iterations, the others
+// their shorter way in the same time.
 void placeFlight(uint8_t i, uint16_t iters) {
   static const int8_t SIDE_X[4] = { 0, 1, 0, -1 };   // where each settings.dir value comes from
   static const int8_t SIDE_Y[4] = { -1, 0, 1, 0 };
-  uint32_t moved = (uint32_t)flightPx[i] * (iters / flightIters[i]);
-  if (moved > flightDist[i]) { moved = flightDist[i]; }
+  uint32_t moved = (uint32_t)flightDist[i] * min(iters, flightTime) / flightTime;
   int16_t rest = flightDist[i] - (int16_t)moved;
   uint8_t d = flightDir[i];
   animXPos[i] = animXTarget[i] + SIDE_X[d] * rest;
