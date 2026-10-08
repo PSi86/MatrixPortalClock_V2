@@ -694,6 +694,7 @@ uint8_t BufferedWriter::_buf[2000];
 
 char timeStr[7], animStr[7]; // 6 digits + null terminator
 bool animTrigger[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
+bool classicFlyAllNext = false;   // FN_FACE_ANIMATION on the classic face: all six fly in at the next second
 bool animShow[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
 int8_t animXPos[6] = {0, 0, 0, 0, 0, 0};
 int8_t animYPos[6] = {0, 0, 0, 0, 0, 0};
@@ -3157,8 +3158,8 @@ bool knockIsReal() {
   return true;
 }
 
-// Whether the Tetris face can be knocked apart right now - what FN_KNOCK_EFFECT
-// needs, whichever input asked for it.
+// Whether the Tetris face can be knocked apart right now - what
+// FN_FACE_ANIMATION needs on it, whichever input asked for it.
 bool knockEffectReady() {
   if (screen != SCREEN_FACE)                           { return false; }  // the banner is on top of it
   if (settings.watchface != WATCHFACE_TETRIS_ID)       { return false; }  // the classic face has nothing to throw
@@ -3320,6 +3321,12 @@ void timekeeper(void) {
     if (animTrigger[1]==true && ((hourNow+1) % 10 == 0 || hourNow+1 == 24)) { animTrigger[0]=true; }
       else { animTrigger[0]=false; }
       // TODO: maybe there is another check necessary for the hours: 23 to 00 change
+    // The watchface animation on the classic face: every digit flies in as if
+    // it changed, through the same steps as a real change.
+    if (classicFlyAllNext) {
+      classicFlyAllNext = false;
+      for (uint8_t i = 0; i < sizeof(animTrigger); i++) { animTrigger[i] = true; }
+    }
   }
   else {
     for (uint8_t i = 0; i < sizeof(animTrigger); i++) {
@@ -3939,7 +3946,9 @@ int8_t faceEventIndex(InputEvent ev) {
 // Whether the source of a face event was found: the buttons always, the knock
 // with the accelerometer, the gestures with the gesture sensor.
 bool faceEventFitted(InputEvent ev) {
-  if (ev == EV_KNOCK) { return accelOK; }
+  // The knock is sensed by the Tetris face's code (updateShake()), so a board
+  // without it - the M4 - has no knock, accelerometer or not.
+  if (ev == EV_KNOCK) { return accelOK && WATCHFACE_TETRIS != 0; }
   if (isGestureEvent(ev)) { return gestureOK; }
   return true;
 }
@@ -3950,7 +3959,6 @@ bool faceActionOffered(uint8_t code, InputEvent ev) {
   switch (FACE_ACTIONS[code].needs) {
     case NEEDS_HOLD:   return ev == EV_UP_HOLD || ev == EV_DOWN_HOLD;
     case NEEDS_GIFS:   return GIF_PLAYBACK != 0;
-    case NEEDS_TETRIS: return WATCHFACE_TETRIS != 0;
     default:           return true;
   }
 }
@@ -4082,9 +4090,7 @@ void runFunction(InputFunction fn, uint8_t steps) {
     case FN_CYCLE_DST:      cycleDstMode(); break;
     case FN_TOGGLE_HOTSPOT: if (apActive) { stopAPMode(); } else { startAPMode(); } break;
     case FN_BRIGHT_FADE:    fadeStart(); break;
-#if WATCHFACE_TETRIS
-    case FN_KNOCK_EFFECT:   if (knockEffectReady()) { shakeStartAll(); } break;
-#endif
+    case FN_FACE_ANIMATION: faceAnimationStart(); break;
 #if GIF_PLAYBACK
     case FN_PLAY_GIF:       gifPlayNow(); break;
     case FN_GIF_AGAIN:      gifPlayAgain(); break;
@@ -4092,6 +4098,20 @@ void runFunction(InputFunction fn, uint8_t steps) {
     case FN_SHOW_HINTS:     showHints(); break;
     default:                break;
   }
+}
+
+// FN_FACE_ANIMATION, on the face only: the watchface's own animation. The
+// Tetris digits break up in the break-up effect; the classic digits all fly
+// in at the next second, as if every one of them changed then.
+void faceAnimationStart() {
+  if (screen != SCREEN_FACE) { return; }
+#if WATCHFACE_TETRIS
+  if (settings.watchface == WATCHFACE_TETRIS_ID) {
+    if (knockEffectReady()) { shakeStartAll(); }
+    return;
+  }
+#endif
+  classicFlyAllNext = true;
 }
 
 void holdStep(InputFunction fn) {

@@ -156,7 +156,7 @@ GPIO7, M4: D3). They keep their printed meaning in every orientation.
 | On the clock face | |
 |---|---|
 | UP or DOWN short, DOWN held | open the menu |
-| UP held | play a GIF (S3) |
+| UP held | play random GIF (S3) |
 | UP held during boot | open the config hotspot, even without the home WiFi |
 
 | In the menu and its editors | |
@@ -225,10 +225,13 @@ compile.
 What every input does on the face is set on the config page's **Inputs** page
 (`/inputs`, linked from the settings): UP and DOWN pressed, pressed twice or
 three times and held, the knock (with the accelerometer) and each gesture (with
-a gesture sensor), each to one of: nothing, open the menu, play a GIF, play the
-last GIF again (both S3), the digits break up (Tetris face), auto brightness
-on/off, daylight saving auto / summer / winter, hotspot on/off, brightness fade
-while held (held buttons only), show what the gestures do. The page lists only
+a gesture sensor), each to one of: nothing, open the menu, play random GIF, play
+last GIF again (both S3), trigger watchface animation, toggle auto brightness
+on / off, toggle daylight saving: auto, summer, winter, toggle hotspot on / off,
+fade brightness while held (held buttons only), show gesture hints. The
+watchface animation is the face's own: the Tetris digits break up in the
+break-up effect, and the classic digits all fly in at the next second as if
+every one of them changed. The page lists only
 the inputs found. The profile chosen there keeps the menu, the hotspot screen
 and the start; choosing it fills the face with its own rows to begin with, and
 nothing set means the profile's rows. Saving is refused unless an input found
@@ -674,8 +677,8 @@ the classic watchface only.
 ### The digits break up
 
 When the time changes a digit, the old one breaks up before the new one is
-built, and an input set to *the digits break up* (by default the knock, see
-[Face shortcuts](#face-shortcuts)) throws all four away and builds them up again
+built, and an input set to *trigger watchface animation* (by default the knock,
+see [Face shortcuts](#face-shortcuts)) throws all four away and builds them up again
 from the current time — with a fresh tiling and fresh colours. The **break-up
 effect** is one of three, selectable and previewing live: **Collapse** (the
 stack gives way and drops), **Scatter** (the pieces fly off and tumble) and
@@ -820,8 +823,8 @@ the Inputs page can change (see [Face shortcuts](#face-shortcuts)):
 | swipe up / down | open the menu | previous / next item, or change the value |
 | swipe right, push | open the menu | open the item; in an editor: save |
 | swipe left | - | back, without saving |
-| wave | the digits break up (Tetris face) | out to the face |
-| circle clockwise / counter-clockwise | play a GIF | previous / next; in an editor five steps (clockwise is up) |
+| wave | trigger watchface animation | out to the face |
+| circle clockwise / counter-clockwise | play random GIF | previous / next; in an editor five steps (clockwise is up) |
 | a hand comes near and stays | a hint: `swipe` / `menu` | - |
 | a hand held over the sensor for 3 s during boot | open the config hotspot | - |
 

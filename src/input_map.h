@@ -55,7 +55,7 @@ enum InputFunction : uint8_t {
   FN_CYCLE_DST,        // daylight saving auto -> summer -> winter, with a banner
   FN_TOGGLE_HOTSPOT,   // config AP on/off
   FN_BRIGHT_FADE,      // cyclic brightness fade while the button stays held, saved on release
-  FN_KNOCK_EFFECT,     // the Tetris digits break up (the break-up effect)
+  FN_FACE_ANIMATION,   // the watchface's animation: the Tetris digits break up, the classic ones fly in
   FN_PLAY_GIF,         // a GIF now, on boards with GIF playback
   FN_GIF_AGAIN,        // the last GIF shown once more, on boards with GIF playback
   FN_SHOW_HINTS,       // what the gestures do, for a moment
@@ -74,7 +74,7 @@ constexpr InputMapping PROFILE_DEFAULT[] = {
   { EV_DOWN_SHORT,     CTX_FACE,    FN_OPEN_MENU      },
   { EV_DOWN_HOLD,      CTX_FACE,    FN_OPEN_MENU      },
   { EV_UP_HOLD,        CTX_FACE,    FN_PLAY_GIF       },
-  { EV_KNOCK,          CTX_FACE,    FN_KNOCK_EFFECT   },
+  { EV_KNOCK,          CTX_FACE,    FN_FACE_ANIMATION },
   { EV_UP_SHORT,       CTX_MENU,    FN_PREV           },
   { EV_DOWN_SHORT,     CTX_MENU,    FN_NEXT           },
   { EV_DOWN_HOLD,      CTX_MENU,    FN_ENTER          },
@@ -93,7 +93,7 @@ constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
   { EV_UP_3X,          CTX_FACE,    FN_TOGGLE_HOTSPOT },
   { EV_UP_HOLD,        CTX_FACE,    FN_BRIGHT_FADE    },
   { EV_DOWN_HOLD,      CTX_FACE,    FN_OPEN_MENU      },
-  { EV_KNOCK,          CTX_FACE,    FN_KNOCK_EFFECT   },
+  { EV_KNOCK,          CTX_FACE,    FN_FACE_ANIMATION },
   { EV_UP_SHORT,       CTX_MENU,    FN_PREV           },
   { EV_DOWN_SHORT,     CTX_MENU,    FN_NEXT           },
   { EV_DOWN_HOLD,      CTX_MENU,    FN_ENTER          },
@@ -114,7 +114,7 @@ constexpr InputMapping GESTURES_DEFAULT[] = {
   { EV_SWIPE_DOWN,       CTX_FACE,    FN_OPEN_MENU      },
   { EV_SWIPE_RIGHT,      CTX_FACE,    FN_OPEN_MENU      },
   { EV_PUSH,             CTX_FACE,    FN_OPEN_MENU      },
-  { EV_WAVE,             CTX_FACE,    FN_KNOCK_EFFECT   },
+  { EV_WAVE,             CTX_FACE,    FN_FACE_ANIMATION },
   { EV_CIRCLE_CW,        CTX_FACE,    FN_PLAY_GIF       },
   { EV_CIRCLE_CCW,       CTX_FACE,    FN_PLAY_GIF       },
   { EV_APPROACH,         CTX_FACE,    FN_SHOW_HINTS     },
@@ -221,20 +221,20 @@ constexpr FaceEvent FACE_EVENTS[] = {
 constexpr uint8_t FACE_EVENT_COUNT = sizeof(FACE_EVENTS) / sizeof(FACE_EVENTS[0]);
 
 // What an action needs to be offered: a held button (it runs while the button
-// stays down), GIF playback, the Tetris face.
-enum FaceActionNeeds : uint8_t { NEEDS_NOTHING, NEEDS_HOLD, NEEDS_GIFS, NEEDS_TETRIS };
+// stays down), GIF playback.
+enum FaceActionNeeds : uint8_t { NEEDS_NOTHING, NEEDS_HOLD, NEEDS_GIFS };
 struct FaceAction { uint8_t code; InputFunction function; FaceActionNeeds needs; const char *label; const char *word; };
 constexpr FaceAction FACE_ACTIONS[] = {
-  { 0, FN_NONE,           NEEDS_NOTHING, "nothing",                               ""      },
-  { 1, FN_OPEN_MENU,      NEEDS_NOTHING, "open the menu",                         "menu"  },
-  { 2, FN_PLAY_GIF,       NEEDS_GIFS,    "play a GIF",                            "GIF"   },
-  { 3, FN_GIF_AGAIN,      NEEDS_GIFS,    "play the last GIF again",               "again" },
-  { 4, FN_KNOCK_EFFECT,   NEEDS_TETRIS,  "the digits break up (Tetris face)",     "knock" },
-  { 5, FN_TOGGLE_AUTO,    NEEDS_NOTHING, "auto brightness on / off",              "auto"  },
-  { 6, FN_CYCLE_DST,      NEEDS_NOTHING, "daylight saving: auto, summer, winter", "DST"   },
-  { 7, FN_TOGGLE_HOTSPOT, NEEDS_NOTHING, "hotspot on / off",                      "AP"    },
-  { 8, FN_BRIGHT_FADE,    NEEDS_HOLD,    "brightness fade while held",            "fade"  },
-  { 9, FN_SHOW_HINTS,     NEEDS_NOTHING, "show what the gestures do",             "hints" },
+  { 0, FN_NONE,           NEEDS_NOTHING, "nothing",                                      ""      },
+  { 1, FN_OPEN_MENU,      NEEDS_NOTHING, "open the menu",                                "menu"  },
+  { 2, FN_PLAY_GIF,       NEEDS_GIFS,    "play random GIF",                              "GIF"   },
+  { 3, FN_GIF_AGAIN,      NEEDS_GIFS,    "play last GIF again",                          "again" },
+  { 4, FN_FACE_ANIMATION, NEEDS_NOTHING, "trigger watchface animation",                  "anim"  },
+  { 5, FN_TOGGLE_AUTO,    NEEDS_NOTHING, "toggle auto brightness on / off",              "auto"  },
+  { 6, FN_CYCLE_DST,      NEEDS_NOTHING, "toggle daylight saving: auto, summer, winter", "DST"   },
+  { 7, FN_TOGGLE_HOTSPOT, NEEDS_NOTHING, "toggle hotspot on / off",                      "AP"    },
+  { 8, FN_BRIGHT_FADE,    NEEDS_HOLD,    "fade brightness while held",                   "fade"  },
+  { 9, FN_SHOW_HINTS,     NEEDS_NOTHING, "show gesture hints",                           "hints" },
 };
 constexpr uint8_t FACE_ACTION_COUNT = sizeof(FACE_ACTIONS) / sizeof(FACE_ACTIONS[0]);
 
