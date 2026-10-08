@@ -510,7 +510,10 @@ leaves it wholly. All flights take the same time: what the longest flight the
 face has with its directions takes at the animation speed, at most 0.85 s. So
 whatever flies at a tick lands together, the shorter flights moving slower,
 every second looks the same whether one digit flies or six, and every digit has
-landed before the next second. On the S3 the speed is kept in real time by the
+landed before the next second. Digits that come from the same side all fly the
+longest distance any of them needs, so they move as one block and keep their
+spacing: a pair set to one side flies in as it stands, and with every digit set
+to one side the whole face slides. On the S3 the speed is kept in real time by the
 loop rate the face really had in its last second, so a web page asking for the
 panel picture does not slow the digits down. (Until 2026-10-08 landscape
 swapped the directions — from right ↔ from top, from left ↔ from bottom — but a

@@ -2260,11 +2260,19 @@ uint16_t flightIterations() {
   return (uint16_t)max(iters, (uint32_t)1);
 }
 
-// Digit i starts its flight from the side settings.dir names for it, as far
-// as it needs (flightNeed()), in the time all flights take (flightTime).
+// Digit i starts its flight from the side settings.dir names for it, in the
+// time all flights take (flightTime). Every digit that comes from the same side
+// flies the same distance, the longest any of them needs (flightNeed()), so
+// they move at one speed as one block and keep their spacing - a pair set to
+// one side flies in as it stands, and with every digit set to one side the
+// whole face slides. (Each flying only as far as it needs, the hours' and the
+// minutes' two digits drew apart or together on the way.)
 void startFlight(uint8_t i) {
   flightDir[i] = settings.dir[i] & 3;
-  int16_t d = flightNeed(i, flightDir[i]);
+  int16_t d = 1;
+  for (uint8_t j = 0; j < 6; j++) {
+    if ((settings.dir[j] & 3) == flightDir[i]) { d = max(d, flightNeed(j, flightDir[i])); }
+  }
   bool across = (flightDir[i] == 1 || flightDir[i] == 3);
   int16_t pos = across ? animXTarget[i] : animYTarget[i];
   if (d > 127 - pos) { d = 127 - pos; }   // the positions are int8_t
