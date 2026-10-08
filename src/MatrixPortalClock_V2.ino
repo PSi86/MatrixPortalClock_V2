@@ -3480,6 +3480,7 @@ String clockStatusText() {
 // page's status of the time, sent again whenever the time is set there.
 String timeStatusText() {
   String s = clockStatusText();
+  if (clockIsSet()) { s += "."; }   // the line about the clock ends here; the one about the RTC follows
   if (!rtcOK)            { s += " No real-time clock: a time set here lasts until the next power loss."; }
   else if (rtcLostPower) { s += " The real-time clock (DS3231) had lost power and has no time until one is set here or comes from the internet."; }
   else                   { s += " The real-time clock (DS3231) keeps the time without power."; }
