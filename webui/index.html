@@ -242,8 +242,8 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
         <div class="row stack"><div class="lbl">Digit colour</div><div class="swatches" id="swDigit"></div></div>
         <div class="row stack"><div><div class="lbl">Fly-in colour</div><div class="hint">Dimmed by itself while a digit moves.</div></div><div class="swatches" id="swTrail"></div></div>
         <div class="row">
-          <div><label class="lbl" for="speed">Fly-in speed</label><div class="hint">Milliseconds per pixel of the digit with the furthest to fly; all digits land together. Smaller is faster.</div></div>
-          <div class="range"><input type="range" id="speed" min="4" max="60" data-live><output for="speed"></output></div>
+          <div><label class="lbl" for="speed">Fly-in time</label><div class="hint">How long every fly-in takes; all digits land together.</div></div>
+          <div class="range"><input type="range" id="speed" min="100" max="850" step="10" data-live><output for="speed"></output></div>
         </div>
         <div class="row stack"><div><div class="lbl">Where each digit flies in from</div><div class="hint">Tap a digit to turn its arrow. Kept by Save.</div></div><div class="dirs" id="dirs"></div></div>
       </div>

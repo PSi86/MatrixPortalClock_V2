@@ -107,7 +107,7 @@ Adafruit_Protomatter matrix(
 // Layout revision inside a valid blob. Fields added later go into spare bytes and
 // are migrated in loadSettings() by revision, so the magic can stay the same and
 // an older firmware keeps reading (and round-tripping) the settings it knows.
-#define SETTINGS_REV   1        // 0 = before the watchface byte existed
+#define SETTINGS_REV   2        // 0 = before the watchface byte existed, 1 = flyInTime held ms per pixel
 
 struct Settings {
   uint16_t magic;        // validity marker
@@ -116,7 +116,7 @@ struct Settings {
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
   uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
-  uint8_t  animSpeed;    // ms per animation pixel (lower = faster animation)
+  uint8_t  flyInTime;    // how long every fly-in of the classic face takes, in 10 ms (rev 1: ms per pixel)
   uint8_t  digitR, digitG, digitB; // color of the time digits
   uint8_t  trailR, trailG, trailB; // color of a digit while it is flying in
   uint8_t  dir[6];       // fly-in direction per digit (0=top,1=right,2=bottom,3=left)
@@ -135,6 +135,10 @@ struct Settings {
 // sizeof(Settings), and a mismatch would silently reset EVERY setting.
 static_assert(sizeof(Settings) == 32,
               "Settings must stay 32 bytes - stored blobs are read back by exact size");
+
+// The fly-in time's range (Settings::flyInTime): at most 850 ms, so every digit
+// has landed before the next second's flights start.
+const uint16_t FLY_IN_MIN_MS = 100, FLY_IN_MAX_MS = 850;
 
 // Watchfaces (Settings::watchface).
 const uint8_t WATCHFACE_CLASSIC   = 0;  // six flying GFX-font digits, HH MM SS
@@ -155,7 +159,7 @@ const Settings DEFAULTS = {
   3600,            // CET base (UTC+1)
   DST_AUTO,        // CET/CEST switched automatically (the original was a fixed UTC+2)
   128,             // neutral: absolute half in manual mode, sensor-as-is trim in auto mode
-  12,              // original loopTime
+  40,              // fly-in time 400 ms
   0, 0, 255,       // blue digits
   255, 255, 255,   // fly-in trail (full color; dimmed relative to brightness at render time)
   {3, 1, 3, 1, 1, 1},
@@ -714,15 +718,11 @@ uint8_t flightDist[6] = {1, 1, 1, 1, 1, 1};
 // (flightIterations()): all flights take the same time, so whatever flies at a
 // tick lands together.
 uint16_t flightTime = 1;
-// A flight takes at most this long, however slow the animation speed and long
-// the way, so every digit has landed before the next second's flights start.
-const uint16_t FLIGHT_MAX_MS = 850;
 // The loop iterations the classic face had in its last whole second, counted
 // between two second ticks (0 = none counted yet). Web requests are served in
 // the same loop and take iterations away - measured: with /api/panel asked
 // every 60 ms a flight paced by the panel's refresh rate ran 30 % slow and
-// missed its landing. Pacing by this count keeps the speed and FLIGHT_MAX_MS
-// in real time.
+// missed its landing. Pacing by this count keeps the fly-in time real.
 uint16_t faceItersPerSec = 0;
 uint32_t faceTickMs = 0;   // when stepClockAnim() last saw a second tick; 0 = not since the face came up
 
@@ -784,7 +784,11 @@ const float   AUTOBRIGHT_TAU_MS = 1200.0f;  // fade time constant (~1.2 s to 63%
 uint8_t       effectiveBrightness = 128;
 
 //Time Related Variables
-uint8_t loopTime = 12; // ms per animation pixel (PANEL_PACED_LOOP: rounded to whole panel refreshes)
+#if !PANEL_PACED_LOOP
+// The M4's loop runs every LOOP_MS ms (the S3's in step with the panel). Until
+// 2026-10-08 it ran every "speed" ms, which was the classic face's ms per pixel.
+const uint8_t LOOP_MS = 10;
+#endif
 uint16_t panelHz = 0;            // measured panel refresh rate, 0 until the first measurement
 unsigned long panelRateLast = 0; // start of the running refresh-rate measurement
 uint8_t hourNow, minuteNow, secondNow;
@@ -2156,27 +2160,15 @@ void updatePanelRate() {
   panelRateLast = millisNow;
 }
 
-#if PANEL_PACED_LOOP
 // Loop iterations per second on the classic face: the last second's count, or
-// before there is one the panel's refresh rate - with PANEL_PACED_LOOP the loop
-// runs once per refresh when nothing holds it up.
+// before there is one what the loop is made to do - on the S3 once per panel
+// refresh when nothing holds it up, on the M4 once every LOOP_MS.
 uint32_t faceLoopHz() {
   if (faceItersPerSec) { return faceItersPerSec; }
-  return panelHz ? panelHz : PANEL_HZ_TYPICAL;
-}
-#endif
-
-// Loop iterations per animation pixel. With PANEL_PACED_LOOP loopTime (ms per
-// pixel) is rounded to whole iterations at the rate the face's loop really
-// has, so every step stays on the panel equally long and the speed stays as
-// set while web requests take time from the loop. Otherwise the loop itself
-// runs every loopTime ms and moves one pixel each time.
-uint8_t itersPerPixel() {
 #if PANEL_PACED_LOOP
-  uint32_t iters = ((uint32_t)loopTime * faceLoopHz() + 500) / 1000;
-  return iters ? (uint8_t)min(iters, (uint32_t)255) : 1;
+  return panelHz ? panelHz : PANEL_HZ_TYPICAL;
 #else
-  return 1;
+  return 1000 / LOOP_MS;
 #endif
 }
 
@@ -2239,25 +2231,22 @@ int16_t flightNeed(uint8_t i, uint8_t dir) {
   return max((int16_t)(size - pos - lo), (int16_t)(pos + hi));
 }
 
-// The loop iterations every flight takes: as long as the longest flight the
-// face can have now (the digit with the furthest to go from its side) takes at
-// the animation speed, one pixel every itersPerPixel() iterations - but at most
-// FLIGHT_MAX_MS. All flights take this time, the shorter ones moving slower, so
-// whatever flies at a tick lands together, and every second looks the same
-// whether one digit flies or six. (Until 2026-10-08 each flight took as long
-// as its own distance: the hours, minutes and seconds landed one after the
-// other.)
+// The loop iterations every flight takes: the fly-in time at the rate the
+// face's loop really has. All flights take this time, each covering its own way
+// in it, so whatever flies at a tick lands together, and every second looks the
+// same whether one digit flies or six. (Until 2026-10-08 the setting was ms per
+// pixel, rounded to whole loop iterations per pixel: with flights up to 62 px
+// and every flight held under a second, it had three steps - 4..7, 8..12 and
+// 13..60 ms looked alike within each.)
 uint16_t flightIterations() {
-  int16_t longest = 1;
-  for (uint8_t i = 0; i < 6; i++) { longest = max(longest, flightNeed(i, settings.dir[i] & 3)); }
-#if PANEL_PACED_LOOP
-  uint32_t maxIters = faceLoopHz() * FLIGHT_MAX_MS / 1000;
-#else
-  uint32_t maxIters = FLIGHT_MAX_MS / loopTime;
-#endif
-  uint32_t iters = (uint32_t)longest * itersPerPixel();
-  if (iters > maxIters) { iters = maxIters; }
+  uint32_t ms = (uint32_t)settings.flyInTime * 10;
+  uint32_t iters = (ms * faceLoopHz() + 500) / 1000;
   return (uint16_t)max(iters, (uint32_t)1);
+}
+
+// The fly-in time in the 10 ms Settings::flyInTime keeps, from ms, within its range.
+uint8_t flyInUnits(long ms) {
+  return (uint8_t)constrain((ms + 5) / 10, (long)(FLY_IN_MIN_MS / 10), (long)(FLY_IN_MAX_MS / 10));
 }
 
 // Digit i starts its flight from the side settings.dir names for it, in the
@@ -2282,9 +2271,9 @@ void startFlight(uint8_t i) {
 
 // Put digit i where its flight is after iters loop iterations: the incoming
 // digit (animStr) the rest of the way out from its place, the outgoing one
-// (timeStr) as far past it on the other side as the flight has come. The
-// longest flight moves one pixel every itersPerPixel() iterations, the others
-// their shorter way in the same time.
+// (timeStr) as far past it on the other side as the flight has come. Every
+// flight covers its way in flightTime iterations, its pixels spread evenly
+// over them.
 void placeFlight(uint8_t i, uint16_t iters) {
   static const int8_t SIDE_X[4] = { 0, 1, 0, -1 };   // where each settings.dir value comes from
   static const int8_t SIDE_Y[4] = { -1, 0, 1, 0 };
@@ -2417,11 +2406,6 @@ const uint8_t TETRIS_SETTLE = 2;  // last cells of the fall, never turning any m
 // the way. Both are stored in their own blob (see TetrisSettings below).
 const uint8_t  TETRIS_DROP_MIN = 20,  TETRIS_DROP_MAX = 250;   // ms per cell
 const uint16_t TETRIS_SPIN_MIN = 80,  TETRIS_SPIN_MAX = 1500;  // ms per quarter turn
-// One fall step every animSpeed * TETRIS_STEP_MULT ms, so the existing speed
-// setting covers 16..240 ms and the default (12) lands at 48 ms. A digit needs
-// between 40 and 140 steps, so even the slowest setting finishes a digit well
-// inside the minute before it has to change again.
-const uint8_t TETRIS_STEP_MULT = 4;
 
 // Six hues 60 degrees apart. Blue is lifted off pure 0000FF, which is too dark
 // against the others on the panel, without moving its hue.
@@ -3376,7 +3360,7 @@ void timekeeper(void) {
 #if PANEL_PACED_LOOP
   delay(1); // show() paces the loop to the panel refresh; just give other tasks a turn
 #else
-  if(deltaT<loopTime) { delay(loopTime-deltaT); } //delay start of execution until we have the right iteration interval
+  if(deltaT<LOOP_MS) { delay(LOOP_MS-deltaT); } //delay start of execution until we have the right iteration interval
 #endif
   
   millisNow=millis();
@@ -3791,6 +3775,9 @@ void loadSettings() {
     // give every field added since an explicit value. Everything the user
     // configured keeps its place, because the struct did not grow.
     if (settings.settingsRev < 1) { settings.watchface = WATCHFACE_CLASSIC; }
+    // Rev 1 held the fly-in speed in ms per pixel (4..60), and a fly-in went
+    // 32 px in landscape: that times 32 is the time it took then.
+    if (settings.settingsRev < 2) { settings.flyInTime = flyInUnits((long)settings.flyInTime * 32); }
     saveSettings();   // stamps the new revision
     Serial.print("Settings: stored layout migrated to rev "); Serial.println(SETTINGS_REV);
   }
@@ -3911,7 +3898,7 @@ void applySettings() {
 #if !WATCHFACE_TETRIS
   settings.watchface = WATCHFACE_CLASSIC;   // this build has no other watchface
 #endif
-  loopTime = settings.animSpeed;
+  settings.flyInTime = constrain(settings.flyInTime, FLY_IN_MIN_MS / 10, FLY_IN_MAX_MS / 10);
   syncTimeHour   = settings.syncHour;
   syncTimeMinute = settings.syncMinute;
   // Enforce full colors (the trail is dimmed at render time, not by the swatch).
@@ -5326,7 +5313,7 @@ void applyParams(const String &q) {
   v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "speed");  if (v.length()) { settings.animSpeed  = constrain(v.toInt(), 4, 60); }
+  v = getParam(q, "speed");  if (v.length()) { settings.flyInTime  = flyInUnits(v.toInt()); }   // ms
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
   v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
   for (int i = 0; i < 6; i++) {
@@ -5436,7 +5423,7 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
   v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "speed");  if (v.length()) { settings.animSpeed = constrain(v.toInt(), 4, 60); loopTime = settings.animSpeed; }
+  v = getParam(q, "speed");  if (v.length()) { settings.flyInTime = flyInUnits(v.toInt()); }   // ms
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
   v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
 #if WATCHFACE_TETRIS
@@ -5573,9 +5560,10 @@ void sendFormPage(Print &c) {
   c.print("<div><label>Max brightness</label><input type=number min=0 max=255 name=brmax onchange=liveNow(0) value="); c.print(settings.brightMax); c.println("></div>");
   c.println("</div>");
 
-  // Animation speed (live)
-  c.print("<label>Animation speed (ms per pixel, small=fast)</label>");
-  c.print("<input type=number min=4 max=60 name=speed value="); c.print(settings.animSpeed);
+  // Fly-in time (live)
+  c.print("<label>Fly-in time (ms, every digit lands at once)</label>");
+  c.print("<input type=number min="); c.print(FLY_IN_MIN_MS); c.print(" max="); c.print(FLY_IN_MAX_MS);
+  c.print(" step=10 name=speed value="); c.print(settings.flyInTime * 10);
   c.println(" onchange=liveNow(0)>");
 
   // Colors (live) - palette swatches instead of a free color picker (few levels per channel)
@@ -6810,7 +6798,7 @@ void apiState(Print &c) {
   s["wf"] = settings.watchface;
   s["digit"] = toHex(settings.digitR, settings.digitG, settings.digitB);
   s["trail"] = toHex(settings.trailR, settings.trailG, settings.trailB);
-  s["speed"] = settings.animSpeed;
+  s["speed"] = settings.flyInTime * 10;   // ms
   JsonArray dirs = s["dirs"].to<JsonArray>();
   for (uint8_t i = 0; i < 6; i++) { dirs.add(settings.dir[i]); }
 #if WATCHFACE_TETRIS

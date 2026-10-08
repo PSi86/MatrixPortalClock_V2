@@ -65,7 +65,7 @@ button pin cannot be carried over.
   timezone, daylight saving, the config hotspot and, with a real-time clock, the
   time and date, set on the clock itself without WiFi (see
   [Menu and buttons](#menu-and-buttons))
-- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, GIFs (S3), the info band's place and sources (S3) and the **home WiFi**; on a page of its own the input profile and what
+- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, fly-in time, colors, fly-in directions, NTP sync time, GIFs (S3), the info band's place and sources (S3) and the **home WiFi**; on a page of its own the input profile and what
   buttons, knock and gestures do on the face (see [Face shortcuts](#face-shortcuts))
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
@@ -449,7 +449,7 @@ is for now; new clocks are built on the S3).
 The matrix shows SSID, password and IP **immediately** when the AP opens (before
 the radio has finished coming up, so there is no frozen display), in landscape
 orientation, until a client connects; after that it switches to the live clock
-preview so that **brightness, colors and animation speed preview live** while you
+preview so that **brightness, colors and the fly-in time preview live** while you
 change them in the web UI (at the full frame rate on the S3, 5 fps on the M4 - every
 WiFiNINA socket write is an SPI round trip there). In the preview a small blue
 square blinks in the top right corner: the hotspot is still up, and only holding
@@ -506,11 +506,10 @@ gravity and rotates the display in 90° increments so the clock is always uprigh
 The per-digit fly-in directions mean the same in both: a digit set to come
 from the top comes from the top edge as the clock is held. Each flight is long
 enough that the incoming digit starts wholly off the panel and the outgoing one
-leaves it wholly. All flights take the same time: what the longest flight the
-face has with its directions takes at the animation speed, at most 0.85 s. So
-whatever flies at a tick lands together, the shorter flights moving slower,
-every second looks the same whether one digit flies or six, and every digit has
-landed before the next second. Digits that come from the same side all fly the
+leaves it wholly. All flights take the same time, the **fly-in time** (100–850
+ms, default 400). So whatever flies at a tick lands together, the shorter
+flights moving slower, every second looks the same whether one digit flies or
+six, and every digit has landed before the next second. Digits that come from the same side all fly the
 longest distance any of them needs, so they move as one block and keep their
 spacing: a pair set to one side flies in as it stands, and with every digit set
 to one side the whole face slides. On the S3 the speed is kept in real time by the
@@ -688,8 +687,8 @@ states — every piece at every height at every turn count: none leaves the box.
 *Tetris turn* the average milliseconds between quarter turns (80–1500, default
 260). They are deliberately separate — one sets how fast the digit builds, the
 other how busy it looks doing it — and they are kept in their own flash blob, so
-the main settings are untouched by them. The *animation speed* setting applies to
-the classic watchface only.
+the main settings are untouched by them. The *fly-in time* applies to the
+classic watchface only.
 
 ### The digits break up
 
@@ -765,23 +764,27 @@ whose config page therefore has no watchface selector.
 
 ## Animation timing
 
-The **animation speed** setting is the time per pixel in ms (default 12) of the
-longest flight the classic face has with its fly-in directions; every other
-flight covers its shorter way in the same time, so all land together.
+The **fly-in time** is how long every flight of the classic face takes, in ms
+(100–850, default 400); each digit covers its own way in it, so all land
+together. Until 2026-10-08 the setting was the time per pixel (4–60 ms, default
+12), rounded to whole loop iterations per pixel; with flights of up to 62 px and
+every flight held under a second, it had only three steps. A stored value of the
+old kind is converted once, times 32 (the length a flight had then in landscape):
+12 ms per pixel becomes 380 ms.
 
 The Tetris watchface has its own pair of settings instead (see above); the
-animation speed does not apply to it.
+fly-in time does not apply to it.
 
 On the S3 the loop runs in step with the panel refresh (about 200 Hz):
-`show()` waits out one refresh period after the previous frame, and a digit moves
-one pixel every whole number of refreshes. The speed setting is therefore rounded
-to steps of about 5 ms (12 ms = 2 refreshes per pixel), and every pixel step of the
-longest flight stays on the panel equally long (the shorter flights, covering
-their way in the same time, step a little less evenly). Drawing a frame and handing it over takes well under a
-refresh period, so the S3 has plenty of headroom. With a fixed millisecond loop,
-as before, the loop drifted against the refresh and single steps stayed on screen
-for 1, 2 or 3 refreshes, which showed as a slight judder. The M4 keeps the fixed
-loop time.
+`show()` waits out one refresh period after the previous frame, and the fly-in
+time is turned into whole refreshes at the rate the face's loop really had in its
+last second. A flight's pixels are spread evenly over them, so a step stays on
+the panel for one refresh or the next whole number, never drifting. Drawing a
+frame and handing it over takes well under a refresh period, so the S3 has
+plenty of headroom. With a fixed millisecond loop, as before, the loop drifted
+against the refresh and single steps stayed on screen for 1, 2 or 3 refreshes,
+which showed as a slight judder. The M4's loop runs every 10 ms (until
+2026-10-08 every "speed" ms).
 
 ### Panel driver
 
