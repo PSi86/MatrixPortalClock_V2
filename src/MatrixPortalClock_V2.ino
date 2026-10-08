@@ -60,6 +60,13 @@ typedef struct gif_draw_tag GIFDRAW;   // the prototypes generated from this ske
 struct GifPackEntry;                   // and this one
 #endif
 
+#if BAND_DATA
+#include "band_data.h"         // the info band's items and the sources the clock fetches
+#else
+struct FeedResult;                     // named by prototypes generated from this sketch
+struct BandItem;
+#endif
+
 /* ----------------------------------------------------------------------
 The RGB matrix must be wired to VERY SPECIFIC pins, different for each
 microcontroller board. board_hal.h picks the set that belongs to the board
@@ -297,6 +304,51 @@ uint16_t      gifPackCount = 0;
 esp_partition_mmap_handle_t gifPackMap;
 bool          gifPackMapped = false;
 uint8_t      *gifPackCopy = nullptr;
+#endif
+
+#if BAND_DATA
+// Info band data ---------------------------------------------------------------
+// The place the clock fetches weather and warnings for, and which of its
+// sources are on: a blob of its own (NVS key "feeds"). The sources and the
+// items are in src/band_data.h, their scheduling at the end of the sketch.
+#define FEED_SETTINGS_MAGIC 0xFEED
+#define FEED_SETTINGS_REV   1
+struct FeedSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  on;          // one bit per FeedId: the sources fetched
+  int32_t  lat, lon;    // the place, in millionths of a degree
+  uint8_t  located;     // 1 once a place is set; nothing is fetched before
+  uint8_t  reserved[3];
+};
+const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
+                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS)), 0, 0, 0, { 0 } };
+FeedSettings feedSettings;
+SettingsStore<FeedSettings> feedStore;
+
+// Per source: when it is due, and how its last fetch went.
+struct FeedRun {
+  unsigned long dueAt;     // millis()
+  uint8_t  failures;       // in a row, for the back-off
+  int16_t  status;         // of the last fetch (FeedResult)
+  time_t   okAt;           // UTC of the last good fetch; 0 = none yet
+  uint32_t ms;             // how long the last fetch took
+  int32_t  bytes;          // and how large its answer was
+  char     error[40];
+};
+FeedRun       feedRuns[FEED_COUNT];
+bool          feedTaskOK = false;        // the fetch task is running
+bool          feedBusy = false;          // a job is with it
+unsigned long feedWantedAt = 0;          // millis() the station was asked for
+char          feedPlace[32] = "";        // the warnings' place, as the DWD names it
+const unsigned long FEED_STATION_MS = 60UL * 1000UL;       // the longest wait for the station
+const unsigned long FEED_RETRY_MS   = 60UL * 1000UL;       // the first wait after a failure, doubled each time
+const unsigned long FEED_GATHER_MS  = 3UL * 60UL * 1000UL; // with the radio on anyway, sources due this soon come along
+
+// The items, from every source; only the loop touches them.
+const uint8_t BAND_ITEMS_MAX = 16;
+BandItem bandItems[BAND_ITEMS_MAX];
+uint8_t  bandItemCount = 0;
 #endif
 
 // Home WiFi --------------------------------------------------------------------
@@ -699,9 +751,23 @@ unsigned long syncDueSince = 0;               // millis() when the pending sync 
 unsigned long syncAttemptSince = 0;           // millis() the running attempt (joining and asking) began
 unsigned long syncPausedSince  = 0;           // millis() the pause began
 unsigned long syncLastAsk  = 0;               // millis() of the last ask, for the retry pace
+const unsigned long NTP_RETRY_MS  = 3000;     // between asks while a sync is due
+
+// The station - the clock joined to the home WiFi - is shared: the NTP sync
+// and the info band's sources each say while they need it (radioUsers), and
+// the radio is off while nobody does (stationUpdate()). The sync's need
+// follows its state (setSyncState()). The hotspot takes the radio over while
+// it is open.
+enum StationState : uint8_t {
+  STA_OFF,       // radio off
+  STA_JOINING,   // joining the home WiFi, again every JOIN_RETRY_MS until it connects
+  STA_UP,        // connected
+};
+enum RadioUser : uint8_t { RADIO_SYNC = 0x01, RADIO_FEEDS = 0x02 };
+StationState  stationState = STA_OFF;
+uint8_t       radioUsers   = RADIO_SYNC;      // the first sync is due at start-up (syncState)
 unsigned long joinAskedAt  = 0;               // millis() the join was last started, for the re-join pace
 unsigned long joinPolledAt = 0;               // millis() the station was last polled (an SPI round trip on the M4)
-const unsigned long NTP_RETRY_MS  = 3000;     // between asks while a sync is due
 const unsigned long JOIN_RETRY_MS = 10000;    // between joins while the station does not connect
 const unsigned long JOIN_POLL_MS  = 500;      // between looks at whether it has
 // A clock that has a time does not keep its radio on for a sync that does not
@@ -964,6 +1030,9 @@ void setup(void) {
   gifScheduleNext();
 #endif
   loadWifiCreds();
+#if BAND_DATA
+  loadFeedSettings();
+#endif
 
   // Onboard LIS3DH accelerometer -> automatic screen rotation. If it is not
   // found the clock simply stays in the default portrait orientation.
@@ -1073,7 +1142,7 @@ void setup(void) {
     netRadioInit();
     netPrintRadioInfo();
     boardBootStageWrite(BOOT_STAGE_WIFI);   // the radio's first transmit burst comes now
-    syncJoin();
+    stationUpdate();                        // the sync wants the station: the join starts
   } else if (!apActive) {
     Serial.println("No home WiFi stored - set one on the config page");
   }
@@ -1116,7 +1185,11 @@ void loop(void) {
     return;
   }
 
+  stationUpdate();      // the home WiFi while the sync or the info band needs it
   timeSync_WifiLib();
+#if BAND_DATA
+  feedsUpdate();        // the info band's sources, fetched beside the loop
+#endif
   if (minuteTrigger) { updateAutoDst(); } // follow the timezone's summer/winter time changes
   updateOrientation();  // rotate the display to match how the panel is held
 #if WATCHFACE_TETRIS
@@ -3211,7 +3284,11 @@ void timekeeper(void) {
 void setSyncState(SyncState next) {
   if (next == syncState) { return; }
   if (syncStateDue(next) && !syncStateDue(syncState)) { syncDueSince = millisNow; }
-  if (syncAttempting(next) && !syncAttempting(syncState)) { syncAttemptSince = millisNow; }
+  if (syncAttempting(next) && !syncAttempting(syncState)) {
+    syncAttemptSince = millisNow;
+    netNtpRequestFresh();   // the station may be up already, for the info band: a new answer is wanted
+  }
+  if (syncNeedsRadio(next)) { radioUsers |= RADIO_SYNC; } else { radioUsers &= (uint8_t)~RADIO_SYNC; }
   if (next == SYNC_PAUSED) { syncPausedSince = millisNow; }
   DEBUG_LOG("sync %u -> %u\n", (unsigned)syncState, (unsigned)next);
   syncState = next;
@@ -3227,6 +3304,12 @@ bool syncStateDue(SyncState s) {
 // asking NTP until it answers.
 bool syncAttempting(SyncState s) {
   return s == SYNC_JOINING || s == SYNC_FETCHING || s == SYNC_RETRY_WAIT;
+}
+
+// Whether the sync needs the station in this state: during an attempt, and a
+// minute early so it has joined by the sync time.
+bool syncNeedsRadio(SyncState s) {
+  return s == SYNC_WAKING || syncAttempting(s);
 }
 
 // The one way to set the clock: UTC, and where it came from. The automatic
@@ -3314,18 +3397,6 @@ bool syncDueAt(time_t when) {
   return days >= (long)uiSettings.syncDays;
 }
 
-// Days from 1970-01-01 to a date of the Gregorian calendar (H. Hinnant's
-// days_from_civil), so a date typed on the config page needs no time zone of
-// the C library.
-long daysFromCivil(int y, unsigned m, unsigned d) {
-  y -= (m <= 2) ? 1 : 0;
-  long era = (y >= 0 ? y : y - 399) / 400;
-  unsigned yoe = (unsigned)(y - era * 400);                          // 0..399
-  unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;    // 0..365
-  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;              // 0..146096
-  return era * 146097L + (long)doe - 719468L;
-}
-
 // The UTC instant of a wall-clock time in the clock's zone and daylight-saving
 // mode. In the automatic mode summer time counts if it is in effect an hour
 // before the standard-time reading; in the hour that repeats in autumn that
@@ -3387,13 +3458,52 @@ bool wifiStored() {
   return wifiCreds.ssid[0] != '\0';
 }
 
-// Start joining the home WiFi, or start again. Never waits for it. Without a
-// stored WiFi there is nothing to join, and a due sync simply stays due.
-void syncJoin() {
-  if (!wifiStored()) { return; }
+// Start joining the home WiFi, or start again. Never waits for it.
+void stationJoin() {
   Serial.print("Joining WiFi "); Serial.println(wifiCreds.ssid);
   netStaBegin(wifiCreds.ssid, wifiCreds.pass);   // also arms a fresh NTP sync
-  joinAskedAt = millisNow;
+  joinAskedAt  = millisNow;
+  stationState = STA_JOINING;
+}
+
+bool stationUp() { return stationState == STA_UP; }
+
+// Keeps the station joined while anyone needs it, and the radio off while
+// nobody does. Runs on every pass outside the hotspot and never waits.
+// Without a stored WiFi there is nothing to join, and whoever wants the
+// station simply goes on waiting.
+void stationUpdate() {
+  if (radioUsers == 0 || !wifiStored()) {
+    if (stationState != STA_OFF) {
+      if (stationState == STA_JOINING) { noteJoinFailed(); }   // read before the radio goes
+      netRadioOff();
+      Serial.println("Disabled Wifi");
+      stationState = STA_OFF;
+    }
+    return;
+  }
+  if (stationState == STA_OFF) { stationJoin(); return; }
+  // Looked at twice a second, not on every pass: on the M4 every look is an
+  // SPI round trip to the radio.
+  if (millisNow - joinPolledAt < JOIN_POLL_MS) { return; }
+  joinPolledAt = millisNow;
+  if (stationState == STA_JOINING) {
+    if (netStaConnected()) {
+      Serial.println("Connected to WiFi");
+      printWifiStatus();
+      if (!bootStageCleared) { boardBootStageWrite(BOOT_STAGE_RUN); }
+      joinOutcome   = JOIN_SUCCEEDED;
+      joinRssi      = netStaRssi();
+      joinOutcomeAt = millisNow;
+      stationState  = STA_UP;
+    } else if (millisNow - joinAskedAt >= JOIN_RETRY_MS) {
+      noteJoinFailed();
+      stationJoin();   // not joined after all this time: start the join again
+    }
+  } else if (!netStaConnected()) {
+    Serial.println("WiFi connection lost");
+    stationJoin();
+  }
 }
 
 // Ask NTP for the time once (board_hal.h: the NINA's own SNTP client on the M4,
@@ -3424,9 +3534,8 @@ void ntpAsk() {
   Serial.println("NTP success");
   Serial.print("NTP offset: ");
   Serial.println(drift);
-  netRadioOff();
-  Serial.println("Disabled Wifi");
-  setSyncState(SYNC_IDLE);
+  netSntpStop();
+  setSyncState(SYNC_IDLE);   // the radio goes off unless the info band still needs it
 }
 
 // Once a minute: wake the radio one minute before the sync time, and make the
@@ -3441,63 +3550,40 @@ void syncSchedule() {
   uint16_t syncMinute = syncTimeHour * 60 + syncTimeMinute;
   if (syncState == SYNC_IDLE && nowMinute == (syncMinute + minutesPerDay - 1) % minutesPerDay &&
       syncDueAt(clockNow() + 60)) {
-    syncJoin();
     setSyncState(SYNC_WAKING);
   }
   if ((syncState == SYNC_IDLE || syncState == SYNC_WAKING) && nowMinute == syncMinute) {
     if (!syncDueAt(clockNow())) {
       // Woken for a sync that is no longer wanted (the interval was changed
       // in the minute between): back to sleep.
-      if (syncState == SYNC_WAKING) { netRadioOff(); setSyncState(SYNC_IDLE); }
+      if (syncState == SYNC_WAKING) { setSyncState(SYNC_IDLE); }
       return;
     }
     // Still idle means the early wake-up was missed, e.g. because the config AP
-    // was up a minute ago; join now instead of failing until tomorrow.
-    if (syncState == SYNC_IDLE) { syncJoin(); }
+    // was up a minute ago; the station joins now instead of failing until tomorrow.
     Serial.println("Renew NTP sync");
     setSyncState(SYNC_JOINING);
   }
 }
 
-// Keeps the clock (UTC) in step with NTP and the radio on only while a sync
-// needs it. Runs on every pass and never waits: the clock stays on the panel
-// and operable while the station joins.
+// Keeps the clock (UTC) in step with NTP, with the station wanted only while
+// a sync needs it (setSyncState()). Runs on every pass and never waits: the
+// clock stays on the panel and operable while the station joins.
 void timeSync_WifiLib() {
   // An attempt that has not worked out within SYNC_ATTEMPT_MS: with a time on
   // the clock it is not worth keeping the radio on, so pause and try later.
   if (syncAttempting(syncState) && clockIsSet() && millisNow - syncAttemptSince >= SYNC_ATTEMPT_MS) {
     Serial.println("NTP sync did not work out - trying again in 10 min");
-    if (syncState == SYNC_JOINING && wifiStored()) { noteJoinFailed(); }   // read before the radio goes
-    netRadioOff();
     setSyncState(SYNC_PAUSED);
   }
   switch (syncState) {
     case SYNC_PAUSED:
-      if (millisNow - syncPausedSince >= SYNC_PAUSE_MS) {
-        syncJoin();
-        setSyncState(SYNC_JOINING);
-      }
+      if (millisNow - syncPausedSince >= SYNC_PAUSE_MS) { setSyncState(SYNC_JOINING); }
       break;
     case SYNC_JOINING:
-      // No WiFi stored: the radio stays off, and the sync stays due - after
+      // No WiFi stored: the station stays off, and the sync stays due - after
       // SYNC_LATE_MS the status pixel says so.
-      if (!wifiStored()) { break; }
-      // Looked at twice a second, not on every pass: on the M4 every look is
-      // an SPI round trip to the radio.
-      if (millisNow - joinPolledAt < JOIN_POLL_MS) { break; }
-      joinPolledAt = millisNow;
-      if (netStaConnected()) {
-        Serial.println("Connected to WiFi");
-        printWifiStatus();
-        if (!bootStageCleared) { boardBootStageWrite(BOOT_STAGE_RUN); }
-        joinOutcome   = JOIN_SUCCEEDED;
-        joinRssi      = netStaRssi();
-        joinOutcomeAt = millisNow;
-        setSyncState(SYNC_FETCHING);
-      } else if (millisNow - joinAskedAt >= JOIN_RETRY_MS) {
-        noteJoinFailed();
-        syncJoin();   // not joined after all this time: start the join again
-      }
+      if (stationUp()) { setSyncState(SYNC_FETCHING); }
       break;
     case SYNC_FETCHING:
       ntpAsk();
@@ -3509,7 +3595,7 @@ void timeSync_WifiLib() {
       // out has to join again first.
       if (millisNow - syncLastAsk > NTP_RETRY_MS) {
         Serial.println("NTP Retry");
-        setSyncState(netStaConnected() ? SYNC_FETCHING : SYNC_JOINING);
+        setSyncState(stationUp() ? SYNC_FETCHING : SYNC_JOINING);
       }
       break;
     default:
@@ -4553,8 +4639,10 @@ void startAPMode() {
   apActive = true;
   millisNow = millis();
   // The hotspot takes the radio: a sync attempt under way is cut off, and a
-  // fresh one starts when the hotspot closes (stopAPMode()).
+  // fresh one starts when the hotspot closes (stopAPMode()). Whatever the
+  // station had is gone.
   if (syncAttempting(syncState)) { setSyncState(SYNC_PAUSED); }
+  stationState = STA_OFF;
   updateBrightness(); // resolve the live brightness for the immediate info screen
   setScreen(SCREEN_HOTSPOT_INFO); // draws SSID/PW/IP at once, before the slow radio bring-up freezes the loop
   scanNetworks();     // while the radio is still a station, for the config page's list
@@ -4604,19 +4692,18 @@ void stopAPMode() {
   dnsUdp.stop();
   apServer.end(); // release the listening socket (a fresh begin() would leak one)
   netApEnd(); // drop the softAP
-  if (syncState == SYNC_IDLE || !wifiStored()) {
-    // Synced, or nothing to join: back to how it is after a regular sync, radio
-    // off. It used to stay joined until the next sync while the code counted
-    // it as off.
-    netRadioOff();
-    Serial.println("Disabled Wifi");
+  // A sync that is pending (e.g. the AP was opened from the boot button)
+  // starts again at once. Then the station joins if anyone needs it - the AP
+  // had the radio, so whatever the station had before is gone - and the radio
+  // goes off otherwise, as after a regular sync.
+  if (syncStateDue(syncState)) { setSyncState(SYNC_JOINING); }
+  if (radioUsers && wifiStored()) {
+    stationJoin();
+    Serial.println("Enabled Wifi for a pending sync or the info band");
   } else {
-    // A sync is pending or about to start (e.g. the AP was opened from the boot
-    // button): join again, and a due sync waits for it - the AP had the radio,
-    // so whatever the station had before is gone.
-    syncJoin();
-    if (syncStateDue(syncState)) { setSyncState(SYNC_JOINING); }
-    Serial.println("Enabled Wifi for pending NTP sync");
+    netRadioOff();
+    stationState = STA_OFF;
+    Serial.println("Disabled Wifi");
   }
   setScreen(SCREEN_FACE); // back to the normal clock, in the current orientation
 }
@@ -4871,6 +4958,10 @@ void handleAP() {
     applyGifParams(query);
     saveGifSettings();
     gifScheduleNext();          // the new times count from now
+#endif
+#if BAND_DATA
+    applyFeedParams(query);
+    saveFeedSettings();
 #endif
     sendMessagePage(out, "Saved", "The hotspot closes and the clock goes back to its face.");
     closeHotspot = true;
@@ -5352,6 +5443,9 @@ void sendFormPage(Print &c) {
   c.print("<div><input type=number min=0 max=255 name=gifbr value="); c.print(gifSettings.minBright); c.println("></div>");
   c.print("<div><input type=number min=1 max=5 step=0.1 name=gifbx value=");
   c.print(gifSettings.brightTimes / 10); c.print('.'); c.print(gifSettings.brightTimes % 10); c.println("></div></div>");
+#endif
+#if BAND_DATA
+  printFeedSection(c);
 #endif
 
   c.println("<button type=submit>Save</button>");
@@ -6009,5 +6103,325 @@ void gifPackClose() {
   }
   free(gifPackCopy);
   gifPackCopy = nullptr;
+}
+#endif
+
+#if BAND_DATA
+/* ----------------------------------------------------------------------
+   Info band data: when the clock's own sources are fetched, and the items
+   they bring (src/band_data.h has the sources and the fetch task). Until
+   the band exists - it comes with the wall clock - the console and the
+   config page show the items.
+
+   A source due wants the station (RADIO_FEEDS), and its fetch goes to the
+   task once the station is up; sources due within FEED_GATHER_MS come along
+   while the radio is on anyway. Then the radio goes off again unless the
+   sync still needs it (stationUpdate()).
+   ---------------------------------------------------------------------- */
+
+void loadFeedSettings() {
+  feedStore.begin("feeds");
+  feedStore.read(feedSettings);
+  if (feedSettings.magic != FEED_SETTINGS_MAGIC) { feedSettings = FEED_DEFAULTS; }
+  feedTaskOK = feedBegin();
+  if (!feedTaskOK) {
+    Serial.println("Info band: no RAM for the fetch task");
+  } else if (!feedSettings.located) {
+    Serial.println("Info band: no place set - set one on the config page");
+  } else {
+    char lat[16], lon[16];
+    feedDegrees(lat, sizeof(lat), feedSettings.lat);
+    feedDegrees(lon, sizeof(lon), feedSettings.lon);
+    Serial.printf("Info band: weather %s, warnings %s, for %s, %s\n", feedOn(FEED_WEATHER) ? "on" : "off",
+                  feedOn(FEED_WARNINGS) ? "on" : "off", lat, lon);
+  }
+}
+
+void saveFeedSettings() {
+  feedSettings.magic = FEED_SETTINGS_MAGIC;
+  feedSettings.rev   = FEED_SETTINGS_REV;
+  feedStore.write(feedSettings);
+}
+
+bool feedOn(uint8_t f) {
+  return (feedSettings.on & (1 << f)) != 0;
+}
+
+// Whether the sources can be fetched at all: the task, a place, a home WiFi,
+// and a time on the clock, by which the items run out.
+bool feedsReady() {
+  return feedTaskOK && feedSettings.located && wifiStored() && clockIsSet();
+}
+
+// Whether source f is on and due within `early` ms.
+bool feedDueWithin(uint8_t f, unsigned long early) {
+  return feedOn(f) && (long)(millisNow + early - feedRuns[f].dueAt) >= 0;
+}
+
+// The first source due within `early` ms; -1 when none is.
+int8_t feedDue(unsigned long early) {
+  for (uint8_t f = 0; f < FEED_COUNT; f++) {
+    if (feedDueWithin(f, early)) { return (int8_t)f; }
+  }
+  return -1;
+}
+
+// "19:00", or "Thu 19:00" when it is not today, in the clock's local time.
+void bandWhen(char *buf, size_t size, time_t utc) {
+  FeedJob now = { 0, 0, 0, clockNow(), (int32_t)tzTotalOffset() };
+  feedWhen(buf, size, utc, now);
+}
+
+// Two short lines: a console line of more than about 128 characters has lost
+// its end on the S3's USB console (2026-10-08, cause not found yet).
+void printBandItem(const char *mark, const BandItem &it) {
+  char until[16];
+  bandWhen(until, sizeof(until), it.until);
+  Serial.printf("Info band %s %s (%s, until %s):\n", mark, it.key, it.level == LEVEL_ALERT ? "alert" : "info", until);
+  Serial.printf("  %s\n", it.text);
+}
+
+void bandRemoveAt(uint8_t i) {
+  for (uint8_t j = i + 1; j < bandItemCount; j++) { bandItems[j - 1] = bandItems[j]; }
+  bandItemCount--;
+}
+
+// Takes an item, in place of the one with its key; says what changed.
+void bandPut(const BandItem &n) {
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    if (strcmp(bandItems[i].key, n.key) != 0) { continue; }
+    bool same = strcmp(bandItems[i].text, n.text) == 0 && bandItems[i].level == n.level;
+    bandItems[i] = n;
+    if (!same) { printBandItem("~", n); }
+    return;
+  }
+  if (bandItemCount == BAND_ITEMS_MAX) {
+    Serial.printf("Info band: no room for %s\n", n.key);
+    return;
+  }
+  bandItems[bandItemCount++] = n;
+  printBandItem("+", n);
+}
+
+// Drops the items of source f, or only those its new result no longer has.
+void bandDropFeed(uint8_t f, const FeedResult *keep = nullptr) {
+  for (int i = (int)bandItemCount - 1; i >= 0; i--) {
+    if (bandItems[i].feed != f) { continue; }
+    bool kept = false;
+    for (uint8_t k = 0; keep && k < keep->count; k++) { kept |= strcmp(keep->item[k].key, bandItems[i].key) == 0; }
+    if (kept) { continue; }
+    Serial.printf("Info band - %s\n", bandItems[i].key);
+    bandRemoveAt((uint8_t)i);
+  }
+}
+
+// Once a minute: the items that have run out go.
+void bandExpire() {
+  time_t now = clockNow();
+  for (int i = (int)bandItemCount - 1; i >= 0; i--) {
+    if (bandItems[i].until > now) { continue; }
+    Serial.printf("Info band - %s (ran out)\n", bandItems[i].key);
+    bandRemoveAt((uint8_t)i);
+  }
+}
+
+// A fetch that did not work: again after 1, 2, 4 ... minutes, never later
+// than the source's own interval. Its items stay until they run out.
+void feedFailed(uint8_t f, const char *why) {
+  FeedRun &r = feedRuns[f];
+  if (r.failures < 255) { r.failures++; }
+  unsigned long wait = FEED_RETRY_MS << min(r.failures - 1, 6);
+  if (wait > FEEDS[f].intervalMs) { wait = FEEDS[f].intervalMs; }
+  r.dueAt = millisNow + wait;
+  strlcpy(r.error, why, sizeof(r.error));
+  Serial.printf("Info band: %s failed (%s), again in %lu min\n", FEEDS[f].name, r.error, wait / 60000UL);
+}
+
+// A result back from the fetch task.
+void feedApply(const FeedResult &res) {
+  if (res.feed >= FEED_COUNT) { return; }
+  FeedRun &r = feedRuns[res.feed];
+  r.status = res.status;
+  r.ms     = res.ms;
+  r.bytes  = res.bytes;
+  Serial.printf("Info band: %s fetched, status %d, %ld bytes in %lu ms\n", FEEDS[res.feed].name, res.status,
+                (long)res.bytes, (unsigned long)res.ms);
+  Serial.printf("  internal RAM %lu free before, %lu lowest since start; stack %lu bytes unused\n",
+                (unsigned long)res.heapFree, (unsigned long)res.heapLow, (unsigned long)res.stackLeft);
+  if (res.error[0]) {
+    feedFailed(res.feed, res.error);
+    return;
+  }
+  r.error[0] = '\0';
+  r.failures = 0;
+  r.okAt     = clockNow();
+  r.dueAt    = millisNow + FEEDS[res.feed].intervalMs;
+  if (res.place[0]) { strlcpy(feedPlace, res.place, sizeof(feedPlace)); }
+  bandDropFeed(res.feed, &res);
+  for (uint8_t k = 0; k < res.count; k++) { bandPut(res.item[k]); }
+}
+
+// On every pass outside the hotspot: takes a result back, hands out the next
+// fetch, and wants the station only while a source is due.
+void feedsUpdate() {
+  static FeedResult res;   // 0.6 KB, off the loop's stack
+  if (feedBusy && xQueueReceive(feedResults(), &res, 0) == pdTRUE) {
+    feedBusy = false;
+    feedApply(res);
+  }
+  if (minuteTrigger) { bandExpire(); }
+  if (feedBusy) { return; }
+  bool session = (radioUsers & RADIO_FEEDS) != 0;
+  int8_t f = feedsReady() ? feedDue(session ? FEED_GATHER_MS : 0) : -1;
+  if (f < 0) {
+    radioUsers &= (uint8_t)~RADIO_FEEDS;
+    return;
+  }
+  if (!session) {
+    radioUsers |= RADIO_FEEDS;
+    feedWantedAt = millisNow;
+  }
+  if (!stationUp()) {
+    if (millisNow - feedWantedAt >= FEED_STATION_MS) {
+      // The station did not come: every source due waits its back-off.
+      for (uint8_t d = 0; d < FEED_COUNT; d++) {
+        if (feedDueWithin(d, 0)) { feedFailed(d, "no WiFi connection"); }
+      }
+      radioUsers &= (uint8_t)~RADIO_FEEDS;
+    }
+    return;
+  }
+  FeedJob job = { (uint8_t)f, feedSettings.lat, feedSettings.lon, clockNow(), (int32_t)tzTotalOffset() };
+  if (xQueueSend(feedJobs(), &job, 0) == pdTRUE) { feedBusy = true; }
+}
+
+// "52.52", "-13,405" or "48" in millionths of a degree, up to `limit` degrees
+// either way; false for anything else. No float parser (see tenthsOf()).
+bool microDegreesOf(const String &v, int32_t limit, int32_t &out) {
+  String t = v;
+  t.trim();
+  unsigned i = 0;
+  bool neg = false;
+  if (i < t.length() && (t[i] == '-' || t[i] == '+')) { neg = (t[i] == '-'); i++; }
+  int64_t whole = 0, frac = 0;
+  int digits = 0, fracDigits = 0;
+  for (; i < t.length() && isDigit(t[i]); i++) {
+    whole = whole * 10 + (t[i] - '0');
+    digits++;
+    if (whole > limit) { return false; }
+  }
+  if (i < t.length() && (t[i] == '.' || t[i] == ',')) {
+    for (i++; i < t.length() && isDigit(t[i]); i++) {
+      if (fracDigits < 6) { frac = frac * 10 + (t[i] - '0'); fracDigits++; }
+    }
+  }
+  if (i != t.length() || digits + fracDigits == 0) { return false; }
+  for (; fracDigits < 6; fracDigits++) { frac *= 10; }
+  int64_t micro = whole * 1000000 + frac;
+  if (micro > (int64_t)limit * 1000000) { return false; }
+  out = (int32_t)(neg ? -micro : micro);
+  return true;
+}
+
+// The info band section of the config page (/save). Both fields empty clear
+// the place; a place that cannot be read keeps the one stored.
+void applyFeedParams(const String &q) {
+  uint8_t on = 0;
+  if (getParam(q, "feedw") == "on") { on |= (uint8_t)(1 << FEED_WEATHER); }   // checkboxes: absent when unticked
+  if (getParam(q, "feeda") == "on") { on |= (uint8_t)(1 << FEED_WARNINGS); }
+  feedSettings.on = on;
+  String la = getParam(q, "lat"), lo = getParam(q, "lon");
+  la.trim();
+  lo.trim();
+  int32_t lat = 0, lon = 0;
+  bool located = feedSettings.located;
+  if (la.length() == 0 && lo.length() == 0) {
+    located = false;
+  } else if (microDegreesOf(la, 90, lat) && microDegreesOf(lo, 180, lon)) {
+    located = true;
+  } else {
+    Serial.println("Info band: the place could not be read - the stored one stays");
+    lat = feedSettings.lat;
+    lon = feedSettings.lon;
+  }
+  bool moved = located != (feedSettings.located != 0) ||
+               (located && (lat != feedSettings.lat || lon != feedSettings.lon));
+  if (moved) {
+    // Another place: what was fetched for the old one goes, and the sources
+    // are due at once.
+    feedSettings.located = located ? 1 : 0;
+    feedSettings.lat = located ? lat : 0;
+    feedSettings.lon = located ? lon : 0;
+    feedPlace[0] = '\0';
+    for (uint8_t f = 0; f < FEED_COUNT; f++) {
+      bandDropFeed(f);
+      memset(&feedRuns[f], 0, sizeof(FeedRun));
+      feedRuns[f].dueAt = millisNow;
+    }
+  }
+  for (uint8_t f = 0; f < FEED_COUNT; f++) {
+    if (!feedOn(f)) { bandDropFeed(f); }   // a source switched off takes its items with it
+  }
+}
+
+// How source f is doing, for the config page.
+void printFeedStatus(Print &c, uint8_t f) {
+  const FeedRun &r = feedRuns[f];
+  c.print(f == FEED_WEATHER ? "Weather: " : "Warnings: ");
+  char when[16];
+  if (!feedOn(f)) {
+    c.print("off");
+  } else if (!feedSettings.located) {
+    c.print("no place set");
+  } else if (r.error[0]) {
+    c.print("failed ("); printHtmlEscaped(c, r.error); c.print("), ");
+    c.print(r.failures); c.print(r.failures == 1 ? " time" : " times in a row");
+  } else if (r.okAt == 0) {
+    c.print("not fetched yet");
+  } else {
+    bandWhen(when, sizeof(when), r.okAt);
+    c.print("fetched at "); c.print(when); c.print(" ("); c.print(r.ms); c.print(" ms");
+    if (r.bytes >= 0) { c.print(", "); c.print(r.bytes); c.print(" bytes"); }
+    c.print(")");
+  }
+  c.println("<br>");
+}
+
+void printFeedSection(Print &c) {
+  c.println("<h2>Info band data</h2>");
+  c.println("<p style=\"font-size:14px\">Weather and DWD weather warnings for one place, fetched by the clock "
+            "over the home WiFi. The band that shows them comes with the wall clock; until then this page "
+            "and the console list what was fetched.</p>");
+  c.println("<label>Place: latitude and longitude in degrees, from a map (e.g. 52.5200 and 13.4050)</label><div class=row>");
+  char deg[16];
+  c.print("<div><input name=lat inputmode=decimal maxlength=12 value=\"");
+  if (feedSettings.located) { feedDegrees(deg, sizeof(deg), feedSettings.lat); c.print(deg); }
+  c.println("\"></div>");
+  c.print("<div><input name=lon inputmode=decimal maxlength=12 value=\"");
+  if (feedSettings.located) { feedDegrees(deg, sizeof(deg), feedSettings.lon); c.print(deg); }
+  c.println("\"></div></div>");
+  c.print("<label><input type=checkbox name=feedw ");
+  if (feedOn(FEED_WEATHER)) { c.print("checked"); }
+  c.println("> Weather, every 30 min (weather data by Open-Meteo.com, CC BY 4.0)</label>");
+  c.print("<label><input type=checkbox name=feeda ");
+  if (feedOn(FEED_WARNINGS)) { c.print("checked"); }
+  c.println("> Weather warnings, every 10 min (Deutscher Wetterdienst, through Bright Sky)</label>");
+  c.print("<p style=\"font-size:13px\">");
+  for (uint8_t f = 0; f < FEED_COUNT; f++) { printFeedStatus(c, f); }
+  if (feedPlace[0]) { c.print("The DWD's place for it: "); printHtmlEscaped(c, feedPlace); c.println("<br>"); }
+  c.println("</p>");
+  if (bandItemCount) {
+    c.println("<ul style=\"font-size:13px\">");
+    for (uint8_t i = 0; i < bandItemCount; i++) {
+      char until[16];
+      bandWhen(until, sizeof(until), bandItems[i].until);
+      c.print("<li>");
+      printHtmlEscaped(c, bandItems[i].text);
+      c.print(bandItems[i].level == LEVEL_ALERT ? " (alert, until " : " (until ");
+      c.print(until);
+      c.println(")</li>");
+    }
+    c.println("</ul>");
+  }
 }
 #endif

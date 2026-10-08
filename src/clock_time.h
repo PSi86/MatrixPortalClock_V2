@@ -49,6 +49,17 @@ inline void clockSet(time_t t) {
 
 inline bool clockIsSet() { return clockState().set; }
 
+// Days from 1970-01-01 to a date of the Gregorian calendar (H. Hinnant's
+// days_from_civil), so a date needs no time zone of the C library.
+inline long daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= (m <= 2) ? 1 : 0;
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);                          // 0..399
+  unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;    // 0..365
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;              // 0..146096
+  return era * 146097L + (long)doe - 719468L;
+}
+
 inline int clockHour(time_t t)   { struct tm tmv; gmtime_r(&t, &tmv); return tmv.tm_hour; }
 inline int clockMinute(time_t t) { struct tm tmv; gmtime_r(&t, &tmv); return tmv.tm_min; }
 inline int clockSecond(time_t t) { struct tm tmv; gmtime_r(&t, &tmv); return tmv.tm_sec; }

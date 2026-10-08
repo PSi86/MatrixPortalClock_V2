@@ -117,6 +117,9 @@
   // GIFs now and then in place of the face, built in by scripts/embed_gifs.py
   // and drawn at 8 bits per colour straight into the panel driver.
   #define GIF_PLAYBACK 1
+  // The info band's data: weather and warnings fetched over HTTPS
+  // (src/band_data.h).
+  #define BAND_DATA 1
   // The accelerometer's INT1 line. Not in Adafruit's pinout page - taken from
   // the board schematic (Adafruit-MatrixPortal-S3-PCB, "Adafruit MatrixPortal
   // S3.sch"), where the net list has U4 (the LIS3DH) pin INT1 on the net INT
@@ -141,6 +144,8 @@
   #define MENU_SLIDE 0
   // No GIFs: they are for the S3 boards (UI concept, GIF playback).
   #define GIF_PLAYBACK 0
+  // No info band data: it is for the S3 boards (src/band_data.h).
+  #define BAND_DATA 0
 #endif
 
 /* ======================================================================
@@ -732,6 +737,7 @@ inline void netRadioInit() {
 }
 
 inline void netStaBegin(const char *ssid, const char *pass) {
+  WiFi.persistent(false);   // also here: the station can be started without netRadioInit()
   WiFi.mode(WIFI_STA);
   WiFi.setTxPower(WIFI_TX_POWER);
   WiFi.begin(ssid, pass);   // non-blocking on the ESP32
@@ -739,6 +745,17 @@ inline void netStaBegin(const char *ssid, const char *pass) {
 }
 
 inline bool netStaConnected() { return WiFi.status() == WL_CONNECTED; }
+
+// Stop the SNTP client after a sync while the station stays joined for
+// something else; the next sync starts it afresh (netNtpEpoch()).
+inline void netSntpStop() {
+#if ESP_IDF_VERSION_MAJOR >= 5
+  esp_sntp_stop();
+#else
+  sntp_stop();
+#endif
+  netSntpRunning() = false;
+}
 
 inline void netRadioOff() {
 #if ESP_IDF_VERSION_MAJOR >= 5
@@ -887,6 +904,8 @@ inline bool netStaConnected() { return WiFi.status() == WL_CONNECTED; }
 // WAIT_FOR_SLAVE_SELECT runs SpiDrv::begin(), which releases the reset and
 // waits 750 ms for the module to boot - clearing its static-IP flag as well.
 inline void netRadioOff() { SpiDrv::end(); }
+
+inline void netSntpStop() {}        // the NINA firmware runs its own SNTP client
 
 inline uint32_t netNtpEpoch() { return (uint32_t)WiFi.getTime(); }
 

@@ -41,9 +41,9 @@ button pin cannot be carried over.
 - **Automatic brightness** via an external BH1750 light sensor: a configurable
   lux → brightness mapping dims the clock once per second to match the room
 - NTP time synchronization with a daily resync. The WiFi is switched on one
-  minute before the sync time and off again after the sync. A sync that has not
-  worked out after a minute, on a clock that already has a time, switches the
-  radio off and tries again 10 minutes later
+  minute before the sync time and off again after the sync, unless the info band
+  data still needs it. A sync that has not worked out after a minute, on a clock
+  that already has a time, gives up the radio and tries again 10 minutes later
 - **Time from a phone** on the config page, or typed in, for a clock without
   WiFi
 - **Real-time clock (optional):** with a DS3231 on the I2C bus the clock has its
@@ -65,7 +65,7 @@ button pin cannot be carried over.
   timezone, daylight saving, the config hotspot and, with a real-time clock, the
   time and date, set on the clock itself without WiFi (see
   [Menu and buttons](#menu-and-buttons))
-- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, GIFs (S3) and the **home WiFi**; on a page of its own the input profile and what
+- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, GIFs (S3), the info band's place and sources (S3) and the **home WiFi**; on a page of its own the input profile and what
   buttons, knock and gestures do on the face (see [Face shortcuts](#face-shortcuts))
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
@@ -78,6 +78,9 @@ button pin cannot be carried over.
 - **Gesture sensor (optional):** with a PAJ7620U2 on the I2C bus, swipes, push,
   circles and a wave work the menu next to the buttons, or instead of them (see
   [Gesture sensor](#gesture-sensor-paj7620u2))
+- **Info band data** (S3): the weather and the DWD weather warnings for a place,
+  fetched over HTTPS, for the info band of the wall clock; for now listed on the
+  config page and the console (see [Info band data](#info-band-data))
 
 ## Setup
 
@@ -364,6 +367,52 @@ the inflate in the chip's ROM before it plays; the pack's GIFs then come up
 like the built-in ones. Private GIFs in the pack stay in the pack: the firmware
 does not contain them, so a firmware built without `gif_dirs.local` can be
 passed on while the pack is not.
+
+## Info band data
+
+The wall clock's face will have an info band below it. Its data is fetched on
+the MatrixPortal S3 already, so the data side can be tried out before the
+wall clock exists: until the band is drawn, the config page's section
+**Info band data** and the console list what was fetched.
+
+The clock fetches only a few key-free sources that are likely to last, and
+everything else is to come through Home Assistant:
+
+| Source | What it gives | How often |
+|---|---|---|
+| [Open-Meteo](https://open-meteo.com) | temperature, weather, the day's high and low, chance of rain, UV index from 3; when rain starts or stops within the next 4 hours | every 30 min |
+| [Bright Sky](https://brightsky.dev) | the DWD's weather warnings for the place, the most severe first (up to four): `minor` as information, from `moderate` on as an alert | every 10 min |
+
+Weather data by Open-Meteo.com (CC BY 4.0); the warnings are the Deutscher
+Wetterdienst's, through Bright Sky, under the DWD's terms of use. Neither needs a
+key.
+
+The place is typed on the config page as latitude and longitude in degrees, from
+a map; nothing is fetched before. Changing it drops what was fetched for the
+old place and fetches at once. Each source can be switched off there, and a
+status line per source says when it was last fetched, or why it failed.
+
+- **WiFi:** a source that is due wakes the radio, and the radio goes off again
+  once neither the info band nor the NTP sync needs it. Sources due within 3
+  minutes come along while the radio is on anyway, so they share a wake-up.
+- **No stale values:** an item runs out after three intervals without a new
+  fetch (weather 90 min, warnings 30 min), a warning at its end at the latest.
+  A failed fetch is tried again after 1, 2, 4 ... minutes, at most after the
+  source's interval; its items stay until they run out.
+- **Beside the loop:** a fetch (name lookup, TLS handshake, the answer) blocks
+  for half a second to a few seconds, so it runs in a task of its own on the
+  other core, and the clock keeps drawing. The answers are read as a stream
+  through a JSON filter, so only the fields used take RAM.
+- **HTTPS:** the servers are checked against the certificate bundle of ESP-IDF
+  that the core's libraries carry. TLS and that bundle cost about 200 KB of
+  flash (the S3 image went from 83 % to 93.5 % of its 2 MB), and a TLS
+  connection takes its buffers from internal RAM, next to the panel driver's;
+  the console reports the internal RAM free before each fetch and the lowest
+  since the start.
+
+The code is in `src/band_data.h` (the items, the two sources, the fetch task)
+and at the end of the sketch (when the sources are due, the items, the config
+page section).
 
 ## AP configuration
 
@@ -851,8 +900,9 @@ not build against picolibc, the default C library from ESP-IDF 6 on. The clock
 keeps UTC, exactly as NTP delivers it; the timezone and daylight saving are added
 only where the time is shown, so changing either never touches the clock.
 
-MatrixPortal M4 only: WiFiNINA, FlashStorage_SAMD. On the S3 the WiFi stack and the
-NVS settings storage come from the ESP32 Arduino core, so no extra library is needed.
+MatrixPortal M4 only: WiFiNINA, FlashStorage_SAMD. On the S3 the WiFi stack, the
+NVS settings storage, HTTPClient and the TLS client come from the ESP32 Arduino
+core; ArduinoJson (Benoit Blanchon) reads the info band's sources.
 
 The Tetris watchface needs no library. Its block tables are generated by
 `scripts/gen_tetris_digits.py` into `src/tetris_digits.h` (a generated file — do
