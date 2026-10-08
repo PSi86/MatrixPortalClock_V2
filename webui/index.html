@@ -258,13 +258,8 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
           <div class="range"><input type="range" id="tspin" min="80" max="1500" step="10" data-live data-pv><output for="tspin"></output></div>
         </div>
         <div class="row">
-          <div><label class="lbl" for="shk">Knock sensitivity</label><div class="hint">0 switches the knock off; 10 reacts to a light tap.</div></div>
-          <div class="range"><input type="range" id="shk" min="0" max="10" data-live data-pv><output for="shk"></output></div>
-        </div>
-        <div class="row"><div class="lbl">Knock effect</div><div class="seg" id="shs" role="group" aria-label="Knock effect"></div></div>
-        <div class="row row-switch">
-          <div><div class="lbl">Also when the time changes</div><div class="hint">The digit that changes comes apart instead of being swapped.</div></div>
-          <label class="switch"><input type="checkbox" id="shchg" aria-label="Also when the time changes"><span></span></label>
+          <div><div class="lbl">Break-up effect</div><div class="hint">How a digit comes apart when the time changes it, and for an input set to “the digits break up” (Inputs).</div></div>
+          <div class="seg" id="shs" role="group" aria-label="Break-up effect"></div>
         </div>
       </div>
     </section>
@@ -326,6 +321,10 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
         <div class="row">
           <div><label class="lbl" for="prof">Profile</label><div class="hint">Choosing one fills the face below with its own.</div></div>
           <select id="prof"></select>
+        </div>
+        <div class="row" id="shkRow">
+          <div><label class="lbl" for="shk">Knock sensitivity</label><div class="hint">0 switches the knock off; 10 reacts to a light tap. What a knock does is set below.</div></div>
+          <div class="range"><input type="range" id="shk" min="0" max="10" data-live><output for="shk"></output></div>
         </div>
         <div class="row" id="gmountRow">
           <div><label class="lbl" for="gmount">Gesture sensor turned</label><div class="hint">If a swipe up acts as another direction, try the next.</div></div>
@@ -445,7 +444,7 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
   var DIR_NAMES = ['from the top', 'from the right', 'from the bottom', 'from the left'];
   var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠'];   // ItemIcon in band_data.h
   // What the page edits; ssid and the WiFi password go through their own form.
-  var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'shchg', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
+  var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
     'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda'];
   var S = null, saved = null, cur = null, gone = false, auth = '';
   try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
@@ -478,7 +477,7 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
   function liveForm(pv) {
     var o = { bright: cur.bright, autob: cur.autob ? 'on' : 'off', luxd: cur.luxd, luxb: cur.luxb, brmin: cur.brmin, brmax: cur.brmax,
       speed: cur.speed, digit: cur.digit, trail: cur.trail };
-    if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; o.shchg = cur.shchg ? 'on' : 'off'; }
+    if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
     if (pv) { o.pv = 1; }
     return enc(o);
   }
@@ -487,7 +486,7 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
       synch: cur.synch, syncm: cur.syncm, luxd: cur.luxd, luxb: cur.luxb, brmin: cur.brmin, brmax: cur.brmax, prof: cur.prof };
     if (cur.autob) { o.autob = 'on'; }   // checkboxes: absent when off, as the old page sent them
     for (var i = 0; i < 6; i++) { o['dir' + i] = cur.dirs[i]; }
-    if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; if (cur.shchg) { o.shchg = 'on'; } }
+    if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
     if (S.hw.rtc) { o.syncd = cur.syncd; }
     if (S.hw.gesture) { o.gmount = cur.gmount; }
     S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } });
@@ -700,12 +699,13 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
     setRange('speed', 'speed', ' ms');
     if (S.hw.tetris) {
       setRange('tdrop', 'tdrop', ' ms'); setRange('tspin', 'tspin', ' ms');
-      setRange('shk', 'shk', '', function (v) { return v === 0 ? 'off' : v; });
       var shs = $('#shs');
       if (!shs.children.length) { [3, 0, 1, 2].forEach(function (v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists.shs[v]; shs.appendChild(b); }); }
       setSeg(shs, 'shs', true, true);
-      setCheck('shchg', 'shchg', null, true, true);
     }
+    // The knock's sensitivity: an input setting, kept with the Tetris settings.
+    $('#shkRow').hidden = !(S.hw.tetris && S.hw.accel);
+    if (S.hw.tetris) { setRange('shk', 'shk', '', function (v) { return v === 0 ? 'off' : v; }); }
     // Brightness
     setCheck('autob', 'autob', showAuto, true, false);
     setRange('brightR', 'bright');

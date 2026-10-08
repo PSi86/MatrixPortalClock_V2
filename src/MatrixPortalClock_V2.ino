@@ -2376,8 +2376,8 @@ struct TetrisSettings {
   uint8_t  dropMs;      // milliseconds per cell of fall
   uint16_t spinMs;      // average milliseconds between quarter turns
   uint8_t  shakeLevel;  // 0 = knocking the clock does nothing, 1..10 sensitivity
-  uint8_t  shakeStyle;  // how the digits come apart, see SHAKE_STYLE_*
-  uint8_t  shakeOnChange; // 1 = a digit is also thrown away when the time changes
+  uint8_t  shakeStyle;  // the break-up effect: how the digits come apart, see SHAKE_STYLE_*
+  uint8_t  unusedRev3;  // was shakeOnChange (rev 3); since 2026-10-08 a changing digit always breaks up
 };
 
 const TetrisSettings TETRIS_DEFAULTS = {
@@ -2386,7 +2386,7 @@ const TetrisSettings TETRIS_DEFAULTS = {
   260,   // and turns a quarter every 260 ms on average
   6,     // reacts to a knock, not to someone walking past
   3,     // a different way of coming apart each time
-  0      // but a minute change just swaps the digit, as it always has
+  0
 };
 
 TetrisSettings tetrisSettings;
@@ -2673,11 +2673,11 @@ void tetrisPushTime() {
     if (shakeBusy[i]) { continue; }   // still coming apart, it will be rebuilt after
     if (millisNow < shakeHoldUntil[i]) { continue; }   // the pause after it came apart
     if (d[i] == tetrisDigits[i].value) { continue; }
-    // Optionally the outgoing digit is thrown away rather than simply replaced.
-    // Only one that is actually standing there can be thrown, so a digit still
-    // being built, or not yet drawn at all, is just swapped as before.
-    if (tetrisSettings.shakeOnChange && tetrisDigits[i].value <= 9 &&
-        tetrisDigits[i].piece > 0) {
+    // The outgoing digit breaks up rather than vanishing at once (decided by
+    // Peter, 2026-10-08: the effect always counts at a time change). Only one
+    // that is actually standing there can break up, so a digit still being
+    // built, or not yet drawn at all, is just swapped.
+    if (tetrisDigits[i].value <= 9 && tetrisDigits[i].piece > 0) {
       if (changeStyle == 0xFF) { changeStyle = shakePickStyle(); }
       shakeStartDigit(i, changeStyle);
       continue;
@@ -3729,7 +3729,7 @@ void loadTetrisSettings() {
       tetrisSettings.shakeLevel = TETRIS_DEFAULTS.shakeLevel;
       tetrisSettings.shakeStyle = TETRIS_DEFAULTS.shakeStyle;
     }
-    if (tetrisSettings.rev < 3) { tetrisSettings.shakeOnChange = TETRIS_DEFAULTS.shakeOnChange; }
+    if (tetrisSettings.rev < 3) { tetrisSettings.unusedRev3 = 0; }
     saveTetrisSettings();
     Serial.print("Tetris settings: migrated to rev "); Serial.println(TETRIS_SETTINGS_REV);
   }
@@ -5222,7 +5222,6 @@ void applyParams(const String &q) {
   v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
   v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); shakeApplyThreshold(); }
   v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
-  tetrisSettings.shakeOnChange = (getParam(q, "shchg") == "on") ? 1 : 0;   // checkbox: absent when unticked
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.animSpeed  = constrain(v.toInt(), 4, 60); }
@@ -5328,7 +5327,6 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
   v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); shakeApplyThreshold(); }
   v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
-  tetrisSettings.shakeOnChange = (getParam(q, "shchg") == "on") ? 1 : 0;   // checkbox: absent when unticked
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "autob");  if (v.length()) { settings.autoBright = (v == "on") ? 1 : 0; } // updateBrightness() re-seeds the fade
@@ -5439,17 +5437,12 @@ void sendFormPage(Print &c) {
   if (tetrisSettings.shakeLevel == 0) { c.print("off"); } else { c.print(tetrisSettings.shakeLevel); }
   c.println("</output>");
 
-  c.println("<label>Shake effect</label><select name=shs onchange=\"liveNow(1)\">");
+  c.println("<label>Break-up effect (when the time changes a digit, and for the shortcut)</label><select name=shs onchange=\"liveNow(1)\">");
   printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_RANDOM,   "Random each time");
   printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_COLLAPSE, "Collapse (the stack gives way)");
   printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_SCATTER,  "Scatter (pieces fly off)");
   printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_CLEAR,    "Clear rows (bottom up)");
   c.println("</select>");
-
-  // The same effect, used where a digit would otherwise just be swapped out.
-  c.print("<label><input type=checkbox name=shchg");
-  if (tetrisSettings.shakeOnChange) { c.print(" checked"); }
-  c.println(" onchange=\"liveNow(1)\"> Also use it when the time changes</label>");
 #endif
 
   // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
@@ -5617,8 +5610,7 @@ void sendFormPage(Print &c) {
   c.println("function _send(p){var g=function(n){return document.getElementsByName(n)[0].value;};");
   c.println("var ab=document.getElementsByName('autob')[0].checked?'on':'off';");
 #if WATCHFACE_TETRIS
-  c.println("var sc=document.getElementsByName('shchg')[0].checked?'on':'off';");
-  c.println("var wf='&wf='+g('wf')+'&tdrop='+g('tdrop')+'&tspin='+g('tspin')+'&shk='+g('shk')+'&shs='+g('shs')+'&shchg='+sc;");
+  c.println("var wf='&wf='+g('wf')+'&tdrop='+g('tdrop')+'&tspin='+g('tspin')+'&shk='+g('shk')+'&shs='+g('shs');");
 #else
   c.println("var wf='';");   // no watchface selector in this build
 #endif
@@ -6724,7 +6716,6 @@ void apiState(Print &c) {
   s["tspin"] = tetrisSettings.spinMs;
   s["shk"] = tetrisSettings.shakeLevel;
   s["shs"] = tetrisSettings.shakeStyle;
-  s["shchg"] = tetrisSettings.shakeOnChange != 0;
 #endif
   s["autob"] = settings.autoBright != 0;
   s["bright"] = settings.brightness;
@@ -6803,7 +6794,7 @@ void apiState(Print &c) {
   shs.add("Collapse");
   shs.add("Scatter");
   shs.add("Clear rows");
-  shs.add("Random");
+  shs.add("Random each time");
 
   JsonObject hw = d["hw"].to<JsonObject>();
   hw["tetris"] = WATCHFACE_TETRIS != 0;

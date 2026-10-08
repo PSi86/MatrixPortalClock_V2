@@ -226,7 +226,7 @@ What every input does on the face is set on the config page's **Inputs** page
 (`/inputs`, linked from the settings): UP and DOWN pressed, pressed twice or
 three times and held, the knock (with the accelerometer) and each gesture (with
 a gesture sensor), each to one of: nothing, open the menu, play a GIF, play the
-last GIF again (both S3), the digits come apart (Tetris face), auto brightness
+last GIF again (both S3), the digits break up (Tetris face), auto brightness
 on/off, daylight saving auto / summer / winter, hotspot on/off, brightness fade
 while held (held buttons only), show what the gestures do. The page lists only
 the inputs found. The profile chosen there keeps the menu, the hotspot screen
@@ -671,15 +671,17 @@ other how busy it looks doing it — and they are kept in their own flash blob, 
 the main settings are untouched by them. The *animation speed* setting applies to
 the classic watchface only.
 
-### Knock it and the digits come apart
+### The digits break up
 
-Give the clock a knock and the digits are thrown away, then built up again from
-the current time — with a fresh tiling and fresh colours, so the knock is worth
-something. Three effects, selectable and previewing live: **Collapse** (the stack
-gives way and drops), **Scatter** (the pieces fly off and tumble) and **Clear
-rows** (rows flash and vanish from the bottom, everything above dropping into the
-gap), plus *Random each time*. The effect is drawn once per event, so all the
-digits involved always come apart the same way.
+When the time changes a digit, the old one breaks up before the new one is
+built, and an input set to *the digits break up* (by default the knock, see
+[Face shortcuts](#face-shortcuts)) throws all four away and builds them up again
+from the current time — with a fresh tiling and fresh colours. The **break-up
+effect** is one of three, selectable and previewing live: **Collapse** (the
+stack gives way and drops), **Scatter** (the pieces fly off and tumble) and
+**Clear rows** (rows flash and vanish from the bottom, everything above dropping
+into the gap), plus *Random each time*. The effect is drawn once per event, so
+all the digits involved always come apart the same way.
 
 **The sensor raises the knock itself.** Its own interrupt generator watches for
 it and pulls INT1, which is wired to GPIO15 — not documented on Adafruit's pinout
@@ -694,7 +696,8 @@ interrupt generator only** and not for the output registers — the orientation
 detection still needs to see gravity. The data rate went from 10 Hz to 100 Hz:
 at 10 Hz a knock lasts about as long as one sample.
 
-*Shake sensitivity* runs from 0 (off) to 10. The scale was measured on the
+*Knock sensitivity* (in the web app under Inputs, since the knock can do other
+things than this) runs from 0 (off) to 10. The scale was measured on the
 device, not guessed: over about 70 s of standing still the largest deviation in
 any one second was 780 raw counts, which is the sensor's own noise, while every
 deliberate interaction produced 1900 or more and a firm knock 12700. That is
@@ -714,15 +717,15 @@ discarded when the face comes back. The reasons the sensor fires without a real
 knock sit together in `knockIsReal()`, the reasons the face cannot be knocked
 apart right now in `knockEffectReady()`.
 
-With **Also use it when the time changes** ticked, the same effect replaces the
-plain swap when a digit changes: at a minute rollover only the digits that
-actually changed come apart, and they rebuild while the others stand still.
-Whatever has come apart leaves the space empty for 300 ms before it builds
-again. The colon is never touched by any of this — it blinks on the second
+At a minute rollover only the digits that actually changed break up, and they
+rebuild while the others stand still; a digit still being built is simply
+swapped. Whatever has come apart leaves the space empty for 300 ms before it
+builds again. (Until 2026-10-08 an option chose between this and a plain swap,
+where the old digit vanished at once; the break-up now always counts.) The colon is never touched by any of this — it blinks on the second
 throughout, being the one thing on this face that shows time actually passing.
 
 **Trying it out on the config page.** Changing the watchface, the drop or turn
-pace, the sensitivity, the effect or the time-change option takes the digits
+pace, the sensitivity or the effect takes the digits
 apart and builds them again straight away, so the setting can be judged on the
 panel. That matters here because the clock deliberately ignores the sensor while
 the AP is up, so a knock is not available to test with. It happens on the
@@ -817,7 +820,7 @@ the Inputs page can change (see [Face shortcuts](#face-shortcuts)):
 | swipe up / down | open the menu | previous / next item, or change the value |
 | swipe right, push | open the menu | open the item; in an editor: save |
 | swipe left | - | back, without saving |
-| wave | the knock effect | out to the face |
+| wave | the digits break up (Tetris face) | out to the face |
 | circle clockwise / counter-clockwise | play a GIF | previous / next; in an editor five steps (clockwise is up) |
 | a hand comes near and stays | a hint: `swipe` / `menu` | - |
 | a hand held over the sensor for 3 s during boot | open the config hotspot | - |
@@ -834,7 +837,7 @@ hand moving away) does nothing unless the Inputs page gives it something.
   is ignored, so the hand pulled back is not read as the opposite swipe. The
   driver library's own pauses after a gesture (200 ms of blocking) are
   switched off. Every gesture counts as handling the clock, so it holds off the
-  knock effect for 3 s, as a button press does.
+  knock for 3 s, as a button press does.
 - **The hint** is a banner that only explains: the swipe that follows closes it
   and goes on to the face, instead of being used up as on other banners.
 - **INT line or not.** STEMMA QT carries no interrupt line. Without one the

@@ -55,7 +55,7 @@ enum InputFunction : uint8_t {
   FN_CYCLE_DST,        // daylight saving auto -> summer -> winter, with a banner
   FN_TOGGLE_HOTSPOT,   // config AP on/off
   FN_BRIGHT_FADE,      // cyclic brightness fade while the button stays held, saved on release
-  FN_KNOCK_EFFECT,     // the Tetris digits come apart
+  FN_KNOCK_EFFECT,     // the Tetris digits break up (the break-up effect)
   FN_PLAY_GIF,         // a GIF now, on boards with GIF playback
   FN_GIF_AGAIN,        // the last GIF shown once more, on boards with GIF playback
   FN_SHOW_HINTS,       // what the gestures do, for a moment
@@ -229,7 +229,7 @@ constexpr FaceAction FACE_ACTIONS[] = {
   { 1, FN_OPEN_MENU,      NEEDS_NOTHING, "open the menu",                         "menu"  },
   { 2, FN_PLAY_GIF,       NEEDS_GIFS,    "play a GIF",                            "GIF"   },
   { 3, FN_GIF_AGAIN,      NEEDS_GIFS,    "play the last GIF again",               "again" },
-  { 4, FN_KNOCK_EFFECT,   NEEDS_TETRIS,  "the digits come apart (Tetris face)",   "knock" },
+  { 4, FN_KNOCK_EFFECT,   NEEDS_TETRIS,  "the digits break up (Tetris face)",     "knock" },
   { 5, FN_TOGGLE_AUTO,    NEEDS_NOTHING, "auto brightness on / off",              "auto"  },
   { 6, FN_CYCLE_DST,      NEEDS_NOTHING, "daylight saving: auto, summer, winter", "DST"   },
   { 7, FN_TOGGLE_HOTSPOT, NEEDS_NOTHING, "hotspot on / off",                      "AP"    },
