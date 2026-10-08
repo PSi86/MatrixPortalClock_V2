@@ -501,9 +501,19 @@ gravity and rotates the display in 90° increments so the clock is always uprigh
 - **Portrait** (32 wide × 64 tall): the hours/minutes/seconds digits are stacked
   vertically (the original layout).
 - **Landscape** (64 wide × 32 tall): hours and minutes are shown large
-  side-by-side with the seconds small underneath. The per-digit fly-in
-  directions are swapped (`from right ↔ from top`, `from left ↔ from bottom`) so
-  digits enter across the short edge instead of sweeping the full width.
+  side-by-side with the seconds small underneath.
+
+The per-digit fly-in directions mean the same in both: a digit set to come
+from the top comes from the top edge as the clock is held. Each flight is long
+enough that the incoming digit starts wholly off the panel and the outgoing one
+leaves it wholly, and it lasts at most 0.85 s, so the digit has landed before
+the next second; at a slow animation speed a long flight is sped up to fit. On
+the S3 the speed is kept in real time by the loop rate the face really had in
+its last second, so a web page asking for the panel picture does not slow the
+digits down. (Until
+2026-10-08 landscape swapped the directions — from right ↔ from top, from left
+↔ from bottom — but a save set them back until the next screen change, and a
+sideways flight was only 32 px long, half the landscape width.)
 
 The rotation switches with a short debounce and ignores near-45° tilts to avoid
 flicker. If the accelerometer is not found, the clock stays in portrait.

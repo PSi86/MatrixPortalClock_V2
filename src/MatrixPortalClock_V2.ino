@@ -705,7 +705,25 @@ int8_t timeXPos[6] = {0, 13, 6, 19, 6, 17};
 int8_t timeYPos[6] = {16, 16, 35, 35, 50, 50};
 int8_t animXTarget[6] = {0, 13, 6, 19, 6, 17}; // Todo check 25 abd 31 value
 int8_t animYTarget[6] = {16, 16, 35, 35, 50, 50};
-int8_t animDirection[6] = {3, 1, 3, 1, 1, 1}; //0=from the top, 1=from the right, 2=from the bottom, 3=from the left
+// Each digit's flight, set when it starts (startFlight()): the side it comes
+// from (settings.dir: 0 = from the top, 1 = from the right, 2 = from the
+// bottom, 3 = from the left), how many pixels it flies, and its pace - every
+// flightIters loop iterations it moves flightPx pixels.
+uint8_t flightDir[6]   = {0, 0, 0, 0, 0, 0};
+uint8_t flightDist[6]  = {1, 1, 1, 1, 1, 1};
+uint8_t flightIters[6] = {1, 1, 1, 1, 1, 1};
+uint8_t flightPx[6]    = {1, 1, 1, 1, 1, 1};
+// A flight takes at most this long, however slow the animation speed and long
+// the way, so every digit has landed before the next second's flights start.
+const uint16_t FLIGHT_MAX_MS = 850;
+// The loop iterations the classic face had in its last whole second, counted
+// between two second ticks (0 = none counted yet). Web requests are served in
+// the same loop and take iterations away - measured: with /api/panel asked
+// every 60 ms a flight paced by the panel's refresh rate ran 30 % slow and
+// missed its landing. Pacing by this count keeps the speed and FLIGHT_MAX_MS
+// in real time.
+uint16_t faceItersPerSec = 0;
+uint32_t faceTickMs = 0;   // when stepClockAnim() last saw a second tick; 0 = not since the face came up
 
 // Source layouts. The active tables above are copied from one of these whenever
 // the orientation changes. Portrait = 32 wide x 64 tall (digits stacked
@@ -1418,36 +1436,24 @@ void updateApDisplay() {
    Orientation: read the accelerometer and rotate the display in 90 deg steps
    ====================================================================== */
 
-// Map a portrait fly-in direction to its landscape equivalent so digits enter
-// across the short (32 px) edge instead of sweeping the full 64 px width:
-// from right(1) <-> from top(0), from left(3) <-> from bottom(2).
-uint8_t swapDir(uint8_t d) {
-  switch (d) {
-    case 0: return 1;
-    case 1: return 0;
-    case 2: return 3;
-    case 3: return 2;
-  }
-  return d;
-}
-
 // Switch the matrix to rotation "rot" and load the matching digit layout into
 // the active runtime tables. Rotations 1/3 are portrait (32x64, stacked
-// HH/MM/SS); rotations 0/2 are landscape (64x32, HH/MM large + SS small below)
-// with the fly-in directions swapped. Digits snap to the new layout so an
-// in-flight animation never streaks across the screen during a rotation.
+// HH/MM/SS); rotations 0/2 are landscape (64x32, HH/MM large + SS small below).
+// The fly-in directions mean the same in both: a digit set to come from the
+// top comes from the top of the panel as it is held (until 2026-10-08
+// landscape swapped them, but only until the next save, which set them back).
+// Digits snap to the new layout so an in-flight animation never streaks
+// across the screen during a rotation.
 void applyOrientation(uint8_t rot) {
   setScreenRotation(rot);
 
   for (uint8_t i = 0; i < 6; i++) {
     if (screenIsLandscape()) {
-      animXTarget[i]   = landXTarget[i];
-      animYTarget[i]   = landYTarget[i];
-      animDirection[i] = (int8_t)swapDir(settings.dir[i]);
+      animXTarget[i] = landXTarget[i];
+      animYTarget[i] = landYTarget[i];
     } else {
-      animXTarget[i]   = portXTarget[i];
-      animYTarget[i]   = portYTarget[i];
-      animDirection[i] = (int8_t)settings.dir[i];
+      animXTarget[i] = portXTarget[i];
+      animYTarget[i] = portYTarget[i];
     }
     timeXPos[i] = animXTarget[i];
     timeYPos[i] = animYTarget[i];
@@ -2149,15 +2155,25 @@ void updatePanelRate() {
   panelRateLast = millisNow;
 }
 
-// Loop iterations per animation pixel. With PANEL_PACED_LOOP every iteration is
-// one panel refresh, so loopTime (ms per pixel) is rounded to whole refreshes and
-// every step stays on the panel equally long. Otherwise the loop itself runs
-// every loopTime ms and moves one pixel each time.
-uint8_t framesPerStep() {
 #if PANEL_PACED_LOOP
-  uint32_t hz = panelHz ? panelHz : PANEL_HZ_TYPICAL;   // before the first measurement
-  uint32_t frames = ((uint32_t)loopTime * hz + 500) / 1000;
-  return frames ? frames : 1;
+// Loop iterations per second on the classic face: the last second's count, or
+// before there is one the panel's refresh rate - with PANEL_PACED_LOOP the loop
+// runs once per refresh when nothing holds it up.
+uint32_t faceLoopHz() {
+  if (faceItersPerSec) { return faceItersPerSec; }
+  return panelHz ? panelHz : PANEL_HZ_TYPICAL;
+}
+#endif
+
+// Loop iterations per animation pixel. With PANEL_PACED_LOOP loopTime (ms per
+// pixel) is rounded to whole iterations at the rate the face's loop really
+// has, so every step stays on the panel equally long and the speed stays as
+// set while web requests take time from the loop. Otherwise the loop itself
+// runs every loopTime ms and moves one pixel each time.
+uint8_t itersPerPixel() {
+#if PANEL_PACED_LOOP
+  uint32_t iters = ((uint32_t)loopTime * faceLoopHz() + 500) / 1000;
+  return iters ? (uint8_t)min(iters, (uint32_t)255) : 1;
 #else
   return 1;
 #endif
@@ -2166,53 +2182,104 @@ uint8_t framesPerStep() {
 // Advance the clock animation state by one step. This is the cheap part - no
 // matrix I/O at all - so it can run on EVERY loop iteration to keep the animation
 // at real time regardless of how often the panel is actually redrawn. On a second
-// tick it rebuilds the digit strings; per digit it starts a fly-in (animTrigger),
-// moves an in-flight digit one pixel toward its target every framesPerStep()
-// calls, or retires an arrived one.
+// tick it rebuilds the digit strings and puts every digit that was flying back
+// on its place; per digit it starts a flight (animTrigger) and places one that
+// is under way (placeFlight()).
 void stepClockAnim(void) {
-  static uint8_t framesInStep = 0;
-  if (secondTrigger) { framesInStep = 0; } // fly-ins start on the second tick: step from there
-  bool moveNow = (++framesInStep >= framesPerStep());
-  if (moveNow) { framesInStep = 0; }
+  static uint16_t itersSinceTick = 0;   // loop iterations since the second tick, where flights start
+  if (secondTrigger) {
+    // The iterations of the second that just ended (the one the last tick
+    // started, counted with it) pace the flights of the next.
+    uint32_t span = millisNow - faceTickMs;
+    if (faceTickMs != 0 && span >= 900 && span <= 1100) {
+      faceItersPerSec = (uint16_t)min(((uint32_t)itersSinceTick + 1) * 1000UL / span, (uint32_t)0xFFFF);
+    }
+    faceTickMs = millisNow;
+    itersSinceTick = 0;
+  }
+  else if (itersSinceTick < 0xFFFF) { itersSinceTick++; }
 
   if (secondTrigger) { classicDigits(); }
   bool timeKnown = clockIsSet();   // dashes do not fly in
 
-  // Concept: Iterate through the digits of the time display. If the animTrigger[i] is true, then create an location offset for the digit according to the fly-in direction that is configured for that digit.
   for (uint8_t i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
-    // check each second if animation digit has reached its target location
-    if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i] && animShow[i] == true && secondTrigger) {
-      // reset time position as animation digit is now in the exact place where current time digit is when not animating
-      timeXPos[i]=animXTarget[i];
-      timeYPos[i]=animYTarget[i];
+    // On the tick the digit that flew in is the one the time shows now, so it
+    // stands on its place - also one a stalled loop kept from landing, which
+    // would otherwise leave the shown digit off its place from then on.
+    if (secondTrigger && animShow[i]) {
+      timeXPos[i] = animXTarget[i];
+      timeYPos[i] = animYTarget[i];
       animShow[i] = false;
     }
-    if(animTrigger[i] == true && timeKnown) {
-      animShow[i] = true;
-      // Fly-in start offset = the off-screen edge the digit comes from. The
-      // vertical offset shrinks in landscape (short edge is 32 px) so the
-      // swapped top/bottom entries don't sit far off-screen for many frames.
-      int8_t vOff = screenIsLandscape() ? 32 : 50;
-      int8_t hOff = 32;
-      //animDirection: 0=from the top, 1=from the right, 2=from the bottom, 3=from the left
-      if(animDirection[i]==0)       { animXPos[i] = animXTarget[i];
-                                      animYPos[i] = animYTarget[i]-vOff; }
-      else if(animDirection[i]==1)  { animXPos[i] = animXTarget[i]+hOff;
-                                      animYPos[i] = animYTarget[i]; }
-      else if(animDirection[i]==2)  { animXPos[i] = animXTarget[i];
-                                      animYPos[i] = animYTarget[i]+vOff; }
-      else if(animDirection[i]==3)  { animXPos[i] = animXTarget[i]-hOff;
-                                      animYPos[i] = animYTarget[i]; }
-    }
-    else if (animShow[i] && moveNow) {
-      // as long as animShow is true, we need to update the position / do the animation of the corresponding digit (i)
-      if      (animYPos[i] < animYTarget[i]) { animYPos[i]++; timeYPos[i]++; } // move animation digit and current time digit at the same time in the same direction
-      else if (animYPos[i] > animYTarget[i]) { animYPos[i]--; timeYPos[i]--; }
-
-      if      (animXPos[i] < animXTarget[i]) { animXPos[i]++; timeXPos[i]++; }
-      else if (animXPos[i] > animXTarget[i]) { animXPos[i]--; timeXPos[i]--; }
-    }
+    if (animTrigger[i] && timeKnown) { startFlight(i); }
+    if (animShow[i]) { placeFlight(i, itersSinceTick); }
   }
+}
+
+// How far digit i flies when it comes from side dir: so far that the incoming
+// digit starts wholly off the panel and the outgoing one, which moves out the
+// other side by the same distance, ends wholly off it. Measured with the box
+// all ten digits of its font cover, and the panel's size as it is turned now.
+uint8_t flightDistance(uint8_t i, uint8_t dir) {
+  const GFXfont *f = (i > 3) ? &FreeSansBold9pt7b : &FreeSansBold12pt7b;   // as renderClock() draws them
+  bool across = (dir == 1 || dir == 3);
+  int16_t lo = 127, hi = -128;   // the digits' box along the flight, from the cursor (hi exclusive)
+  for (char c = '0'; c <= '9'; c++) {
+    const GFXglyph &g = f->glyph[c - f->first];
+    int16_t a = across ? g.xOffset : g.yOffset;
+    int16_t b = a + (across ? g.width : g.height);
+    if (a < lo) { lo = a; }
+    if (b > hi) { hi = b; }
+  }
+  int16_t pos  = across ? animXTarget[i] : animYTarget[i];
+  int16_t size = across ? matrix.width() : matrix.height();
+  int16_t d = max((int16_t)(size - pos - lo), (int16_t)(pos + hi));
+  if (d > 127 - pos) { d = 127 - pos; }   // the positions are int8_t
+  return (uint8_t)max(d, (int16_t)1);
+}
+
+// The pace of a flight of d pixels: one pixel every itersPerPixel() loop
+// iterations, the animation speed, unless the flight would then take longer
+// than FLIGHT_MAX_MS - then fewer iterations per pixel, or, where one
+// iteration is already too slow (the M4 runs one every loopTime ms), several
+// pixels per step.
+void flightPace(uint8_t d, uint8_t &iters, uint8_t &px) {
+#if PANEL_PACED_LOOP
+  uint32_t maxIters = faceLoopHz() * FLIGHT_MAX_MS / 1000;
+#else
+  uint32_t maxIters = FLIGHT_MAX_MS / loopTime;
+#endif
+  if (maxIters < 1) { maxIters = 1; }
+  iters = itersPerPixel();
+  px = 1;
+  if ((uint32_t)d * iters <= maxIters) { return; }
+  if (maxIters >= d) { iters = (uint8_t)min(maxIters / d, (uint32_t)255); return; }
+  iters = 1;
+  px = (uint8_t)((d + maxIters - 1) / maxIters);
+}
+
+// Digit i starts its flight from the side settings.dir names for it.
+void startFlight(uint8_t i) {
+  flightDir[i]  = settings.dir[i] & 3;
+  flightDist[i] = flightDistance(i, flightDir[i]);
+  flightPace(flightDist[i], flightIters[i], flightPx[i]);
+  animShow[i] = true;
+}
+
+// Put digit i where its flight is after iters loop iterations: the incoming
+// digit (animStr) the rest of the way out from its place, the outgoing one
+// (timeStr) as far past it on the other side as the flight has come.
+void placeFlight(uint8_t i, uint16_t iters) {
+  static const int8_t SIDE_X[4] = { 0, 1, 0, -1 };   // where each settings.dir value comes from
+  static const int8_t SIDE_Y[4] = { -1, 0, 1, 0 };
+  uint32_t moved = (uint32_t)flightPx[i] * (iters / flightIters[i]);
+  if (moved > flightDist[i]) { moved = flightDist[i]; }
+  int16_t rest = flightDist[i] - (int16_t)moved;
+  uint8_t d = flightDir[i];
+  animXPos[i] = animXTarget[i] + SIDE_X[d] * rest;
+  animYPos[i] = animYTarget[i] + SIDE_Y[d] * rest;
+  timeXPos[i] = animXTarget[i] - SIDE_X[d] * (int16_t)moved;
+  timeYPos[i] = animYTarget[i] - SIDE_Y[d] * (int16_t)moved;
 }
 
 #if defined(CLOCK_DEBUG)
@@ -3243,6 +3310,7 @@ uint8_t activeWatchface() {
 // places, so no fly-in from before resumes. The Tetris face catches up by
 // itself, digit by digit.
 void faceCatchUp() {
+  faceTickMs = 0;                    // it was not stepped meanwhile: the next tick starts a new count
   classicDigits();
   applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
 }
@@ -3829,7 +3897,6 @@ void applySettings() {
   settings.watchface = WATCHFACE_CLASSIC;   // this build has no other watchface
 #endif
   loopTime = settings.animSpeed;
-  for (uint8_t i = 0; i < 6; i++) { animDirection[i] = (int8_t)settings.dir[i]; }
   syncTimeHour   = settings.syncHour;
   syncTimeMinute = settings.syncMinute;
   // Enforce full colors (the trail is dimmed at render time, not by the swatch).
@@ -5049,7 +5116,7 @@ void serveClient(WiFiClient &client, bool lan) {
 #else
   if (path.startsWith("/save")) {
     applyParams(query);
-    applySettings();            // the runtime copies: animation, directions, sync time
+    applySettings();            // the runtime copies: animation speed, sync time
     setDstMode(settings.dst);   // a new zone's daylight-saving rule counts at once
     saveSettings();
 #if WATCHFACE_TETRIS
@@ -6907,7 +6974,7 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
   String error = applyKeysForm(body);
   if (error.length()) { sendJsonError(c, 400, error.c_str()); return; }
   applyParams(body);
-  applySettings();            // the runtime copies: animation, directions, sync time
+  applySettings();            // the runtime copies: animation speed, sync time
   setDstMode(settings.dst);   // a new zone's daylight-saving rule counts at once
   saveSettings();
 #if WATCHFACE_TETRIS
