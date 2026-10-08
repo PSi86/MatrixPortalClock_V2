@@ -44,12 +44,15 @@ struct BandItem {
   time_t  until;       // UTC
 };
 
-// How often a source is fetched, and how long its items count without a new
-// fetch: three intervals, so a fetch or two may fail without a gap.
-struct FeedInfo { const char *name; uint32_t intervalMs; uint32_t staleS; };
+// How often a source is fetched, how long its items count without a new
+// fetch (three intervals, so a fetch or two may fail without a gap), and
+// whether it needs the clock to stay connected (continuous network access):
+// a source that is fetched wakes the radio by itself and does not, one that
+// is pushed to the clock (Home Assistant over MQTT) will.
+struct FeedInfo { const char *name; uint32_t intervalMs; uint32_t staleS; bool needsAlways; };
 const FeedInfo FEEDS[FEED_COUNT] = {
-  { "weather",  30UL * 60UL * 1000UL, 90UL * 60UL },
-  { "warnings", 10UL * 60UL * 1000UL, 30UL * 60UL },
+  { "weather",  30UL * 60UL * 1000UL, 90UL * 60UL, false },
+  { "warnings", 10UL * 60UL * 1000UL, 30UL * 60UL, false },
 };
 
 // ---- Between the loop and the fetch task ------------------------------------
