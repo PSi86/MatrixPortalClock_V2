@@ -6172,8 +6172,10 @@ void bandWhen(char *buf, size_t size, time_t utc) {
   feedWhen(buf, size, utc, now);
 }
 
-// Two short lines: a console line of more than about 128 characters has lost
-// its end on the S3's USB console (2026-10-08, cause not found yet).
+// The S3's USB console has dropped part of these lines (2026-10-08): about
+// 128 bytes into a burst of output, whatever the lines' length, some 60 bytes
+// went missing; the cause is not found yet. The config page lists the items
+// in full.
 void printBandItem(const char *mark, const BandItem &it) {
   char until[16];
   bandWhen(until, sizeof(until), it.until);
