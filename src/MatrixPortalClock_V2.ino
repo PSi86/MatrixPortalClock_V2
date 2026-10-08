@@ -2216,11 +2216,12 @@ void stepClockAnim(void) {
   }
 }
 
-// How far digit i flies when it comes from side dir: so far that the incoming
-// digit starts wholly off the panel and the outgoing one, which moves out the
-// other side by the same distance, ends wholly off it. Measured with the box
-// all ten digits of its font cover, and the panel's size as it is turned now.
-uint8_t flightDistance(uint8_t i, uint8_t dir) {
+// How far digit i has to fly when it comes from side dir: so far that the
+// incoming digit starts wholly off the panel and the outgoing one, which moves
+// out the other side by the same distance, ends wholly off it. Measured with
+// the box all ten digits of its font cover, and the panel's size as it is
+// turned now.
+int16_t flightNeed(uint8_t i, uint8_t dir) {
   const GFXfont *f = (i > 3) ? &FreeSansBold9pt7b : &FreeSansBold12pt7b;   // as renderClock() draws them
   bool across = (dir == 1 || dir == 3);
   int16_t lo = 127, hi = -128;   // the digits' box along the flight, from the cursor (hi exclusive)
@@ -2233,9 +2234,7 @@ uint8_t flightDistance(uint8_t i, uint8_t dir) {
   }
   int16_t pos  = across ? animXTarget[i] : animYTarget[i];
   int16_t size = across ? matrix.width() : matrix.height();
-  int16_t d = max((int16_t)(size - pos - lo), (int16_t)(pos + hi));
-  if (d > 127 - pos) { d = 127 - pos; }   // the positions are int8_t
-  return (uint8_t)max(d, (int16_t)1);
+  return max((int16_t)(size - pos - lo), (int16_t)(pos + hi));
 }
 
 // The pace of a flight of d pixels: one pixel every itersPerPixel() loop
@@ -2258,10 +2257,19 @@ void flightPace(uint8_t d, uint8_t &iters, uint8_t &px) {
   px = (uint8_t)((d + maxIters - 1) / maxIters);
 }
 
-// Digit i starts its flight from the side settings.dir names for it.
+// Digit i starts its flight from the side settings.dir names for it. Both
+// digits of a pair (hours, minutes, seconds) fly the same distance, the longer
+// of the two they need, so when both change they land together - at the same
+// speed, from whichever sides they come. (Each flying only as far as it needs,
+// the hours' tens from the left landed 13 px after the ones from the right.)
 void startFlight(uint8_t i) {
-  flightDir[i]  = settings.dir[i] & 3;
-  flightDist[i] = flightDistance(i, flightDir[i]);
+  uint8_t mate = i ^ 1;   // 0-1, 2-3, 4-5
+  flightDir[i] = settings.dir[i] & 3;
+  int16_t d = max(flightNeed(i, flightDir[i]), flightNeed(mate, settings.dir[mate] & 3));
+  bool across = (flightDir[i] == 1 || flightDir[i] == 3);
+  int16_t pos = across ? animXTarget[i] : animYTarget[i];
+  if (d > 127 - pos) { d = 127 - pos; }   // the positions are int8_t
+  flightDist[i] = (uint8_t)max(d, (int16_t)1);
   flightPace(flightDist[i], flightIters[i], flightPx[i]);
   animShow[i] = true;
 }

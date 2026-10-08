@@ -506,7 +506,9 @@ gravity and rotates the display in 90° increments so the clock is always uprigh
 The per-digit fly-in directions mean the same in both: a digit set to come
 from the top comes from the top edge as the clock is held. Each flight is long
 enough that the incoming digit starts wholly off the panel and the outgoing one
-leaves it wholly, and it lasts at most 0.85 s, so the digit has landed before
+leaves it wholly; both digits of a pair (hours, minutes, seconds) fly the longer
+of their two distances, so when both change they land together. A flight lasts
+at most 0.85 s, so the digit has landed before
 the next second; at a slow animation speed a long flight is sped up to fit. On
 the S3 the speed is kept in real time by the loop rate the face really had in
 its last second, so a web page asking for the panel picture does not slow the
