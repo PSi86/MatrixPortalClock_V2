@@ -493,8 +493,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     });
   }
   function showGifCount() {
-    var g = S.gifs, t = (g.builtIn + g.pack) + ' GIFs: ' + g.builtIn + ' built in';
-    t += g.packState === 'ok' ? ', ' + g.pack + ' in the GIF pack' : g.packState === 'damaged' ? '; the GIF pack is damaged and not used' : '; no GIF pack';
+    var g = S.gifs, t = g.packState === 'ok' ? g.pack + ' GIFs in the GIF pack (' + g.packMaxKb + ' KB room)'
+      : g.packState === 'damaged' ? 'The GIF pack is damaged and not used: no GIFs.' : 'No GIF pack yet: no GIFs. Write one below.';
     $('#gifCount').textContent = t;
   }
   function enc(o) {

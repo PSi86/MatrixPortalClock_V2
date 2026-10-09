@@ -1,8 +1,8 @@
 # Example GIFs
 
-The firmware build (`scripts/embed_gifs.py`) builds every GIF of this folder that
-fits the panel into the S3 firmware; the clock shows them now and then in place
-of its face. They are unchanged copies of the files named below, under the
+The GIF pack (`scripts/gif_pack.py`) takes every GIF of this folder that fits
+the panel; the S3 clock shows them now and then in place of its face. None is
+built into the firmware. They are unchanged copies of the files named below, under the
 licences given there.
 
 | File | Size | Picture | Author and source | Licence |
@@ -16,11 +16,11 @@ licences given there.
 
 ## Your own GIFs
 
-GIFs from other folders can go into your own build: list the folders, one per
-line, in `gif_dirs.local` in the project folder (git ignores that file). Far
-more fit into the GIF pack in the board's ffat partition: list those folders in
-`gif_pack.local` instead (see "GIF pack" in the [README](../README.md#gif-pack)).
+GIFs from other folders go into your own GIF pack, in the board's ffat
+partition: list the folders, one per line, in `gif_pack.local` in the project
+folder (git ignores that file; see "GIF pack" in the
+[README](../README.md#gif-pack)).
 A folder's `exclude.txt` (or its parent's) names files to leave out, one per
 line; a line matches the end of a file's path. Many well-known GIFs belong to
-their creators: keep them out of this repository, and do not publish a firmware
-image or a GIF pack built with them.
+their creators: keep them out of this repository, and do not publish a GIF pack
+built with them.

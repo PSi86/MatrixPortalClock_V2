@@ -114,8 +114,9 @@
   #define WATCHFACE_TETRIS 1
   // Moving between the menu list and an editor slides the picture sideways.
   #define MENU_SLIDE 1
-  // GIFs now and then in place of the face, built in by scripts/embed_gifs.py
-  // and drawn at 8 bits per colour straight into the panel driver.
+  // GIFs now and then in place of the face, from the GIF pack in the ffat
+  // partition (scripts/gif_pack.py), drawn at 8 bits per colour straight into
+  // the panel driver.
   #define GIF_PLAYBACK 1
   // The info band's data: weather and warnings fetched over HTTPS
   // (src/band_data.h).
@@ -597,12 +598,19 @@ inline void boardSerialBegin(unsigned long baud) {
   // (Built with -D ARDUINO_USB_CDC_ON_BOOT=0 the console is UART0 instead and
   // the board brings up no USB device at all.)
   Serial.setTxTimeoutMs(0);
-  // A host that sets 1200 baud, or toggles DTR and RTS in esptool's order (a
-  // serial tool did as it closed the port), would restart the clock into its
-  // bootloader, where nothing drives the panel and the last row pair it was
-  // sent stays lit at full duty. Uploads go by UF2 or the ROM bootloader
-  // (platformio.ini), so that path is switched off.
+#if !ARDUINO_USB_MODE
+  // TinyUSB's CDC: a host that sets 1200 baud, or toggles DTR and RTS in
+  // esptool's order (a serial tool did as it closed the port), would restart
+  // the clock into its bootloader, where nothing drives the panel and the last
+  // row pair it was sent stays lit at full duty. Uploads went by UF2 or the ROM
+  // bootloader, so that path was switched off.
   Serial.enableReboot(false);
+#else
+  // The chip's own USB-Serial-JTAG (the clock's flash layout of 2026-10-09):
+  // esptool's DTR/RTS order resets the chip into its ROM bootloader in
+  // hardware, which is how uploads go now; no software can switch that off.
+  // A tool that only reads the console opens the port with DTR and RTS low.
+#endif
 #endif
 }
 

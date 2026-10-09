@@ -1,5 +1,4 @@
-# Helpers shared by scripts/embed_gifs.py (GIFs built into the firmware) and
-# scripts/gif_pack.py (the GIF pack in the ffat partition).
+# Helpers for scripts/gif_pack.py (the GIF pack in the ffat partition).
 
 import os
 
