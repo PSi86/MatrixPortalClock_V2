@@ -172,6 +172,7 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
 .sc .ev { font-size: 14px; }
 .err { color: var(--bad); font-size: 13px; }
 .note { font-size: 12.5px; color: var(--muted); }
+progress { width: 100%; height: 8px; accent-color: var(--accent); }
 .need { border: 1px solid var(--warn); background: var(--accent-soft); border-radius: 8px; padding: 10px 12px; font-size: 13px; display: grid; gap: 6px; }
 .need ol { margin: 0; padding-left: 20px; }
 .need .btn { justify-self: start; min-height: 32px; padding: 5px 12px; }
@@ -342,6 +343,12 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
       <div class="sec-head"><h2>GIFs</h2><p>Now and then a GIF takes the panel; holding UP on the face plays one at once.</p></div>
       <div class="card">
         <div class="row stack"><div class="legend"><span id="gifCount"></span></div></div>
+        <div class="row stack">
+          <div><div class="lbl">GIF pack</div><div class="hint">Replaces the pack on the clock with a pack file, as the GIF library or “pio run -t gifpack” builds it.</div></div>
+          <div class="ctl"><button class="btn" type="button" id="packPick">Choose a file</button><input type="file" id="packFile" accept=".bin" hidden><button class="btn" type="button" id="packSend" disabled>Write onto the clock</button></div>
+          <progress id="packProg" max="100" value="0" hidden></progress>
+          <div class="note" id="packNote"></div>
+        </div>
         <div class="row row-switch">
           <div><div class="lbl">Show GIFs now and then</div><div class="hint">At a random time between the two below.</div></div>
           <label class="switch"><input type="checkbox" id="gifr" aria-label="Show GIFs now and then"><span></span></label>
@@ -467,6 +474,11 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
       if (ct.indexOf('json') < 0) { return r; }
       return r.json().then(function (j) { if (!r.ok) { throw new Error(j.error || ('HTTP ' + r.status)); } return j; });
     });
+  }
+  function showGifCount() {
+    var g = S.gifs, t = (g.builtIn + g.pack) + ' GIFs: ' + g.builtIn + ' built in';
+    t += g.packState === 'ok' ? ', ' + g.pack + ' in the GIF pack' : g.packState === 'damaged' ? '; the GIF pack is damaged and not used' : '; no GIF pack';
+    $('#gifCount').textContent = t;
   }
   function enc(o) {
     return Object.keys(o).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(o[k]); }).join('&');
@@ -733,9 +745,7 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
     fillInputs();
     // GIFs
     if (has('gifr')) {
-      var g = S.gifs, t = (g.builtIn + g.pack) + ' GIFs: ' + g.builtIn + ' built in';
-      t += g.packState === 'ok' ? ', ' + g.pack + ' in the GIF pack' : g.packState === 'damaged' ? '; the GIF pack is damaged and not used' : '; no GIF pack';
-      $('#gifCount').textContent = t;
+      showGifCount();
       setCheck('gifr', 'gifr');
       ['gifmin', 'gifmax', 'gifbr'].forEach(function (k) { setNumber(k, k); });
       setNumber('gifbx', 'gifbx', 10);
@@ -1011,6 +1021,46 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
       toast(on ? 'Home network access is on.' : 'Home network access is off.');
       return load();
     }).catch(function (e) { err.textContent = e.message; err.hidden = false; });
+  });
+  var packFile = null;
+  function kb(n) { return Math.round(n / 1024); }
+  $('#packPick').addEventListener('click', function () { $('#packFile').click(); });
+  $('#packFile').addEventListener('change', function () {
+    var f = this.files[0];
+    packFile = null; $('#packSend').disabled = true; $('#packProg').hidden = true;
+    if (!f) { $('#packNote').textContent = ''; return; }
+    if (f.size < 32 || f.size > S.gifs.packMaxKb * 1024) {
+      $('#packNote').textContent = '“' + f.name + '” has ' + kb(f.size) + ' KB; a pack for this clock has at most ' + S.gifs.packMaxKb + ' KB.';
+      return;
+    }
+    packFile = f; $('#packSend').disabled = false;
+    $('#packNote').textContent = '“' + f.name + '”, ' + kb(f.size) + ' KB. Writing it replaces the pack on the clock.';
+  });
+  twoTap($('#packSend'), 'Write onto the clock', 'Tap again to replace the pack', function () {
+    if (!packFile) { return; }
+    var x = new XMLHttpRequest(), h = headers({ 'Content-Type': 'application/octet-stream' }), done = false;
+    x.open('POST', '/api/pack');
+    Object.keys(h).forEach(function (k) { x.setRequestHeader(k, h[k]); });
+    $('#packSend').disabled = true; $('#packProg').hidden = false; $('#packProg').value = 0;
+    $('#packNote').textContent = 'Sending: the clock writes the pack as it arrives and shows how far it is on its panel.';
+    x.upload.onprogress = function (e) { if (e.lengthComputable) { $('#packProg').value = Math.round(100 * e.loaded / e.total); } };
+    function finish(text) {
+      if (done) { return; }
+      done = true; $('#packNote').textContent = text;
+      packFile = null; $('#packFile').value = '';
+      api('/api/state').then(function (st) { S.gifs = st.gifs; showGifCount(); }).catch(function () {});
+    }
+    x.onload = function () {
+      var j = {};
+      try { j = JSON.parse(x.responseText); } catch (e) { /* not JSON */ }
+      if (x.status !== 200) { finish(j.error || ('The clock answered HTTP ' + x.status + '.')); return; }
+      $('#packProg').value = 100;
+      finish(j.gifs + ' GIFs, ' + j.kb + ' KB, written in ' + (j.ms / 1000).toFixed(1) + ' s'
+        + (j.damaged ? '; ' + j.damaged + ' of them arrived damaged and do not play.' : '.'));
+      toast('GIF pack written.');
+    };
+    x.onerror = function () { finish('The upload broke off: the clock stopped answering.'); };
+    x.send(packFile);
   });
   twoTap($('#forget'), 'Forget WiFi', 'Tap again to forget', function () {
     api('/api/forget', '').then(function (r) { showWifi(r.line, false); $('#ssid').value = ''; toast('The home WiFi is forgotten.'); }).catch(function () { toast('The clock did not answer.'); });

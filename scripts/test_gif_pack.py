@@ -160,6 +160,48 @@ def test_ffat_partition_of_the_board_table():
     assert gif_pack.partition(csv) == (0x450000, 3776 * 1024), gif_pack.partition(csv)
 
 
+def test_the_pack_goes_whole_and_only_to_the_named_clock():
+    import base64
+    import http.server
+    import json
+    import threading
+    got = {}
+
+    class Clock(http.server.BaseHTTPRequestHandler):   # what the clock's /api/state and /api/pack answer
+        def log_message(self, *args):
+            pass
+
+        def reply(self, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            got["auth"] = self.headers.get("Authorization")
+            self.reply({"system": {"mac": "7C:4F:AD:06:C1:6C"}, "gifs": {"packMaxKb": 3776}})
+
+        def do_POST(self):
+            got["body"] = self.rfile.read(int(self.headers["Content-Length"]))
+            self.reply({"ok": True, "gifs": 2, "damaged": 0, "kb": len(got["body"]) // 1024, "ms": 1234})
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Clock)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, pack, quiet = "127.0.0.1:%d" % server.server_port, bytes(range(256)) * 1000, lambda text: None
+    try:
+        ok, text = gif_pack.send_pack(host, "secret", pack, "7c:4f:ad:06:c1:00", say=quiet)
+        assert not ok and "nothing sent" in text and "body" not in got, text
+        ok, text = gif_pack.send_pack(host, "secret", bytes(3776 * 1024 + 1), None, say=quiet)
+        assert not ok and "nothing sent" in text and "body" not in got, text
+        ok, text = gif_pack.send_pack(host, "secret", pack, "7c:4f:ad:06:c1:6c", say=quiet)
+        assert ok and got["body"] == pack, text
+        assert got["auth"] == "Basic " + base64.b64encode(b"clock:secret").decode(), got["auth"]
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

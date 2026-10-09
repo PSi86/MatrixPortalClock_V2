@@ -13,6 +13,15 @@
 #       A UF2 copy cannot write it (TinyUF2 writes the app partition only), so
 #       uploading the firmware by UF2 leaves the pack alone; "pio run -t erase"
 #       wipes it.
+#   pio run -e adafruit_matrixportal_s3 -t sendgifs
+#       builds it and sends it to the clock over the home network (the web
+#       app's POST /api/pack), no bootloader and no cable: GIF_PACK_HOST is the
+#       clock's address (matrixclock-xxxxxx.local or its IP), GIF_PACK_PASSWORD
+#       its password for the home network (continuous network access has to
+#       be on). The clock writes the pack as it arrives, then checks every GIF;
+#       with GIF_PACK_MAC set only the clock whose /api/state names that MAC
+#       gets it.
+#   For uploadgifs:
 #       Without --upload-port it takes the one ESP32-S3 USB-Serial/JTAG port
 #       there is (USB 303A:1001, what the ROM bootloader shows up as). Before it
 #       writes, it reads the board's partition table and writes only when the
@@ -171,6 +180,62 @@ def partition(csv_path, name="ffat"):
     raise ValueError("no partition %s in %s" % (name, csv_path))
 
 
+def send_pack(host, password, pack, mac=None, say=print):
+    """Sends pack (bytes) to the clock at host over its web interface: POST
+    /api/pack, after /api/state has shown the clock takes a pack that large
+    and, with mac, that it is the board with that MAC. say() gets the progress.
+    Returns (ok, what happened)."""
+    import base64
+    import http.client
+    import json
+    headers = {"Authorization": "Basic " + base64.b64encode(("clock:" + password).encode()).decode()} if password else {}
+
+    def answer(response):
+        body = response.read()
+        try:
+            return response.status, json.loads(body)
+        except ValueError:
+            return response.status, {"error": body.decode("utf-8", "replace")[:200]}
+
+    try:
+        conn = http.client.HTTPConnection(host, timeout=30)
+        conn.request("GET", "/api/state", headers=headers)
+        status, state = answer(conn.getresponse())
+        conn.close()
+        if status != 200:
+            return False, "the clock at %s answered HTTP %d: %s - nothing sent" % (host, status, state.get("error", ""))
+        board = state.get("system", {}).get("mac", "").lower()
+        if mac and board != mac.lower():
+            return False, "the clock at %s is %s, not %s (GIF_PACK_MAC) - nothing sent" % (host, board, mac.lower())
+        room = state.get("gifs", {}).get("packMaxKb", 0) * 1024
+        if len(pack) > room:
+            return False, "the pack has %d bytes, the clock at %s takes %d - nothing sent" % (len(pack), host, room)
+        say("GIF pack: clock %s at %s, sending %d KB" % (board, host, len(pack) // 1024))
+        conn = http.client.HTTPConnection(host, timeout=60)
+        conn.putrequest("POST", "/api/pack")
+        for key, value in dict(headers, **{"Content-Type": "application/octet-stream",
+                                            "Content-Length": str(len(pack))}).items():
+            conn.putheader(key, value)
+        conn.endheaders()
+        step, told = 64 * 1024, 0
+        for at in range(0, len(pack), step):
+            conn.send(pack[at:at + step])
+            percent = (at + len(pack[at:at + step])) * 100 // len(pack)
+            if percent >= told + 10 or percent == 100:
+                say("GIF pack: sent %d %%" % percent)
+                told = percent
+        status, result = answer(conn.getresponse())
+        conn.close()
+    except OSError as err:
+        return False, "the clock at %s did not answer: %s" % (host, err)
+    if status != 200:
+        return False, result.get("error", "HTTP %d" % status)
+    text = "%d GIFs, %d KB written in %.1f s" % (result["gifs"], result["kb"], result["ms"] / 1000)
+    if result.get("damaged"):
+        return False, text + "; %d arrived damaged and do not play" % result["damaged"]
+    return True, text
+
+
 def _pio(env):
     project = env.subst("$PROJECT_DIR")
     sys.path.insert(0, os.path.join(project, "scripts"))
@@ -247,10 +312,23 @@ def _pio(env):
         return subprocess.call(esptool + ["--before", "default-reset", "--after", "watchdog-reset",
                                           "write-flash", "-z", "0x%x" % offset, out])
 
+    def send_to_clock(target, source, env):   # noqa: ARG001
+        host = os.environ.get("GIF_PACK_HOST", "").strip()
+        if not host:
+            sys.stderr.write("GIF pack: GIF_PACK_HOST names no clock - its address on the home network, "
+                             "matrixclock-xxxxxx.local or its IP\n")
+            return 1
+        ok, text = send_pack(host, os.environ.get("GIF_PACK_PASSWORD", ""), open(out, "rb").read(),
+                             os.environ.get("GIF_PACK_MAC", "").strip() or None)
+        (sys.stdout if ok else sys.stderr).write("GIF pack: %s\n" % text)
+        return 0 if ok else 1
+
     env.AddCustomTarget(name="gifpack", dependencies=None, actions=[build_pack],
                         title="Build GIF pack", description="GIFs of gif_pack.local -> gifpack.bin")
     env.AddCustomTarget(name="uploadgifs", dependencies=None, actions=[build_pack, upload_pack],
                         title="Upload GIF pack", description="gifpack.bin -> ffat partition (ROM bootloader)")
+    env.AddCustomTarget(name="sendgifs", dependencies=None, actions=[build_pack, send_to_clock],
+                        title="Send GIF pack", description="gifpack.bin -> the clock over the home network")
 
 
 if __name__ == "__main__" and "Import" not in globals():

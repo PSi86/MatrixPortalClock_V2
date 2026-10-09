@@ -5091,12 +5091,26 @@ void serveClient(WiFiClient &client, bool lan) {
     if (h.startsWith("Host:")) { host = h.substring(5); host.trim(); }
 #endif
   }
+  // Parse the request target out of "METHOD <target> HTTP/1.1"
+  int sp1 = reqLine.indexOf(' ');
+  int sp2 = reqLine.indexOf(' ', sp1 + 1);
+  String target = (sp1 >= 0 && sp2 > sp1) ? reqLine.substring(sp1 + 1, sp2) : String("/");
+  String path = target, query = "";
+  int q = target.indexOf('?');
+  if (q >= 0) { path = target.substring(0, q); query = target.substring(q + 1); }
+
   // A form sent by POST - the home WiFi, so the password is not part of the
   // URL (and of the request line a debug build logs); the web app sends all
-  // its settings so. Capped.
+  // its settings so. Capped. A GIF pack is far larger and goes straight into
+  // its partition instead (apiPackUpload()).
   bool isPost = reqLine.startsWith("POST ");
+#if WEBUI_APP && GIF_PLAYBACK
+  bool packUpload = isPost && path == "/api/pack";
+#else
+  bool packUpload = false;
+#endif
   String body;
-  if (isPost && contentLength > 0 && contentLength <= (long)HTTP_BODY_MAX) {
+  if (isPost && !packUpload && contentLength > 0 && contentLength <= (long)HTTP_BODY_MAX) {
     body.reserve(contentLength);
     char buf[257];
     long left = contentLength;
@@ -5115,14 +5129,6 @@ void serveClient(WiFiClient &client, bool lan) {
             client.remoteIP().toString().c_str());
 #endif
 
-  // Parse the request target out of "METHOD <target> HTTP/1.1"
-  int sp1 = reqLine.indexOf(' ');
-  int sp2 = reqLine.indexOf(' ', sp1 + 1);
-  String target = (sp1 >= 0 && sp2 > sp1) ? reqLine.substring(sp1 + 1, sp2) : String("/");
-  String path = target, query = "";
-  int q = target.indexOf('?');
-  if (q >= 0) { path = target.substring(0, q); query = target.substring(q + 1); }
-
 #if AP_BUFFERED_SEND
   BufferedWriter out(client); // batch the many small prints into few big SPI writes
 #else
@@ -5138,7 +5144,13 @@ void serveClient(WiFiClient &client, bool lan) {
   bool restart = false;   // the web app asked for a restart
 #if WEBUI_APP
   if (path.startsWith("/api/")) {
-    if (!lan || lanAuthorized(out, auth)) { webApi(out, path, isPost, body, closeHotspot, syncNow, restart); }
+    if (!lan || lanAuthorized(out, auth)) {
+#if GIF_PLAYBACK
+      if (packUpload) { apiPackUpload(client, out, contentLength); }
+      else
+#endif
+      { webApi(out, path, isPost, body, closeHotspot, syncNow, restart); }
+    }
   } else if (path == "/" || path.startsWith("/index")) {
     sendWebApp(out);
   } else if (lan) {
@@ -6931,6 +6943,7 @@ void apiState(Print &c) {
   gifs["builtIn"] = BUILT_IN_GIF_COUNT;
   gifs["pack"] = (gifPackState == GIF_PACK_OK) ? gifPackCount : 0;
   gifs["packState"] = gifPackState == GIF_PACK_OK ? "ok" : gifPackState == GIF_PACK_BAD ? "damaged" : "none";
+  gifs["packMaxKb"] = gifPackPart ? gifPackPart->size / 1024 : 0;   // what POST /api/pack takes
 #endif
 
   JsonObject wifi = d["wifi"].to<JsonObject>();
@@ -6955,6 +6968,7 @@ void apiState(Print &c) {
   sys["programMax"] = app ? app->size : 0;
   sys["reset"] = resetReasonText();
   sys["bootStage"] = prevBootStage;
+  sys["mac"] = WiFi.macAddress();   // the board's, as esptool prints it: a tool checks it before it writes
 
   apiStatusInto(d);   // and what moves, so the page starts complete
   sendJson(c, d);
@@ -6973,6 +6987,164 @@ void apiPanel(Print &c) {
   c.println();
   c.write((const uint8_t *)matrix.getBuffer(), bytes);
 }
+
+#if GIF_PLAYBACK
+// POST /api/pack: a GIF pack (the layout scripts/gif_pack.py writes), sent
+// whole as the request body, into the ffat partition. Its header is checked
+// before anything is erased, so a file that is no pack leaves the old one as
+// it was. The header is written last, so an upload that breaks off leaves no
+// pack rather than a damaged one, and the built-in GIFs play on. The loop
+// waits for it - a full partition takes about half a minute - and the panel
+// shows how far it is.
+const uint32_t PACK_ERASE_BLOCK = 65536;            // erased ahead of the data, a flash block at a time
+const unsigned long PACK_READ_TIMEOUT_MS = 5000;    // the longest gap in the upload before it counts as broken off
+
+void apiPackUpload(WiFiClient &client, Print &out, long length) {
+  if (!gifPackPart) {
+    gifPackPart = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "ffat");
+  }
+  if (!gifPackPart) {
+    packDrain(client, length);
+    sendJsonError(out, 500, "This clock has no partition for a GIF pack.");
+    return;
+  }
+  if (length < (long)sizeof(GifPackHeader) || (uint32_t)length > gifPackPart->size) {
+    packDrain(client, length);
+    String e = "Not a GIF pack this clock holds: it takes up to " + String(gifPackPart->size / 1024) + " KB.";
+    sendJsonError(out, 400, e.c_str());
+    return;
+  }
+  unsigned long started = millis();
+  GifPackHeader h;
+  if (packRead(client, (uint8_t *)&h, sizeof(h)) != sizeof(h)) {
+    sendJsonError(out, 400, "The upload broke off before the pack's header; the old pack stays.");
+    return;
+  }
+  uint32_t indexBytes = (uint32_t)h.count * sizeof(GifPackEntry);
+  if (memcmp(h.magic, "CLKGPACK", sizeof(h.magic)) != 0 || h.version != 1 || h.count == 0
+      || h.count > GIF_PACK_COUNT_MAX || h.size != (uint32_t)length || sizeof(h) + indexBytes > h.size) {
+    packDrain(client, length - (long)sizeof(h));
+    sendJsonError(out, 400, "Not a GIF pack this clock reads (scripts/gif_pack.py writes them); the old pack stays.");
+    return;
+  }
+
+  // Nothing plays from the old pack while it is overwritten.
+  if (screen == SCREEN_GIF) { closeScreen(); }
+  gifPackState = GIF_PACK_NONE;
+  free(gifPack);
+  gifPack = nullptr;
+  gifPackCount = 0;
+  gifLast = -1;   // it may have been a pack GIF the new pack does not have
+  Serial.printf("GIF pack: receiving %u GIFs, %u KB\n", h.count, (unsigned)(h.size / 1024));
+
+  uint8_t *buf = (uint8_t *)malloc(4096);
+  uint32_t at = sizeof(h), erasedTo = 0, shownAt = 0;
+  bool ok = buf != nullptr;
+  drawPackProgress(0, h.size);
+  while (ok && at < h.size) {
+    size_t n = packRead(client, buf, min(h.size - at, (uint32_t)4096));
+    if (n == 0) { ok = false; break; }
+    // Erase ahead of the data, a block at a time; the first block takes the
+    // old header with it.
+    while (ok && erasedTo < at + n) {
+      uint32_t len = min(PACK_ERASE_BLOCK, (uint32_t)gifPackPart->size - erasedTo);
+      ok = esp_partition_erase_range(gifPackPart, erasedTo, len) == ESP_OK;
+      erasedTo += len;
+    }
+    if (!ok || esp_partition_write(gifPackPart, at, buf, n) != ESP_OK) { ok = false; break; }
+    at += n;
+    if (at - shownAt >= PACK_ERASE_BLOCK || at == h.size) { drawPackProgress(at, h.size); shownAt = at; }
+    delay(1);   // the rest of the loop is waiting; let the idle task in
+  }
+  free(buf);
+  if (ok) { ok = esp_partition_write(gifPackPart, 0, &h, sizeof(h)) == ESP_OK; }
+  gifPackLoad();        // what the partition holds now: the new pack, the old one, or none
+  panelDirty = true;    // the progress is still on the panel
+  if (!ok) {
+    String e = "The upload broke off after " + String(at / 1024) + " of " + String(h.size / 1024) + " KB; ";
+    e += (erasedTo == 0) ? "the old pack stays." : "the clock has no GIF pack now and plays its built-in GIFs.";
+    Serial.println("GIF pack: " + e);
+    sendJsonError(out, 400, e.c_str());
+    return;
+  }
+  if (gifPackState != GIF_PACK_OK) {
+    sendJsonError(out, 400, "The pack arrived, but its index is damaged; the clock plays its built-in GIFs.");
+    return;
+  }
+  // Every GIF's bytes against its CRC, as each is checked again before it plays.
+  uint16_t damaged = 0;
+  for (uint16_t n = 0; n < gifPackCount; n++) {
+    const GifPackEntry &e = gifPack[n];
+    const void *mapped = nullptr;
+    esp_partition_mmap_handle_t map;
+    if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &map) != ESP_OK) {
+      damaged++;
+      continue;
+    }
+    if (esp_rom_crc32_le(0, (const uint8_t *)mapped, e.size) != e.crc) { damaged++; }
+    esp_partition_munmap(map);
+  }
+  gifScheduleNext();
+  unsigned long ms = millis() - started;
+  Serial.printf("GIF pack: written, %u GIFs, %u damaged, %lu ms\n", gifPackCount, damaged, ms);
+  JsonDocument d;
+  d["ok"] = damaged == 0;
+  d["gifs"] = gifPackCount;
+  d["damaged"] = damaged;
+  d["kb"] = h.size / 1024;
+  d["ms"] = ms;
+  sendJson(out, d);
+}
+
+// Up to want bytes of the request body: what arrives with no gap longer than
+// PACK_READ_TIMEOUT_MS; fewer when the client stops sending.
+size_t packRead(WiFiClient &client, uint8_t *buf, size_t want) {
+  size_t got = 0;
+  unsigned long last = millis();
+  while (got < want) {
+    int n = client.read(buf + got, want - got);
+    if (n > 0) {
+      got += n;
+      last = millis();
+      continue;
+    }
+    if (!client.connected() && client.available() == 0) { break; }
+    if (millis() - last > PACK_READ_TIMEOUT_MS) { break; }
+    delay(1);
+  }
+  return got;
+}
+
+// Reads and drops the rest of a body that is refused, so the client gets the
+// answer: closing the socket with data unread resets the connection, and the
+// answer goes with it (seen with a file that was no pack).
+void packDrain(WiFiClient &client, long left) {
+  uint8_t buf[512];
+  while (left > 0) {
+    size_t n = packRead(client, buf, (size_t)min(left, (long)sizeof(buf)));
+    if (n == 0) { return; }
+    left -= (long)n;
+  }
+}
+
+// The panel while a GIF pack is written: what happens, and how far it is.
+void drawPackProgress(uint32_t done, uint32_t total) {
+  uint8_t percent = total ? (uint8_t)((uint64_t)done * 100 / total) : 0;
+  int16_t w = matrix.width(), h = matrix.height();
+  uint16_t ink = scaledColorVisible(255, 140, 0);
+  matrix.fillScreen(0);
+  matrix.setFont(&Picopixel);
+  matrix.setTextColor(ink);
+  matrix.setCursor(1, 7);
+  matrix.print("GIF PACK");
+  matrix.drawRect(1, h / 2 - 3, w - 2, 7, ink);
+  matrix.fillRect(2, h / 2 - 2, (int16_t)((int32_t)(w - 4) * percent / 100), 5, ink);
+  matrix.setCursor(1, h - 2);
+  matrix.print(percent);
+  matrix.print(" %");
+  matrix.show();
+}
+#endif
 
 // The clock's time from a phone (utc=) or typed in (date= and time=, the
 // clock's local time). Answers with the new status line.
