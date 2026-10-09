@@ -698,7 +698,17 @@ uint8_t BufferedWriter::_buf[2000];
 
 char timeStr[7], animStr[7]; // 6 digits + null terminator
 bool animTrigger[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
-bool classicFlyAllNext = false;   // FN_FACE_ANIMATION on the classic face: all six fly in at the next second
+// FN_FACE_ANIMATION on the classic face: asked for (all six fly in at the next
+// second), flying, or neither. A new one is ignored until the last one has
+// landed and CLASSIC_ANIM_REST_MS have passed. An input can come again before
+// the first has played - a knock reports every event the sensor latches
+// (updateShake()), seen 2 to 7 per knock - and one that came after the second
+// had taken the request asked for a second animation.
+enum ClassicAnim : uint8_t { CLASSIC_ANIM_IDLE, CLASSIC_ANIM_ASKED, CLASSIC_ANIM_FLYING };
+ClassicAnim classicAnim = CLASSIC_ANIM_IDLE;
+unsigned long classicAnimEndedAt = 0;   // millis() when the last one landed or was cut off
+uint16_t      classicAnimIgnored = 0;   // requests ignored since the last one taken, for the console
+const unsigned long CLASSIC_ANIM_REST_MS = 300;
 bool animShow[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
 int8_t animXPos[6] = {0, 0, 0, 0, 0, 0};
 int8_t animYPos[6] = {0, 0, 0, 0, 0, 0};
@@ -2208,6 +2218,12 @@ void stepClockAnim(void) {
     if (animTrigger[i] && timeKnown) { startFlight(i); }
     if (animShow[i]) { placeFlight(i, itersSinceTick); }
   }
+  // The watchface animation has landed once its flights have: every flight
+  // takes flightTime iterations from the tick it started on.
+  if (classicAnim == CLASSIC_ANIM_FLYING && itersSinceTick >= flightTime) {
+    classicAnim = CLASSIC_ANIM_IDLE;
+    classicAnimEndedAt = millisNow;
+  }
 }
 
 // How far digit i has to fly when it comes from side dir: so far that the
@@ -3310,6 +3326,10 @@ uint8_t activeWatchface() {
 // itself, digit by digit.
 void faceCatchUp() {
   faceTickMs = 0;                    // it was not stepped meanwhile: the next tick starts a new count
+  if (classicAnim != CLASSIC_ANIM_IDLE) {   // another screen or face cut the watchface animation off
+    classicAnim = CLASSIC_ANIM_IDLE;
+    classicAnimEndedAt = millisNow;
+  }
   classicDigits();
   applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
 }
@@ -3390,8 +3410,8 @@ void timekeeper(void) {
       // TODO: maybe there is another check necessary for the hours: 23 to 00 change
     // The watchface animation on the classic face: every digit flies in as if
     // it changed, through the same steps as a real change.
-    if (classicFlyAllNext) {
-      classicFlyAllNext = false;
+    if (classicAnim == CLASSIC_ANIM_ASKED) {
+      classicAnim = CLASSIC_ANIM_FLYING;
       for (uint8_t i = 0; i < sizeof(animTrigger); i++) { animTrigger[i] = true; }
     }
   }
@@ -4171,7 +4191,11 @@ void runFunction(InputFunction fn, uint8_t steps) {
 
 // FN_FACE_ANIMATION, on the face only: the watchface's own animation. The
 // Tetris digits break up in the break-up effect; the classic digits all fly
-// in at the next second, as if every one of them changed then.
+// in at the next second, as if every one of them changed then - unless one is
+// still asked for or flying, or landed less than CLASSIC_ANIM_REST_MS ago. The
+// console gets one line per animation taken, with the requests ignored since
+// the one before, not one per request (a stress test of fast knocks wrote over
+// 200 lines in 30 s).
 void faceAnimationStart() {
   if (screen != SCREEN_FACE) { return; }
 #if WATCHFACE_TETRIS
@@ -4180,7 +4204,14 @@ void faceAnimationStart() {
     return;
   }
 #endif
-  classicFlyAllNext = true;
+  if (classicAnim != CLASSIC_ANIM_IDLE || millisNow - classicAnimEndedAt < CLASSIC_ANIM_REST_MS) {
+    if (classicAnimIgnored < 0xFFFF) { classicAnimIgnored++; }
+    return;
+  }
+  classicAnim = CLASSIC_ANIM_ASKED;
+  Serial.print("Face animation: the classic digits fly in at the next second (");
+  Serial.print(classicAnimIgnored); Serial.println(" requests ignored since the last one)");
+  classicAnimIgnored = 0;
 }
 
 void holdStep(InputFunction fn) {

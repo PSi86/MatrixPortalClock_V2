@@ -231,7 +231,11 @@ on / off, toggle daylight saving: auto, summer, winter, toggle hotspot on / off,
 fade brightness while held (held buttons only), show gesture hints. The
 watchface animation is the face's own: the Tetris digits break up in the
 break-up effect, and the classic digits all fly in at the next second as if
-every one of them changed. The page lists only
+every one of them changed. On the classic face a new one is ignored until the
+running one has landed and 0.3 s have passed, so a knock that reports itself
+more than once (2 to 7 times, seen) plays it once, and a fast run of knocks
+plays the next one just after the last has landed; the Tetris face keeps its
+own rules (see the break-up effect). The page lists only
 the inputs found. The profile chosen there keeps the menu, the hotspot screen
 and the start; choosing it fills the face with its own rows to begin with, and
 nothing set means the profile's rows. Saving is refused unless an input found
