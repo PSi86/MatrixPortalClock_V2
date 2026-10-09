@@ -67,6 +67,9 @@ button pin cannot be carried over.
   [Menu and buttons](#menu-and-buttons))
 - **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, fly-in time, colors, fly-in directions, NTP sync time, GIFs (S3), the info band's place and sources (S3) and the **home WiFi**; on a page of its own the input profile and what
   buttons, knock and gestures do on the face (see [Face shortcuts](#face-shortcuts))
+- **Web app** (S3): the settings page as an app, through the hotspot and, with
+  continuous network access, on the home network behind a password (see
+  [Web app and the home network](#web-app-and-the-home-network-s3))
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
   a normal upload does not touch - `pio run -t erase` does; M4: one 8 KB flash
@@ -420,6 +423,47 @@ status line per source says when it was last fetched, or why it failed.
 The code is in `src/band_data.h` (the items, the two sources, the fetch task)
 and at the end of the sketch (when the sources are due, the items, the config
 page section).
+
+## Web app and the home network (S3)
+
+The S3 serves its settings as a web app: one page (`webui/index.html`, gzipped
+into the firmware at build time by `scripts/embed_webui.py`) that talks to the
+clock over a JSON interface. The M4 keeps the page it writes line by line (see
+[AP configuration](#ap-configuration)).
+
+| | Through the hotspot | On the home network |
+|---|---|---|
+| Switched on by | the menu's **Hotspot**, an input set to *toggle hotspot on / off*, or UP held at boot | the page's card **Continuous network access**, switch *Stay connected to the home network* |
+| Address | `http://4.3.2.1` (opens as a captive portal) | `http://matrixclock-xxxxxx.local` (the last three bytes of the board's MAC) or its IP, both on the page and the console |
+| Password | the hotspot's WiFi password | the clock's own: preset to the hotspot's (`clock1234`), changed on the page (8–63 characters) |
+| Networks in range | listed, scanned when the hotspot opens | not listed: a scan would take the radio off the home network |
+
+**On the home network** the clock stays connected to the stored WiFi while the
+switch is on; otherwise its radio is on only for the time sync and the info
+band's fetches. The station's power saving is off meanwhile, so a request is
+answered in about 40 ms instead of 1.2 s. The page itself loads without a
+password and then asks for it; every request to `/api/` carries it (HTTP Basic,
+any user name). Five wrong passwords in a row lock the check for 30 s (HTTP
+429). A data source that needs a standing connection is marked on the page
+(none of today's do; the Home Assistant link will), and switching one on without
+a stored WiFi or without continuous access says that it needs both.
+
+**The interface** — the page uses nothing else, so tools can too. Writes are
+form-encoded POSTs, answers are JSON:
+
+| Request | What it does |
+|---|---|
+| `GET /api/state` | settings, the lists the page offers, hardware found, WiFi, system |
+| `GET /api/status` | brightness, light, time and its source, rotation, screen, the info band's sources (the page asks every 2 s) |
+| `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
+| `POST /api/live` | tries settings live, in RAM only |
+| `POST /api/save` | stores everything the page shows |
+| `POST /api/discard` | puts the stored settings back |
+| `POST /api/time` | sets the time, from the phone or typed |
+| `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
+| `POST /api/gif` | plays a GIF now (on the face) |
+| `POST /api/lan` | continuous network access on or off, a new password |
+| `POST /api/restart` | restarts the clock |
 
 ## AP configuration
 
