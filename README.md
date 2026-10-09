@@ -19,7 +19,7 @@ reset instruction - so the sketch itself is board independent.
 | NTP | lwIP SNTP client | the NINA firmware's own SNTP |
 | Settings stored in | NVS partition (0x9000) | flash block at 0x7E000 |
 | Buttons | UP GPIO6 (`BUTTON_UP`), DOWN GPIO7 (`BUTTON_DOWN`) | UP D2, DOWN D3 |
-| Upload | esptool over native USB | UF2 bootloader (double reset) |
+| Upload | esptool over the chip's USB-Serial-JTAG, no buttons | UF2 bootloader (double reset) |
 
 The S3 was added because the M4's WiFiNINA link kept causing WiFi trouble; on the S3
 the radio sits on the main MCU, which also lets the AP config page preview the clock at
@@ -102,24 +102,22 @@ button pin cannot be carried over.
    pio run -t upload       # flash
    pio device monitor      # serial output (115200 baud)
    ```
-   **Uploading to the S3 needs the board in a bootloader first.** The running
-   clock ignores the automatic reset into the bootloader over its USB port (1200
-   baud, or DTR and RTS toggled in esptool's order): it never worked here -
-   Windows kept a dead serial port - and a serial tool that happened to toggle
-   the lines that way sent the clock into its bootloader, where nothing drives
-   the panel and one row pair stays lit at full duty. Use one of:
-   - **UF2 (simplest):** double-tap **RESET** (the second tap while the NeoPixel
-     is purple), then copy `.pio/build/adafruit_matrixportal_s3/firmware.uf2`
-     (written by every build) onto the `MATRXS3BOOT` drive. The board restarts
-     into the new firmware by itself.
-   - **ROM bootloader:** hold **BOOT**, tap **RESET**, release **BOOT**, then
-     `pio run -t upload --upload-port <port>`. Afterwards esptool cannot restart
-     the board over USB - press **RESET** to start the clock.
+   **Uploading to the S3** needs no button: the clock's console is the chip's
+   own USB-Serial-JTAG (USB 303A:1001), so esptool resets the running clock
+   into its ROM bootloader by itself and starts it again with a watchdog reset
+   when it is done (`pio run -t upload --upload-port <port>`). While the ROM
+   bootloader runs nothing drives the panel, and the row pair it was sent last
+   stays lit at full duty for those few seconds. Should the board ever not
+   answer, the ROM bootloader is there by hand: hold **BOOT**, tap **RESET**,
+   release **BOOT**, upload. An upload leaves the settings and the GIF pack
+   alone. This needs the clock's own flash layout (see
+   [Flash layout](#flash-layout-s3)); a board still on Adafruit's TinyUF2 layout
+   is moved over once, as described there.
 
-   **Console:** the normal build uses the board's TinyUSB console (239A:8125).
-   The debug environment switches to the chip's USB-Serial-JTAG controller
-   (`ARDUINO_USB_MODE=1`, 303A:1001), which is the port the ROM bootloader uses,
-   so its output survives from reset into the running clock.
+   **Console:** `pio device monitor` (115200 baud) on the same port. Open it with
+   DTR and RTS low, as `platformio.ini` sets for the monitor
+   (`monitor_dtr = 0`, `monitor_rts = 0`): a tool that opens the port with both
+   raised - pyserial's default - restarts the clock.
 
    **Power:** WiFi transmit bursts are the clock's highest current draw. At the
    core's default transmit power of 19.5 dBm the S3 reset while joining the
@@ -128,8 +126,7 @@ button pin cannot be carried over.
    therefore sets `WIFI_TX_POWER` to 11 dBm (board_hal.h). A charger that drops
    VBUS altogether cannot be fixed that way: with the PD charger on a C-to-C
    cable the board still resets at random moments, so use an A-to-C cable with
-   it. Because such a reset can fall into TinyUF2's double-reset window, it may
-   look as if the board only ever boots into `MATRXS3BOOT`.
+   it.
 
    **Diagnosis without a console:** the clock shows the cause of an abnormal
    reset (`BROWN`, `PANIC`, `TWDT`, ...) for 2 s at boot, and remembers how far
@@ -285,12 +282,15 @@ the clock's 52). Below about 48 the panel's colours also step too coarsely for
 such pictures. When the clock has switched the panel dark (brightness 0), a GIF
 stays dark too.
 
-The GIFs are built into the firmware by `scripts/embed_gifs.py`: every GIF in
-[`gifs/`](gifs/README.md) that fits the panel (four examples with their licences
-and authors), and those of the folders listed in `gif_dirs.local`, smallest first,
-up to `custom_gif_budget_kb` (550 KB; the build stops when the app image no longer fits its partition). That file is ignored by git, so private
-GIFs stay out of the repository; a firmware built with them must not be
-published. The build says how many it took and which it left out.
+All the GIFs are in the **GIF pack**, in the board's `ffat` partition (4544 KB,
+see [Flash layout](#flash-layout-s3)); none is built into the firmware, so the
+firmware stays small and the room goes to GIFs. Without a pack the clock plays no
+GIFs. The pack takes every GIF in [`gifs/`](gifs/README.md) that fits the panel
+(four examples with their licences and authors) and those of the folders listed
+in `gif_pack.local` in the project folder (one per line, ignored by git, for
+private GIFs) or in `GIF_PACK_DIRS`, smallest first while there is room. Private
+GIFs stay out of the repository and out of the firmware, so a firmware build can
+be passed on while a pack with private GIFs is not.
 
 Which GIFs fit depends on how the clock stands, `custom_gif_orientation` in
 `platformio.ini`: `landscape` (the default) takes GIFs up to 64x32, `portrait`
@@ -298,49 +298,16 @@ up to 32x64, `both` those that fit one way or the other, for a clock that gets
 turned. A clock that always stands the same way then carries no GIFs it could
 never play.
 
-### Building the firmware with your own GIFs
+### GIF pack
 
 The commands are for PowerShell on Windows (not Git Bash: the S3 platform's
 tools refuse to run there). Replace `<project folder>` with the folder of this
 repository and `<GIF folder>` with a folder of your GIFs outside it. If `pio` is
-on your PATH, `pio` does instead of the full path.
-
-1. Name the folder for the build. Either list it in `gif_dirs.local` in the
-   project folder, one folder per line - then every build takes it, the build
-   button in VS Code too - or name it for one build only with `GIF_DIRS`
-   (several folders separated by `;`), which then stands in for that file:
-
-       $env:GIF_DIRS = '<GIF folder>'
-
-2. Build:
-
-       & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -d '<project folder>' -e adafruit_matrixportal_s3
-
-   The build says how many GIFs it took (`GIFs: ... built in`) and how many
-   did not fit the panel or the budget. Afterwards `Remove-Item Env:GIF_DIRS`,
-   so that later builds in the same window go without them.
-
-3. Double-tap RESET on the clock: the drive `MATRXS3BOOT` appears. Copy the
-   firmware onto it (or drag the file there in Explorer); the clock restarts
-   with it by itself:
-
-       $d = (Get-Volume | Where-Object FileSystemLabel -eq 'MATRXS3BOOT').DriveLetter
-       Copy-Item '<project folder>\.pio\build\adafruit_matrixportal_s3\firmware.uf2' "${d}:\"
-
-On macOS and Linux the same goes as `GIF_DIRS=<GIF folder> pio run -e
-adafruit_matrixportal_s3` (folders separated by `:`), and the UF2 is copied onto
-the `MATRXS3BOOT` volume with the file manager or `cp`.
-
-### GIF pack
-
-More GIFs than fit into the firmware go into the GIF pack, in the board's
-`ffat` partition (3776 KB), which the clock uses for nothing else. UF2 cannot
-write it (TinyUF2 writes the app partition only), so the firmware's UF2
-uploads leave it alone; `pio run -t erase` wipes it.
+on your PATH, `pio` does instead of the full path. A firmware upload leaves the
+pack alone; `pio run -t erase` wipes it.
 
 **Over the home network** (with continuous network access on, see
-[Web app and the home network](#web-app-and-the-home-network-s3)), no cable and
-no bootloader:
+[Web app and the home network](#web-app-and-the-home-network-s3)), no cable:
 
     $env:GIF_PACK_HOST = 'matrixclock-xxxxxx.local'; $env:GIF_PACK_PASSWORD = '<the clock's password>'
     & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -d '<project folder>' -e adafruit_matrixportal_s3 -t sendgifs
@@ -349,53 +316,47 @@ It builds the pack as below, asks the clock for its MAC (`GIF_PACK_MAC`, if
 set, has to match) and its room, and sends the pack (`POST /api/pack`). The
 clock checks the pack's header before it erases anything, so a file that is no
 pack leaves the old one; it writes the pack as it arrives, its header last, so
-an upload that breaks off leaves no pack rather than a damaged one and the
-built-in GIFs play on. Then it checks every GIF's CRC and plays the new ones at
-once, without a restart. A full pack took 15.6 s; the panel shows how far it
-is. The web app's GIFs card sends a pack file the same way (built by
-`-t gifpack` or the GIF library), with a bar for the upload.
+an upload that breaks off leaves no pack rather than a damaged one. Then it
+checks every GIF's CRC and plays the new ones at once, without a restart. A full
+pack of 3776 KB took 15.6 s; the panel shows how far it is. The web app's GIFs
+card sends a pack file the same way (built by `-t gifpack` or the GIF library),
+with a bar for the upload.
 
-**Through the ROM bootloader**, for a clock that is not on the network.
-Placeholders as above, plus `<board MAC>`:
+**Over USB**, for a clock that is not on the network. Placeholders as above,
+plus `<board MAC>`:
 
-1. Name the folder for the pack: list it in `gif_pack.local` in the project
-   folder (one per line, ignored by git) or name it with `GIF_PACK_DIRS`. Set
-   `GIF_PACK_MAC` too if more than one ESP32-S3 is ever plugged in: then only
-   the board with that MAC is written. esptool prints a board's MAC when it
-   connects (`MAC: 7c:4f:...`), so the first run without it shows it.
+1. Name the folder for the pack: list it in `gif_pack.local` or name it with
+   `GIF_PACK_DIRS`. Set `GIF_PACK_MAC` too if more than one ESP32-S3 is ever
+   plugged in: then only the board with that MAC is written. esptool prints a
+   board's MAC when it connects (`MAC: 7c:4f:...`), so the first run without it
+   shows it.
 
        $env:GIF_PACK_DIRS = '<GIF folder>'
        $env:GIF_PACK_MAC = '<board MAC>'
 
-2. Put the clock into its ROM bootloader: hold BOOT, tap RESET, release BOOT.
-
-3. Build the pack and write it:
+2. Build the pack and write it:
 
        & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -d '<project folder>' -e adafruit_matrixportal_s3 -t uploadgifs
 
-   Without `--upload-port COMx` it takes the one ESP32-S3 USB port there is
-   (USB 303A:1001, how the ROM bootloader shows up). Before it writes, it reads
-   the board's MAC and partition table and stops without writing when the MAC
-   is not `GIF_PACK_MAC` or the board has no ffat partition where this build
-   expects one - another ESP32-S3 board is never written over. `-t gifpack`
-   only builds `.pio\build\adafruit_matrixportal_s3\gifpack.bin`.
+   Without `--upload-port COMx` it takes the one ESP32-S3 USB-Serial-JTAG port
+   there is (USB 303A:1001: the clock's console and its ROM bootloader alike).
+   Before it writes, it reads the board's MAC and partition table and stops
+   without writing when the MAC is not `GIF_PACK_MAC` or the board has no ffat
+   partition where this build expects one - another ESP32-S3 board, or one still
+   on TinyUF2's layout, is never written over. `-t gifpack` only builds
+   `.pio\build\adafruit_matrixportal_s3\gifpack.bin`.
 
-4. The clock then starts by itself: the upload ends with a watchdog reset (a
+3. The clock then starts by itself: the upload ends with a watchdog reset (a
    reset through RTS would leave an ESP32-S3 in its ROM bootloader). Its
    console and config page say how many GIFs the pack holds. If the target
-   stopped without writing, nothing changed on the board; press RESET to start
-   it again.
+   stopped without writing, nothing changed on the board.
 
 `scripts/gif_pack.py` takes the GIFs that fit the panel the way the clock
-stands, leaves out those the firmware has built in and second copies, and puts
-them in smallest first while there is room. Each GIF is kept as it is or
-deflated, whichever is smaller (deflating saves about a fifth on typical
-pixel-art GIFs). The clock reads the pack's index at start-up, checks a GIF's
-CRC each time it is about to play, and inflates a deflated one into PSRAM with
-the inflate in the chip's ROM before it plays; the pack's GIFs then come up
-like the built-in ones. Private GIFs in the pack stay in the pack: the firmware
-does not contain them, so a firmware built without `gif_dirs.local` can be
-passed on while the pack is not.
+stands, leaves out second copies, and puts them in smallest first while there
+is room. Each GIF is kept as it is or deflated, whichever is smaller (deflating
+saves about a fifth on typical pixel-art GIFs). The clock reads the pack's index
+at start-up, checks a GIF's CRC each time it is about to play, and inflates a
+deflated one into PSRAM with the inflate in the chip's ROM before it plays.
 
 ## Info band data
 
@@ -512,8 +473,8 @@ item for its seconds.
   password refused, nothing answering at the address, address not found).
 - **Flash:** the client costs 41.7 KB (it brings the TLS and WebSocket
   transports the core's build has switched on, which the link does not use),
-  the whole link about 57 KB; the S3 image with 600 KB of built-in GIFs is at
-  99.0 % of its 2 MB.
+  the whole link about 57 KB. Since the flash layout of 2026-10-09 the S3's
+  image has 1,434,800 bytes, 400 KB less than its app slot.
 
 The code is in `src/ha_link.h` (the client, its task and the topics) and at the
 end of the sketch (when it runs, what arrives, the card's part).
@@ -1083,6 +1044,53 @@ reproduces the header byte for byte, and it verifies every table it emits before
 writing: exact coverage of the glyph, no overlaps, every piece droppable from
 above in the stored order, and a proper colouring within the palette. It refuses
 to write anything if a check fails.
+
+## Flash layout (S3)
+
+The MatrixPortal S3 comes with Adafruit's TinyUF2 layout: two app slots of 2 MB,
+of which the clock used one, TinyUF2 (the `MATRXS3BOOT` drive) and 3776 KB of
+FAT that the clock used for its GIF pack. Its app slot became too small (the
+firmware with built-in GIFs and the Home Assistant link no longer fitted), so
+since 2026-10-09 the clock has a layout of its own, `partitions_clock_s3.csv`:
+
+| Partition | Offset | Size | What for |
+|---|---|---|---|
+| `nvs` | 0x9000 | 20 KB | the settings - where TinyUF2's table had them, so they survive the change |
+| `otadata` | 0xE000 | 8 KB | which app slot boots |
+| `app0` | 0x10000 | 1792 KB | the firmware |
+| `app1` | 0x1D0000 | 1792 KB | for updates over WiFi (to come) |
+| `ffat` | 0x390000 | 4544 KB | the GIF pack, all the clock's GIFs |
+
+No GIFs are built into the firmware, and there is no TinyUF2: uploads go over
+the USB-Serial-JTAG without a button (see [Setup](#setup)). The board
+definition `boards/adafruit_matrixportal_esp32s3_clock.json` belongs to it:
+Adafruit's own would also write TinyUF2 at 0x410000, now inside the GIF pack,
+and touches the port at 1200 baud and waits for a new one before it uploads. `scripts/check_app_size.py` stops
+the build when `firmware.bin` does not fit its app slot (PlatformIO's "Flash:"
+line counts the sections only and reads about 26 KB low; once an image 6.7 KB
+too large was cut short by TinyUF2 and the board did not start).
+
+**Moving a board over** from the TinyUF2 layout, once:
+
+1. Keep its whole flash first, through the ROM bootloader (hold BOOT, tap
+   RESET, release BOOT): `esptool --chip esp32s3 --port <port> --no-stub
+   read-flash 0 0x800000 flash-full.bin`, then `verify-flash 0x0 flash-full.bin`.
+   Writing that file back at 0x0 gives the board exactly its old state again.
+   (On Windows, set `PYTHONIOENCODING=utf-8` first: esptool's progress bar
+   otherwise breaks a read off with a misleading "Serial data stream stopped".
+   The stub's fast read broke off at the same 64 KB every time; the ROM's own
+   read, `--no-stub`, took 6 minutes for 8 MB and read it all.)
+2. Still in the ROM bootloader: `pio run -e adafruit_matrixportal_s3 -t upload
+   --upload-port <port>`. It writes the bootloader, the partition table,
+   `otadata` and the firmware, and leaves `nvs` alone; the clock starts by
+   itself with its settings.
+3. Send the GIF pack anew (see [GIF pack](#gif-pack)): the old one sat where
+   the new table has no FAT.
+
+**Back to Adafruit's state:** Adafruit's [Factory Reset](https://learn.adafruit.com/adafruit-matrixportal-s3/factory-reset)
+page has TinyUF2's combined image (erase the flash, write it at 0x0) and the
+shipped demo as a UF2; CircuitPython for the board is on
+[circuitpython.org](https://circuitpython.org/board/adafruit_matrixportal_s3/).
 
 ## Toolchain (S3)
 

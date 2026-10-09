@@ -1,18 +1,18 @@
-# The GIF pack: more GIFs for the MatrixPortal S3 than fit into the firmware,
-# in the board's ffat partition (3776 KB), which the clock uses for nothing
-# else. The firmware reads it at start-up (section "GIF pack" in the sketch).
+# The GIF pack: all the GIFs of the MatrixPortal S3 (none is built into the
+# firmware since the flash layout of 2026-10-09), in the board's ffat
+# partition (4544 KB), which the clock uses for nothing else. The firmware
+# reads it at start-up (section "GIF pack" in the sketch).
 #
 # As a PlatformIO script (extra_scripts of the S3 env) it adds two targets:
 #   pio run -e adafruit_matrixportal_s3 -t gifpack
 #       builds .pio/build/<env>/gifpack.bin
 #   pio run -e adafruit_matrixportal_s3 -t uploadgifs [--upload-port COMx]
-#       builds it and writes it into the ffat partition. Only the ROM bootloader
-#       takes it: hold BOOT, tap RESET, release BOOT. Afterwards the clock starts
-#       by itself (a watchdog reset: esptool's reset through RTS leaves an
-#       ESP32-S3 on its USB-Serial/JTAG in the ROM bootloader).
-#       A UF2 copy cannot write it (TinyUF2 writes the app partition only), so
-#       uploading the firmware by UF2 leaves the pack alone; "pio run -t erase"
-#       wipes it.
+#       builds it and writes it into the ffat partition through the ROM
+#       bootloader, which esptool resets the board into over its USB-Serial/JTAG
+#       (should that fail: hold BOOT, tap RESET, release BOOT). Afterwards the
+#       clock starts by itself (a watchdog reset: esptool's reset through RTS
+#       leaves an ESP32-S3 on its USB-Serial/JTAG in the ROM bootloader).
+#       A firmware upload leaves the pack alone; "pio run -t erase" wipes it.
 #   pio run -e adafruit_matrixportal_s3 -t sendgifs
 #       builds it and sends it to the clock over the home network (the web
 #       app's POST /api/pack), no bootloader and no cable: GIF_PACK_HOST is the
@@ -23,18 +23,19 @@
 #       gets it.
 #   For uploadgifs:
 #       Without --upload-port it takes the one ESP32-S3 USB-Serial/JTAG port
-#       there is (USB 303A:1001, what the ROM bootloader shows up as). Before it
+#       there is (USB 303A:1001: the clock's console and its ROM bootloader
+#       alike). Before it
 #       writes, it reads the board's partition table and writes only when the
 #       board has the ffat partition this build expects, so another ESP32-S3
 #       board on the PC is never written over; with GIF_PACK_MAC set (the
 #       board's MAC, as esptool prints it when it connects) only that board.
-# The GIFs come from the folders listed in gif_pack.local in the project folder
-# (one per line, git ignores the file), or from GIF_PACK_DIRS if that is set
-# (folders separated by ";" on Windows, ":" elsewhere), with their
-# exclude.txt, and have to fit the panel the way the clock stands
-# (custom_gif_panel, custom_gif_orientation, as for the GIFs built in). A GIF
-# the firmware has built in anyway is left out, and so is a second copy. They
-# go in smallest first while the partition has room.
+# The GIFs come from gifs/ (the repository's examples, always taken) and the
+# folders listed in gif_pack.local in the project folder (one per line, git
+# ignores the file), or from GIF_PACK_DIRS if that is set (folders separated
+# by ";" on Windows, ":" elsewhere), with their exclude.txt, and have to fit
+# the panel the way the clock stands (custom_gif_panel,
+# custom_gif_orientation). A second copy of a GIF is left out. They go in
+# smallest first while the partition has room.
 #
 # Each GIF is kept as it is or deflated (zlib, level 9), whichever is smaller;
 # the clock inflates a deflated one into PSRAM with the inflate in the chip's
@@ -110,8 +111,9 @@ def layout(gifs, capacity):
 
 def collect(folders, panel, orientation, skip_sha1=()):
     """The GIFs of the folders that fit, smallest stored size first, without
-    copies and without those in skip_sha1. Returns (gifs for layout(), number
-    that do not fit, number left out as copies)."""
+    copies and without those in skip_sha1 (the GIF library passes what a clock
+    has elsewhere). Returns (gifs for layout(), number that do not fit, number
+    left out as copies)."""
     import gif_common
     seen, found, too_big, copies = set(skip_sha1), [], 0, 0
     for folder in folders:
@@ -257,19 +259,18 @@ def _pio(env):
             folders, source = [d for d in listed.split(os.pathsep) if d.strip()], "GIF_PACK_DIRS"
         else:
             folders, source = gif_common.listed_dirs(project, "gif_pack.local"), "gif_pack.local"
-        folders = [d.strip() for d in folders if os.path.isdir(d.strip())]
-        if not folders:
-            sys.stderr.write("GIF pack: %s names no folder that exists\n" % source)
-            return 1
+        listed = [d.strip() for d in folders if os.path.isdir(d.strip())]
+        if not listed:
+            print("GIF pack: %s names no folder that exists - the examples in gifs/ only" % source)
+        folders = [os.path.join(project, "gifs")] + listed
         offset, capacity = where()
-        built_in = env.get("GIF_BUILT_IN_SHA1", "").split()
-        gifs, too_big, copies = collect(folders, panel, orientation, built_in)
+        gifs, too_big, copies = collect(folders, panel, orientation)
         pack, taken, left_out = layout(gifs, capacity)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         with open(out, "wb") as f:
             f.write(pack)
         print("GIF pack: %d GIFs, %d of %d bytes (ffat at 0x%x); %d did not fit the room left, %d do not fit "
-              "the panel, %d left out as copies or built in" % (len(taken), len(pack), capacity, offset,
+              "the panel, %d left out as copies" % (len(taken), len(pack), capacity, offset,
                                                                 len(left_out), too_big, copies))
         print("GIF pack: from %s - %s" % (", ".join(folders), out))
         return 0
@@ -280,8 +281,8 @@ def _pio(env):
             from serial.tools import list_ports
             found = rom_ports([(p.device, p.vid, p.pid) for p in list_ports.comports()])
             if not found:
-                sys.stderr.write("GIF pack: no ESP32-S3 in its ROM bootloader (USB 303A:1001) - hold BOOT, tap "
-                                 "RESET, release BOOT, then try again\n")
+                sys.stderr.write("GIF pack: no ESP32-S3 on its USB-Serial/JTAG (USB 303A:1001) - is the clock "
+                                 "plugged in? If it does not answer: hold BOOT, tap RESET, release BOOT, try again\n")
                 return 1
             if len(found) > 1:
                 sys.stderr.write("GIF pack: several ESP32-S3 USB ports (%s) - name one with --upload-port\n"
@@ -349,7 +350,7 @@ if __name__ == "__main__" and "Import" not in globals():
         sys.exit(__doc__ or "usage: gif_pack.py OUT.bin FOLDER... [--panel 64x32] [--orientation landscape] [--size BYTES]")
     gifs, too_big, copies = collect(args[1:], gif_common.panel_size(opts.get("--panel", "64x32")),
                                     gif_common.check_orientation(opts.get("--orientation", "landscape")))
-    pack, taken, left_out = layout(gifs, int(opts.get("--size", str(3776 * 1024)), 0))
+    pack, taken, left_out = layout(gifs, int(opts.get("--size", str(4544 * 1024)), 0))
     with open(args[0], "wb") as f:
         f.write(pack)
     print("%d GIFs, %d bytes; %d did not fit the room left, %d do not fit the panel, %d copies"

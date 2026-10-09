@@ -1,0 +1,11 @@
+# MatrixPortal S3: the clock's own flash layout (decided 2026-10-09), in
+# place of TinyUF2's (two 2 MB app slots, TinyUF2 256 KB, ffat 3776 KB).
+# Two app slots for updates over WiFi, no GIFs in the firmware, the rest for
+# the GIF pack. nvs and otadata stay where TinyUF2's table had them, so the
+# settings survive the change.
+# Name,   Type, SubType, Offset,   Size,
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x1C0000,
+app1,     app,  ota_1,   0x1D0000, 0x1C0000,
+ffat,     data, fat,     0x390000, 0x470000,
