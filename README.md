@@ -334,10 +334,29 @@ the `MATRXS3BOOT` volume with the file manager or `cp`.
 ### GIF pack
 
 More GIFs than fit into the firmware go into the GIF pack, in the board's
-`ffat` partition (3776 KB), which the clock uses for nothing else. It is
-written through the ROM bootloader, not by UF2 (TinyUF2 writes the app
-partition only), so the firmware's UF2 uploads leave it alone;
-`pio run -t erase` wipes it. Placeholders as above, plus `<board MAC>`:
+`ffat` partition (3776 KB), which the clock uses for nothing else. UF2 cannot
+write it (TinyUF2 writes the app partition only), so the firmware's UF2
+uploads leave it alone; `pio run -t erase` wipes it.
+
+**Over the home network** (with continuous network access on, see
+[Web app and the home network](#web-app-and-the-home-network-s3)), no cable and
+no bootloader:
+
+    $env:GIF_PACK_HOST = 'matrixclock-xxxxxx.local'; $env:GIF_PACK_PASSWORD = '<the clock's password>'
+    & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -d '<project folder>' -e adafruit_matrixportal_s3 -t sendgifs
+
+It builds the pack as below, asks the clock for its MAC (`GIF_PACK_MAC`, if
+set, has to match) and its room, and sends the pack (`POST /api/pack`). The
+clock checks the pack's header before it erases anything, so a file that is no
+pack leaves the old one; it writes the pack as it arrives, its header last, so
+an upload that breaks off leaves no pack rather than a damaged one and the
+built-in GIFs play on. Then it checks every GIF's CRC and plays the new ones at
+once, without a restart. A full pack took 15.6 s; the panel shows how far it
+is. The web app's GIFs card sends a pack file the same way (built by
+`-t gifpack` or the GIF library), with a bar for the upload.
+
+**Through the ROM bootloader**, for a clock that is not on the network.
+Placeholders as above, plus `<board MAC>`:
 
 1. Name the folder for the pack: list it in `gif_pack.local` in the project
    folder (one per line, ignored by git) or name it with `GIF_PACK_DIRS`. Set
@@ -462,6 +481,7 @@ form-encoded POSTs, answers are JSON:
 | `POST /api/time` | sets the time, from the phone or typed |
 | `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
 | `POST /api/gif` | plays a GIF now (on the face) |
+| `POST /api/pack` | a GIF pack as the body (`application/octet-stream`), written into the ffat partition (see [GIF pack](#gif-pack)) |
 | `POST /api/lan` | continuous network access on or off, a new password |
 | `POST /api/restart` | restarts the clock |
 
