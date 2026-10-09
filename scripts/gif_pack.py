@@ -180,11 +180,12 @@ def partition(csv_path, name="ffat"):
     raise ValueError("no partition %s in %s" % (name, csv_path))
 
 
-def send_pack(host, password, pack, mac=None, say=print):
+def send_pack(host, password, pack, mac=None, say=print, progress=None):
     """Sends pack (bytes) to the clock at host over its web interface: POST
     /api/pack, after /api/state has shown the clock takes a pack that large
-    and, with mac, that it is the board with that MAC. say() gets the progress.
-    Returns (ok, what happened)."""
+    and, with mac, that it is the board with that MAC. say() gets the progress
+    as text, progress(sent, total) after each piece. Returns (ok, what
+    happened)."""
     import base64
     import http.client
     import json
@@ -219,8 +220,11 @@ def send_pack(host, password, pack, mac=None, say=print):
         conn.endheaders()
         step, told = 64 * 1024, 0
         for at in range(0, len(pack), step):
-            conn.send(pack[at:at + step])
-            percent = (at + len(pack[at:at + step])) * 100 // len(pack)
+            piece = pack[at:at + step]
+            conn.send(piece)
+            if progress:
+                progress(at + len(piece), len(pack))
+            percent = (at + len(piece)) * 100 // len(pack)
             if percent >= told + 10 or percent == 100:
                 say("GIF pack: sent %d %%" % percent)
                 told = percent

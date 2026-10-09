@@ -195,8 +195,11 @@ def test_the_pack_goes_whole_and_only_to_the_named_clock():
         assert not ok and "nothing sent" in text and "body" not in got, text
         ok, text = gif_pack.send_pack(host, "secret", bytes(3776 * 1024 + 1), None, say=quiet)
         assert not ok and "nothing sent" in text and "body" not in got, text
-        ok, text = gif_pack.send_pack(host, "secret", pack, "7c:4f:ad:06:c1:6c", say=quiet)
+        steps = []
+        ok, text = gif_pack.send_pack(host, "secret", pack, "7c:4f:ad:06:c1:6c", say=quiet,
+                                      progress=lambda sent, total: steps.append((sent, total)))
         assert ok and got["body"] == pack, text
+        assert steps[-1] == (len(pack), len(pack)) and steps == sorted(steps), steps
         assert got["auth"] == "Basic " + base64.b64encode(b"clock:secret").decode(), got["auth"]
     finally:
         server.shutdown()
