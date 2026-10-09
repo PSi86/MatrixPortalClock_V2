@@ -288,7 +288,7 @@ stays dark too.
 The GIFs are built into the firmware by `scripts/embed_gifs.py`: every GIF in
 [`gifs/`](gifs/README.md) that fits the panel (four examples with their licences
 and authors), and those of the folders listed in `gif_dirs.local`, smallest first,
-up to `custom_gif_budget_kb` (600 KB). That file is ignored by git, so private
+up to `custom_gif_budget_kb` (550 KB; the build stops when the app image no longer fits its partition). That file is ignored by git, so private
 GIFs stay out of the repository; a firmware built with them must not be
 published. The build says how many it took and which it left out.
 
@@ -443,6 +443,81 @@ The code is in `src/band_data.h` (the items, the two sources, the fetch task)
 and at the end of the sketch (when the sources are due, the items, the config
 page section).
 
+## Home Assistant link (S3)
+
+Everything the clock does not fetch itself comes from Home Assistant, over MQTT
+through the broker Home Assistant runs (the Mosquitto add-on). The client is the
+one ESP-IDF brings along (esp-mqtt, in the core's libraries): it runs in a task
+of its own, keeps the connection alive and connects again by itself after a
+break, so the clock keeps drawing.
+
+Setting it up:
+
+1. In Home Assistant, install the **Mosquitto broker** add-on, add a Home
+   Assistant user for the clock, and set up the MQTT integration if Home
+   Assistant does not offer it by itself.
+2. On the clock's page, section **Info band data**, card **Home Assistant**:
+   the broker's address (`homeassistant.local` or its IP), port 1883, that user
+   and its password, the switch on, **Save Home Assistant link**. The link needs
+   a stored home WiFi and **continuous network access** (Home WiFi section);
+   the card says what is missing.
+3. The clock shows up in Home Assistant as the device *Matrix Clock xxxxxx*, by
+   MQTT discovery, with an entity **Message** (notify) and, with a BH1750, a
+   sensor **Light** (lux, once a minute).
+
+`xxxxxx` is the end of the clock's host name, the last three bytes of its MAC;
+the card shows its topics.
+
+| Topic | Direction | Payload |
+|---|---|---|
+| `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required); an empty payload takes the item away |
+| `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (60 unless given, 5 to 3600) |
+| `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
+| `mpclock/<id>/light` | the clock to Home Assistant | lux, once a minute |
+| `homeassistant/notify/<id>/message/config`, `homeassistant/sensor/<id>/light/config` | the clock to Home Assistant, retained | MQTT discovery |
+
+`<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
+`partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
+`thunder`, `warning`. An item for the band, from an automation:
+
+```yaml
+action: mqtt.publish
+data:
+  topic: mpclock/06c16c/item/waste
+  retain: true
+  payload: >-
+    {"text": "Paper bin tomorrow", "icon": "warning",
+     "until": {{ (now() + timedelta(hours=12)).timestamp() | int }}}
+```
+
+A message goes to the **Message** entity (`notify.send_message`), or as JSON to
+the message topic. Until the banner on the S class exists, it is listed like an
+item for its seconds.
+
+- **Retained items:** the broker keeps them, so a clock that starts or comes
+  back gets the current set at once, and nothing is polled. On every connect
+  the clock drops what Home Assistant sent before and takes them as they come,
+  so an item taken away meanwhile does not linger. `until` is required, so no
+  item outlives Home Assistant.
+- **Online and offline:** the clock says goodbye (`offline`) when the link or the
+  continuous access is switched off or the hotspot opens; a clock that just
+  vanishes is reported offline by the broker about 90 s later (keep-alive 60 s).
+  When Home Assistant has restarted, the clock announces itself again.
+- **A message is shown once:** one the broker keeps (sent retained) is shown
+  when it comes, but not again when the broker hands it out at a later connect;
+  an empty payload on the message topic, which takes a kept message off the
+  broker, is ignored.
+- **Status:** the card says whether the link is connecting, since when it is
+  connected and how many items it brought, or what went wrong (user name or
+  password refused, nothing answering at the address, address not found).
+- **Flash:** the client costs 41.7 KB (it brings the TLS and WebSocket
+  transports the core's build has switched on, which the link does not use),
+  the whole link about 57 KB; the S3 image with 600 KB of built-in GIFs is at
+  99.0 % of its 2 MB.
+
+The code is in `src/ha_link.h` (the client, its task and the topics) and at the
+end of the sketch (when it runs, what arrives, the card's part).
+
 ## Web app and the home network (S3)
 
 The S3 serves its settings as a web app: one page (`webui/index.html`, gzipped
@@ -463,9 +538,9 @@ band's fetches. The station's power saving is off meanwhile, so a request is
 answered in about 40 ms instead of 1.2 s. The page itself loads without a
 password and then asks for it; every request to `/api/` carries it (HTTP Basic,
 any user name). Five wrong passwords in a row lock the check for 30 s (HTTP
-429). A data source that needs a standing connection is marked on the page
-(none of today's do; the Home Assistant link will), and switching one on without
-a stored WiFi or without continuous access says that it needs both.
+429). A data source that needs a standing connection is marked on the page (the
+Home Assistant link does), and switching one on without a stored WiFi or
+without continuous access says that it needs both.
 
 **The interface** — the page uses nothing else, so tools can too. Writes are
 form-encoded POSTs, answers are JSON:
@@ -473,7 +548,7 @@ form-encoded POSTs, answers are JSON:
 | Request | What it does |
 |---|---|
 | `GET /api/state` | settings, the lists the page offers, hardware found, WiFi, system |
-| `GET /api/status` | brightness, light, time and its source, rotation, screen, the info band's sources (the page asks every 2 s) |
+| `GET /api/status` | brightness, light, time and its source, rotation, screen, the info band's sources and items, the Home Assistant link (the page asks every 2 s) |
 | `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
 | `POST /api/live` | tries settings live, in RAM only |
 | `POST /api/save` | stores everything the page shows |
@@ -483,6 +558,7 @@ form-encoded POSTs, answers are JSON:
 | `POST /api/gif` | plays a GIF now (on the face) |
 | `POST /api/pack` | a GIF pack as the body (`application/octet-stream`), written into the ffat partition (see [GIF pack](#gif-pack)) |
 | `POST /api/lan` | continuous network access on or off, a new password |
+| `POST /api/ha` | the Home Assistant link: on or off, broker, port, user, password (empty keeps the stored one) |
 | `POST /api/restart` | restarts the clock |
 
 ## AP configuration

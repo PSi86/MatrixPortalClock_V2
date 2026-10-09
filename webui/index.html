@@ -372,7 +372,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     </section>
 
     <section class="sec" id="band" data-title="Info band">
-      <div class="sec-head"><h2>Info band data</h2><p>Weather and DWD warnings for one place. The band that shows them comes with the wall clock; until then they are listed here.</p></div>
+      <div class="sec-head"><h2>Info band data</h2><p>Weather and DWD warnings for one place, and what Home Assistant sends. The band that shows them comes with the wall clock; until then they are listed here.</p></div>
       <div class="card">
         <div class="row">
           <div><div class="lbl">Place</div><div class="hint">Latitude and longitude in degrees, from a map.</div></div>
@@ -391,6 +391,23 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="row stack"><div class="lbl">On the band now</div><ul class="items" id="items"></ul></div>
         <div class="row stack"><div class="note">Weather data by Open-Meteo.com (CC BY 4.0). Warnings: Deutscher Wetterdienst, through Bright Sky.</div></div>
       </div>
+      <div class="card" id="haCard" hidden>
+        <div class="group-title">Home Assistant</div>
+        <div class="row row-switch">
+          <div><div class="lbl">Link to Home Assistant<span class="badge always">needs continuous network access</span></div><div class="status" style="margin-top:2px"><span class="dot" id="haDot"></span><span class="hint" style="margin:0" id="haLine"></span></div></div>
+          <label class="switch"><input type="checkbox" id="haOn" aria-label="Link to Home Assistant"><span></span></label>
+        </div>
+        <div class="row stack" id="haNeedRow" hidden><div class="need" id="haNeed"></div></div>
+        <div class="row">
+          <div><div class="lbl">Broker</div><div class="hint">Home Assistant’s address, with the Mosquitto add-on installed.</div></div>
+          <div class="pair"><label>Address<input type="text" id="haHost" maxlength="63" autocomplete="off" placeholder="homeassistant.local"></label><label>Port<input type="number" id="haPort" min="1" max="65535"></label></div>
+        </div>
+        <div class="row"><label class="lbl" for="haUser">User</label><input type="text" id="haUser" maxlength="63" autocomplete="off"></div>
+        <div class="row"><div><label class="lbl" for="haPw">Password</label><div class="hint">Of the Home Assistant user for the clock.</div></div><input type="password" id="haPw" maxlength="63" autocomplete="new-password"></div>
+        <div class="row stack"><div class="note" id="haTopics"></div></div>
+        <div class="row"><div class="note" id="haNote"></div><div class="ctl"><button class="btn primary" type="button" id="haSave">Save Home Assistant link</button></div></div>
+        <div class="row stack"><div class="err" id="haErr" hidden></div></div>
+      </div>
     </section>
 
     <section class="sec" id="net" data-title="Network">
@@ -406,7 +423,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       <div class="card">
         <div class="group-title" id="lanTitle">Continuous network access</div>
         <div class="row row-switch">
-          <div><div class="lbl">Stay connected to the home network</div><div class="hint">The clock keeps its WiFi connection, and these settings open at its address on the home network, behind the password below. Sources marked “needs continuous network access” work only with it; the GIF library uses it too. Off, the clock connects only to fetch the time and its data.</div></div>
+          <div><div class="lbl">Stay connected to the home network</div><div class="hint">The clock keeps its WiFi connection, and these settings open at its address on the home network, behind the password below. Sources marked “needs continuous network access” and the Home Assistant link work only with it; the GIF library uses it too. Off, the clock connects only to fetch the time and its data.</div></div>
           <label class="switch"><input type="checkbox" id="lanOn" aria-label="Stay connected to the home network"><span></span></label>
         </div>
         <div class="row" id="lanAddrRow"><div class="lbl">Address</div><div class="note" id="lanAddr" style="font-family:var(--mono);overflow-wrap:anywhere"></div></div>
@@ -755,6 +772,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }
     // Info band
     if (has('lat')) { setNumber('lat', 'lat'); setNumber('lon', 'lon'); setCheck('feedw', 'feedw', showNeeds); setCheck('feeda', 'feeda', showNeeds); }
+    $('#haCard').hidden = !S.ha;
+    if (S.ha) { fillHa(); }
     // WiFi
     $('#ssid').value = S.settings.ssid;
     $('#pw').value = '';
@@ -801,25 +820,47 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       badge.textContent = always ? 'needs continuous network access' : '';
       badge.className = 'badge' + (always ? ' always' : '');
       badge.hidden = !always;
-      var lacks = [];
-      if (!S.wifi.stored) { lacks.push('a stored home WiFi with its password (Home WiFi, below)'); }
-      if (always && !S.lan.on) { lacks.push('continuous network access switched on (Home WiFi, below: “Stay connected to the home network”)'); }
-      var row = $('#fNeedRow' + i), box = $('#fNeed' + i);
-      row.hidden = !(cur[k] && lacks.length);
-      if (row.hidden) { return; }
-      box.innerHTML = '';
-      var t = document.createElement('div');
-      t.textContent = lacks.length === 1 ? 'This source fetches nothing yet. It needs ' + lacks[0] + '.' : 'This source fetches nothing yet. It needs';
-      box.appendChild(t);
-      if (lacks.length > 1) {
-        var ol = document.createElement('ol');
-        lacks.forEach(function (l) { var li = document.createElement('li'); li.textContent = l; ol.appendChild(li); });
-        box.appendChild(ol);
-      }
-      var b = document.createElement('button'); b.type = 'button'; b.className = 'btn'; b.textContent = 'Go to Home WiFi';
-      b.addEventListener('click', function () { goTo('net'); });
-      box.appendChild(b);
+      var row = $('#fNeedRow' + i);
+      row.hidden = !cur[k] || !fillNeed($('#fNeed' + i), 'This source fetches nothing yet.', lacks(always));
     });
+  }
+  function lacks(always) {
+    var l = [];
+    if (!S.wifi.stored) { l.push('a stored home WiFi with its password (Home WiFi, below)'); }
+    if (always && !S.lan.on) { l.push('continuous network access switched on (Home WiFi, below: “Stay connected to the home network”)'); }
+    return l;
+  }
+  // The box that says what is still missing; false, and nothing filled, when nothing is.
+  function fillNeed(box, lead, needs) {
+    if (!needs.length) { return false; }
+    box.innerHTML = '';
+    var t = document.createElement('div');
+    t.textContent = lead + ' It needs' + (needs.length === 1 ? ' ' + needs[0] + '.' : '');
+    box.appendChild(t);
+    if (needs.length > 1) {
+      var ol = document.createElement('ol');
+      needs.forEach(function (n) { var li = document.createElement('li'); li.textContent = n; ol.appendChild(li); });
+      box.appendChild(ol);
+    }
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'btn'; b.textContent = 'Go to Home WiFi';
+    b.addEventListener('click', function () { goTo('net'); });
+    box.appendChild(b);
+    return true;
+  }
+  // The Home Assistant link: its own form and Save, as the home network access has.
+  function fillHa() {
+    var h = S.ha;
+    $('#haOn').checked = h.on;
+    $('#haHost').value = h.host; $('#haPort').value = h.port; $('#haUser').value = h.user;
+    $('#haPw').value = ''; $('#haPw').placeholder = h.hasPassword ? 'unchanged' : 'none stored';
+    $('#haTopics').textContent = 'Items for the band go to ' + h.topics + 'item/<name>, retained: JSON with text, icon, level (info or alert) and until (Unix time). '
+      + 'Messages go to ' + h.topics + 'message, or to the clock’s “Message” entity in Home Assistant.';
+    $('#haNote').textContent = S.mode === 'ap' ? 'Kept at once; the link starts when the hotspot closes.' : 'Kept at once; the link starts again with it.';
+    showHaNeeds();
+  }
+  function showHaNeeds() {
+    if (!S || !S.ha) { return; }
+    $('#haNeedRow').hidden = !$('#haOn').checked || !fillNeed($('#haNeed'), 'The link does not run yet.', lacks(true));
   }
   function showWifi(line, stored) { $('#wifiLine').textContent = line; $('#wifiDot').className = 'dot ' + (stored ? 'ok' : 'warn'); }
 
@@ -897,9 +938,23 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         var li = document.createElement('li'); li.className = 'item' + (it.alert ? ' alert' : '');
         var ic = document.createElement('span'); ic.className = 'item-ico'; ic.setAttribute('aria-hidden', 'true'); ic.textContent = ICONS[it.icon] || '•';
         var tx = document.createElement('span'); tx.className = 'item-t'; tx.textContent = it.text;
-        var u = document.createElement('span'); u.className = 'item-u'; u.textContent = (it.alert ? 'alert, ' : '') + 'until ' + it.until;
+        var u = document.createElement('span'); u.className = 'item-u'; u.textContent = (it.alert ? 'alert, ' : '') + 'until ' + it.until + (it.ha ? ' · Home Assistant' : '');
         li.appendChild(ic); li.appendChild(tx); li.appendChild(u); ul.appendChild(li);
       });
+    }
+    if (st.haStatus && S && S.ha) {
+      var h = st.haStatus, at = S.ha.host + ':' + S.ha.port, ht, hc = 'warn';
+      if (h.state === 'off') { ht = 'Off.'; hc = ''; }
+      else if (h.state === 'hotspot') { ht = 'Paused while the hotspot is open.'; }
+      else if (h.state === 'blocked') {
+        ht = h.blocked === 'host' ? 'No broker address set.' : h.blocked === 'wifi' ? 'No home WiFi stored.' : 'Waits for continuous network access.';
+      }
+      else if (h.state === 'waiting') { ht = 'Waits for the home WiFi connection.'; }
+      else if (h.state === 'failed') { ht = 'The clock had no RAM for the link; it tries again in a minute.'; hc = 'bad'; }
+      else if (h.state === 'stopping') { ht = 'Stopping the link…'; }
+      else if (h.state === 'connecting') { ht = 'Connecting to ' + at + '…' + (h.error ? ' Last try: ' + h.error + '.' : ''); if (h.error) { hc = 'bad'; } }
+      else { ht = 'Connected to ' + at + (h.since ? ' since ' + h.since : '') + '; ' + h.items + (h.items === 1 ? ' item' : ' items') + ' from Home Assistant.'; hc = 'ok'; }
+      $('#haLine').textContent = ht; $('#haDot').className = 'dot ' + hc;
     }
   }
   var statusBusy = false, panelBusy = false;
@@ -1020,6 +1075,15 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       if (!on && S.mode === 'lan') { bye('Home network access is off', 'Switch it on again from the clock’s hotspot.'); return; }
       toast(on ? 'Home network access is on.' : 'Home network access is off.');
       return load();
+    }).catch(function (e) { err.textContent = e.message; err.hidden = false; });
+  });
+  $('#haOn').addEventListener('change', showHaNeeds);
+  $('#haSave').addEventListener('click', function () {
+    var err = $('#haErr'); err.hidden = true;
+    api('/api/ha', enc({ on: $('#haOn').checked ? 'on' : 'off', host: $('#haHost').value.trim(), port: $('#haPort').value,
+      user: $('#haUser').value.trim(), pw: $('#haPw').value })).then(function (r) {
+      S.ha = r.ha; fillHa();
+      toast(r.ha.on ? 'Home Assistant link saved.' : 'Home Assistant link is off.');
     }).catch(function (e) { err.textContent = e.message; err.hidden = false; });
   });
   var packFile = null;
