@@ -120,6 +120,9 @@
   // The info band's data: weather and warnings fetched over HTTPS
   // (src/band_data.h).
   #define BAND_DATA 1
+  // The settings as a web app (webui/index.html) on a JSON interface; the M4
+  // keeps the page the sketch writes line by line.
+  #define WEBUI_APP 1
   // The accelerometer's INT1 line. Not in Adafruit's pinout page - taken from
   // the board schematic (Adafruit-MatrixPortal-S3-PCB, "Adafruit MatrixPortal
   // S3.sch"), where the net list has U4 (the LIS3DH) pin INT1 on the net INT
@@ -146,6 +149,8 @@
   #define GIF_PLAYBACK 0
   // No info band data: it is for the S3 boards (src/band_data.h).
   #define BAND_DATA 0
+  // The page the sketch writes line by line; the web app is for the S3.
+  #define WEBUI_APP 0
 #endif
 
 /* ======================================================================
@@ -693,6 +698,7 @@ inline void boardReset() {
 #include <WiFiUdp.h>
 #include <esp_sntp.h>
 #include <esp_netif.h>
+#include <esp_mac.h>                 // esp_read_mac(), for the clock's name on the network
 #include <dhcpserver/dhcpserver.h>   // OFFER_DNS
 
 // Time sources for the S3's own SNTP client. Point the first one at a server on
@@ -736,8 +742,21 @@ inline void netRadioInit() {
   BOOT_TRACE("net: WiFi.mode(WIFI_STA) done");
 }
 
+// The clock's name on the home network, for DHCP and mDNS: "matrixclock-"
+// and the last three bytes of its MAC, e.g. matrixclock-06c16c.
+inline const char *netHostname() {
+  static char name[20] = "";
+  if (!name[0]) {
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(name, sizeof(name), "matrixclock-%02x%02x%02x", mac[3], mac[4], mac[5]);
+  }
+  return name;
+}
+
 inline void netStaBegin(const char *ssid, const char *pass) {
   WiFi.persistent(false);   // also here: the station can be started without netRadioInit()
+  WiFi.setHostname(netHostname());   // before the mode: the station's netif takes it when it is made
   WiFi.mode(WIFI_STA);
   WiFi.setTxPower(WIFI_TX_POWER);
   WiFi.begin(ssid, pass);   // non-blocking on the ESP32

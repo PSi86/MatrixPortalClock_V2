@@ -65,8 +65,11 @@ button pin cannot be carried over.
   timezone, daylight saving, the config hotspot and, with a real-time clock, the
   time and date, set on the clock itself without WiFi (see
   [Menu and buttons](#menu-and-buttons))
-- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, animation speed, colors, fly-in directions, NTP sync time, GIFs (S3), the info band's place and sources (S3) and the **home WiFi**; on a page of its own the input profile and what
+- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, fly-in time, colors, fly-in directions, NTP sync time, GIFs (S3), the info band's place and sources (S3) and the **home WiFi**; on a page of its own the input profile and what
   buttons, knock and gestures do on the face (see [Face shortcuts](#face-shortcuts))
+- **Web app** (S3): the settings page as an app, through the hotspot and, with
+  continuous network access, on the home network behind a password (see
+  [Web app and the home network](#web-app-and-the-home-network-s3))
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
   a normal upload does not touch - `pio run -t erase` does; M4: one 8 KB flash
@@ -156,7 +159,7 @@ GPIO7, M4: D3). They keep their printed meaning in every orientation.
 | On the clock face | |
 |---|---|
 | UP or DOWN short, DOWN held | open the menu |
-| UP held | play a GIF (S3) |
+| UP held | play random GIF (S3) |
 | UP held during boot | open the config hotspot, even without the home WiFi |
 
 | In the menu and its editors | |
@@ -225,10 +228,17 @@ compile.
 What every input does on the face is set on the config page's **Inputs** page
 (`/inputs`, linked from the settings): UP and DOWN pressed, pressed twice or
 three times and held, the knock (with the accelerometer) and each gesture (with
-a gesture sensor), each to one of: nothing, open the menu, play a GIF, play the
-last GIF again (both S3), the digits come apart (Tetris face), auto brightness
-on/off, daylight saving auto / summer / winter, hotspot on/off, brightness fade
-while held (held buttons only), show what the gestures do. The page lists only
+a gesture sensor), each to one of: nothing, open the menu, play random GIF, play
+last GIF again (both S3), trigger watchface animation, toggle auto brightness
+on / off, toggle daylight saving: auto, summer, winter, toggle hotspot on / off,
+fade brightness while held (held buttons only), show gesture hints. The
+watchface animation is the face's own: the Tetris digits break up in the
+break-up effect, and the classic digits all fly in at the next second as if
+every one of them changed. On the classic face a new one is ignored until the
+running one has landed and 0.3 s have passed, so a knock that reports itself
+more than once (2 to 7 times, seen) plays it once, and a fast run of knocks
+plays the next one just after the last has landed; the Tetris face keeps its
+own rules (see the break-up effect). The page lists only
 the inputs found. The profile chosen there keeps the menu, the hotspot screen
 and the start; choosing it fills the face with its own rows to begin with, and
 nothing set means the profile's rows. Saving is refused unless an input found
@@ -414,6 +424,47 @@ The code is in `src/band_data.h` (the items, the two sources, the fetch task)
 and at the end of the sketch (when the sources are due, the items, the config
 page section).
 
+## Web app and the home network (S3)
+
+The S3 serves its settings as a web app: one page (`webui/index.html`, gzipped
+into the firmware at build time by `scripts/embed_webui.py`) that talks to the
+clock over a JSON interface. The M4 keeps the page it writes line by line (see
+[AP configuration](#ap-configuration)).
+
+| | Through the hotspot | On the home network |
+|---|---|---|
+| Switched on by | the menu's **Hotspot**, an input set to *toggle hotspot on / off*, or UP held at boot | the page's card **Continuous network access**, switch *Stay connected to the home network* |
+| Address | `http://4.3.2.1` (opens as a captive portal) | `http://matrixclock-xxxxxx.local` (the last three bytes of the board's MAC) or its IP, both on the page and the console |
+| Password | the hotspot's WiFi password | the clock's own: preset to the hotspot's (`clock1234`), changed on the page (8–63 characters) |
+| Networks in range | listed, scanned when the hotspot opens | not listed: a scan would take the radio off the home network |
+
+**On the home network** the clock stays connected to the stored WiFi while the
+switch is on; otherwise its radio is on only for the time sync and the info
+band's fetches. The station's power saving is off meanwhile, so a request is
+answered in about 40 ms instead of 1.2 s. The page itself loads without a
+password and then asks for it; every request to `/api/` carries it (HTTP Basic,
+any user name). Five wrong passwords in a row lock the check for 30 s (HTTP
+429). A data source that needs a standing connection is marked on the page
+(none of today's do; the Home Assistant link will), and switching one on without
+a stored WiFi or without continuous access says that it needs both.
+
+**The interface** — the page uses nothing else, so tools can too. Writes are
+form-encoded POSTs, answers are JSON:
+
+| Request | What it does |
+|---|---|
+| `GET /api/state` | settings, the lists the page offers, hardware found, WiFi, system |
+| `GET /api/status` | brightness, light, time and its source, rotation, screen, the info band's sources (the page asks every 2 s) |
+| `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
+| `POST /api/live` | tries settings live, in RAM only |
+| `POST /api/save` | stores everything the page shows |
+| `POST /api/discard` | puts the stored settings back |
+| `POST /api/time` | sets the time, from the phone or typed |
+| `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
+| `POST /api/gif` | plays a GIF now (on the face) |
+| `POST /api/lan` | continuous network access on or off, a new password |
+| `POST /api/restart` | restarts the clock |
+
 ## AP configuration
 
 Open the menu, select **Hotspot** and hold DOWN -> the board opens the access
@@ -446,7 +497,7 @@ is for now; new clocks are built on the S3).
 The matrix shows SSID, password and IP **immediately** when the AP opens (before
 the radio has finished coming up, so there is no frozen display), in landscape
 orientation, until a client connects; after that it switches to the live clock
-preview so that **brightness, colors and animation speed preview live** while you
+preview so that **brightness, colors and the fly-in time preview live** while you
 change them in the web UI (at the full frame rate on the S3, 5 fps on the M4 - every
 WiFiNINA socket write is an SPI round trip there). In the preview a small blue
 square blinks in the top right corner: the hotspot is still up, and only holding
@@ -498,9 +549,25 @@ gravity and rotates the display in 90° increments so the clock is always uprigh
 - **Portrait** (32 wide × 64 tall): the hours/minutes/seconds digits are stacked
   vertically (the original layout).
 - **Landscape** (64 wide × 32 tall): hours and minutes are shown large
-  side-by-side with the seconds small underneath. The per-digit fly-in
-  directions are swapped (`from right ↔ from top`, `from left ↔ from bottom`) so
-  digits enter across the short edge instead of sweeping the full width.
+  side-by-side with the seconds small underneath.
+
+The per-digit fly-in directions mean the same in both: a digit set to come
+from the top comes from the top edge as the clock is held. Each flight is long
+enough that the incoming digit starts wholly off the panel and the outgoing one
+leaves it wholly. All flights take the same time, the **fly-in time** (100–850
+ms, default 400). So whatever flies at a tick lands together, the shorter
+flights moving slower, every second looks the same whether one digit flies or
+six, and every digit has landed before the next second. Digits that come from the same side all fly the
+longest distance any of them needs, so they move as one block and keep their
+spacing: a pair set to one side flies in as it stands, and with every digit set
+to one side the whole face slides. On the S3 the speed is kept in real time by the
+loop rate the face really had in its last second, so a web page asking for the
+panel picture does not slow the digits down. (Until 2026-10-08 landscape
+swapped the directions — from right ↔ from top, from left ↔ from bottom — but a
+save set them back until the next screen change, a sideways flight was only
+32 px long, half the landscape width, and later that day, briefly, each flight
+took as long as its own distance, so hours, minutes and seconds landed one
+after the other.)
 
 The rotation switches with a short debounce and ignores near-45° tilts to avoid
 flicker. If the accelerometer is not found, the clock stays in portrait.
@@ -668,18 +735,20 @@ states — every piece at every height at every turn count: none leaves the box.
 *Tetris turn* the average milliseconds between quarter turns (80–1500, default
 260). They are deliberately separate — one sets how fast the digit builds, the
 other how busy it looks doing it — and they are kept in their own flash blob, so
-the main settings are untouched by them. The *animation speed* setting applies to
-the classic watchface only.
+the main settings are untouched by them. The *fly-in time* applies to the
+classic watchface only.
 
-### Knock it and the digits come apart
+### The digits break up
 
-Give the clock a knock and the digits are thrown away, then built up again from
-the current time — with a fresh tiling and fresh colours, so the knock is worth
-something. Three effects, selectable and previewing live: **Collapse** (the stack
-gives way and drops), **Scatter** (the pieces fly off and tumble) and **Clear
-rows** (rows flash and vanish from the bottom, everything above dropping into the
-gap), plus *Random each time*. The effect is drawn once per event, so all the
-digits involved always come apart the same way.
+When the time changes a digit, the old one breaks up before the new one is
+built, and an input set to *trigger watchface animation* (by default the knock,
+see [Face shortcuts](#face-shortcuts)) throws all four away and builds them up again
+from the current time — with a fresh tiling and fresh colours. The **break-up
+effect** is one of three, selectable and previewing live: **Collapse** (the
+stack gives way and drops), **Scatter** (the pieces fly off and tumble) and
+**Clear rows** (rows flash and vanish from the bottom, everything above dropping
+into the gap), plus *Random each time*. The effect is drawn once per event, so
+all the digits involved always come apart the same way.
 
 **The sensor raises the knock itself.** Its own interrupt generator watches for
 it and pulls INT1, which is wired to GPIO15 — not documented on Adafruit's pinout
@@ -694,7 +763,8 @@ interrupt generator only** and not for the output registers — the orientation
 detection still needs to see gravity. The data rate went from 10 Hz to 100 Hz:
 at 10 Hz a knock lasts about as long as one sample.
 
-*Shake sensitivity* runs from 0 (off) to 10. The scale was measured on the
+*Knock sensitivity* (in the web app under Inputs, since the knock can do other
+things than this) runs from 0 (off) to 10. The scale was measured on the
 device, not guessed: over about 70 s of standing still the largest deviation in
 any one second was 780 raw counts, which is the sensor's own noise, while every
 deliberate interaction produced 1900 or more and a firm knock 12700. That is
@@ -714,15 +784,15 @@ discarded when the face comes back. The reasons the sensor fires without a real
 knock sit together in `knockIsReal()`, the reasons the face cannot be knocked
 apart right now in `knockEffectReady()`.
 
-With **Also use it when the time changes** ticked, the same effect replaces the
-plain swap when a digit changes: at a minute rollover only the digits that
-actually changed come apart, and they rebuild while the others stand still.
-Whatever has come apart leaves the space empty for 300 ms before it builds
-again. The colon is never touched by any of this — it blinks on the second
+At a minute rollover only the digits that actually changed break up, and they
+rebuild while the others stand still; a digit still being built is simply
+swapped. Whatever has come apart leaves the space empty for 300 ms before it
+builds again. (Until 2026-10-08 an option chose between this and a plain swap,
+where the old digit vanished at once; the break-up now always counts.) The colon is never touched by any of this — it blinks on the second
 throughout, being the one thing on this face that shows time actually passing.
 
 **Trying it out on the config page.** Changing the watchface, the drop or turn
-pace, the sensitivity, the effect or the time-change option takes the digits
+pace, the sensitivity or the effect takes the digits
 apart and builds them again straight away, so the setting can be judged on the
 panel. That matters here because the clock deliberately ignores the sensor while
 the AP is up, so a knock is not available to test with. It happens on the
@@ -742,21 +812,27 @@ whose config page therefore has no watchface selector.
 
 ## Animation timing
 
-The digits fly in one pixel per step; the **animation speed** setting is the time
-per pixel in ms (default 12).
+The **fly-in time** is how long every flight of the classic face takes, in ms
+(100–850, default 400); each digit covers its own way in it, so all land
+together. Until 2026-10-08 the setting was the time per pixel (4–60 ms, default
+12), rounded to whole loop iterations per pixel; with flights of up to 62 px and
+every flight held under a second, it had only three steps. A stored value of the
+old kind is converted once, times 32 (the length a flight had then in landscape):
+12 ms per pixel becomes 380 ms.
 
 The Tetris watchface has its own pair of settings instead (see above); the
-animation speed does not apply to it.
+fly-in time does not apply to it.
 
 On the S3 the loop runs in step with the panel refresh (about 200 Hz):
-`show()` waits out one refresh period after the previous frame, and a digit moves
-one pixel every whole number of refreshes. The speed setting is therefore rounded
-to steps of about 5 ms (12 ms = 2 refreshes per pixel), and every pixel step stays
-on the panel equally long. Drawing a frame and handing it over takes well under a
-refresh period, so the S3 has plenty of headroom. With a fixed millisecond loop,
-as before, the loop drifted against the refresh and single steps stayed on screen
-for 1, 2 or 3 refreshes, which showed as a slight judder. The M4 keeps the fixed
-loop time.
+`show()` waits out one refresh period after the previous frame, and the fly-in
+time is turned into whole refreshes at the rate the face's loop really had in its
+last second. A flight's pixels are spread evenly over them, so a step stays on
+the panel for one refresh or the next whole number, never drifting. Drawing a
+frame and handing it over takes well under a refresh period, so the S3 has
+plenty of headroom. With a fixed millisecond loop, as before, the loop drifted
+against the refresh and single steps stayed on screen for 1, 2 or 3 refreshes,
+which showed as a slight judder. The M4's loop runs every 10 ms (until
+2026-10-08 every "speed" ms).
 
 ### Panel driver
 
@@ -817,8 +893,8 @@ the Inputs page can change (see [Face shortcuts](#face-shortcuts)):
 | swipe up / down | open the menu | previous / next item, or change the value |
 | swipe right, push | open the menu | open the item; in an editor: save |
 | swipe left | - | back, without saving |
-| wave | the knock effect | out to the face |
-| circle clockwise / counter-clockwise | play a GIF | previous / next; in an editor five steps (clockwise is up) |
+| wave | trigger watchface animation | out to the face |
+| circle clockwise / counter-clockwise | play random GIF | previous / next; in an editor five steps (clockwise is up) |
 | a hand comes near and stays | a hint: `swipe` / `menu` | - |
 | a hand held over the sensor for 3 s during boot | open the config hotspot | - |
 
@@ -834,7 +910,7 @@ hand moving away) does nothing unless the Inputs page gives it something.
   is ignored, so the hand pulled back is not read as the opposite swipe. The
   driver library's own pauses after a gesture (200 ms of blocking) are
   switched off. Every gesture counts as handling the clock, so it holds off the
-  knock effect for 3 s, as a button press does.
+  knock for 3 s, as a button press does.
 - **The hint** is a banner that only explains: the swipe that follows closes it
   and goes on to the face, instead of being used up as on other banners.
 - **INT line or not.** STEMMA QT carries no interrupt line. Without one the

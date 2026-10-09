@@ -1,0 +1,1062 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Matrix Clock</title>
+<style>
+/* The clock's settings: a control panel for an LED clock. Phone: app bar with section tabs, the
+   panel's picture, stacked cards, save bar at the bottom. Desktop: section rail | settings | panel.
+   System fonts only: the clock serves this page from its own flash, offline in the hotspot. */
+:root {
+  --bg: #f3f5f7; --surface: #ffffff; --raised: #edf0f3; --line: #d7dde4; --fg: #151a21; --muted: #5a6574;
+  --accent: #b36800; --accent-fg: #ffffff; --accent-soft: #fbecd6; --ok: #1f8a4c; --warn: #a76a00; --bad: #c62f35;
+  --panel: #0c0f13; --led-off: #1b2027;
+  --shadow: 0 1px 2px rgba(20, 26, 33, .06), 0 4px 16px rgba(20, 26, 33, .05);
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+  --r: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1115; --surface: #161a20; --raised: #1d222a; --line: #2a313b; --fg: #e5e9ef; --muted: #8f9bab;
+    --accent: #ffad2e; --accent-fg: #1a1100; --accent-soft: #33240b; --ok: #46c27a; --warn: #e8a92a; --bad: #f0575c;
+    --panel: #07090c; --led-off: #151a20; --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 20px rgba(0, 0, 0, .25);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1115; --surface: #161a20; --raised: #1d222a; --line: #2a313b; --fg: #e5e9ef; --muted: #8f9bab;
+  --accent: #ffad2e; --accent-fg: #1a1100; --accent-soft: #33240b; --ok: #46c27a; --warn: #e8a92a; --bad: #f0575c;
+  --panel: #07090c; --led-off: #151a20; --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 20px rgba(0, 0, 0, .25);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 var(--font); }
+[hidden] { display: none !important; }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a { color: var(--accent); }
+
+.appbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--surface); border-bottom: 1px solid var(--line); }
+.appbar-in { display: flex; align-items: center; gap: 12px; padding: 10px 16px; max-width: 1400px; margin: 0 auto; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-mark { width: 30px; height: 18px; border-radius: 4px; background: var(--panel); display: grid; grid-template-columns: repeat(8, 1fr); gap: 1px; padding: 3px; flex: none; }
+.brand-mark i { border-radius: 50%; background: var(--led-off); }
+.brand-mark i.on { background: var(--accent); }
+.brand-name { font-weight: 700; letter-spacing: -.01em; white-space: nowrap; }
+.brand-sub { color: var(--muted); font-size: 12.5px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12.5px; border: 1px solid var(--line); background: var(--raised); white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+.iconbtn { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 5px 9px; cursor: pointer; }
+.tabs { background: var(--surface); padding: 0 16px 10px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { border: 1px solid var(--line); background: var(--surface); padding: 5px 12px; border-radius: 999px; white-space: nowrap; cursor: pointer;
+  font-size: 13.5px; color: var(--fg); text-decoration: none; touch-action: manipulation; }
+.tab[aria-current="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+.shell { max-width: 1400px; margin: 0 auto; padding: 16px 16px 120px; display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); }
+.rail { display: none; }
+.preview-rail { min-width: 0; }
+main { min-width: 0; display: grid; gap: 28px; }
+@media (min-width: 760px) {
+  .tabs { display: none; }
+  .shell { grid-template-columns: 200px minmax(0, 1fr); }
+  .rail { display: block; position: sticky; top: 76px; align-self: start; grid-column: 1; grid-row: 1 / span 2; }
+  .preview-rail { grid-column: 2; grid-row: 1; }
+  main { grid-column: 2; grid-row: 2; }
+}
+@media (min-width: 1120px) {
+  .shell { grid-template-columns: 200px minmax(0, 720px) minmax(280px, 1fr); }
+  .rail { grid-row: 1; }
+  main { grid-column: 2; grid-row: 1; }
+  .preview-rail { grid-column: 3; grid-row: 1; position: sticky; top: 76px; align-self: start; }
+}
+.rail nav { display: grid; gap: 2px; }
+.rail a { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 8px; color: var(--fg); text-decoration: none; font-size: 14px; }
+.rail a:hover { background: var(--raised); }
+.rail a[aria-current="true"] { background: var(--surface); box-shadow: var(--shadow); font-weight: 600; }
+.rail-foot { margin-top: 18px; padding: 10px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); }
+
+.preview { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); overflow: hidden; }
+.screen { background: var(--panel); padding: 14px; display: grid; place-items: center; position: relative; }
+.screen canvas { width: 100%; height: auto; display: block; max-width: 100%; }
+.screen canvas.tall { width: auto; height: 260px; max-height: 60vh; }
+.screen-note { position: absolute; left: 12px; right: 12px; bottom: 10px; text-align: center; font-size: 12.5px; color: #c9d1db; text-shadow: 0 1px 2px #000; }
+.preview-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+.meta { padding: 10px 12px; min-width: 0; }
+.meta + .meta { border-left: 1px solid var(--line); }
+.meta-k { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.meta-v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preview-note { padding: 10px 12px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+
+section.sec { scroll-margin-top: 110px; display: grid; gap: 12px; }
+@media (min-width: 760px) { section.sec { scroll-margin-top: 80px; } }
+.sec-head h2 { font-size: 20px; letter-spacing: -.015em; }
+.sec-head p { margin: 2px 0 0; color: var(--muted); font-size: 13.5px; max-width: 60ch; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); }
+.group-title { padding: 12px 16px 0; font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 12px 16px; }
+.row + .row { border-top: 1px solid var(--line); }
+@media (min-width: 560px) { .row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); align-items: center; gap: 16px; } .row.stack { grid-template-columns: minmax(0, 1fr); } }
+.lbl { font-weight: 550; }
+.hint { color: var(--muted); font-size: 12.5px; margin-top: 2px; font-weight: 400; }
+.ctl { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+select, input[type="text"], input[type="number"], input[type="password"], input[type="date"], input[type="time"] {
+  width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); min-height: 38px; }
+input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+.pair label { font-size: 12px; color: var(--muted); display: grid; gap: 3px; }
+.btn { border: 1px solid var(--line); background: var(--surface); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-weight: 550; min-height: 38px; }
+.btn:hover { background: var(--raised); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.btn.danger { color: var(--bad); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.switch { position: relative; width: 44px; height: 26px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--line); transition: background .15s; pointer-events: none; }
+.switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--surface); box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .15s; }
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::after { transform: translateX(18px); }
+.switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.row-switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+@media (min-width: 560px) { .row.row-switch { grid-template-columns: none; } }
+.range { display: flex; align-items: center; gap: 10px; width: 100%; }
+.range input { flex: 1; accent-color: var(--accent); min-width: 0; }
+.range output { font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 5ch; text-align: right; font-size: 13.5px; }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 9px; padding: 2px; background: var(--bg); gap: 2px; }
+.seg button { border: 0; background: none; padding: 6px 12px; border-radius: 7px; cursor: pointer; font-size: 13.5px; }
+.seg button[aria-pressed="true"] { background: var(--surface); box-shadow: var(--shadow); font-weight: 600; }
+.faces { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 14px 16px; }
+.face { border: 1.5px solid var(--line); border-radius: var(--r); padding: 8px; background: var(--bg); cursor: pointer; text-align: left; display: grid; gap: 8px; }
+.face[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.face canvas { width: 100%; height: auto; aspect-ratio: 2 / 1; background: var(--panel); border-radius: 6px; display: block; }
+.face b { display: block; font-size: 14px; }
+.face small { color: var(--muted); font-size: 12px; }
+.swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+.sw { width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .25); }
+.sw[aria-pressed="true"] { border-color: var(--fg); box-shadow: inset 0 0 0 2px var(--surface); }
+.dirs { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; width: 100%; }
+.dir { display: grid; gap: 4px; justify-items: center; }
+.dir small { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.dir button { width: 100%; max-width: 46px; aspect-ratio: 1; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); cursor: pointer; font-size: 18px; line-height: 1; }
+.dir button:hover { border-color: var(--accent); }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; font-size: 13.5px; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--raised); font-size: 12.5px; border: 1px solid var(--line); }
+.chip.off { color: var(--muted); border-style: dashed; background: none; }
+.status { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; }
+.status .dot { margin-top: 6px; }
+.items { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.item { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
+.item.alert { border-color: var(--bad); }
+.item-ico { width: 36px; height: 36px; border-radius: 8px; background: var(--panel); color: #e9edf2; display: grid; place-items: center; font-size: 18px; }
+.item-t { font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+.item-u { font-size: 12px; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+.networks { display: grid; gap: 6px; width: 100%; }
+.net { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); cursor: pointer; text-align: left; width: 100%; }
+.net[aria-pressed="true"] { border-color: var(--accent); }
+.net span:last-child { color: var(--muted); font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+.bars { display: inline-flex; gap: 2px; align-items: flex-end; height: 12px; margin-right: 6px; vertical-align: middle; }
+.bars i { width: 3px; background: var(--line); border-radius: 1px; }
+.bars i.on { background: var(--fg); }
+.shortcuts { width: 100%; display: grid; }
+.sc { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.sc:first-child { border-top: 0; }
+.sc .ev { font-size: 14px; }
+.err { color: var(--bad); font-size: 13px; }
+.note { font-size: 12.5px; color: var(--muted); }
+.need { border: 1px solid var(--warn); background: var(--accent-soft); border-radius: 8px; padding: 10px 12px; font-size: 13px; display: grid; gap: 6px; }
+.need ol { margin: 0; padding-left: 20px; }
+.need .btn { justify-self: start; min-height: 32px; padding: 5px 12px; }
+.badge { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  background: var(--raised); border: 1px solid var(--line); color: var(--muted); vertical-align: 1px; }
+.badge.always { border-color: var(--accent); color: var(--accent); }
+.legend { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); font-family: var(--mono); flex-wrap: wrap; }
+.savebar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px)); background: var(--surface);
+  border-top: 1px solid var(--line); box-shadow: 0 -6px 20px rgba(0, 0, 0, .12); transform: translateY(110%); transition: transform .2s; }
+.savebar.show { transform: none; }
+.savebar-in { max-width: 1000px; margin: 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.savebar-txt { flex: 1; min-width: 180px; font-size: 13.5px; }
+.toast { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%) translateY(20px); opacity: 0; background: var(--fg); color: var(--bg);
+  padding: 8px 14px; border-radius: 8px; font-size: 13.5px; transition: all .2s; z-index: 40; pointer-events: none; max-width: calc(100% - 32px); }
+.toast.show { opacity: 1; transform: translateX(-50%); }
+.cover { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: grid; place-items: center; padding: 24px; text-align: center; }
+.cover-box { max-width: 420px; display: grid; gap: 10px; }
+.cover-box h2 { font-size: 20px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<header class="appbar">
+  <div class="appbar-in">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><i></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i><i></i><i class="on"></i><i></i><i class="on"></i></div>
+      <div style="min-width:0">
+        <div class="brand-name">Matrix Clock</div>
+        <div class="brand-sub" id="addr"></div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill" id="connPill"><span class="dot ok"></span><span id="connTxt"></span></span>
+    <button class="iconbtn" type="button" id="themeBtn" aria-label="Switch light or dark">◐</button>
+  </div>
+  <nav class="tabs" id="tabs" aria-label="Sections"></nav>
+</header>
+
+<div class="shell">
+  <aside class="rail" aria-label="Sections">
+    <nav id="railNav"></nav>
+    <div class="rail-foot" id="railFoot"></div>
+  </aside>
+
+  <div class="preview-rail">
+    <div class="preview">
+      <div class="screen"><canvas id="led" width="640" height="320" role="img" aria-label="The clock's panel"></canvas><div class="screen-note" id="screenNote" hidden></div></div>
+      <div class="preview-meta">
+        <div class="meta"><div class="meta-k">Brightness</div><div class="meta-v" id="mBright">–</div></div>
+        <div class="meta"><div class="meta-k">Light</div><div class="meta-v" id="mLux">–</div></div>
+        <div class="meta"><div class="meta-k">Time</div><div class="meta-v" id="mTime">–</div></div>
+      </div>
+      <div class="preview-note">The panel as the clock draws it now, shown at full strength. What you change shows on the clock at once; Save keeps it.</div>
+    </div>
+  </div>
+
+  <main id="main">
+    <section class="sec" id="face" data-title="Face">
+      <div class="sec-head"><h2>Clock face</h2><p>The settings below are those of the face chosen.</p></div>
+      <div class="card" id="facePick">
+        <div class="faces" role="group" aria-label="Watchface">
+          <button class="face" type="button" data-face="0"><canvas width="128" height="64" data-mini="classic"></canvas><span><b>Classic</b><small>HH MM SS, digits fly in</small></span></button>
+          <button class="face" type="button" data-face="1"><canvas width="128" height="64" data-mini="tetris"></canvas><span><b>Tetris</b><small>HH:MM of falling blocks</small></span></button>
+        </div>
+      </div>
+      <div class="card" data-for-face="0">
+        <div class="group-title">Classic</div>
+        <div class="row stack"><div class="lbl">Digit colour</div><div class="swatches" id="swDigit"></div></div>
+        <div class="row stack"><div><div class="lbl">Fly-in colour</div><div class="hint">Dimmed by itself while a digit moves.</div></div><div class="swatches" id="swTrail"></div></div>
+        <div class="row">
+          <div><label class="lbl" for="speed">Fly-in time</label><div class="hint">How long every fly-in takes; all digits land together.</div></div>
+          <div class="range"><input type="range" id="speed" min="100" max="850" step="10" data-live><output for="speed"></output></div>
+        </div>
+        <div class="row stack"><div><div class="lbl">Where each digit flies in from</div><div class="hint">Tap a digit to turn its arrow. Kept by Save.</div></div><div class="dirs" id="dirs"></div></div>
+      </div>
+      <div class="card" data-for-face="1">
+        <div class="group-title">Tetris</div>
+        <div class="row">
+          <div><label class="lbl" for="tdrop">Drop pace</label><div class="hint">Milliseconds per block row; higher is slower.</div></div>
+          <div class="range"><input type="range" id="tdrop" min="20" max="250" data-live data-pv><output for="tdrop"></output></div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="tspin">Turn pace</label><div class="hint">Milliseconds between quarter turns; higher is calmer.</div></div>
+          <div class="range"><input type="range" id="tspin" min="80" max="1500" step="10" data-live data-pv><output for="tspin"></output></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">Break-up effect</div><div class="hint">How digits come apart when time changes.</div></div>
+          <div class="seg" id="shs" role="group" aria-label="Break-up effect"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="bright" data-title="Brightness">
+      <div class="sec-head"><h2>Brightness</h2><p id="brightLead">Fixed, or following the room's light.</p></div>
+      <div class="card">
+        <div class="row row-switch" id="autoRow">
+          <div><div class="lbl">Follow the room's light</div><div class="hint" id="autoHint"></div></div>
+          <label class="switch"><input type="checkbox" id="autob" aria-label="Follow the room's light"><span></span></label>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="brightR" id="brightLbl">Brightness</label><div class="hint">The panel shows <span id="effB" style="font-family:var(--mono)">–</span> now.</div></div>
+          <div class="range"><input type="range" id="brightR" min="0" max="255" data-live><output for="brightR"></output></div>
+        </div>
+        <div id="autoRows">
+          <div class="row">
+            <div><div class="lbl">Room light</div><div class="hint">Dark and bright end of the scale, in lux.</div></div>
+            <div class="pair"><label>Dark<input type="number" id="luxd" min="0" max="65535" data-live></label><label>Bright<input type="number" id="luxb" min="1" max="65535" data-live></label></div>
+          </div>
+          <div class="row">
+            <div><div class="lbl">Panel brightness</div><div class="hint">At the dark and the bright end.</div></div>
+            <div class="pair"><label>At least<input type="number" id="brmin" min="0" max="255" data-live></label><label>At most<input type="number" id="brmax" min="0" max="255" data-live></label></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="time" data-title="Time">
+      <div class="sec-head"><h2>Time</h2><p>The clock keeps UTC; zone and daylight saving are added for the face.</p></div>
+      <div class="card">
+        <div class="row stack">
+          <div class="status"><span class="dot" id="timeDot"></span><span id="timeLine"></span></div>
+          <div class="ctl"><button class="btn" type="button" id="phoneBtn">Set from this device</button><span class="note">or type the clock's local time:</span></div>
+          <div class="pair"><label>Date<input type="date" id="tdate"></label><label>Time<input type="time" id="ttime"></label></div>
+          <div class="ctl"><button class="btn" type="button" id="typedBtn">Set date and time</button></div>
+        </div>
+        <div class="row"><label class="lbl" for="tz">Time zone</label><select id="tz"></select></div>
+        <div class="row"><div class="lbl">Daylight saving</div>
+          <div class="seg" id="dst" role="group" aria-label="Daylight saving">
+            <button type="button" data-v="2">By the zone</button><button type="button" data-v="1">Summer</button><button type="button" data-v="0">Winter</button>
+          </div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="sync">Internet time sync</label><div class="hint" id="syncHint"></div></div>
+          <input type="time" id="sync">
+        </div>
+        <div class="row" id="syncdRow">
+          <div><label class="lbl" for="syncd">Sync interval</label><div class="hint">The real-time clock keeps the time in between.</div></div>
+          <select id="syncd"><option value="1">daily</option><option value="7">every 7 days</option><option value="30">every 30 days</option><option value="91">every 3 months</option><option value="182">every 6 months</option><option value="365">every 12 months</option><option value="0">never (no WiFi needed)</option></select>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="inputs" data-title="Inputs">
+      <div class="sec-head"><h2>Buttons, knock and gestures</h2><p>What each input found does on the face. The menu, the hotspot screen and the start follow the profile.</p></div>
+      <div class="card">
+        <div class="row stack"><div class="lbl">Found</div><div class="chips" id="found"></div></div>
+        <div class="row">
+          <div><label class="lbl" for="prof">Profile</label><div class="hint">Choosing one fills the face below with its own.</div></div>
+          <select id="prof"></select>
+        </div>
+        <div class="row" id="shkRow">
+          <div><label class="lbl" for="shk">Knock sensitivity</label><div class="hint">0 switches the knock off; 10 reacts to a light tap. What a knock does is set below.</div></div>
+          <div class="range"><input type="range" id="shk" min="0" max="10" data-live><output for="shk"></output></div>
+        </div>
+        <div class="row" id="gmountRow">
+          <div><label class="lbl" for="gmount">Gesture sensor turned</label><div class="hint">If a swipe up acts as another direction, try the next.</div></div>
+          <select id="gmount"><option value="0">not turned</option><option value="1">90° clockwise</option><option value="2">180°</option><option value="3">90° counter-clockwise</option></select>
+        </div>
+        <div class="row stack">
+          <div><div class="lbl">On the face</div><div class="hint">Giving a button's twice or three times something to do makes its single press wait 0.4 s for the next.</div></div>
+          <div class="shortcuts" id="shortcuts"></div>
+          <div class="err" id="scErr" hidden>None of these opens the menu. Give one of them “open the menu”.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="gifs" data-title="GIFs">
+      <div class="sec-head"><h2>GIFs</h2><p>Now and then a GIF takes the panel; holding UP on the face plays one at once.</p></div>
+      <div class="card">
+        <div class="row stack"><div class="legend"><span id="gifCount"></span></div></div>
+        <div class="row row-switch">
+          <div><div class="lbl">Show GIFs now and then</div><div class="hint">At a random time between the two below.</div></div>
+          <label class="switch"><input type="checkbox" id="gifr" aria-label="Show GIFs now and then"><span></span></label>
+        </div>
+        <div class="row"><div class="lbl">Minutes between two GIFs</div>
+          <div class="pair"><label>At least<input type="number" id="gifmin" min="1" max="1440"></label><label>At most<input type="number" id="gifmax" min="1" max="1440"></label></div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="gifsec">Seconds a GIF plays</label><div class="hint">In whole loops: as many as fit, at least one.</div></div>
+          <div class="range"><input type="range" id="gifsec" min="2" max="60"><output for="gifsec"></output></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">Brightness while a GIF plays</div><div class="hint">At least this, and at least this many times the clock's.</div></div>
+          <div class="pair"><label>At least<input type="number" id="gifbr" min="0" max="255"></label><label>Times the clock's<input type="number" id="gifbx" min="1" max="5" step="0.1"></label></div>
+        </div>
+        <div class="row">
+          <div class="lbl">Try one</div>
+          <div class="ctl"><button class="btn" type="button" id="gifNow">Play a GIF now</button><span class="note" id="gifNowNote"></span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="band" data-title="Info band">
+      <div class="sec-head"><h2>Info band data</h2><p>Weather and DWD warnings for one place. The band that shows them comes with the wall clock; until then they are listed here.</p></div>
+      <div class="card">
+        <div class="row">
+          <div><div class="lbl">Place</div><div class="hint">Latitude and longitude in degrees, from a map.</div></div>
+          <div class="pair"><label>Latitude<input type="text" inputmode="decimal" id="lat" maxlength="12"></label><label>Longitude<input type="text" inputmode="decimal" id="lon" maxlength="12"></label></div>
+        </div>
+        <div class="row row-switch">
+          <div><div class="lbl">Weather, every 30 min<span class="badge" id="fBadge0"></span></div><div class="status" style="margin-top:2px"><span class="dot" id="fDot0"></span><span class="hint" style="margin:0" id="fLine0"></span></div></div>
+          <label class="switch"><input type="checkbox" id="feedw" aria-label="Weather"><span></span></label>
+        </div>
+        <div class="row stack" id="fNeedRow0" hidden><div class="need" id="fNeed0"></div></div>
+        <div class="row row-switch">
+          <div><div class="lbl">Weather warnings, every 10 min<span class="badge" id="fBadge1"></span></div><div class="status" style="margin-top:2px"><span class="dot" id="fDot1"></span><span class="hint" style="margin:0" id="fLine1"></span></div></div>
+          <label class="switch"><input type="checkbox" id="feeda" aria-label="Weather warnings"><span></span></label>
+        </div>
+        <div class="row stack" id="fNeedRow1" hidden><div class="need" id="fNeed1"></div></div>
+        <div class="row stack"><div class="lbl">On the band now</div><ul class="items" id="items"></ul></div>
+        <div class="row stack"><div class="note">Weather data by Open-Meteo.com (CC BY 4.0). Warnings: Deutscher Wetterdienst, through Bright Sky.</div></div>
+      </div>
+    </section>
+
+    <section class="sec" id="net" data-title="Network">
+      <div class="sec-head"><h2>Home WiFi</h2><p>The network the clock fetches its time and data over.</p></div>
+      <div class="card">
+        <div class="row stack"><div class="status"><span class="dot" id="wifiDot"></span><span id="wifiLine"></span></div></div>
+        <div class="row stack" id="netsRow"><div class="lbl">Networks in range</div><div class="networks" id="networks"></div><div class="note" id="netsNote"></div></div>
+        <div class="row"><label class="lbl" for="ssid">Network name</label><input type="text" id="ssid" maxlength="32" autocomplete="off"></div>
+        <div class="row"><label class="lbl" for="pw">Password</label><input type="password" id="pw" maxlength="63" autocomplete="new-password"></div>
+        <div class="row"><div class="note" id="wifiSaveNote"></div><div class="ctl"><button class="btn primary" type="button" id="wifiSave">Save WiFi</button><button class="btn danger" type="button" id="forget">Forget WiFi</button></div></div>
+        <div class="row stack"><div class="err" id="wifiErr" hidden></div></div>
+      </div>
+      <div class="card">
+        <div class="group-title" id="lanTitle">Continuous network access</div>
+        <div class="row row-switch">
+          <div><div class="lbl">Stay connected to the home network</div><div class="hint">The clock keeps its WiFi connection, and these settings open at its address on the home network, behind the password below. Sources marked “needs continuous network access” work only with it; the GIF library uses it too. Off, the clock connects only to fetch the time and its data.</div></div>
+          <label class="switch"><input type="checkbox" id="lanOn" aria-label="Stay connected to the home network"><span></span></label>
+        </div>
+        <div class="row" id="lanAddrRow"><div class="lbl">Address</div><div class="note" id="lanAddr" style="font-family:var(--mono);overflow-wrap:anywhere"></div></div>
+        <div class="row">
+          <div><label class="lbl" for="lanPw">Password</label><div class="hint" id="lanPwHint"></div></div>
+          <input type="password" id="lanPw" maxlength="63" autocomplete="new-password">
+        </div>
+        <div class="row"><div class="note" id="lanNote"></div><div class="ctl"><button class="btn primary" type="button" id="lanSave">Save home network access</button></div></div>
+        <div class="row stack"><div class="err" id="lanErr" hidden></div></div>
+      </div>
+    </section>
+
+    <section class="sec" id="sys" data-title="System">
+      <div class="sec-head"><h2>System</h2><p>What runs on the clock.</p></div>
+      <div class="card">
+        <div class="row stack"><dl class="kv" id="sysKv"></dl></div>
+        <div class="row"><div class="lbl">Restart</div><div class="ctl"><button class="btn" type="button" id="restart">Restart the clock</button></div></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="savebar" id="savebar" role="region" aria-label="Unsaved changes">
+  <div class="savebar-in">
+    <div class="savebar-txt"><b id="chgN"></b> not saved yet. <span id="saveHint"></span></div>
+    <button class="btn" type="button" id="discard">Discard</button>
+    <button class="btn primary" type="button" id="save">Save</button>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="cover" id="cover"><div class="cover-box"><h2 id="coverT">Matrix Clock</h2><div class="note" id="coverN">Asking the clock…</div>
+  <form id="login" hidden><input type="password" id="loginPw" placeholder="The clock's password" autocomplete="current-password" aria-label="The clock's password" style="margin-bottom:8px">
+  <button class="btn primary" type="submit">Open the settings</button></form></div></div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  var PAL = ['#ffffff', '#ff0000', '#ff8000', '#ffff00', '#80ff00', '#00ff00', '#00ff80', '#00ffff', '#00c0ff', '#0000ff', '#8000ff', '#ff00ff', '#ff0080', '#ff80c0'];
+  var DIR_ARROWS = ['↓', '←', '↑', '→'];        // the way a digit moves when it comes from the top, right, bottom, left
+  var DIR_NAMES = ['from the top', 'from the right', 'from the bottom', 'from the left'];
+  var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠'];   // ItemIcon in band_data.h
+  // What the page edits; ssid and the WiFi password go through their own form.
+  var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
+    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda'];
+  var S = null, saved = null, cur = null, gone = false, auth = '';
+  try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
+  function headers(extra) { var h = extra || {}; if (auth) { h.Authorization = 'Basic ' + btoa('clock:' + auth); } return h; }
+
+  function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  function toast(t) {
+    var el = $('#toast'); el.textContent = t; el.classList.add('show');
+    clearTimeout(toast.t); toast.t = setTimeout(function () { el.classList.remove('show'); }, 3000);
+  }
+  function api(path, form) {
+    var opt = form === undefined ? { cache: 'no-store', headers: headers() }
+      : { method: 'POST', cache: 'no-store', headers: headers({ 'Content-Type': 'application/x-www-form-urlencoded' }), body: form };
+    return fetch(path, opt).then(function (r) {
+      if (r.status === 401 || r.status === 429) {
+        return r.json().catch(function () { return {}; }).then(function (j) { var e = new Error(j.error || 'The clock’s password is needed.'); e.auth = true; throw e; });
+      }
+      if (r.status === 204) { return {}; }
+      var ct = r.headers.get('Content-Type') || '';
+      if (ct.indexOf('json') < 0) { return r; }
+      return r.json().then(function (j) { if (!r.ok) { throw new Error(j.error || ('HTTP ' + r.status)); } return j; });
+    });
+  }
+  function enc(o) {
+    return Object.keys(o).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(o[k]); }).join('&');
+  }
+  function has(k) { return S && S.settings && S.settings[k] !== undefined; }
+
+  // ---- what goes to the clock --------------------------------------------------------------------
+  function liveForm(pv) {
+    var o = { bright: cur.bright, autob: cur.autob ? 'on' : 'off', luxd: cur.luxd, luxb: cur.luxb, brmin: cur.brmin, brmax: cur.brmax,
+      speed: cur.speed, digit: cur.digit, trail: cur.trail };
+    if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
+    if (pv) { o.pv = 1; }
+    return enc(o);
+  }
+  function saveForm() {
+    var o = { tz: cur.tz, dst: cur.dst, bright: cur.bright, speed: cur.speed, digit: cur.digit, trail: cur.trail,
+      synch: cur.synch, syncm: cur.syncm, luxd: cur.luxd, luxb: cur.luxb, brmin: cur.brmin, brmax: cur.brmax, prof: cur.prof };
+    if (cur.autob) { o.autob = 'on'; }   // checkboxes: absent when off, as the old page sent them
+    for (var i = 0; i < 6; i++) { o['dir' + i] = cur.dirs[i]; }
+    if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
+    if (S.hw.rtc) { o.syncd = cur.syncd; }
+    if (S.hw.gesture) { o.gmount = cur.gmount; }
+    S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } });
+    if (has('gifr')) {
+      o.gifmin = cur.gifmin; o.gifmax = cur.gifmax; o.gifsec = cur.gifsec; o.gifbr = cur.gifbr; o.gifbx = (cur.gifbx / 10).toFixed(1);
+      if (cur.gifr) { o.gifr = 'on'; }
+    }
+    if (has('lat')) {
+      o.lat = cur.lat; o.lon = cur.lon;
+      if (cur.feedw) { o.feedw = 'on'; }
+      if (cur.feeda) { o.feeda = 'on'; }
+    }
+    return enc(o);
+  }
+  var liveTimer = null, livePv = false;
+  function sendLive(pv) {
+    livePv = livePv || !!pv;
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(function () {
+      var f = liveForm(livePv); livePv = false;
+      api('/api/live', f).catch(function () { toast('The clock did not answer.'); });
+    }, 120);
+  }
+
+  // ---- unsaved changes ------------------------------------------------------------------------------
+  function diffCount() {
+    var n = 0;
+    KEYS.forEach(function (k) { if (has(k) && JSON.stringify(saved[k]) !== JSON.stringify(cur[k])) { n++; } });
+    return n;
+  }
+  function keysOk() {
+    var ok = false;
+    S.lists.events.forEach(function (e, i) { if (e.fitted && cur.keys[i] === S.lists.menuAction) { ok = true; } });
+    return ok;
+  }
+  function changed() {
+    var n = diffCount();
+    $('#chgN').textContent = n === 1 ? '1 change' : n + ' changes';
+    $('#savebar').classList.toggle('show', n > 0 && !gone);
+    var ok = keysOk();
+    $('#scErr').hidden = ok;
+    $('#save').disabled = !ok;
+  }
+
+  // ---- controls ---------------------------------------------------------------------------------------
+  function setRange(id, key, unit, fmt) {
+    var el = document.getElementById(id), out = el.nextElementSibling;
+    var show = function () { out.textContent = (fmt ? fmt(+el.value) : el.value) + (unit || ''); };
+    el.value = cur[key]; show();
+    if (!el.dataset.bound) {
+      el.dataset.bound = 1;
+      el.addEventListener('input', function () { cur[key] = +el.value; show(); changed(); });
+      // Taken over by the clock when the slider is let go of, as on the old page.
+      el.addEventListener('change', function () { cur[key] = +el.value; show(); changed(); if (el.hasAttribute('data-live')) { sendLive(el.hasAttribute('data-pv')); } });
+    }
+  }
+  function setNumber(id, key, scale) {
+    var el = document.getElementById(id);
+    el.value = scale ? (cur[key] / scale).toFixed(1) : cur[key];
+    if (!el.dataset.bound) {
+      el.dataset.bound = 1;
+      el.addEventListener('input', function () {
+        if (el.type === 'number') { var v = parseFloat(el.value); if (isNaN(v)) { return; } cur[key] = scale ? Math.round(v * scale) : v; }
+        else { cur[key] = el.value.trim(); }
+        changed();
+      });
+      el.addEventListener('change', function () { if (el.hasAttribute('data-live')) { sendLive(false); } });
+    }
+  }
+  function setCheck(id, key, after, live, pv) {
+    var el = document.getElementById(id);
+    el.checked = !!cur[key];
+    if (!el.dataset.bound) {
+      el.dataset.bound = 1;
+      el.addEventListener('change', function () { cur[key] = el.checked; if (after) { after(); } changed(); if (live) { sendLive(pv); } });
+    }
+    if (after) { after(); }
+  }
+  function setSeg(el, key, live, pv) {
+    var show = function () { $$('button', el).forEach(function (b) { b.setAttribute('aria-pressed', +b.dataset.v === cur[key] ? 'true' : 'false'); }); };
+    if (!el.dataset.bound) {
+      el.dataset.bound = 1;
+      $$('button', el).forEach(function (b) {
+        b.addEventListener('click', function () { cur[key] = +b.dataset.v; show(); changed(); if (live) { sendLive(pv); } });
+      });
+    }
+    show();
+  }
+  function setSwatches(id, key) {
+    var box = document.getElementById(id);
+    if (!box.children.length) {
+      PAL.forEach(function (c) {
+        var b = document.createElement('button');
+        b.type = 'button'; b.className = 'sw'; b.style.background = c; b.dataset.c = c; b.setAttribute('aria-label', 'Colour ' + c);
+        b.addEventListener('click', function () { cur[key] = c; show(); changed(); sendLive(false); });
+        box.appendChild(b);
+      });
+    }
+    var show = function () { $$('.sw', box).forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.c === String(cur[key]).toLowerCase() ? 'true' : 'false'); }); };
+    show();
+  }
+  function setDirs() {
+    var box = $('#dirs'), names = ['H₁₀', 'H₁', 'M₁₀', 'M₁', 'S₁₀', 'S₁'];
+    if (!box.children.length) {
+      names.forEach(function (n, i) {
+        var d = document.createElement('div'); d.className = 'dir';
+        var b = document.createElement('button'); b.type = 'button';
+        var s = document.createElement('small'); s.textContent = n;
+        b.addEventListener('click', function () { cur.dirs[i] = (cur.dirs[i] + 1) % 4; show(); changed(); });
+        d.appendChild(b); d.appendChild(s); box.appendChild(d);
+      });
+    }
+    var show = function () {
+      $$('.dir button', box).forEach(function (b, i) {
+        b.textContent = DIR_ARROWS[cur.dirs[i]];
+        b.setAttribute('aria-label', 'Digit ' + (i + 1) + ' flies in ' + DIR_NAMES[cur.dirs[i]]);
+      });
+    };
+    show();
+  }
+  function showFace() {
+    $$('.face').forEach(function (b) { b.setAttribute('aria-pressed', +b.dataset.face === cur.wf ? 'true' : 'false'); });
+    $$('[data-for-face]').forEach(function (c) { c.hidden = +c.dataset.forFace !== cur.wf; });
+  }
+  function showAuto() {
+    var sensor = S.hw.lux;
+    $('#autoRows').hidden = !cur.autob;
+    $('#brightLbl').textContent = cur.autob ? 'Shift' : 'Brightness';
+    $('#autoHint').textContent = cur.autob ? 'The slider below shifts the sensor’s brightness: 128 changes nothing.'
+      : (sensor ? 'The panel keeps the brightness set below.' : 'No light sensor has answered yet.');
+  }
+  function fillTz() {
+    var sel = $('#tz');
+    sel.innerHTML = '';
+    var found = false;
+    S.lists.tz.forEach(function (t) {
+      var o = document.createElement('option'); o.value = t[0]; o.textContent = t[1]; sel.appendChild(o);
+      if (t[0] === cur.tz) { found = true; }
+    });
+    if (!found) { var o = document.createElement('option'); o.value = cur.tz; o.textContent = 'UTC' + (cur.tz >= 0 ? '+' : '') + (cur.tz / 3600); sel.appendChild(o); }
+    sel.value = cur.tz;
+    if (!sel.dataset.bound) { sel.dataset.bound = 1; sel.addEventListener('change', function () { cur.tz = +sel.value; changed(); }); }
+  }
+  function fillInputs() {
+    var found = $('#found'), chips = ['UP', 'DOWN'];
+    found.innerHTML = '';
+    var add = function (t, off) { var c = document.createElement('span'); c.className = 'chip' + (off ? ' off' : ''); c.textContent = t; found.appendChild(c); };
+    chips.forEach(function (t) { add(t, false); });
+    add(S.hw.accel ? 'Knock (accelerometer)' : 'No accelerometer', !S.hw.accel);
+    add(S.hw.gesture ? ('Gesture sensor' + (S.hw.gestureInt ? ', INT line' : ', asked every 50 ms')) : 'No gesture sensor', !S.hw.gesture);
+    var prof = $('#prof');
+    prof.innerHTML = '';
+    S.lists.profiles.forEach(function (p, i) { var o = document.createElement('option'); o.value = i; o.textContent = p; prof.appendChild(o); });
+    prof.value = cur.prof;
+    $('#gmountRow').hidden = !S.hw.gesture;
+    $('#gmount').value = cur.gmount;
+    var box = $('#shortcuts');
+    box.innerHTML = '';
+    S.lists.events.forEach(function (e, i) {
+      if (!e.fitted) { return; }
+      var r = document.createElement('div'); r.className = 'sc';
+      var l = document.createElement('label'); l.className = 'ev'; l.htmlFor = 'k' + i; l.textContent = e.label;
+      var s = document.createElement('select'); s.id = 'k' + i;
+      e.actions.forEach(function (a) { var o = document.createElement('option'); o.value = a; o.textContent = S.lists.actions[a]; s.appendChild(o); });
+      s.value = cur.keys[i];
+      if (s.selectedIndex < 0) { s.value = 0; cur.keys[i] = 0; }
+      s.addEventListener('change', function () { cur.keys[i] = +s.value; changed(); });
+      r.appendChild(l); r.appendChild(s); box.appendChild(r);
+    });
+    if (!prof.dataset.bound) {
+      prof.dataset.bound = 1;
+      prof.addEventListener('change', function () { cur.prof = +prof.value; cur.keys = S.lists.profileKeys[cur.prof].slice(); fillInputs(); changed(); });
+      $('#gmount').addEventListener('change', function () { cur.gmount = +$('#gmount').value; changed(); });
+    }
+  }
+  function fillNetworks() {
+    var box = $('#networks'), nets = S.wifi.networks;
+    box.innerHTML = '';
+    $('#netsRow').hidden = S.mode !== 'ap';
+    $('#netsNote').textContent = S.wifi.scanFailed ? 'The scan for networks failed when the hotspot opened.'
+      : (nets.length ? '' : 'No networks were in range when the hotspot opened.');
+    nets.forEach(function (n) {
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'net'; b.dataset.ssid = n[0];
+      var bars = Math.max(1, Math.min(4, Math.round((n[1] + 95) / 9)));
+      var l = document.createElement('span'), bi = document.createElement('span'); bi.className = 'bars';
+      for (var k = 1; k <= 4; k++) { var i = document.createElement('i'); i.style.height = (k * 3) + 'px'; if (k <= bars) { i.className = 'on'; } bi.appendChild(i); }
+      l.appendChild(bi); l.appendChild(document.createTextNode(n[0]));
+      var r = document.createElement('span'); r.textContent = n[1] + ' dBm' + (n[2] ? ' · open' : '');
+      b.appendChild(l); b.appendChild(r);
+      b.addEventListener('click', function () { $('#ssid').value = n[0]; markNet(); $('#pw').focus(); });
+      box.appendChild(b);
+    });
+    markNet();
+  }
+  function markNet() { $$('.net').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.ssid === $('#ssid').value ? 'true' : 'false'); }); }
+
+  function render() {
+    // Sections the clock has.
+    $('#gifs').hidden = !has('gifr');
+    $('#band').hidden = !has('lat');
+    $('#facePick').hidden = !S.hw.tetris;
+    if (!S.hw.tetris) { cur.wf = 0; }
+    buildNav();
+    // Face
+    $$('.face').forEach(function (b) {
+      if (!b.dataset.bound) { b.dataset.bound = 1; b.addEventListener('click', function () { cur.wf = +b.dataset.face; showFace(); changed(); sendLive(true); }); }
+    });
+    showFace();
+    setSwatches('swDigit', 'digit'); setSwatches('swTrail', 'trail'); setDirs();
+    setRange('speed', 'speed', ' ms');
+    if (S.hw.tetris) {
+      setRange('tdrop', 'tdrop', ' ms'); setRange('tspin', 'tspin', ' ms');
+      var shs = $('#shs');
+      if (!shs.children.length) { [3, 0, 1, 2].forEach(function (v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists.shs[v]; shs.appendChild(b); }); }
+      setSeg(shs, 'shs', true, true);
+    }
+    // The knock's sensitivity: an input setting, kept with the Tetris settings.
+    $('#shkRow').hidden = !(S.hw.tetris && S.hw.accel);
+    if (S.hw.tetris) { setRange('shk', 'shk', '', function (v) { return v === 0 ? 'off' : v; }); }
+    // Brightness
+    setCheck('autob', 'autob', showAuto, true, false);
+    setRange('brightR', 'bright');
+    ['luxd', 'luxb', 'brmin', 'brmax'].forEach(function (k) { setNumber(k, k); });
+    $('#autoRow').hidden = !S.hw.lux && !cur.autob;
+    // Time
+    fillTz();
+    setSeg($('#dst'), 'dst', false);
+    var sync = $('#sync'), pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    sync.value = pad(cur.synch) + ':' + pad(cur.syncm);
+    if (!sync.dataset.bound) {
+      sync.dataset.bound = 1;
+      sync.addEventListener('change', function () { var p = sync.value.split(':'); if (p.length === 2) { cur.synch = +p[0]; cur.syncm = +p[1]; changed(); } });
+    }
+    $('#syncHint').textContent = S.hw.rtc ? 'At this time on the days a sync is due.' : 'Daily at this time.';
+    $('#syncdRow').hidden = !S.hw.rtc;
+    var sd = $('#syncd');
+    if (S.hw.rtc && !$('option[value="' + cur.syncd + '"]', sd)) { var o = document.createElement('option'); o.value = cur.syncd; o.textContent = 'every ' + cur.syncd + ' days'; sd.appendChild(o); }
+    sd.value = cur.syncd;
+    if (!sd.dataset.bound) { sd.dataset.bound = 1; sd.addEventListener('change', function () { cur.syncd = +sd.value; changed(); }); }
+    var now = new Date();
+    $('#tdate').value = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+    $('#ttime').value = pad(now.getHours()) + ':' + pad(now.getMinutes());
+    // Inputs
+    fillInputs();
+    // GIFs
+    if (has('gifr')) {
+      var g = S.gifs, t = (g.builtIn + g.pack) + ' GIFs: ' + g.builtIn + ' built in';
+      t += g.packState === 'ok' ? ', ' + g.pack + ' in the GIF pack' : g.packState === 'damaged' ? '; the GIF pack is damaged and not used' : '; no GIF pack';
+      $('#gifCount').textContent = t;
+      setCheck('gifr', 'gifr');
+      ['gifmin', 'gifmax', 'gifbr'].forEach(function (k) { setNumber(k, k); });
+      setNumber('gifbx', 'gifbx', 10);
+      setRange('gifsec', 'gifsec', ' s');
+      $('#gifNow').hidden = S.mode === 'ap';
+      $('#gifNowNote').textContent = S.mode === 'ap' ? 'GIFs play over the face, not while the hotspot is open.' : '';
+    }
+    // Info band
+    if (has('lat')) { setNumber('lat', 'lat'); setNumber('lon', 'lon'); setCheck('feedw', 'feedw', showNeeds); setCheck('feeda', 'feeda', showNeeds); }
+    // WiFi
+    $('#ssid').value = S.settings.ssid;
+    $('#pw').value = '';
+    $('#pw').placeholder = S.wifi.stored ? 'unchanged' : 'none stored';
+    $('#wifiSaveNote').textContent = S.mode === 'ap' ? 'Saving closes the hotspot; the clock joins the WiFi and fetches the time.'
+      : 'Taken at the next join; the clock keeps its connection until then.';
+    fillNetworks();
+    showWifi(S.wifi.line, S.wifi.stored);
+    var lan = S.lan;
+    $('#lanOn').checked = lan.on;
+    $('#lanAddr').textContent = 'http://' + lan.host + '.local' + (lan.ip ? ' · http://' + lan.ip : '');
+    $('#lanAddrRow').hidden = !lan.on;
+    $('#lanPw').value = '';
+    $('#lanPw').placeholder = lan.hasPassword ? 'unchanged' : 'at least 8 characters';
+    $('#lanPwHint').textContent = lan.defaultPassword
+      ? 'Still the preset one, the hotspot’s password. Better set your own: 8 to 63 characters.'
+      : '8 to 63 characters; asked on the home network only.';
+    $('#lanNote').textContent = S.mode === 'ap' ? 'Kept at once; the hotspot stays open.' : (lan.on ? 'Switching it off here ends this page’s connection.' : '');
+    // System
+    var y = S.system, kv = $('#sysKv'), mb = function (b) { return (b / 1048576).toFixed(2) + ' MB'; }, kb = function (b) { return Math.round(b / 1024) + ' KB'; };
+    var up = y.uptime, upText = Math.floor(up / 86400) + ' d ' + Math.floor(up % 86400 / 3600) + ' h ' + Math.floor(up % 3600 / 60) + ' min';
+    var rows = [['Board', S.board + ', ' + S.panel[0] + '×' + S.panel[1] + ' panel'], ['Firmware', S.fw], ['Running for', upText + ' (at load)'],
+      ['Internal RAM', kb(y.heapFree) + ' free, ' + kb(y.heapLow) + ' at the lowest'], ['PSRAM', kb(y.psramFree) + ' free'],
+      ['Program', mb(y.program) + ' of ' + mb(y.programMax) + ' (' + (100 * y.program / y.programMax).toFixed(1) + ' %)'],
+      ['Last start', y.reset + (y.bootStage ? '; the run before ended early, in start stage ' + y.bootStage : '')],
+      ['Real-time clock', S.hw.rtc ? (S.hw.rtcLost ? 'DS3231, had lost power' : 'DS3231') : 'none']];
+    kv.innerHTML = '';
+    rows.forEach(function (r) { var dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = r[0]; dd.textContent = r[1]; kv.appendChild(dt); kv.appendChild(dd); });
+    $('#railFoot').textContent = 'Firmware ' + S.fw + '. Changes show on the clock at once and stay after Save.';
+    // Context
+    $('#addr').textContent = location.host + ' · ' + S.board;
+    $('#connTxt').textContent = S.mode === 'ap' ? 'Hotspot' : 'Home network';
+    $('#saveHint').textContent = S.mode === 'ap' ? 'Saving closes the hotspot.' : '';
+    applyStatus(S);
+    changed();
+  }
+  // What a source that is switched on still lacks, said where it is switched on: a stored home WiFi
+  // with its password, and for a source marked so, continuous network access.
+  var feedsNow = [];
+  function showNeeds() {
+    if (!S || !has('lat')) { return; }
+    ['feedw', 'feeda'].forEach(function (k, i) {
+      var f = feedsNow[i] || {}, always = !!f.always, badge = $('#fBadge' + i);
+      badge.textContent = always ? 'needs continuous network access' : '';
+      badge.className = 'badge' + (always ? ' always' : '');
+      badge.hidden = !always;
+      var lacks = [];
+      if (!S.wifi.stored) { lacks.push('a stored home WiFi with its password (Home WiFi, below)'); }
+      if (always && !S.lan.on) { lacks.push('continuous network access switched on (Home WiFi, below: “Stay connected to the home network”)'); }
+      var row = $('#fNeedRow' + i), box = $('#fNeed' + i);
+      row.hidden = !(cur[k] && lacks.length);
+      if (row.hidden) { return; }
+      box.innerHTML = '';
+      var t = document.createElement('div');
+      t.textContent = lacks.length === 1 ? 'This source fetches nothing yet. It needs ' + lacks[0] + '.' : 'This source fetches nothing yet. It needs';
+      box.appendChild(t);
+      if (lacks.length > 1) {
+        var ol = document.createElement('ol');
+        lacks.forEach(function (l) { var li = document.createElement('li'); li.textContent = l; ol.appendChild(li); });
+        box.appendChild(ol);
+      }
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'btn'; b.textContent = 'Go to Home WiFi';
+      b.addEventListener('click', function () { goTo('net'); });
+      box.appendChild(b);
+    });
+  }
+  function showWifi(line, stored) { $('#wifiLine').textContent = line; $('#wifiDot').className = 'dot ' + (stored ? 'ok' : 'warn'); }
+
+  // ---- navigation -----------------------------------------------------------------------------------------
+  var spyQuietUntil = 0, sections = [];
+  function buildNav() {
+    var rail = $('#railNav'), tabs = $('#tabs');
+    rail.innerHTML = ''; tabs.innerHTML = '';
+    sections = $$('section.sec').filter(function (s) { return !s.hidden; });
+    sections.forEach(function (s) {
+      [[rail, 'a', ''], [tabs, 'a', 'tab']].forEach(function (t) {
+        var a = document.createElement(t[1]); a.href = '#' + s.id; a.textContent = s.dataset.title; a.dataset.sec = s.id; if (t[2]) { a.className = t[2]; }
+        a.addEventListener('click', function (e) { e.preventDefault(); goTo(s.id); });
+        t[0].appendChild(a);
+      });
+    });
+    markCurrent(sections.length ? sections[0].id : '');
+  }
+  function goTo(id) {
+    var el = document.getElementById(id), head = $('.appbar').getBoundingClientRect().bottom;
+    var top = el.getBoundingClientRect().top + window.pageYOffset - Math.max(0, head) - 12;
+    spyQuietUntil = Date.now() + 900;
+    markCurrent(id);
+    try { window.scrollTo({ top: Math.max(0, top), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); }
+    catch (e) { window.scrollTo(0, Math.max(0, top)); }
+  }
+  function markCurrent(id) {
+    $$('#railNav a, #tabs .tab').forEach(function (el) { el.setAttribute('aria-current', el.dataset.sec === id ? 'true' : 'false'); });
+    var tab = $('#tabs .tab[data-sec="' + id + '"]');
+    if (tab && tab.parentNode.scrollWidth > tab.parentNode.clientWidth) { tab.parentNode.scrollTo({ left: tab.offsetLeft - 16, behavior: 'smooth' }); }
+  }
+  var current = '';
+  function spy() {
+    if (Date.now() < spyQuietUntil || !sections.length) { return; }
+    var best = sections[0].id;
+    sections.forEach(function (s) { if (s.getBoundingClientRect().top < 160) { best = s.id; } });
+    if ((window.innerHeight + window.scrollY) >= document.body.scrollHeight - 4) { best = sections[sections.length - 1].id; }
+    if (best !== current) { current = best; markCurrent(best); }
+  }
+  window.addEventListener('scroll', function () { spy(); clearTimeout(spy.t); spy.t = setTimeout(function () { spyQuietUntil = 0; spy(); }, 950); }, { passive: true });
+
+  // ---- what moves -----------------------------------------------------------------------------------------
+  var rot = 0, screenGif = false;
+  function applyStatus(st) {
+    if (st.feeds) { feedsNow = st.feeds; showNeeds(); }
+    $('#mBright').textContent = st.bright; $('#effB').textContent = st.bright;
+    $('#mLux').textContent = st.lux === null || st.lux === undefined ? 'no sensor' : st.lux + ' lux';
+    $('#mTime').textContent = st.clockSet ? st.clock + ' · ' + st.src : 'not set';
+    $('#timeLine').textContent = st.timeLine;
+    $('#timeDot').className = 'dot ' + (st.clockSet ? 'ok' : 'warn');
+    rot = st.rot; screenGif = st.gif;
+    var note = $('#screenNote');
+    note.hidden = !st.gif;
+    note.textContent = 'A GIF is playing; it is drawn past this picture.';
+    if (st.feeds) {
+      st.feeds.forEach(function (f, i) {
+        var line = $('#fLine' + i), dot = $('#fDot' + i);
+        if (!line) { return; }
+        var t, cls;
+        if (!f.on) { t = 'Off.'; cls = ''; }
+        else if (f.blocked === 'place') { t = 'No place set.'; cls = 'warn'; }
+        else if (f.blocked === 'wifi') { t = 'No home WiFi stored, so nothing is fetched.'; cls = 'warn'; }
+        else if (f.blocked === 'always') { t = 'Waits for continuous network access.'; cls = 'warn'; }
+        else if (f.blocked === 'time') { t = 'Waits for the clock’s time.'; cls = 'warn'; }
+        else if (f.error) { t = 'Failed: ' + f.error + (f.failures > 1 ? ', ' + f.failures + ' times in a row.' : '.'); cls = 'bad'; }
+        else if (f.okAt) { t = 'Fetched at ' + f.okAt + ' in ' + f.ms + ' ms' + (f.bytes !== undefined ? ', ' + f.bytes + ' bytes' : '') + '.'; cls = 'ok'; }
+        else { t = 'Not fetched yet.'; cls = 'warn'; }
+        if (i === 1 && st.place) { t += ' DWD place: ' + st.place + '.'; }
+        line.textContent = t; dot.className = 'dot ' + cls;
+      });
+      var ul = $('#items');
+      ul.innerHTML = '';
+      if (!st.items.length) { var li = document.createElement('li'); li.className = 'note'; li.textContent = 'Nothing yet.'; ul.appendChild(li); }
+      st.items.forEach(function (it) {
+        var li = document.createElement('li'); li.className = 'item' + (it.alert ? ' alert' : '');
+        var ic = document.createElement('span'); ic.className = 'item-ico'; ic.setAttribute('aria-hidden', 'true'); ic.textContent = ICONS[it.icon] || '•';
+        var tx = document.createElement('span'); tx.className = 'item-t'; tx.textContent = it.text;
+        var u = document.createElement('span'); u.className = 'item-u'; u.textContent = (it.alert ? 'alert, ' : '') + 'until ' + it.until;
+        li.appendChild(ic); li.appendChild(tx); li.appendChild(u); ul.appendChild(li);
+      });
+    }
+  }
+  var statusBusy = false, panelBusy = false;
+  function pollStatus() {
+    if (statusBusy || gone || document.hidden) { return; }
+    statusBusy = true;
+    api('/api/status').then(function (st) { applyStatus(st); }).catch(function () {}).then(function () { statusBusy = false; });
+  }
+  function pollPanel() {
+    if (panelBusy || gone || document.hidden) { return; }
+    panelBusy = true;
+    fetch('/api/panel', { cache: 'no-store', headers: headers() }).then(function (r) { return r.ok ? r.arrayBuffer() : new ArrayBuffer(0); })
+      .then(function (b) { if (b.byteLength === 64 * 32 * 2) { drawPanel(new Uint16Array(b)); } })
+      .catch(function () {}).then(function () { panelBusy = false; });
+  }
+
+  // The canvas buffer is the panel's own rows; the clock draws into it turned by "rot" (Adafruit GFX),
+  // so each pixel of the picture as the clock stands is looked up through the same turn.
+  function drawPanel(px) {
+    var W = 64, H = 32, tall = rot === 1 || rot === 3, lw = tall ? H : W, lh = tall ? W : H;
+    var cv = $('#led'), c = cv.getContext('2d'), cell = 10;
+    if (cv.width !== lw * cell) { cv.width = lw * cell; cv.height = lh * cell; cv.classList.toggle('tall', tall); }
+    var max = 1, rgb = new Array(lw * lh);
+    for (var ly = 0; ly < lh; ly++) {
+      for (var lx = 0; lx < lw; lx++) {
+        var x = lx, y = ly;
+        if (rot === 1) { x = W - 1 - ly; y = lx; } else if (rot === 2) { x = W - 1 - lx; y = H - 1 - ly; } else if (rot === 3) { x = ly; y = H - 1 - lx; }
+        var v = px[y * W + x], r = (v >> 11 & 31) * 255 / 31, g = (v >> 5 & 63) * 255 / 63, b = (v & 31) * 255 / 31;
+        rgb[ly * lw + lx] = [r, g, b];
+        if (r > max) { max = r; } if (g > max) { max = g; } if (b > max) { max = b; }
+      }
+    }
+    var cs = getComputedStyle(document.documentElement), offCol = cs.getPropertyValue('--led-off').trim() || '#151a20';
+    c.fillStyle = cs.getPropertyValue('--panel').trim() || '#07090c';
+    c.fillRect(0, 0, cv.width, cv.height);
+    for (var i = 0; i < rgb.length; i++) {
+      var p = rgb[i], on = p[0] + p[1] + p[2] > 0;
+      c.fillStyle = on ? 'rgb(' + Math.round(255 * Math.pow(p[0] / max, 0.7)) + ',' + Math.round(255 * Math.pow(p[1] / max, 0.7)) + ',' + Math.round(255 * Math.pow(p[2] / max, 0.7)) + ')' : offCol;
+      c.beginPath(); c.arc((i % lw) * cell + cell / 2, Math.floor(i / lw) * cell + cell / 2, cell * 0.38, 0, 6.283); c.fill();
+    }
+  }
+  // The pictures of the two faces in the picker: drawings of what each looks like, not the panel.
+  function drawMinis() {
+    $$('canvas[data-mini]').forEach(function (cv) {
+      var off = document.createElement('canvas'); off.width = 64; off.height = 32;
+      var o = off.getContext('2d'), d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+      o.fillStyle = '#fff'; o.textAlign = 'center'; o.textBaseline = 'middle';
+      var tet = cv.dataset.mini === 'tetris';
+      o.font = (tet ? '900 22px ' : '800 13px ') + getComputedStyle(document.body).fontFamily;
+      if (tet) { o.fillText(p(d.getHours()) + ':' + p(d.getMinutes()), 32, 17); }
+      else { var t = p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()); [6, 15, 26, 35, 47, 56].forEach(function (x, i) { o.fillText(t[i], x, 17); }); }
+      var data = o.getImageData(0, 0, 64, 32).data, c = cv.getContext('2d'), cell = cv.width / 64;
+      var TET = ['#ff3b30', '#ffcc00', '#34c759', '#00c7be', '#0a84ff', '#bf5af2'];
+      c.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() || '#07090c';
+      c.fillRect(0, 0, cv.width, cv.height);
+      for (var y = 0; y < 32; y++) {
+        for (var x = 0; x < 64; x++) {
+          if (data[(y * 64 + x) * 4 + 3] < 115) { continue; }
+          c.fillStyle = tet ? TET[(Math.floor(x / 3) * 7 + Math.floor(y / 3) * 3) % 6] : (cur ? cur.digit : '#00c0ff');
+          c.beginPath(); c.arc(x * cell + cell / 2, y * cell + cell / 2, cell * 0.4, 0, 6.283); c.fill();
+        }
+      }
+    });
+  }
+
+  // ---- actions ---------------------------------------------------------------------------------------------
+  function bye(title, text) {
+    gone = true;
+    $('#savebar').classList.remove('show');
+    $('#coverT').textContent = title; $('#coverN').textContent = text;
+    $('#cover').hidden = false;
+  }
+  $('#save').addEventListener('click', function () {
+    if (!keysOk()) { return; }
+    $('#save').disabled = true;
+    api('/api/save', saveForm()).then(function (r) {
+      saved = clone(cur);
+      if (r.closing) { bye('Saved', 'The hotspot closes and the clock goes back to its face.'); return; }
+      changed(); toast('Saved.');
+    }).catch(function (e) { toast(e.message || 'The clock did not answer.'); changed(); });
+  });
+  $('#discard').addEventListener('click', function () {
+    api('/api/discard', '').then(function () { return load(); }).then(function () { toast('Changes discarded; the clock shows the saved settings again.'); })
+      .catch(function () { toast('The clock did not answer.'); });
+  });
+  $('#phoneBtn').addEventListener('click', function () {
+    api('/api/time', 'utc=' + Math.floor(Date.now() / 1000)).then(function (r) { $('#timeLine').textContent = r.timeLine; toast('The clock has this device’s time now.'); })
+      .catch(function (e) { toast(e.message); });
+  });
+  $('#typedBtn').addEventListener('click', function () {
+    api('/api/time', enc({ date: $('#tdate').value, time: $('#ttime').value })).then(function (r) { $('#timeLine').textContent = r.timeLine; toast('Time set.'); })
+      .catch(function (e) { toast(e.message); });
+  });
+  $('#gifNow').addEventListener('click', function () {
+    api('/api/gif', '').then(function (r) { toast(r.playing ? 'The clock plays a GIF now.' : 'No GIF: one plays only over the face.'); }).catch(function () { toast('The clock did not answer.'); });
+  });
+  $('#ssid').addEventListener('input', markNet);
+  $('#wifiSave').addEventListener('click', function () {
+    var err = $('#wifiErr'); err.hidden = true;
+    api('/api/wifi', enc({ ssid: $('#ssid').value.trim(), pw: $('#pw').value })).then(function (r) {
+      if (r.closing) { bye('WiFi saved', 'The hotspot closes; the clock joins the WiFi and fetches the time.'); return; }
+      toast('WiFi saved.');
+      return load();
+    }).catch(function (e) { err.textContent = e.message; err.hidden = false; });
+  });
+  function twoTap(btn, label, armed, act) {
+    btn.addEventListener('click', function () {
+      if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = label; act(); return; }
+      btn.dataset.armed = '1'; btn.textContent = armed;
+      setTimeout(function () { if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = label; } }, 4000);
+    });
+  }
+  $('#lanSave').addEventListener('click', function () {
+    var err = $('#lanErr'), on = $('#lanOn').checked, pw = $('#lanPw').value;
+    err.hidden = true;
+    api('/api/lan', enc({ on: on ? 'on' : 'off', pw: pw })).then(function () {
+      if (pw && S.mode === 'lan') { auth = pw; try { sessionStorage.setItem('mc-auth', auth); } catch (e) { /* no storage */ } }
+      if (!on && S.mode === 'lan') { bye('Home network access is off', 'Switch it on again from the clock’s hotspot.'); return; }
+      toast(on ? 'Home network access is on.' : 'Home network access is off.');
+      return load();
+    }).catch(function (e) { err.textContent = e.message; err.hidden = false; });
+  });
+  twoTap($('#forget'), 'Forget WiFi', 'Tap again to forget', function () {
+    api('/api/forget', '').then(function (r) { showWifi(r.line, false); $('#ssid').value = ''; toast('The home WiFi is forgotten.'); }).catch(function () { toast('The clock did not answer.'); });
+  });
+  twoTap($('#restart'), 'Restart the clock', 'Tap again to restart', function () {
+    api('/api/restart', '').then(function () { bye('Restarting', S.mode === 'ap' ? 'The clock restarts; open the hotspot again from its menu.' : 'The clock restarts; reload this page in about 15 s.'); })
+      .catch(function () { toast('The clock did not answer.'); });
+  });
+  $('#themeBtn').addEventListener('click', function () {
+    var root = document.documentElement, dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme = dark ? 'light' : 'dark';
+    try { localStorage.setItem('mc-theme', root.dataset.theme); } catch (e) { /* no storage */ }
+    drawMinis();
+  });
+  try { var th = localStorage.getItem('mc-theme'); if (th) { document.documentElement.dataset.theme = th; } } catch (e) { /* no storage */ }
+
+  function load() {
+    return api('/api/state').then(function (st) {
+      S = st; saved = clone(st.settings); cur = clone(st.settings);
+      render(); drawMinis();
+      $('#cover').hidden = true;
+    });
+  }
+  function start() {
+    load().catch(function (e) {
+      if (e.auth) {
+        $('#coverT').textContent = 'Matrix Clock on the home network';
+        $('#coverN').textContent = auth ? e.message : 'The settings need the clock’s password: at first the hotspot’s, changed in the settings under Home WiFi, continuous network access.';
+        $('#login').hidden = false; $('#loginPw').focus();
+        return;
+      }
+      $('#coverN').textContent = 'The clock did not answer. Reload this page.';
+    });
+  }
+  $('#login').addEventListener('submit', function (e) {
+    e.preventDefault();
+    auth = $('#loginPw').value;
+    try { sessionStorage.setItem('mc-auth', auth); } catch (err) { /* no storage */ }
+    $('#login').hidden = true; $('#coverN').textContent = 'Asking the clock…';
+    start();
+  });
+  start();
+  setInterval(pollStatus, 2000);
+  setInterval(pollPanel, 200);   // 700 until 2026-10-08; 200 kept after a trial
+  setInterval(drawMinis, 1000);
+})();
+</script>
+</body>
+</html>
