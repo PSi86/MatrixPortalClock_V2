@@ -17,6 +17,8 @@
 #include <NetworkClientSecure.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
+#include <mbedtls/platform.h>
+#include <freertos/idf_additions.h>
 #include "clock_time.h"
 
 // ---- Items ----------------------------------------------------------------
@@ -26,8 +28,22 @@ enum ItemLevel : uint8_t { LEVEL_INFO, LEVEL_ALERT };
 // What an item's icon shows; the pictures come with the band.
 enum ItemIcon : uint8_t {
   ICON_NONE, ICON_CLEAR_DAY, ICON_CLEAR_NIGHT, ICON_PARTLY_DAY, ICON_PARTLY_NIGHT, ICON_CLOUDY,
-  ICON_FOG, ICON_DRIZZLE, ICON_RAIN, ICON_SNOW, ICON_THUNDER, ICON_WARNING,
+  ICON_FOG, ICON_DRIZZLE, ICON_RAIN, ICON_SNOW, ICON_THUNDER, ICON_WARNING, ICON_COUNT
 };
+
+// The icons by name, as Home Assistant gives them, in ItemIcon's order.
+const char *const ITEM_ICON_NAMES[ICON_COUNT] = {
+  "", "clear-day", "clear-night", "partly-day", "partly-night", "cloudy",
+  "fog", "drizzle", "rain", "snow", "thunder", "warning",
+};
+
+// ICON_NONE for a name that is none of them.
+inline uint8_t itemIconByName(const char *name) {
+  for (uint8_t i = 1; name && i < ICON_COUNT; i++) {
+    if (strcmp(name, ITEM_ICON_NAMES[i]) == 0) { return i; }
+  }
+  return ICON_NONE;
+}
 
 // The sources the clock fetches itself.
 enum FeedId : uint8_t { FEED_WEATHER, FEED_WARNINGS, FEED_COUNT };
@@ -36,7 +52,7 @@ enum FeedId : uint8_t { FEED_WEATHER, FEED_WARNINGS, FEED_COUNT };
 // item past `until` is not shown any more, so the band never passes off an
 // old value as the current one.
 struct BandItem {
-  char    key[12];     // what it is, unique among the items: "weather", "rain", "warn1"
+  char    key[24];     // what it is, unique within its source: "weather", "rain", "warn1", or a name Home Assistant gave
   char    text[96];
   uint8_t icon;        // ItemIcon
   uint8_t level;       // ItemLevel
@@ -117,6 +133,17 @@ inline time_t feedIsoTime(const char *s) {
     t += (*z == '+') ? -off : off;
   }
   return (time_t)t;
+}
+
+// Copies src into dst (size bytes with the NUL), cutting at a character's
+// first byte, so a long UTF-8 text never ends in half a character.
+inline void itemTextCopy(char *dst, const char *src, size_t size) {
+  if (strlcpy(dst, src, size) < size) { return; }
+  size_t cut = size - 1;                                     // the first byte left out
+  if (((uint8_t)src[cut] & 0xC0) != 0x80) { return; }       // it starts a character: nothing cut through
+  while (cut > 0 && ((uint8_t)dst[cut - 1] & 0xC0) == 0x80) { cut--; }
+  if (cut > 0) { cut--; }                                    // the first byte of the character cut through
+  dst[cut] = '\0';
 }
 
 inline void feedItem(FeedResult &r, const char *key, const char *text, uint8_t icon, uint8_t level, time_t until) {
@@ -380,12 +407,30 @@ inline void feedTask(void *) {
   }
 }
 
+// mbedTLS's memory from PSRAM, internal RAM only when PSRAM is short. The
+// core is built with CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC, so a TLS handshake
+// took several 10 KB of internal RAM, which the panel driver, the WiFi and
+// the Home Assistant link need too: on 2026-10-09 a fetch at start-up with
+// the link on left only 18 KB of it free. PSRAM is what the core's own
+// CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC would use.
+inline void *feedTlsCalloc(size_t n, size_t size) {
+  void *p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+inline void feedTlsFree(void *p) { heap_caps_free(p); }
+
 // Starts the fetch task, on core 0 beside the WiFi so the loop on core 1
-// keeps drawing during a fetch. false when there was no RAM for it.
+// keeps drawing during a fetch, with its stack in PSRAM when there is some
+// (it never touches the flash). false when there was no RAM for it.
 inline bool feedBegin() {
   if (feedJobs()) { return true; }
+  mbedtls_platform_set_calloc_free(feedTlsCalloc, feedTlsFree);   // before any TLS
   feedJobs()    = xQueueCreate(1, sizeof(FeedJob));
   feedResults() = xQueueCreate(1, sizeof(FeedResult));
   if (!feedJobs() || !feedResults()) { return false; }
+  if (xTaskCreatePinnedToCoreWithCaps(feedTask, "feeds", FEED_TASK_STACK, nullptr, 1, nullptr, 0,
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS) {
+    return true;
+  }
   return xTaskCreatePinnedToCore(feedTask, "feeds", FEED_TASK_STACK, nullptr, 1, nullptr, 0) == pdPASS;
 }

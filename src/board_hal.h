@@ -123,6 +123,8 @@
   // The settings as a web app (webui/index.html) on a JSON interface; the M4
   // keeps the page the sketch writes line by line.
   #define WEBUI_APP 1
+  // The link to Home Assistant over MQTT (src/ha_link.h).
+  #define HA_LINK 1
   // The accelerometer's INT1 line. Not in Adafruit's pinout page - taken from
   // the board schematic (Adafruit-MatrixPortal-S3-PCB, "Adafruit MatrixPortal
   // S3.sch"), where the net list has U4 (the LIS3DH) pin INT1 on the net INT
@@ -151,6 +153,8 @@
   #define BAND_DATA 0
   // The page the sketch writes line by line; the web app is for the S3.
   #define WEBUI_APP 0
+  // No Home Assistant link: what it brings is for the info band.
+  #define HA_LINK 0
 #endif
 
 /* ======================================================================

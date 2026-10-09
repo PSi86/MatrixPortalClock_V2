@@ -68,6 +68,7 @@ struct GifPackEntry;                   // and this one
 #include <mbedtls/base64.h>    // and sent as HTTP Basic authorization
 #else
 class JsonDocument;                    // named by prototypes generated from this sketch
+class JsonObject;
 #endif
 
 #if BAND_DATA
@@ -75,6 +76,15 @@ class JsonDocument;                    // named by prototypes generated from thi
 #else
 struct FeedResult;                     // named by prototypes generated from this sketch
 struct BandItem;
+#endif
+
+#if HA_LINK
+#if !(BAND_DATA && WEBUI_APP)
+#error "The Home Assistant link brings items for the info band and is set up in the web app"
+#endif
+#include "ha_link.h"           // the link to Home Assistant over MQTT
+#else
+struct HaIn;                           // named by prototypes generated from this sketch
 #endif
 
 /* ----------------------------------------------------------------------
@@ -390,6 +400,57 @@ uint8_t       lanFails = 0;              // wrong passwords in a row
 unsigned long lanLockedAt = 0;           // millis() of the fifth; no password is checked for LAN_LOCK_MS
 bool          lanLocked = false;
 const unsigned long LAN_LOCK_MS = 30UL * 1000UL;
+#endif
+
+#if HA_LINK
+// The Home Assistant link ------------------------------------------------------------
+// MQTT through Home Assistant's broker (src/ha_link.h): its address and the
+// clock's login there, a blob of its own (NVS key "ha"). The password is kept
+// as typed, as the home WiFi's is: the broker needs it so.
+#define HA_SETTINGS_MAGIC 0x4A11
+#define HA_SETTINGS_REV   1
+struct HaSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  on;            // 1 = linked
+  uint16_t port;          // the broker's
+  uint8_t  reserved[2];
+  char     host[64];      // the broker's name or address
+  char     user[64];
+  char     pass[64];
+};
+HaSettings haSettings;
+SettingsStore<HaSettings> haStore;
+const uint16_t HA_PORT_DEFAULT = 1883;
+
+// What the link does, for the config page.
+enum HaState : uint8_t {
+  HA_OFF,          // switched off
+  HA_BLOCKED,      // switched on, but it lacks something (haBlocked())
+  HA_WAITING,      // waits for the station
+  HA_FAILED,       // the client did not start (no RAM); again after HA_RETRY_MS
+  HA_CONNECTING,   // the client runs and is not connected, yet or again
+  HA_UP,           // connected
+  HA_STOPPING,     // the worker says goodbye and stops the client (up to a connect's timeout)
+};
+HaState       haState = HA_OFF;
+// Where the client is, as far as the loop has asked the worker for it. From
+// the start command to the worker's "stopped" the link holds the station
+// (RADIO_HA), so the goodbye still goes out.
+enum HaPhase : uint8_t { HA_PHASE_IDLE, HA_PHASE_STARTING, HA_PHASE_RUNNING, HA_PHASE_STOPPING };
+HaPhase       haPhase = HA_PHASE_IDLE;
+bool          haChanged = false;      // new settings: the client starts again with them
+unsigned long haFailedAt = 0;         // millis() the client last failed to start; 0 = it did not
+char          haError[80] = "";       // what went wrong last, until the next connect
+time_t        haUpSince = 0;          // UTC of the connect
+unsigned long haLightAt = 0;          // millis() the light was last sent; 0 = not since the connect
+uint32_t      haLostSeen = 0;         // haLink().lost as last reported
+const unsigned long HA_LIGHT_MS = 60UL * 1000UL;   // the light sensor's lux to Home Assistant
+const unsigned long HA_RETRY_MS = 60UL * 1000UL;   // after the client failed to start
+const unsigned long HA_STOP_WAIT_MS = 2000;        // the hotspot waits this long for the goodbye
+const uint8_t  SOURCE_HA = FEED_COUNT;   // BandItem.feed of what Home Assistant sent
+const char *const HA_MESSAGE_KEY = "*message";   // a message's item; no item name has a '*'
+const uint16_t HA_MESSAGE_S = 60;        // how long a message counts when it does not say
 #endif
 
 // Home WiFi --------------------------------------------------------------------
@@ -831,8 +892,9 @@ unsigned long syncPausedSince  = 0;           // millis() the pause began
 unsigned long syncLastAsk  = 0;               // millis() of the last ask, for the retry pace
 const unsigned long NTP_RETRY_MS  = 3000;     // between asks while a sync is due
 
-// The station - the clock joined to the home WiFi - is shared: the NTP sync
-// and the info band's sources each say while they need it (radioUsers), and
+// The station - the clock joined to the home WiFi - is shared: the NTP sync,
+// the info band's sources, the web app on the home network and the Home
+// Assistant link each say while they need it (radioUsers), and
 // the radio is off while nobody does (stationUpdate()). The sync's need
 // follows its state (setSyncState()). The hotspot takes the radio over while
 // it is open.
@@ -841,7 +903,7 @@ enum StationState : uint8_t {
   STA_JOINING,   // joining the home WiFi, again every JOIN_RETRY_MS until it connects
   STA_UP,        // connected
 };
-enum RadioUser : uint8_t { RADIO_SYNC = 0x01, RADIO_FEEDS = 0x02, RADIO_LAN = 0x04 };
+enum RadioUser : uint8_t { RADIO_SYNC = 0x01, RADIO_FEEDS = 0x02, RADIO_LAN = 0x04, RADIO_HA = 0x08 };
 StationState  stationState = STA_OFF;
 uint8_t       radioUsers   = RADIO_SYNC;      // the first sync is due at start-up (syncState)
 unsigned long joinAskedAt  = 0;               // millis() the join was last started, for the re-join pace
@@ -1114,6 +1176,9 @@ void setup(void) {
 #if WEBUI_APP
   loadLanSettings();
 #endif
+#if HA_LINK
+  loadHaSettings();
+#endif
 
   // Onboard LIS3DH accelerometer -> automatic screen rotation. If it is not
   // found the clock simply stays in the default portrait orientation.
@@ -1273,6 +1338,9 @@ void loop(void) {
   timeSync_WifiLib();
 #if BAND_DATA
   feedsUpdate();        // the info band's sources, fetched beside the loop
+#endif
+#if HA_LINK
+  haUpdate();           // the link to Home Assistant, which runs beside the loop
 #endif
   if (minuteTrigger) { updateAutoDst(); } // follow the timezone's summer/winter time changes
   updateOrientation();  // rotate the display to match how the panel is held
@@ -4812,6 +4880,9 @@ void startAPMode() {
   // The hotspot takes the radio: a sync attempt under way is cut off, and a
   // fresh one starts when the hotspot closes (stopAPMode()). Whatever the
   // station had is gone.
+#if HA_LINK
+  haStopLink(true);     // says goodbye to Home Assistant while the station still has the radio
+#endif
   if (syncAttempting(syncState)) { setSyncState(SYNC_PAUSED); }
   stationState = STA_OFF;
 #if WEBUI_APP
@@ -6433,10 +6504,11 @@ void bandRemoveAt(uint8_t i) {
   bandItemCount--;
 }
 
-// Takes an item, in place of the one with its key; says what changed.
+// Takes an item, in place of the one of its source with its key; says what
+// changed.
 void bandPut(const BandItem &n) {
   for (uint8_t i = 0; i < bandItemCount; i++) {
-    if (strcmp(bandItems[i].key, n.key) != 0) { continue; }
+    if (bandItems[i].feed != n.feed || strcmp(bandItems[i].key, n.key) != 0) { continue; }
     bool same = strcmp(bandItems[i].text, n.text) == 0 && bandItems[i].level == n.level;
     bandItems[i] = n;
     if (!same) { printBandItem("~", n); }
@@ -6448,6 +6520,16 @@ void bandPut(const BandItem &n) {
   }
   bandItems[bandItemCount++] = n;
   printBandItem("+", n);
+}
+
+// Takes the item of source f with this key away, if there is one.
+void bandRemove(uint8_t f, const char *key) {
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    if (bandItems[i].feed != f || strcmp(bandItems[i].key, key) != 0) { continue; }
+    Serial.printf("Info band - %s\n", key);
+    bandRemoveAt(i);
+    return;
+  }
 }
 
 // Drops the items of source f, or only those its new result no longer has.
@@ -6822,7 +6904,13 @@ void apiStatusInto(JsonDocument &d) {
     o["icon"] = bandItems[i].icon;
     o["alert"] = bandItems[i].level == LEVEL_ALERT;
     o["until"] = until;
+#if HA_LINK
+    o["ha"] = bandItems[i].feed == SOURCE_HA;
+#endif
   }
+#endif
+#if HA_LINK
+  haStatusInto(d["haStatus"].to<JsonObject>());
 #endif
 }
 
@@ -6890,6 +6978,9 @@ void apiState(Print &c) {
   lanJ["defaultPassword"] = lanPasswordIs(AP_PASS);
   lanJ["host"] = netHostname();
   if (stationUp()) { lanJ["ip"] = WiFi.localIP().toString(); }
+#if HA_LINK
+  haSettingsInto(d["ha"].to<JsonObject>());
+#endif
 
   JsonObject lists = d["lists"].to<JsonObject>();
   JsonArray tz = lists["tz"].to<JsonArray>();
@@ -7254,6 +7345,10 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
 #endif
   } else if (path == "/api/lan") {
     apiLan(c, body);
+#if HA_LINK
+  } else if (path == "/api/ha") {
+    apiHa(c, body);
+#endif
   } else if (path == "/api/restart") {
     sendNoContent(c);
     restart = true;
@@ -7410,5 +7505,406 @@ void lanUpdate() {
   if (!client) { return; }
   netClientTimeoutMs(client, 100);
   serveClient(client, true);
+}
+#endif
+
+#if HA_LINK
+/* ----------------------------------------------------------------------
+   The Home Assistant link (src/ha_link.h has the client and its topics):
+   when the client runs, what arrives, and the config page's part. Like
+   every source that is pushed to the clock it needs a stored home WiFi and
+   continuous network access. While it runs it holds the station as well
+   (RADIO_HA), so that switching the link or the access off still lets it
+   say goodbye before the radio goes.
+   ---------------------------------------------------------------------- */
+
+// "06c16c": the end of the host name, the last three bytes of the MAC.
+const char *haId() { return netHostname() + strlen("matrixclock-"); }
+
+void loadHaSettings() {
+  haStore.begin("ha");
+  haStore.read(haSettings);
+  if (haSettings.magic != HA_SETTINGS_MAGIC) {
+    memset(&haSettings, 0, sizeof(haSettings));
+    haSettings.port = HA_PORT_DEFAULT;
+  }
+  haTopics(haId());
+  if (haSettings.on) {
+    Serial.printf("Home Assistant: on, broker %s:%u, topics %s...\n", haSettings.host, haSettings.port, haLink().prefix);
+  }
+}
+
+void saveHaSettings() {
+  haSettings.magic = HA_SETTINGS_MAGIC;
+  haSettings.rev   = HA_SETTINGS_REV;
+  haStore.write(haSettings);
+}
+
+// What the link lacks to run, or nullptr: the page says so where it is
+// switched on.
+const char *haBlocked() {
+  if (!wifiStored())       { return "wifi"; }
+  if (!lanSettings.on)     { return "always"; }   // continuous network access
+  if (!haSettings.host[0]) { return "host"; }
+  return nullptr;
+}
+
+// The discovery configs: an entity to send the clock a message (notify,
+// Home Assistant 2024.5 on), and the light sensor's lux when there is one.
+// Without a sensor its config is taken back, in case it was there before.
+void haBuildAnnounce() {
+  HaLink &l = haLink();
+  const char *id = haId();
+  JsonDocument dev;
+  dev["identifiers"][0] = netHostname();
+  dev["name"] = String("Matrix Clock ") + id;
+  dev["model"] = "MatrixPortal S3";
+  dev["sw_version"] = FW_VERSION;
+  dev["configuration_url"] = String("http://") + netHostname() + ".local/";
+
+  JsonDocument msg;
+  msg["name"] = "Message";
+  msg["unique_id"] = String(netHostname()) + "-message";
+  msg["command_topic"] = l.message;
+  msg["command_template"] = "{\"text\": {{ value | tojson }}}";
+  msg["availability_topic"] = l.status;
+  msg["qos"] = 1;
+  msg["device"] = dev;
+  snprintf(l.announceTopic[0], sizeof(l.announceTopic[0]), "homeassistant/notify/%s/message/config", id);
+  l.announce[0] = "";
+  serializeJson(msg, l.announce[0]);
+
+  snprintf(l.announceTopic[1], sizeof(l.announceTopic[1]), "homeassistant/sensor/%s/light/config", id);
+  l.announce[1] = "";
+  if (luxOK) {
+    JsonDocument light;
+    light["name"] = "Light";
+    light["unique_id"] = String(netHostname()) + "-light";
+    light["state_topic"] = String(l.prefix) + "light";
+    light["device_class"] = "illuminance";
+    light["unit_of_measurement"] = "lx";
+    light["state_class"] = "measurement";
+    light["availability_topic"] = l.status;
+    light["device"] = dev;
+    serializeJson(light, l.announce[1]);
+  }
+}
+
+void haFailed() {
+  haFailedAt = millisNow ? millisNow : 1;
+  haState = HA_FAILED;
+  Serial.println("Home Assistant: no RAM for the MQTT client - again in a minute");
+}
+
+// Asks the worker for the client, with the settings as they are now.
+void haStartLink() {
+  if (!haBegin()) { haFailed(); return; }
+  HaLink &l = haLink();
+  haBuildAnnounce();
+  strlcpy(l.host, haSettings.host, sizeof(l.host));
+  strlcpy(l.user, haSettings.user, sizeof(l.user));
+  strlcpy(l.pass, haSettings.pass, sizeof(l.pass));
+  strlcpy(l.clientId, netHostname(), sizeof(l.clientId));
+  l.port = haSettings.port;
+  HaCmd c = {};
+  c.kind = HA_CMD_START;
+  if (!haCommand(c)) { return; }   // the worker is busy: again on the next pass
+  haPhase = HA_PHASE_STARTING;
+  haChanged = false;
+  radioUsers |= RADIO_HA;
+  haState = HA_CONNECTING;
+  Serial.printf("Home Assistant: connecting to %s:%u\n", haSettings.host, haSettings.port);
+}
+
+// Asks the worker to say goodbye and stop the client. The loop goes on at
+// once; only the hotspot waits (up to HA_STOP_WAIT_MS), as it takes the
+// radio right after.
+void haStopLink(bool wait) {
+  if (haPhase == HA_PHASE_STARTING || haPhase == HA_PHASE_RUNNING) {
+    HaCmd c = {};
+    c.kind = HA_CMD_STOP;
+    c.connected = (haState == HA_UP) ? 1 : 0;
+    if (!haCommand(c)) { return; }   // the worker is busy: again on the next pass
+    haPhase = HA_PHASE_STOPPING;
+    haState = HA_STOPPING;
+  }
+  if (!wait || haPhase != HA_PHASE_STOPPING) { return; }
+  static HaIn m;   // haUpdate()'s is busy only when it calls this
+  unsigned long t0 = millis();
+  while (haPhase == HA_PHASE_STOPPING && millis() - t0 < HA_STOP_WAIT_MS) {
+    if (xQueueReceive(haLink().in, &m, pdMS_TO_TICKS(50)) == pdTRUE) { haApply(m); }
+  }
+}
+
+// On every pass outside the hotspot: takes what the worker and the client's
+// task passed on, has the client run while the link is on and has what it
+// needs, and sends the light now and then. Never waits for the network.
+void haUpdate() {
+  static HaIn m;   // 0.5 KB, off the loop's stack
+  while (haLink().in && xQueueReceive(haLink().in, &m, 0) == pdTRUE) { haApply(m); }
+  uint32_t lost = haLink().lost.load();
+  if (lost != haLostSeen) {
+    Serial.printf("Home Assistant: %lu messages lost, the loop was busy\n", (unsigned long)(lost - haLostSeen));
+    haLostSeen = lost;
+  }
+  bool want = haSettings.on && !haBlocked();
+  if (haPhase == HA_PHASE_STARTING || haPhase == HA_PHASE_RUNNING) {
+    if (!want || haChanged) {
+      haStopLink(false);
+    } else if (haState == HA_UP && luxOK && lastLux >= 0 && (haLightAt == 0 || millisNow - haLightAt >= HA_LIGHT_MS)) {
+      HaCmd c = {};
+      c.kind = HA_CMD_SEND;
+      strlcpy(c.suffix, "light", sizeof(c.suffix));
+      snprintf(c.payload, sizeof(c.payload), "%ld", lroundf(lastLux));
+      if (haCommand(c)) { haLightAt = millisNow ? millisNow : 1; }
+    }
+    return;
+  }
+  if (haPhase == HA_PHASE_STOPPING) { return; }   // a new start waits for the old client to be gone
+  if (!want) {
+    haState = haSettings.on ? HA_BLOCKED : HA_OFF;
+    return;
+  }
+  if (!stationUp()) { haState = HA_WAITING; return; }
+  if (haFailedAt && millisNow - haFailedAt < HA_RETRY_MS) { haState = HA_FAILED; return; }
+  haStartLink();
+}
+
+void haApply(const HaIn &m) {
+  // The worker's answers.
+  if (m.kind == HA_IN_STARTED) {
+    if (haPhase == HA_PHASE_STARTING) { haPhase = HA_PHASE_RUNNING; }
+    return;
+  }
+  if (m.kind == HA_IN_START_FAILED || m.kind == HA_IN_STOPPED) {
+    haPhase = HA_PHASE_IDLE;
+    radioUsers &= (uint8_t)~RADIO_HA;
+    if (m.kind == HA_IN_START_FAILED) { haFailed(); }
+    else { haState = HA_OFF; Serial.println("Home Assistant: link stopped"); }
+    return;
+  }
+  // The client's: none counts once its stop was asked for.
+  if (haPhase != HA_PHASE_STARTING && haPhase != HA_PHASE_RUNNING) { return; }
+  switch (m.kind) {
+    case HA_IN_CONNECTED:
+      haState   = HA_UP;
+      haUpSince = clockIsSet() ? clockNow() : 0;
+      haError[0] = '\0';
+      haLightAt = 0;
+      haDropItems();   // the broker sends the retained ones anew at once
+      Serial.printf("Home Assistant: connected to %s:%u\n", haSettings.host, haSettings.port);
+      break;
+    case HA_IN_DISCONNECTED:
+      if (haState == HA_UP) { Serial.println("Home Assistant: connection lost - the client tries again"); }
+      haState = HA_CONNECTING;
+      break;
+    case HA_IN_ERROR:
+      if (m.error == HA_ERR_TOO_LONG) {
+        Serial.printf("Home Assistant: %s refused, %ld bytes (%u taken)\n", m.topic, (long)m.detail, HA_PAYLOAD_MAX);
+        break;
+      }
+      haErrorText(m);
+      Serial.printf("Home Assistant: %s\n", haError);
+      break;
+    case HA_IN_DATA:
+      if (!m.own) {
+        // Home Assistant has started anew: it has forgotten what is not retained.
+        if (strcmp(m.topic, "homeassistant/status") == 0 && strcmp(m.payload, "online") == 0) {
+          Serial.println("Home Assistant has started - the clock announces itself again");
+          HaCmd c = {};
+          c.kind = HA_CMD_ANNOUNCE;
+          haCommand(c);
+          haLightAt = 0;
+        }
+      } else if (strncmp(m.topic, "item/", 5) == 0) {
+        haItem(m.topic + 5, m.payload, m.len);
+      } else if (strcmp(m.topic, "message") == 0) {
+        // The broker sets the retain flag only on a kept message it hands out
+        // at a (re)connect, never on one it passes on live: such a message
+        // was shown when it came, and would come again with every connect.
+        // An empty one is how a kept message is taken off the broker.
+        if (m.retained)    { Serial.println("Home Assistant: a message kept by the broker is not shown again"); }
+        else if (m.len)    { haMessage(m.payload, m.len); }
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+// The items Home Assistant sent, but a message on show.
+void haDropItems() {
+  for (int i = (int)bandItemCount - 1; i >= 0; i--) {
+    if (bandItems[i].feed == SOURCE_HA && strcmp(bandItems[i].key, HA_MESSAGE_KEY) != 0) { bandRemoveAt((uint8_t)i); }
+  }
+}
+
+// What went wrong, in words, for the config page.
+void haErrorText(const HaIn &m) {
+  char where[80];
+  snprintf(where, sizeof(where), "%s:%u", haSettings.host, haSettings.port);
+  if (m.error == HA_ERR_REFUSED) {
+    if (m.detail == MQTT_CONNECTION_REFUSE_BAD_USERNAME || m.detail == MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED) {
+      strlcpy(haError, "The broker refused the user name or password", sizeof(haError));
+    } else if (m.detail == MQTT_CONNECTION_REFUSE_ID_REJECTED) {
+      strlcpy(haError, "The broker refused the clock's client name", sizeof(haError));
+    } else {
+      snprintf(haError, sizeof(haError), "The broker refused the connection (code %ld)", (long)m.detail);
+    }
+  } else if (m.error == HA_ERR_NETWORK) {
+    if (m.tlsError == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME) {
+      snprintf(haError, sizeof(haError), "Address not found: %s", haSettings.host);
+    } else if (m.detail == ECONNREFUSED) {
+      snprintf(haError, sizeof(haError), "Nothing answers at %s", where);
+    } else if (m.tlsError == ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT || m.detail == ETIMEDOUT) {
+      snprintf(haError, sizeof(haError), "No answer from %s", where);
+    } else if (m.detail == EHOSTUNREACH) {
+      snprintf(haError, sizeof(haError), "%s cannot be reached", where);
+    } else {
+      snprintf(haError, sizeof(haError), "The connection to %s failed (%s, errno %ld)", where,
+               m.tlsError ? esp_err_to_name(m.tlsError) : "no TLS error", (long)m.detail);
+    }
+  } else {
+    snprintf(haError, sizeof(haError), "MQTT error %ld", (long)m.detail);
+  }
+}
+
+// A name Home Assistant gives an item: 1 to 23 of a-z, A-Z, 0-9, _ and -.
+bool haNameOk(const char *name) {
+  size_t n = strlen(name);
+  if (n == 0 || n >= sizeof(BandItem::key)) { return false; }
+  for (const char *p = name; *p; p++) {
+    if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-') { return false; }
+  }
+  return true;
+}
+
+// mpclock/<id>/item/<name>: an item for the band, or its end (an empty
+// payload, or an until that has passed).
+void haItem(const char *name, const char *payload, uint16_t len) {
+  if (!haNameOk(name)) {
+    Serial.printf("Home Assistant: item name \"%s\" not taken (1 to 23 of a-z, 0-9, _ and -)\n", name);
+    return;
+  }
+  if (len == 0) { bandRemove(SOURCE_HA, name); return; }
+  JsonDocument doc;
+  DeserializationError e = deserializeJson(doc, payload, len);
+  if (e || !doc.is<JsonObject>()) {
+    Serial.printf("Home Assistant: item %s is no JSON object (%s)\n", name, e ? e.c_str() : "another JSON value");
+    return;
+  }
+  long long until = doc["until"].as<long long>();
+  if (until <= 0) {
+    Serial.printf("Home Assistant: item %s has no until (Unix time) - not taken\n", name);
+    return;
+  }
+  if (clockIsSet() && (time_t)until <= clockNow()) { bandRemove(SOURCE_HA, name); return; }
+  const char *text = doc["text"] | "";
+  uint8_t icon = itemIconByName(doc["icon"] | "");
+  if (!text[0] && icon == ICON_NONE) {
+    Serial.printf("Home Assistant: item %s has neither a text nor an icon - not taken\n", name);
+    return;
+  }
+  BandItem it = {};
+  strlcpy(it.key, name, sizeof(it.key));
+  itemTextCopy(it.text, text, sizeof(it.text));
+  it.icon  = icon;
+  it.level = strcmp(doc["level"] | "info", "alert") == 0 ? LEVEL_ALERT : LEVEL_INFO;
+  it.feed  = SOURCE_HA;
+  it.until = (time_t)until;
+  bandPut(it);
+}
+
+// mpclock/<id>/message: for `seconds` (HA_MESSAGE_S unless it says, 5 to
+// 3600). Until the banner on S exists it is an item like the others.
+void haMessage(const char *payload, uint16_t len) {
+  JsonDocument doc;
+  DeserializationError e = deserializeJson(doc, payload, len);
+  if (e || !doc.is<JsonObject>()) {
+    Serial.printf("Home Assistant: the message is no JSON object (%s)\n", e ? e.c_str() : "another JSON value");
+    return;
+  }
+  const char *text = doc["text"] | "", *title = doc["title"] | "";
+  if (!text[0] && !title[0]) { Serial.println("Home Assistant: an empty message"); return; }
+  long seconds = constrain(doc["seconds"] | (long)HA_MESSAGE_S, 5L, 3600L);
+  char line[HA_PAYLOAD_MAX + 1];
+  if (title[0] && text[0]) { snprintf(line, sizeof(line), "%s: %s", title, text); }
+  else                     { strlcpy(line, text[0] ? text : title, sizeof(line)); }
+  BandItem it = {};
+  strlcpy(it.key, HA_MESSAGE_KEY, sizeof(it.key));
+  itemTextCopy(it.text, line, sizeof(it.text));
+  it.icon  = itemIconByName(doc["icon"] | "");
+  it.level = strcmp(doc["level"] | "info", "alert") == 0 ? LEVEL_ALERT : LEVEL_INFO;
+  it.feed  = SOURCE_HA;
+  it.until = clockNow() + seconds;
+  bandPut(it);
+}
+
+// The settings for the page; never the password, only whether there is one.
+void haSettingsInto(JsonObject o) {
+  o["on"] = haSettings.on != 0;
+  o["host"] = haSettings.host;
+  o["port"] = haSettings.port;
+  o["user"] = haSettings.user;
+  o["hasPassword"] = haSettings.pass[0] != 0;
+  o["topics"] = haLink().prefix;
+}
+
+// What the link does, for the page. The hotspot stops it while it is open.
+void haStatusInto(JsonObject o) {
+  static const char *const STATE_NAMES[] = { "off", "blocked", "waiting", "failed", "connecting", "up", "stopping" };
+  o["state"] = (apActive && haSettings.on) ? "hotspot" : STATE_NAMES[haState];
+  const char *blocked = haBlocked();
+  if (haState == HA_BLOCKED && blocked) { o["blocked"] = blocked; }
+  if (haError[0]) { o["error"] = haError; }
+  if (haState == HA_UP && haUpSince) {
+    char when[16];
+    bandWhen(when, sizeof(when), haUpSince);
+    o["since"] = when;
+  }
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < bandItemCount; i++) { n += bandItems[i].feed == SOURCE_HA; }
+  o["items"] = n;
+}
+
+// /api/ha: on (on or off), host, port, user and pw (empty keeps the one
+// stored, unless the user is cleared too). Taken at once: the client starts
+// again with it.
+void apiHa(Print &c, const String &body) {
+  bool on = getParam(body, "on") == "on";
+  String host = getParam(body, "host"), user = getParam(body, "user"), pw = getParam(body, "pw");
+  String portText = getParam(body, "port");
+  host.trim();
+  user.trim();
+  portText.trim();
+  long port = portText.length() ? portText.toInt() : HA_PORT_DEFAULT;
+  if (host.length() >= sizeof(haSettings.host) || host.indexOf(' ') >= 0) {
+    sendJsonError(c, 400, "The broker's address is a name or an IP address, up to 63 characters.");
+    return;
+  }
+  if (port < 1 || port > 65535) { sendJsonError(c, 400, "The port is a number from 1 to 65535."); return; }
+  if (user.length() >= sizeof(haSettings.user) || pw.length() >= sizeof(haSettings.pass)) {
+    sendJsonError(c, 400, "User name and password have up to 63 characters each.");
+    return;
+  }
+  if (on && !host.length()) { sendJsonError(c, 400, "Enter the broker's address to switch the link on."); return; }
+  bool wasOn = haSettings.on != 0;
+  strlcpy(haSettings.host, host.c_str(), sizeof(haSettings.host));
+  haSettings.port = (uint16_t)port;
+  strlcpy(haSettings.user, user.c_str(), sizeof(haSettings.user));
+  if (pw.length())         { strlcpy(haSettings.pass, pw.c_str(), sizeof(haSettings.pass)); }
+  else if (!user.length()) { haSettings.pass[0] = '\0'; }   // a password belongs to a user
+  haSettings.on = on ? 1 : 0;
+  saveHaSettings();
+  haChanged = true;
+  haFailedAt = 0;
+  haError[0] = '\0';
+  if (wasOn && !on) { bandDropFeed(SOURCE_HA); }   // switched off, the link takes its items with it
+  Serial.printf("Home Assistant: %s, broker %s:%u%s\n", on ? "on" : "off", haSettings.host, haSettings.port,
+                pw.length() ? ", new password" : "");
+  JsonDocument d;
+  d["ok"] = true;
+  haSettingsInto(d["ha"].to<JsonObject>());
+  sendJson(c, d);
 }
 #endif
