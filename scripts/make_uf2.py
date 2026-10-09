@@ -6,6 +6,7 @@
 # the ota_0 app partition, so the plain app image (firmware.bin, starting with the
 # 0xE9 image magic) goes in from base 0 - no bootloader, no partition table.
 
+import os
 import struct
 
 Import("env")  # noqa: F821 - provided by PlatformIO/SCons
@@ -38,6 +39,22 @@ def bin_to_uf2(data):
     return bytes(out)
 
 
+def ota0_size(partitions_bin):
+    """Size of the ota_0 partition in a binary partition table, or None."""
+    try:
+        with open(partitions_bin, "rb") as f:
+            table = f.read()
+    except OSError:
+        return None
+    for pos in range(0, len(table) - 31, 32):
+        magic, ptype, subtype, _offset, size = struct.unpack_from("<HBBII", table, pos)
+        if magic != 0x50AA:      # 0xAA 0x50: an entry; anything else ends the table
+            break
+        if ptype == 0x00 and subtype == 0x10:   # app, ota_0
+            return size
+    return None
+
+
 def make_uf2(source, target, env):
     bin_path = str(target[0])
     uf2_path = bin_path[:-len(".bin")] + ".uf2"
@@ -45,9 +62,21 @@ def make_uf2(source, target, env):
         data = f.read()
     if not data or data[0] != 0xE9:
         raise ValueError("%s is not an ESP app image (no 0xE9 magic)" % bin_path)
+    # TinyUF2 writes only what fits into ota_0. A larger image arrives cut
+    # short, does not start, and the board stays in MATRXS3BOOT; PlatformIO's
+    # "Flash:" line counts the sections only and reads lower than the image.
+    room = ota0_size(env.subst("$BUILD_DIR/partitions.bin"))
+    if room is not None and len(data) > room:
+        if os.path.exists(uf2_path):
+            os.remove(uf2_path)   # no UF2 of an earlier build left to copy by mistake
+        raise ValueError("firmware.bin has %d bytes, %d more than the %d of ota_0: lower "
+                         "custom_gif_budget_kb in platformio.ini" % (len(data), len(data) - room, room))
     with open(uf2_path, "wb") as f:
         f.write(bin_to_uf2(data))
-    print("Created %s (%d bytes of app image)" % (uf2_path, len(data)))
+    if room is None:
+        print("Created %s (%d bytes of app image; ota_0's size not found)" % (uf2_path, len(data)))
+    else:
+        print("Created %s (%d bytes of app image, %d of ota_0 free)" % (uf2_path, len(data), room - len(data)))
 
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", make_uf2)  # noqa: F821
