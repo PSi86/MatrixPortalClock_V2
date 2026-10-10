@@ -972,12 +972,18 @@ always. The walk takes 25 px/s by default (*Pace*, 20 to 80 ms per pixel); the
 longest change of a single digit, from the left edge to the digit complete,
 is 199 steps, 8 s at that pace (the debug build's self-test, below).
 
-**Knock**, and the face action *trigger watchface animation*: *Power pellet*
-(the muncher eats one of the colon's power pellets, the ghosts turn blue and flee,
-and one it catches flashes white for a third of a second and is gone; it used to
-run off as a pair of eyes, which on the panel read as a lone dot flying through
-the corridor), *Last digit again* (the minutes'
-ones eaten and laid again), or *Random each time*. A knock is not taken while a
+**Knock**, and the face action *trigger watchface animation*: *Power pellet*,
+*Last digit again* (the minutes' ones eaten and laid again), or *Random each
+time*. In the power pellet scene one ghost follows the muncher and the other
+comes in from the right; while the muncher eats one of the colon's power pellets
+they wait on either side of the opening. Turned blue, they stand frozen until it
+is back in the corridor, then shuffle away, and it catches the one on the left,
+then the one on the right, both near the middle (in landscape at x 24 and 39,
+upright at x 8 and 23): each flashes white for half a second while everything
+else stands still, as in the game, and is gone. Before, both fled to the left,
+and the muncher caught one at the very edge of the panel and, upright, none; and
+a caught ghost ran off as a pair of eyes, which on the panel read as a lone dot
+flying through the corridor. A knock is not taken while a
 scene runs, for 1 s after one, or when its scene could not end 1.5 s before the
 next change starts. However the ghosts stand, a scene ends at the latest 150
 steps after the muncher's walk, so no scene can hold up a change of the time.
@@ -986,8 +992,9 @@ The settings are in a blob of their own (NVS key `muncher`), as the Tetris ones
 are; `mst`, `mkn` and `mpace` in the web app's interface. Changing the change
 style or the pace shows the change from the last minute to this one; choosing
 another knock shows its scene. The debug build walks every change of every digit,
-both ways and on both layouts, and the knock's scene, ten seconds after start-up
-and says on the console whether each left exactly the new digit.
+both ways and on both layouts, and the knock's scene (both ghosts caught, away
+from the panel's edges), ten seconds after start-up, says on the console whether
+each came out right, and where the knock's scene caught its ghosts.
 
 ## Animation timing
 

@@ -151,20 +151,34 @@ const uint8_t MAX_LEGS = 112;
 
 enum Style : uint8_t { STYLE_MIXED, STYLE_ALL, STYLE_DIFF, STYLE_COUNT };   // stored values
 enum Mode : uint8_t { MODE_IDLE, MODE_CHANGE, MODE_POWER };
-enum GhostMode : uint8_t { GHOST_OFF, GHOST_FOLLOW, GHOST_SCARED, GHOST_CAUGHT };
+// FOLLOW: behind the muncher along the corridor. AMBUSH: in from the right,
+// waiting on the other side of the opening (the knock's scene). SCARED:
+// blue after the power pellet. CAUGHT: its flash, then gone.
+enum GhostMode : uint8_t { GHOST_OFF, GHOST_FOLLOW, GHOST_AMBUSH, GHOST_SCARED, GHOST_CAUGHT };
 const uint8_t GHOSTS = 2;
 const uint8_t GHOST_DELAY[GHOSTS] = { 8, 16 };   // steps behind the muncher's track
 const uint8_t GHOST_GAP[GHOSTS]   = { 7, 14 };   // never closer to it than this
 const int16_t START_X = -3;                      // just off the left edge
-// A caught ghost flashes white where it was caught for this many steps, a
-// third of a second at the default pace, and is gone. It used to run off
-// as a pair of eyes: two white pixels that on the panel read as a lone dot
-// flying through the corridor (Peter, 2026-10-10).
-const uint8_t CAUGHT_STEPS = 8;
+// The knock's scene puts the catch in the middle of the panel: one ghost
+// follows the muncher, the other comes in from the right, and both wait on
+// either side of the opening while it eats the pellet. Turned blue, they
+// stand frozen until it is back in the corridor, then shuffle away, one
+// pixel every SCARED_EVERY steps, and it catches the one on the left, then
+// the one on the right. Before, both fled to the left at half speed: on
+// the panel the muncher caught one at the very edge, and upright none
+// (Peter, 2026-10-10).
+const uint8_t SCARED_EVERY = 8;
+// A caught ghost flashes white where it was caught for this many steps,
+// half a second at the default pace, while everything else stands still,
+// as in the game, and is gone. It used to run off as a pair of eyes: two
+// white pixels that on the panel read as a lone dot flying through the
+// corridor (Peter, 2026-10-10).
+const uint8_t CAUGHT_STEPS = 12;
 
 struct Ghost {
   int16_t x;
   uint8_t mode;
+  int8_t  flee;       // GHOST_SCARED: the way it shuffles off, -1 left, +1 right
   uint8_t timer;      // GHOST_CAUGHT: steps of its flash left
   // Whether it is drawn on this step: always, but in its flash only every
   // other pair of steps.
@@ -184,6 +198,8 @@ class Face {
   int8_t dx = 1, dy = 0;                       // the way it faces
   Ghost ghosts[GHOSTS] = {};
   uint16_t stepsDone = 0;
+  uint8_t caughtCount = 0;                     // ghosts caught in this scene
+  int16_t caughtX[GHOSTS] = {};                // where, in the order caught
 
   void setLayout(const Layout &layout) { L = layout; show(shown); }
 
@@ -239,8 +255,9 @@ class Face {
     return done;
   }
 
-  // The knock's scene: up to the power pellet and back, then after the
-  // ghosts. Returns the steps up to the pellet.
+  // The knock's scene: up to the power pellet and back down; from there it
+  // goes after the ghosts and out to the right (stepOnce()). Returns the
+  // steps up to the pellet.
   uint16_t planPower() {
     legCount = 0;
     steps = 0;
@@ -255,7 +272,6 @@ class Face {
     uint16_t pellet = steps;
     leg(L.knockX, L.knockAtY, ACT_WALK, 0);
     leg(L.knockX, L.laneY, ACT_WALK, 0);
-    leg(START_X, L.laneY, ACT_WALK, 0);
     pathSteps = steps;
     return pellet;
   }
@@ -268,7 +284,13 @@ class Face {
     legAt = 0;
     mx = START_X; my = L.laneY; dx = 1; dy = 0;
     laneX = START_X;
+    caughtCount = 0;
+    moves = 0;
     for (uint8_t g = 0; g < GHOSTS; g++) { ghosts[g].mode = GHOST_FOLLOW; ghosts[g].x = START_X - GHOST_GAP[g]; }
+    if (m == MODE_POWER) {   // the second one comes in from the right
+      ghosts[1].mode = GHOST_AMBUSH;
+      ghosts[1].x = L.w + 3;
+    }
     for (uint8_t k = 0; k < TRACK; k++) { track[k] = START_X; }
   }
 
@@ -281,8 +303,8 @@ class Face {
     return moved;
   }
 
-  bool mouthOpen() const { return (stepsDone / 3) % 2 == 0; }
-  bool muncherOn() const { return mode != MODE_IDLE && legAt < legCount; }
+  bool mouthOpen() const { return (moves / 3) % 2 == 0; }
+  bool muncherOn() const { return mode != MODE_IDLE; }   // drawn clipped: off the panel at either end
   uint8_t legsPlanned() const { return legCount; }
 
  private:
@@ -292,6 +314,7 @@ class Face {
   int16_t px = START_X, py = 0;      // where the walk being planned stands
   uint16_t steps = 0;                // its length so far
   uint16_t pathSteps = 0;            // the whole walk's length
+  uint16_t moves = 0;                // steps the muncher moved (its mouth; not while all stand still)
   // However the ghosts are placed, a scene is over this many steps after the
   // muncher's walk: a scene that never ended would hold up every change of
   // the time after it.
@@ -359,13 +382,42 @@ class Face {
     else if (g.act == ACT_SET)            { dots[i] = wanted ? (dots[i] | bit) : (dots[i] & ~bit); }
   }
 
+  // While a caught ghost flashes, everything else stands still.
+  bool frozen() const {
+    for (uint8_t g = 0; g < GHOSTS; g++) {
+      if (ghosts[g].mode == GHOST_CAUGHT) { return true; }
+    }
+    return false;
+  }
+
+  // The knock's scene after its walk: towards the nearest blue ghost, the
+  // one on the left first when both are as near; with none left, out to
+  // the right.
+  void chase() {
+    int16_t best = -1, bestDist = 0x7FFF;
+    for (uint8_t g = 0; g < GHOSTS; g++) {
+      if (ghosts[g].mode != GHOST_SCARED) { continue; }
+      int16_t dist = abs(ghosts[g].x - mx);
+      if (dist < bestDist || (dist == bestDist && ghosts[g].x < ghosts[best].x)) { best = g; bestDist = dist; }
+    }
+    int8_t sx = (best >= 0) ? (int8_t)((ghosts[best].x > mx) - (ghosts[best].x < mx)) : 1;
+    if (best < 0 && mx > L.w + 2) { return; }   // out
+    mx += sx;
+    if (sx) { dx = sx; dy = 0; }
+    moves++;
+  }
+
   void stepOnce() {
     stepsDone++;
-    if (legAt < legCount) {
+    bool still = frozen();
+    if (still) {
+      // nothing moves but the flash
+    } else if (legAt < legCount) {
       const Leg &g = legs[legAt];
       int8_t sx = (g.x > mx) - (g.x < mx), sy = (g.y > my) - (g.y < my);
       mx += sx; my += sy;
       if (sx || sy) { dx = sx; dy = sy; }
+      moves++;
       touch(g);
       if (mx == g.x && my == g.y) {
         if (g.act == ACT_PELLET) { powerPellet(); }
@@ -376,24 +428,30 @@ class Face {
         // back to it - an 8 becoming a 4, entered at its lower left, say.
         if (legAt < legCount && legs[legAt].act != g.act) { touch(legs[legAt]); }
       }
+    } else if (mode == MODE_POWER) {
+      chase();
     }
-    if (my == L.laneY) {
+    if (!still && my == L.laneY) {
       laneX = mx;
       if (mx >= 2 && (mx - 2) % 4 == 0 && (mx - 2) / 4 < 32) { lanePellets &= ~(1UL << ((mx - 2) / 4)); }
     }
     track[stepsDone % TRACK] = laneX;
-    moveGhosts();
-    if (legAt >= legCount && (ghostsGone() || stepsDone > pathSteps + AFTER_WALK_MAX)) { finish(); }
+    moveGhosts(still);
+    bool out = mode != MODE_POWER || mx > L.w + 2;   // the knock's muncher leaves on its own
+    if (legAt >= legCount && ((out && ghostsGone()) || stepsDone > pathSteps + AFTER_WALK_MAX)) { finish(); }
   }
 
   void powerPellet() {
     pelletEaten = true;
     for (uint8_t g = 0; g < GHOSTS; g++) {
-      if (ghosts[g].mode == GHOST_FOLLOW) { ghosts[g].mode = GHOST_SCARED; }
+      Ghost &h = ghosts[g];
+      if (h.mode != GHOST_FOLLOW && h.mode != GHOST_AMBUSH) { continue; }
+      h.flee = (h.x < L.knockX) ? -1 : 1;    // away from the opening, on its own side
+      h.mode = GHOST_SCARED;
     }
   }
 
-  void moveGhosts() {
+  void moveGhosts(bool still) {
     for (uint8_t g = 0; g < GHOSTS; g++) {
       Ghost &h = ghosts[g];
       switch (h.mode) {
@@ -406,10 +464,23 @@ class Face {
           if (x > h.x) { h.x = x; }
           break;
         }
+        case GHOST_AMBUSH:
+          // In from the right, to wait as far on the other side of the
+          // opening as the first ghost waits on its own side.
+          if (h.x > L.knockX + GHOST_GAP[0]) { h.x--; }
+          break;
         case GHOST_SCARED:
-          if (stepsDone % 2 == 0) { h.x--; }               // fleeing, at half speed
-          if (my == L.laneY && abs(mx - h.x) <= 3) { h.mode = GHOST_CAUGHT; h.timer = CAUGHT_STEPS; }
-          else if (h.x < -3) { h.mode = GHOST_OFF; }
+          if (still) { break; }
+          // Frozen while the muncher is still up, then shuffling off.
+          if (my == L.laneY && stepsDone % SCARED_EVERY == 0) { h.x += h.flee; }
+          // Caught as the two touch, so its flash shows beside the muncher.
+          if (my == L.laneY && abs(mx - h.x) <= 4) {
+            h.mode = GHOST_CAUGHT;
+            h.timer = CAUGHT_STEPS;
+            if (caughtCount < GHOSTS) { caughtX[caughtCount++] = h.x; }
+          } else if (h.x < -3 || h.x > L.w + 3) {
+            h.mode = GHOST_OFF;                            // got away
+          }
           break;
         case GHOST_CAUGHT:
           if (h.timer > 0) { h.timer--; }
@@ -425,7 +496,7 @@ class Face {
     for (uint8_t g = 0; g < GHOSTS; g++) {
       const Ghost &h = ghosts[g];
       if (h.mode == GHOST_FOLLOW && h.x - 2 < L.w) { return false; }
-      if (h.mode == GHOST_SCARED || h.mode == GHOST_CAUGHT) { return false; }
+      if (h.mode == GHOST_AMBUSH || h.mode == GHOST_SCARED || h.mode == GHOST_CAUGHT) { return false; }
     }
     return true;
   }
@@ -452,7 +523,8 @@ inline bool selfTest(Face &f, uint16_t &longest, uint16_t &failed) {
   const Layout *layouts[2] = { &LANDSCAPE, &PORTRAIT };
   for (uint8_t l = 0; l < 2; l++) {
     // The knock's scene: the pellet is eaten when the muncher reaches it,
-    // the ghosts turn, and the scene ends. failed = 50000 + layout.
+    // the ghosts turn, it catches both of them on the panel, away from its
+    // edges, and the scene ends. failed = 50000 + layout.
     uint8_t d[4] = { 1, 2, 3, 4 };
     f.setLayout(*layouts[l]);
     f.show(d);
@@ -461,7 +533,11 @@ inline bool selfTest(Face &f, uint16_t &longest, uint16_t &failed) {
     f.advanceTo(pellet);
     bool scared = f.pelletEaten && f.ghosts[0].mode == GHOST_SCARED;
     f.advanceTo(3000);
-    if (!scared || f.mode != MODE_IDLE) { failed = 50000 + l; return false; }
+    bool caught = f.caughtCount == GHOSTS;
+    for (uint8_t g = 0; g < f.caughtCount; g++) {
+      if (f.caughtX[g] < 4 || f.caughtX[g] > layouts[l]->w - 5) { caught = false; }
+    }
+    if (!scared || !caught || f.mode != MODE_IDLE) { failed = 50000 + l; return false; }
     for (uint8_t pos = 2; pos <= 3; pos++) {
       for (uint8_t style = STYLE_ALL; style <= STYLE_DIFF; style++) {
         for (uint8_t from = 0; from <= 9; from++) {

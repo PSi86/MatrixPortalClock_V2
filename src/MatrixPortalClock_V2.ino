@@ -3614,12 +3614,18 @@ void muncherIdle(const uint8_t now[4]) {
   if (muncherPlannedFor != next) {
     uint8_t to[4];
     muncherDigitsAt(next, to);
-    uint16_t done = munch.planChange(to, muncherSettings.style);
+    muncherPlannedDone = munch.planChange(to, muncherSettings.style);
     muncherPlannedFor = next;
-    muncherPlannedDone = done;
-    unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
-    muncherStartAt = nextMinuteAt - (unsigned long)done * muncherSettings.paceMs;
   }
+  // The start, worked out anew on every pass until the change begins: the
+  // second's beginning it is measured from is only right once a real second
+  // has begun. Measured once at planning time, the first change after a
+  // restart stood complete at :00.973 (twice on 2026-10-10): the loop's
+  // first pass after the start counts as a new second, wherever in its
+  // second it falls. A sync that moves the second, or a new pace, is
+  // followed the same way.
+  unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
+  muncherStartAt = nextMinuteAt - (unsigned long)muncherPlannedDone * muncherSettings.paceMs;
   if (muncherPreviewReq) {
     // The web app wants to see a change: the last minute's to this one.
     muncherPreviewReq = false;
@@ -3704,19 +3710,23 @@ void muncherDraw(bool colonOn) {
   for (uint8_t k = 0; k < 32 && 2 + 4 * k < L.w; k++) {
     if (munch.lanePellets & (1UL << k)) { matrix.drawPixel(2 + 4 * k, L.laneY, dot); }
   }
-  for (uint8_t g = 0; g < muncher::GHOSTS; g++) {
-    const muncher::Ghost &h = munch.ghosts[g];
-    if (h.mode == muncher::GHOST_OFF || !h.lit()) { continue; }
-    // A caught one flashes white, eyes and all.
-    uint16_t body = (h.mode == muncher::GHOST_CAUGHT) ? eyes
-                  : (h.mode == muncher::GHOST_SCARED) ? wall
-                  : scaledColor(GHOST_RGB[g][0], GHOST_RGB[g][1], GHOST_RGB[g][2]);
-    muncherSprite(GHOST_BODY, h.x, L.laneY, 1, 0, body);
-    muncherSprite(GHOST_EYES, h.x, L.laneY, 1, 0, eyes);
-  }
-  if (munch.muncherOn()) {
-    muncherSprite(munch.mouthOpen() ? MUNCH_OPEN : MUNCH_SHUT, munch.mx, munch.my, munch.dx, munch.dy,
-                  scaledColor(255, 255, 0));
+  // The ghosts under the muncher, except one caught: its white flash goes on
+  // top, or the muncher standing next to it would hide most of it.
+  for (uint8_t pass = 0; pass < 2; pass++) {
+    if (pass == 1 && munch.muncherOn()) {
+      muncherSprite(munch.mouthOpen() ? MUNCH_OPEN : MUNCH_SHUT, munch.mx, munch.my, munch.dx, munch.dy,
+                    scaledColor(255, 255, 0));
+    }
+    for (uint8_t g = 0; g < muncher::GHOSTS; g++) {
+      const muncher::Ghost &h = munch.ghosts[g];
+      bool caught = h.mode == muncher::GHOST_CAUGHT;
+      if (h.mode == muncher::GHOST_OFF || !h.lit() || caught != (pass == 1)) { continue; }
+      uint16_t body = caught ? eyes
+                    : (h.mode == muncher::GHOST_SCARED) ? wall
+                    : scaledColor(GHOST_RGB[g][0], GHOST_RGB[g][1], GHOST_RGB[g][2]);
+      muncherSprite(GHOST_BODY, h.x, L.laneY, 1, 0, body);
+      muncherSprite(GHOST_EYES, h.x, L.laneY, 1, 0, eyes);
+    }
   }
   drawStatusPixel();
   drawHotspotMark();
@@ -3811,6 +3821,20 @@ void muncherSelfTest() {
                 longest, millis() - t0);
   if (!ok) { Serial.printf(", first wrong: %u", failed); }
   Serial.println();
+  // Where the knock's scene catches the ghosts, and how long it takes.
+  const muncher::Layout *layouts[2] = { &muncher::LANDSCAPE, &muncher::PORTRAIT };
+  for (uint8_t l = 0; l < 2; l++) {
+    uint8_t d[4] = { 1, 2, 3, 4 };
+    f.setLayout(*layouts[l]);
+    f.show(d);
+    f.planPower();
+    f.start(muncher::MODE_POWER);
+    uint16_t n = 0;
+    while (f.mode != muncher::MODE_IDLE && n < 3000) { f.advanceTo(++n); }
+    Serial.printf("Muncher knock scene, %s: %u caught", l ? "upright" : "landscape", f.caughtCount);
+    for (uint8_t g = 0; g < f.caughtCount; g++) { Serial.printf(" at x %d", f.caughtX[g]); }
+    Serial.printf(", %u steps\n", n);
+  }
 }
 #endif
 #endif  // WATCHFACE_MUNCHER
