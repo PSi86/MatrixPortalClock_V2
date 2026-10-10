@@ -109,7 +109,7 @@ constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
 };
 
 // Gestures, for every profile. Swipes and push move as UP and DOWN do; a
-// circle is the knob - clockwise is up, five steps at a time in an editor. A
+// circle is the knob - clockwise is up, one step per circle in an editor. A
 // hand held over the sensor at boot is the recovery, as holding UP is, and a
 // swipe to the left closes the hotspot again. The wave has no row: the sensor
 // reported hardly any wave in the tests of 2026-10-10, so the clock does not

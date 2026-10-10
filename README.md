@@ -1013,7 +1013,7 @@ shortcuts to begin with, which the Inputs page can change (see
 | swipe up / down | open the menu | previous / next item, or change the value |
 | swipe right, push | open the menu | open the item; in an editor: save |
 | swipe left | - | back, without saving |
-| circle clockwise / counter-clockwise | play random GIF | previous / next; in an editor five steps (clockwise is up) |
+| circle clockwise / counter-clockwise | play random GIF | previous / next; in an editor one step per circle (clockwise is up) |
 | a hand comes near and stays | a hint: `swipe` / `menu` | - |
 | a hand held over the sensor for 3 s during boot | open the config hotspot | - |
 
@@ -1056,10 +1056,12 @@ circle, instead.
   GND, SDA, SCL. Not 5 V: the module's pull-ups go to its supply and would put
   5 V on the ESP32-S3's 3.3 V pins (the board has its own pull-ups to 3.3 V).
   INT stays free unless it is wanted (above).
-- **On the console** every gesture taken shows as `Gesture: Swipe up (sensor
-  up, turned 0, panel 0)`, one left out with its reason (`- left out, the hand
-  going back, 300 ms after the last`), and a hand that came near as `Gesture
-  sensor: a hand near`. The addresses that answered on the I2C bus at start-up
+- **On the console** every gesture taken shows as `Gesture: Swipe up, 1840 ms
+  after the last (sensor up, turned 0, panel 0)`, one left out with its reason
+  (`- left out, the hand going back, 300 ms after the last`), and a hand that
+  came near as `Gesture sensor: a hand near`. The time counts from the last
+  gesture taken; when the sensor set more than one bit, the register follows
+  (`0x43=C0`), and the gesture shown is the one the priority above chose. The addresses that answered on the I2C bus at start-up
   are on the console and in `/api/state` (`hw.i2c`).
 - **Gesture test** (the web app's Inputs section): the panel shows every
   gesture instead of doing it - big, the direction the clock takes, grey when

@@ -4640,9 +4640,9 @@ const char *gestureLeftOut(uint8_t ev) {
 }
 
 // Once per loop: a gesture the sensor holds, as an event, unless it is left
-// out (gestureLeftOut()). A circle moves five steps, as a fast tap burst
-// does. Every gesture is handling the clock (lastInputAt), as every button
-// press is.
+// out (gestureLeftOut()). A circle is one step, as a swipe is: at five steps
+// a circle made the editors jump (tests of 2026-10-10). Every gesture is
+// handling the clock (lastInputAt), as every button press is.
 void updateGestures() {
   if (!gestureOK) { return; }
   if (GESTURE_INT >= 0) {
@@ -4685,13 +4685,19 @@ void updateGestures() {
   const char *label = name >= 0 ? FACE_EVENTS[name].label : "?";
   const char *why = gestureLeftOut(ev);
   gestureRemember(g, ev, why == nullptr, r43, r44);
+  // With the time since the last gesture taken, and the register as read when
+  // it held more than one bit (the decoding then chose by priority).
+  char after[48] = "";
+  int n = 0;
+  if (gestureAt) { n = snprintf(after, sizeof(after), ", %lu ms after the last", millisNow - gestureAt); }
+  if (r43 & (r43 - 1)) { snprintf(after + n, sizeof(after) - n, ", 0x43=%02X", r43); }
   if (why) {
-    Serial.printf("Gesture: %s - left out, %s, %lu ms after the last (sensor %s, turned %u, panel %u)\n", label, why,
-                  millisNow - gestureAt, gestureRawName(g), uiSettings.gestureMount, screenRotation);
+    Serial.printf("Gesture: %s - left out, %s%s (sensor %s, turned %u, panel %u)\n", label, why, after,
+                  gestureRawName(g), uiSettings.gestureMount, screenRotation);
     if (screen == SCREEN_GESTURE_TEST) { gestureTestCount++; panelDirty = true; }
     return;
   }
-  Serial.printf("Gesture: %s (sensor %s, turned %u, panel %u)\n", label, gestureRawName(g),
+  Serial.printf("Gesture: %s%s (sensor %s, turned %u, panel %u)\n", label, after, gestureRawName(g),
                 uiSettings.gestureMount, screenRotation);
   gestureLastEv = (uint8_t)ev;
   gestureAt   = millisNow;
@@ -4704,7 +4710,7 @@ void updateGestures() {
     panelDirty = true;
     return;
   }
-  handleInput(ev, (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) ? BURST_FAST_STEPS : 1);
+  handleInput(ev, 1);
 }
 
 // Without the INT line: whether a hand has come near and stays, asked only
