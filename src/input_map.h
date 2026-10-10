@@ -109,16 +109,16 @@ constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
 };
 
 // Gestures, for every profile. Swipes and push move as UP and DOWN do; a
-// circle is the knob - clockwise is up, five steps at a time in an editor;
-// waving is the knock on the face and the way home in the menu. A hand held
-// over the sensor at boot is the recovery, as holding UP is, and a swipe to
-// the left closes the hotspot again.
+// circle is the knob - clockwise is up, five steps at a time in an editor. A
+// hand held over the sensor at boot is the recovery, as holding UP is, and a
+// swipe to the left closes the hotspot again. The wave has no row: the sensor
+// reported hardly any wave in the tests of 2026-10-10, so the clock does not
+// read it.
 constexpr InputMapping GESTURES_DEFAULT[] = {
   { EV_SWIPE_UP,         CTX_FACE,    FN_OPEN_MENU      },
   { EV_SWIPE_DOWN,       CTX_FACE,    FN_OPEN_MENU      },
   { EV_SWIPE_RIGHT,      CTX_FACE,    FN_OPEN_MENU      },
   { EV_PUSH,             CTX_FACE,    FN_OPEN_MENU      },
-  { EV_WAVE,             CTX_FACE,    FN_FACE_ANIMATION },
   { EV_CIRCLE_CW,        CTX_FACE,    FN_PLAY_GIF       },
   { EV_CIRCLE_CCW,       CTX_FACE,    FN_PLAY_GIF       },
   { EV_APPROACH,         CTX_FACE,    FN_SHOW_HINTS     },
@@ -127,7 +127,6 @@ constexpr InputMapping GESTURES_DEFAULT[] = {
   { EV_SWIPE_RIGHT,      CTX_MENU,    FN_ENTER          },
   { EV_PUSH,             CTX_MENU,    FN_ENTER          },
   { EV_SWIPE_LEFT,       CTX_MENU,    FN_BACK           },
-  { EV_WAVE,             CTX_MENU,    FN_HOME           },
   { EV_CIRCLE_CW,        CTX_MENU,    FN_PREV           },
   { EV_CIRCLE_CCW,       CTX_MENU,    FN_NEXT           },
   { EV_SWIPE_LEFT,       CTX_HOTSPOT, FN_BACK           },

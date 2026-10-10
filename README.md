@@ -1002,34 +1002,47 @@ per second.
 ## Gesture sensor (PAJ7620U2)
 
 A PAJ7620U2 on the I2C bus (address 0x73; on the MatrixPortal through the STEMMA
-QT port) recognises nine gestures by itself. The clock looks for it at
-start-up; without one everything works as before. Its gestures do the same in
-both input profiles; on the face these are the shortcuts to begin with, which
-the Inputs page can change (see [Face shortcuts](#face-shortcuts)):
+QT port) recognises nine gestures by itself, eight of which the clock uses.
+The clock looks for it at start-up; without one everything works as before.
+Its gestures do the same in both input profiles; on the face these are the
+shortcuts to begin with, which the Inputs page can change (see
+[Face shortcuts](#face-shortcuts)):
 
 | Gesture | On the clock face | In the menu and its editors |
 |---|---|---|
 | swipe up / down | open the menu | previous / next item, or change the value |
 | swipe right, push | open the menu | open the item; in an editor: save |
 | swipe left | - | back, without saving |
-| wave | trigger watchface animation | out to the face |
 | circle clockwise / counter-clockwise | play random GIF | previous / next; in an editor five steps (clockwise is up) |
 | a hand comes near and stays | a hint: `swipe` / `menu` | - |
 | a hand held over the sensor for 3 s during boot | open the config hotspot | - |
 
 On the hotspot screen a swipe to the left closes the hotspot again. Pull (a
-hand moving away) does nothing unless the Inputs page gives it something.
+hand moving away) does nothing unless the Inputs page gives it something. The
+wave is not used: in the tests of 2026-10-10 the sensor reported a wave for 3
+of 5 waves, and late, in the first run, and for none of 10 in the second
+(with either of the settings below); a wave came as left and right, or as a
+circle, instead.
 
 - **Directions follow the panel.** The direction the sensor reports, plus the
   turn it is mounted at, minus the rotation the panel is drawn in, gives the
   direction on the panel: a swipe up is up as the viewer sees it, however the
   clock is held. The mount turn is set once on the config page (**Inputs** page);
   if a swipe up acts as another direction, try the next setting.
-- **One gesture at a time:** for 300 ms after a gesture the sensor's next one
-  is ignored, so the hand pulled back is not read as the opposite swipe. The
-  driver library's own pauses after a gesture (200 ms of blocking) are
-  switched off. Every gesture counts as handling the clock, so it holds off the
-  knock for 3 s, as a button press does.
+- **Reading:** the clock reads the sensor's two result registers itself, in
+  one read (as the datasheet's burst read, and the Zephyr and M5Stack drivers
+  do); the library only sets it up. With more than one bit set, a circle
+  counts before push and pull, and those before a swipe. Two of the sensor's
+  values are then set as PixArt's datasheet v1.5 starts it (0x91 = 0x0C, so a
+  hand may be out of view for 12 frames before a trace ends, and 0xCF =
+  0x62): with them circles came as circles in the tests (9 of 9), with the
+  library's values often as swipes (6 of 14).
+- **A swipe acts at once.** What comes after a gesture is held against it:
+  any gesture within 300 ms, the opposite swipe within 450 ms (the hand going
+  back; in the tests it came 250 to 305 ms after the swipe), and a swipe
+  within 1 s of a circle (part of the circling). Every gesture counts as
+  handling the clock, so it holds off the knock for 3 s, as a button press
+  does.
 - **The hint** is a banner that only explains: the swipe that follows closes it
   and goes on to the face, instead of being used up as on other banners.
 - **INT line or not.** STEMMA QT carries no interrupt line. Without one the
@@ -1043,17 +1056,28 @@ hand moving away) does nothing unless the Inputs page gives it something.
   GND, SDA, SCL. Not 5 V: the module's pull-ups go to its supply and would put
   5 V on the ESP32-S3's 3.3 V pins (the board has its own pull-ups to 3.3 V).
   INT stays free unless it is wanted (above).
-- **On the console** every gesture taken shows as `Gesture: Swipe up`, one the
-  300 ms after another leave out as `Gesture: Swipe down - left, 120 ms after
-  the last`, and a hand that came near as `Gesture sensor: a hand near`. The
-  addresses that answered on the I2C bus at start-up are on the console and in
-  `/api/state` (`hw.i2c`).
+- **On the console** every gesture taken shows as `Gesture: Swipe up (sensor
+  up, turned 0, panel 0)`, one left out with its reason (`- left out, the hand
+  going back, 300 ms after the last`), and a hand that came near as `Gesture
+  sensor: a hand near`. The addresses that answered on the I2C bus at start-up
+  are on the console and in `/api/state` (`hw.i2c`).
+- **Gesture test** (the web app's Inputs section): the panel shows every
+  gesture instead of doing it - big, the direction the clock takes, grey when
+  it is left out; on top the two result registers in hex and the sensor's own
+  direction; below the count (G), the sensor's wave count (W) and what is in
+  view (N brightness/size). The web app lists the last eight with their
+  registers, the console logs every read with a bit set, with the debug
+  registers 0xB6 and 0xB7, and a switch there puts the library's values back
+  for a comparison, until the next restart. Any button ends the test, and so
+  do 3 minutes without a gesture. `GET /api/gestures`, `POST /api/gesturetest`
+  (`on=1|0`, `tune=1|0`).
 
-Not yet tested on hardware: no gesture sensor has been connected so far. Still
-to be tried with the part: how reliably it tells a hand that stays from one
-passing by (the hint and the boot hold), whether the panel's own light or a
-cover in front of the sensor makes it see an object that is not there, and
-which mount turn its modules need.
+Tested on 2026-10-10 with a PAJ7620U2 module (Berrybase CJ-PAJ7620) on the
+MatrixPortal S3, mount turn 0: swipes, push and pull came reliably, circles
+with the values above; the wave not (above). Still to be tried: how reliably
+it tells a hand that stays from one passing by (the hint and the boot hold),
+and whether the panel's own light or a cover in front of the sensor makes it
+see an object that is not there.
 
 ## Real-time clock (DS3231)
 

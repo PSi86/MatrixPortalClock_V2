@@ -601,16 +601,25 @@ Button buttons[] = {
 
 // Gesture sensor -----------------------------------------------------------
 // A PAJ7620U2 on the I2C bus (0x73), optional, found at boot or not at all. It
-// recognises the gestures itself and holds the last one until it is read;
-// reading it clears it. With its INT line wired (GESTURE_INT_PIN, board_hal.h)
-// the sensor is read only when the line is low; without, it is asked every
-// GESTURE_POLL_MS, and whether a hand is near (for the hints) every
-// APPROACH_POLL_MS while the screen on top maps that.
+// recognises the gestures itself and holds them until they are read; reading
+// clears them. The clock reads its two result registers itself (the library
+// only sets it up); the wave it reports is not used, since in the tests of
+// 2026-10-10 it came for hardly any wave. With its INT line wired
+// (GESTURE_INT_PIN, board_hal.h) the sensor is read only when the line is low;
+// without, it is asked every GESTURE_POLL_MS, and whether a hand is near (for
+// the hints) every APPROACH_POLL_MS while the screen on top maps that.
 RevEng_PAJ7620 gestureSensor;
 bool          gestureOK = false;
 const int     GESTURE_INT = GESTURE_INT_PIN;   // -1: no INT line
-const unsigned long GESTURE_POLL_MS    = 50;    // gestures take some 200 ms, and the sensor holds them
-const unsigned long GESTURE_LOCKOUT_MS = 300;   // after a gesture: the hand pulled back is not the opposite swipe
+const unsigned long GESTURE_POLL_MS     = 50;    // gestures take some 200 ms, and the sensor holds them
+// Gestures left out, measured on 2026-10-10: the opposite of a swipe came
+// 250 to 305 ms after it as the hand went back, and a circle now and then
+// came as swipes between its turns.
+const unsigned long GESTURE_LOCKOUT_MS  = 300;   // after a gesture: any other one
+const unsigned long GESTURE_RETURN_MS   = 450;   // after a swipe: the opposite one, the hand going back
+const unsigned long GESTURE_CIRCLING_MS = 1000;  // after a circle: a swipe, part of the circling
+unsigned long gestureCircleAt = 0;               // millis() of the last circle the sensor reported
+uint8_t       gestureLastEv   = 0;               // the last gesture taken (InputEvent)
 const unsigned long APPROACH_POLL_MS   = 100;
 const unsigned long APPROACH_MS        = 400;   // near this long: a hand that stays, not one passing by
 const unsigned long APPROACH_REARM_MS  = 1000;  // gone this long before the next approach counts
@@ -619,7 +628,7 @@ unsigned long gesturePolledAt  = 0;
 unsigned long gestureAt        = 0;   // millis() of the last gesture that counted
 // The last gestures the sensor reported, newest first, for the gesture test
 // and the web app: the sensor's own direction, the event the panel made of it,
-// and whether it was taken or left (within GESTURE_LOCKOUT_MS of the last).
+// whether it was taken or left out (gestureLeftOut()), and the two registers.
 struct GestureSeen { unsigned long at; uint8_t raw; uint8_t ev; bool taken; uint8_t r43, r44; };
 const uint8_t GESTURE_SEEN_MAX = 8;
 GestureSeen gestureSeen[GESTURE_SEEN_MAX];
@@ -636,6 +645,7 @@ int16_t  gestureNearSize   = -1;
 uint8_t  gestureWaves = 0;              // the sensor's wave count (0xB7) as last read in the test
 const char *gestureRawName(uint8_t g);  // declared here: the sketch's generated prototypes miss these
 const char *gestureWord(uint8_t ev);
+const char *gestureLeftOut(uint8_t ev);
 Gesture gestureDecode(uint8_t r43, uint8_t r44);
 unsigned long approachPolledAt = 0;
 unsigned long objectNearSince  = 0;   // 0 = nothing near
@@ -4255,6 +4265,7 @@ bool faceEventFitted(InputEvent ev) {
   // The knock is sensed by the Tetris face's code (updateShake()), so a board
   // without it - the M4 - has no knock, accelerometer or not.
   if (ev == EV_KNOCK) { return accelOK && WATCHFACE_TETRIS != 0; }
+  if (ev == EV_WAVE) { return false; }   // not read: too unreliable (updateGestures())
   if (isGestureEvent(ev)) { return gestureOK; }
   return true;
 }
@@ -4578,14 +4589,14 @@ void updateInput() {
 
 /* ---- Gesture sensor ------------------------------------------------------ */
 
-// At boot: whether a PAJ7620U2 answers. The driver's own waits after a
-// gesture (it sleeps 200 ms after push and pull) are switched off; the
-// lockout below does that job without stopping the clock.
+// At boot: whether a PAJ7620U2 answers. The library sets it up as PixArt's
+// datasheet v0.8 does; two values are then set as in the datasheet v1.5
+// (gestureTune()): with them circles came as circles in the tests of
+// 2026-10-10 (9 of 9), with the library's often as swipes (6 of 14).
 void gestureBegin() {
   gestureOK = gestureSensor.begin(&Wire) != 0;
   if (!gestureOK) { Serial.println("PAJ7620U2 not found - no gestures"); return; }
-  gestureSensor.setGestureEntryTime(0);
-  gestureSensor.setGestureExitTime(0);
+  gestureTune(true);
   if (GESTURE_INT >= 0) { pinMode((uint8_t)GESTURE_INT, INPUT_PULLUP); }
   Serial.print("PAJ7620U2 found, read ");
   Serial.println(GESTURE_INT >= 0 ? "on its INT line" : "by asking it every 50 ms");
@@ -4614,10 +4625,24 @@ InputEvent gestureEvent(Gesture g) {
   return SWIPES[(dir + uiSettings.gestureMount + 4 - screenRotation) % 4];
 }
 
-// Once per loop: a gesture the sensor holds, as an event, unless it comes
-// within GESTURE_LOCKOUT_MS of the last one. A circle moves five steps, as a
-// fast tap burst does. Every gesture is handling the clock (lastInputAt), as
-// every button press is.
+// Why a gesture is left out, or nullptr when it is taken. A swipe goes out at
+// once; only what comes after a gesture is held against it.
+const char *gestureLeftOut(uint8_t ev) {
+  bool swipe = ev >= EV_SWIPE_UP && ev <= EV_SWIPE_RIGHT;
+  if (gestureAt && millisNow - gestureAt < GESTURE_LOCKOUT_MS) { return "too soon after the last"; }
+  if (swipe && gestureAt && millisNow - gestureAt < GESTURE_RETURN_MS) {
+    // EV_SWIPE_UP, _DOWN, _LEFT, _RIGHT: the opposite is the neighbour in each pair.
+    uint8_t opposite = (uint8_t)(((ev - EV_SWIPE_UP) ^ 1) + EV_SWIPE_UP);
+    if (gestureLastEv == opposite) { return "the hand going back"; }
+  }
+  if (swipe && gestureCircleAt && millisNow - gestureCircleAt < GESTURE_CIRCLING_MS) { return "part of the circling"; }
+  return nullptr;
+}
+
+// Once per loop: a gesture the sensor holds, as an event, unless it is left
+// out (gestureLeftOut()). A circle moves five steps, as a fast tap burst
+// does. Every gesture is handling the clock (lastInputAt), as every button
+// press is.
 void updateGestures() {
   if (!gestureOK) { return; }
   if (GESTURE_INT >= 0) {
@@ -4627,19 +4652,15 @@ void updateGestures() {
     if (millisNow - gesturePolledAt < GESTURE_POLL_MS) { return; }
     gesturePolledAt = millisNow;
   }
-  // In the gesture test the two result registers are read as they are and
-  // logged, to see what the sensor reports for a circle or a wave; outside it
-  // the library's reading still decides.
   uint8_t r43 = 0, r44 = 0;
-  Gesture g;
+  bool got = gestureReadRaw(r43, r44);   // reading clears them, and the INT line
   if (screen == SCREEN_GESTURE_TEST) {
-    // With the debug registers 0xB6 (the sensor's own result, not kept) and
-    // 0xB7 (the wave count, bits 0-3, which counts while the hand still
-    // waves; the abort count, bits 4-6): a line whenever any of them shows
-    // something or changes.
+    // The test logs the two registers as read, with the debug registers 0xB6
+    // (the sensor's own result, not kept) and 0xB7 (the wave count, bits 0-3;
+    // the abort count, bits 4-6), whenever any of them shows something or
+    // changes.
     static unsigned long rawAt = 0;
     static uint8_t b6Last = 0, b7Last = 0;
-    bool got = gestureReadRaw(r43, r44);
     uint8_t dbg[2] = { 0, 0 };
     gestureReadRegs(0xB6, dbg, 2);
     if (r43 || r44 || dbg[0] != b6Last || dbg[1] != b7Last) {
@@ -4651,28 +4672,28 @@ void updateGestures() {
       b7Last = dbg[1];
       gestureWaves = dbg[1] & 0x0F;
     }
-    if (!got || (r43 == 0 && r44 == 0)) { return; }
-    g = gestureDecode(r43, r44);
-  } else {
-    g = gestureSensor.readGesture();   // reading clears it, and the INT line
   }
+  if (!got || r43 == 0) { return; }
+  Gesture g = gestureDecode(r43, r44);
   InputEvent ev = gestureEvent(g);
   if (ev == EV_NONE) { return; }
-  // Each one on the console, as it was taken or left: what a hand did, and
-  // what the sensor saw without one; with the sensor's own direction and the
-  // two turns that make the panel's of it.
+  if (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) { gestureCircleAt = millisNow; }   // taken or not, the hand circles
+  // Each one on the console, as it was taken or left out: what a hand did,
+  // and what the sensor saw without one; with the sensor's own direction and
+  // the two turns that make the panel's of it.
   int8_t name = faceEventIndex(ev);
   const char *label = name >= 0 ? FACE_EVENTS[name].label : "?";
-  bool taken = millisNow - gestureAt >= GESTURE_LOCKOUT_MS;
-  gestureRemember(g, ev, taken, r43, r44);
-  if (!taken) {
-    Serial.printf("Gesture: %s - left, %lu ms after the last (sensor %s, turned %u, panel %u)\n", label,
+  const char *why = gestureLeftOut(ev);
+  gestureRemember(g, ev, why == nullptr, r43, r44);
+  if (why) {
+    Serial.printf("Gesture: %s - left out, %s, %lu ms after the last (sensor %s, turned %u, panel %u)\n", label, why,
                   millisNow - gestureAt, gestureRawName(g), uiSettings.gestureMount, screenRotation);
     if (screen == SCREEN_GESTURE_TEST) { gestureTestCount++; panelDirty = true; }
     return;
   }
   Serial.printf("Gesture: %s (sensor %s, turned %u, panel %u)\n", label, gestureRawName(g),
                 uiSettings.gestureMount, screenRotation);
+  gestureLastEv = (uint8_t)ev;
   gestureAt   = millisNow;
   lastInputAt = millisNow;
   objectNearSince = 0;        // a gesture is no approach
@@ -4778,11 +4799,13 @@ bool gestureReadRaw(uint8_t &r43, uint8_t &r44) {
   return ok;
 }
 
-// The gesture test's sensor settings for the wave: as the library leaves
-// them (0xCF 0x64: a wave from 4 swings; 0x91 0x06: a hand may be out of
-// view for 6 frames before its trace ends), or as PixArt's datasheet v1.5
-// starts the sensor (0xCF 0x62: from 2 swings; 0x91 0x0C: 12 frames). In RAM
-// only, until the next restart.
+// Two of the sensor's settings: as PixArt's datasheet v1.5 starts it, which
+// the clock sets at boot (0x91 0x0C: a hand may be out of view for 12
+// frames before its trace ends, "If Wave and CW/CCW move over FOV, then
+// increase this value will help to make the trace more complete"; 0xCF
+// 0x62: a wave from 2 swings), or as the library leaves them (0x06 and
+// 0x64: 6 frames, 4 swings), which the gesture test can switch to for a
+// comparison, until the next restart.
 bool gestureTuned = false;
 void gestureTune(bool on) {
   gestureWriteReg(0xEF, 0x00);   // bank 0
@@ -4793,12 +4816,13 @@ void gestureTune(bool on) {
                                            : "wave settings of the library (0xCF=0x64, 0x91=0x06)");
 }
 
-// The gesture the two registers stand for when more than one bit is set: a
-// circle before a wave, a wave before push and pull, those before a swipe.
+// The gesture the result registers stand for, also when more than one bit is
+// set: a circle before push and pull, those before a swipe. The wave (0x44)
+// is not used: it came for hardly any wave in the tests of 2026-10-10.
 Gesture gestureDecode(uint8_t r43, uint8_t r44) {
+  (void)r44;
   if (r43 & 0x40) { return GES_CLOCKWISE; }
   if (r43 & 0x80) { return GES_ANTICLOCKWISE; }
-  if (r44 & 0x01) { return GES_WAVE; }
   if (r43 & 0x10) { return GES_FORWARD; }
   if (r43 & 0x20) { return GES_BACKWARD; }
   if (r43 & 0x01) { return GES_UP; }
