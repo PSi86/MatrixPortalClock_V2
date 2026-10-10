@@ -373,13 +373,16 @@ const unsigned long FEED_GATHER_MS  = 3UL * 60UL * 1000UL; // with the radio on 
 const uint8_t BAND_ITEMS_MAX = 16;
 BandItem bandItems[BAND_ITEMS_MAX];
 uint8_t  bandItemCount = 0;
+time_t   bandNextUntil = 0;   // the earliest until of them (UTC), when the next one runs out; 0 = no items
 
 // Alerts on the 64x32 clock, which has no room for the band (concept doc,
 // "Decided and open on the band", 2026-10-09): an item at alert level comes
 // up as a banner with its icon alone, once, and the face carries a marker
-// while one is there. The alerts already shown, by source and tag; one stays
-// known for a while after it went, so an alert that drops out and comes back
-// (a reconnect to Home Assistant, a fetch that missed it) is not shown again.
+// while one is there. The alerts already shown, by source and tag. One its
+// source takes away, or one that runs out, is over and forgotten at once.
+// One dropped for a technical reason stays known for a while, so an alert
+// that comes back (a reconnect to Home Assistant, a fetch that missed it) is
+// not shown again.
 struct AlertSeen { uint8_t feed; uint32_t tag; unsigned long lastAt; };
 const uint8_t       ALERT_SEEN_MAX  = 24;
 const unsigned long ALERT_FORGET_MS = 15UL * 60UL * 1000UL;
@@ -6513,9 +6516,19 @@ void printBandItem(const char *mark, const BandItem &it) {
   Serial.printf("  %s\n", it.text);
 }
 
+// The earliest until of all items, worked out anew after every change to
+// them; bandPut() and bandRemoveAt() are the only two that make one.
+void bandFindNextUntil() {
+  bandNextUntil = 0;
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    if (bandNextUntil == 0 || bandItems[i].until < bandNextUntil) { bandNextUntil = bandItems[i].until; }
+  }
+}
+
 void bandRemoveAt(uint8_t i) {
   for (uint8_t j = i + 1; j < bandItemCount; j++) { bandItems[j - 1] = bandItems[j]; }
   bandItemCount--;
+  bandFindNextUntil();
 }
 
 // Takes an item, in place of the one of its source with its key; says what
@@ -6525,6 +6538,7 @@ void bandPut(const BandItem &n) {
     if (bandItems[i].feed != n.feed || strcmp(bandItems[i].key, n.key) != 0) { continue; }
     bool same = strcmp(bandItems[i].text, n.text) == 0 && bandItems[i].level == n.level;
     bandItems[i] = n;
+    bandFindNextUntil();
     if (!same) { printBandItem("~", n); }
     return;
   }
@@ -6533,6 +6547,7 @@ void bandPut(const BandItem &n) {
     return;
   }
   bandItems[bandItemCount++] = n;
+  bandFindNextUntil();
   printBandItem("+", n);
 }
 
@@ -6541,6 +6556,7 @@ void bandRemove(uint8_t f, const char *key) {
   for (uint8_t i = 0; i < bandItemCount; i++) {
     if (bandItems[i].feed != f || strcmp(bandItems[i].key, key) != 0) { continue; }
     Serial.printf("Info band - %s\n", key);
+    alertForget(bandItems[i]);
     bandRemoveAt(i);
     return;
   }
@@ -6558,12 +6574,13 @@ void bandDropFeed(uint8_t f, const FeedResult *keep = nullptr) {
   }
 }
 
-// Once a minute: the items that have run out go.
+// The items that have run out go.
 void bandExpire() {
   time_t now = clockNow();
   for (int i = (int)bandItemCount - 1; i >= 0; i--) {
     if (bandItems[i].until > now) { continue; }
     Serial.printf("Info band - %s (ran out)\n", bandItems[i].key);
+    alertForget(bandItems[i]);
     bandRemoveAt((uint8_t)i);
   }
 }
@@ -6576,6 +6593,13 @@ int8_t alertSeenIndex(uint8_t feed, uint32_t tag) {
     if (alertSeen[i].feed == feed && alertSeen[i].tag == tag) { return (int8_t)i; }
   }
   return -1;
+}
+
+// An item that is over - taken away by its source, or run out - is no
+// longer known as shown, so the same item sent again comes up as new.
+void alertForget(const BandItem &it) {
+  int8_t s = alertSeenIndex(it.feed, it.tag);
+  if (s >= 0) { alertSeen[s] = alertSeen[--alertSeenCount]; }
 }
 
 // Keeps an alert as shown; when the list is full, in place of the one gone
@@ -6714,7 +6738,10 @@ void feedsUpdate() {
     feedBusy = false;
     feedApply(res);
   }
-  if (minuteTrigger) { bandExpire(); }
+  // An item goes when its until has come. Once a minute every item is looked
+  // at as well, whatever bandNextUntil says, so none can outstay its until
+  // by more than that.
+  if (minuteTrigger || (bandNextUntil != 0 && clockNow() >= bandNextUntil)) { bandExpire(); }
   if (feedBusy) { return; }
   bool session = (radioUsers & RADIO_FEEDS) != 0;
   int8_t f = feedsReady() ? feedDue(session ? FEED_GATHER_MS : 0) : -1;

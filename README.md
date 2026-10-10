@@ -393,7 +393,10 @@ status line per source says when it was last fetched, or why it failed.
 - **No stale values:** an item runs out after three intervals without a new
   fetch (weather 90 min, warnings 30 min), a warning at its end at the latest.
   A failed fetch is tried again after 1, 2, 4 ... minutes, at most after the
-  source's interval; its items stay until they run out.
+  source's interval; its items stay until they run out. An item goes as soon
+  as its time has come: the clock keeps the earliest end of all items and
+  compares it with the time on every pass, and once a minute it looks at every
+  item as well.
 - **Beside the loop:** a fetch (name lookup, TLS handshake, the answer) blocks
   for half a second to a few seconds, so it runs in a task of its own on the
   other core, and the clock keeps drawing. The answers are read as a stream
@@ -502,10 +505,12 @@ Assistant sends with `"level": "alert"`. Information does not show on it.
   hotspot's blue mark.
 - **Once:** an alert comes up when it is new, or when an item that was
   information turns into an alert. The same item with a new text does not come
-  up again, and an alert stays known for 15 minutes after it went, so a
-  reconnect to Home Assistant or a fetch that missed it does not bring it back. A
-  DWD warning with another headline counts as another warning; every message is
-  one of its own. Several new alerts with the same icon share one banner.
+  up again. An alert its source takes away (an empty payload) or that runs out
+  is over: sent again, it comes up again. One dropped for a technical reason
+  stays known for 15 minutes, so a reconnect to Home Assistant or a fetch that
+  missed it does not bring it back. A DWD warning with another headline counts
+  as another warning; every message is one of its own. Several new alerts with
+  the same icon share one banner.
 
 The icons are drawn as pixels in `src/item_icons.h`, part of the firmware like
 the rest of the band, so they need nothing loaded onto the clock.
