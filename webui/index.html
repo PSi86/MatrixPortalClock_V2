@@ -333,6 +333,12 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div><label class="lbl" for="gmount">Gesture sensor turned</label><div class="hint">If a swipe up acts as another direction, try the next.</div></div>
           <select id="gmount"><option value="0">not turned</option><option value="1">90° clockwise</option><option value="2">180°</option><option value="3">90° counter-clockwise</option></select>
         </div>
+        <div class="row stack" id="gtRow" hidden>
+          <div><div class="lbl">Gesture test</div><div class="hint">The panel shows every gesture instead of doing it: big, the direction the clock takes; on top (S) the sensor’s own; below the count (G), the turn set above (M), the panel’s rotation (R) and what the sensor sees in front of it (N brightness/size). Grey: left out, too soon after the last. Any button ends it, and so do 3 minutes without a gesture.</div></div>
+          <div class="ctl"><button class="btn" type="button" id="gtBtn">Start on the panel</button><span class="note" id="gtNote"></span></div>
+          <label class="close"><input type="checkbox" id="gtTune"> Wave settings of PixArt’s datasheet v1.5 (until the next restart)</label>
+          <ul class="items" id="gtList"></ul>
+        </div>
         <div class="row stack">
           <div><div class="lbl">On the face</div><div class="hint">Giving a button's twice or three times something to do makes its single press wait 0.4 s for the next.</div>
             <div class="hint" id="closeHint" hidden>Ticked inputs close an alert or a message on the panel and go on to the next one; nothing else they do runs then.</div></div>
@@ -683,6 +689,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     prof.value = cur.prof;
     $('#gmountRow').hidden = !S.hw.gesture;
     $('#gmount').value = cur.gmount;
+    $('#gtRow').hidden = !S.hw.gesture;
+    if (S.hw.gesture) { pollGestures(); }   // the switch and the last gestures as the clock has them
     var box = $('#shortcuts'), closing = has('closes');
     box.innerHTML = '';
     $('#closeHint').hidden = !closing;
@@ -1068,6 +1076,37 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   $('#typedBtn').addEventListener('click', function () {
     api('/api/time', enc({ date: $('#tdate').value, time: $('#ttime').value })).then(function (r) { $('#timeLine').textContent = r.timeLine; toast('Time set.'); })
       .catch(function (e) { toast(e.message); });
+  });
+  // The gesture test: while it is up, the clock's list of the last gestures
+  // every half second (each request holds the clock a moment, so only then).
+  var gtTimer = null;
+  function showGestures(g) {
+    $('#gtBtn').textContent = g.test ? 'Stop' : 'Start on the panel';
+    $('#gtTune').checked = !!g.tuned;
+    $('#gtNote').textContent = g.test ? (g.count + (g.count === 1 ? ' gesture' : ' gestures') + ' · waves counted ' + g.waves + ' · turned ' + g.mount + ', panel ' + g.rotation
+      + (g.near ? ' · in view: brightness ' + g.near.brightness + ', size ' + g.near.size : ' · nothing in view')) : '';
+    var ul = $('#gtList');
+    ul.innerHTML = '';
+    g.events.forEach(function (e) {
+      var li = document.createElement('li'); li.className = 'item';
+      var ic = document.createElement('span'); ic.className = 'item-ico'; ic.textContent = e.taken ? '✓' : '·';
+      var tx = document.createElement('span'); tx.className = 'item-t'; tx.textContent = e.panel + (e.taken ? '' : ' (left out: too soon)');
+      var u = document.createElement('span'); u.className = 'item-u'; u.textContent = 'sensor ' + e.sensor + ' · 0x43/0x44 ' + e.bits + ' · ' + (e.ago / 1000).toFixed(1) + ' s ago';
+      li.appendChild(ic); li.appendChild(tx); li.appendChild(u); ul.appendChild(li);
+    });
+    clearTimeout(gtTimer);
+    if (g.test) { gtTimer = setTimeout(pollGestures, 500); }
+  }
+  function pollGestures() { api('/api/gestures').then(showGestures).catch(function () { toast('The clock did not answer.'); }); }
+  $('#gtTune').addEventListener('change', function () {
+    api('/api/gesturetest', enc({ tune: $('#gtTune').checked ? 1 : 0 })).then(showGestures).catch(function () { toast('The clock did not answer.'); });
+  });
+  $('#gtBtn').addEventListener('click', function () {
+    var on = $('#gtBtn').textContent !== 'Stop';
+    api('/api/gesturetest', enc({ on: on ? 1 : 0 })).then(function (g) {
+      if (on && !g.test) { toast('No test: it starts over the face or a GIF, not over the menu or a banner.'); }
+      showGestures(g);
+    }).catch(function () { toast('The clock did not answer.'); });
   });
   $('#msgShow').addEventListener('click', function () {
     api('/api/messages', '').then(function (r) {
