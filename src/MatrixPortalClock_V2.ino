@@ -72,6 +72,7 @@ class JsonObject;
 
 #if BAND_DATA
 #include "band_data.h"         // the info band's items and the sources the clock fetches
+#include "item_icons.h"        // their icons, for the band and the alert banners
 #else
 struct FeedResult;                     // named by prototypes generated from this sketch
 struct BandItem;
@@ -372,6 +373,20 @@ const unsigned long FEED_GATHER_MS  = 3UL * 60UL * 1000UL; // with the radio on 
 const uint8_t BAND_ITEMS_MAX = 16;
 BandItem bandItems[BAND_ITEMS_MAX];
 uint8_t  bandItemCount = 0;
+
+// Alerts on the 64x32 clock, which has no room for the band (concept doc,
+// "Decided and open on the band", 2026-10-09): an item at alert level comes
+// up as a banner with its icon alone, once, and the face carries a marker
+// while one is there. The alerts already shown, by source and tag; one stays
+// known for a while after it went, so an alert that drops out and comes back
+// (a reconnect to Home Assistant, a fetch that missed it) is not shown again.
+struct AlertSeen { uint8_t feed; uint32_t tag; unsigned long lastAt; };
+const uint8_t       ALERT_SEEN_MAX  = 24;
+const unsigned long ALERT_FORGET_MS = 15UL * 60UL * 1000UL;
+const uint8_t       ALERT_R = 255, ALERT_G = 0, ALERT_B = 0;   // the alert colour
+AlertSeen alertSeen[ALERT_SEEN_MAX];
+uint8_t   alertSeenCount = 0;
+bool      alertHolds = false;     // an item at alert level is there
 #endif
 
 #if WEBUI_APP
@@ -607,8 +622,9 @@ Screen        screenUnder[SCREEN_DEPTH];
 uint8_t       screenUnderCount = 0;
 // Screens that close by themselves: after this long without input, or, for a
 // banner, after this long at all.
-const unsigned long MENU_IDLE_MS = 20000;   // menu and editors, back to the face
-const unsigned long BANNER_MS    = 3000;
+const unsigned long MENU_IDLE_MS    = 20000;   // menu and editors, back to the face
+const unsigned long BANNER_MS       = 3000;
+const unsigned long ALERT_BANNER_MS = 10000;   // an alert's banner
 
 #if MENU_SLIDE
 // Slide between the menu list and an editor: the old picture moves out to one
@@ -626,9 +642,11 @@ int8_t   slideDir = 0;              // the slide the next menu picture starts wi
 // Banner: what it says and in which colour comes from the function that opened
 // it. A time banner shows the time the clock shows now, read when it is drawn.
 // A hint is text as well, but only explains what comes next, so an input on it
-// is not used up (handleInput()).
-enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT };
+// is not used up (handleInput()). An alert's banner shows the alert's icon in
+// the alert colour, for ALERT_BANNER_MS.
+enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT, BANNER_ALERT };
 BannerKind    bannerKind = BANNER_TEXT;
+uint8_t       bannerIcon = 0;                    // BANNER_ALERT: the ItemIcon
 char          bannerText[2][12] = { "", "" };   // one or two lines; an empty second one is not drawn
 uint8_t       bannerR = 255, bannerG = 255, bannerB = 255;
 unsigned long bannerAt = 0;      // millis() the banner came up
@@ -1348,6 +1366,9 @@ void loop(void) {
 #endif
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
   updateScreenTimeouts();
+#if BAND_DATA
+  alertsUpdate();       // a new alert comes up as a banner, before a GIF that is due
+#endif
 #if GIF_PLAYBACK
   gifUpdate();          // a GIF of its own accord when one is due
 #endif
@@ -1447,7 +1468,7 @@ bool inputIdleFor(unsigned long ms) {
 void updateScreenTimeouts() {
   switch (screen) {
     case SCREEN_BANNER:
-      if (millisNow - bannerAt >= BANNER_MS) { closeScreen(); }
+      if (millisNow - bannerAt >= (bannerKind == BANNER_ALERT ? ALERT_BANNER_MS : BANNER_MS)) { closeScreen(); }
       break;
     case SCREEN_MENU:
     case SCREEN_EDITOR:
@@ -1866,6 +1887,9 @@ void showTimeBanner() {
 }
 
 void drawBanner() {
+#if BAND_DATA
+  if (bannerKind == BANNER_ALERT) { drawAlertBanner(); return; }
+#endif
   if (bannerKind != BANNER_TIME) {
     drawCenteredLines(bannerText[0], bannerText[1][0] ? bannerText[1] : nullptr,
                       scaledColorVisible(bannerR, bannerG, bannerB));
@@ -2458,6 +2482,18 @@ void drawHotspotMark() {
   uint8_t level = effectiveBrightness / 3;
   if (level < STATUS_PIXEL_MIN) { level = STATUS_PIXEL_MIN; }
   matrix.fillRect(matrix.width() - 2, 0, 2, 2, scaledColorB(0, 80, 255, level));
+}
+
+// While an alert is there, a small square in the alert colour in the same
+// corner of the face, after its banner and as long as the alert holds. Not in
+// the hotspot's preview: the hotspot's mark has the corner then.
+void drawAlertMarker() {
+#if BAND_DATA
+  if (!alertHolds || screen != SCREEN_FACE) { return; }
+  uint8_t level = effectiveBrightness / 3;
+  if (level < STATUS_PIXEL_MIN) { level = STATUS_PIXEL_MIN; }
+  matrix.fillRect(matrix.width() - 2, 0, 2, 2, scaledColorB(ALERT_R, ALERT_G, ALERT_B, level));
+#endif
 }
 
 /* ======================================================================
@@ -3183,6 +3219,7 @@ void drawTetrisFace() {
   // Same overlays the classic watchface draws, so both behave alike.
   drawStatusPixel();
   drawHotspotMark();
+  drawAlertMarker();
   drawFeedbackIndicator();
   matrix.show();
 
@@ -3357,6 +3394,7 @@ void renderClock(void) {
 
   drawStatusPixel();
   drawHotspotMark();
+  drawAlertMarker();
   drawFeedbackIndicator();
 #if defined(CLOCK_DEBUG)
   uint32_t showStart = micros();
@@ -6530,6 +6568,108 @@ void bandExpire() {
   }
 }
 
+// ---- Alerts: banners and the marker on the face --------------------------------
+
+// The alert already shown with this source and tag; -1 when there is none.
+int8_t alertSeenIndex(uint8_t feed, uint32_t tag) {
+  for (uint8_t i = 0; i < alertSeenCount; i++) {
+    if (alertSeen[i].feed == feed && alertSeen[i].tag == tag) { return (int8_t)i; }
+  }
+  return -1;
+}
+
+// Keeps an alert as shown; when the list is full, in place of the one gone
+// the longest.
+void alertSeenAdd(uint8_t feed, uint32_t tag) {
+  uint8_t i = alertSeenCount;
+  if (i == ALERT_SEEN_MAX) {
+    i = 0;
+    for (uint8_t j = 1; j < alertSeenCount; j++) {
+      if (millisNow - alertSeen[j].lastAt > millisNow - alertSeen[i].lastAt) { i = j; }
+    }
+  } else {
+    alertSeenCount++;
+  }
+  alertSeen[i] = { feed, tag, millisNow };
+}
+
+// The banner of item i: its icon, the warning sign for an item without one.
+// An alert with the same icon that is new as well counts as shown with it,
+// so two warnings that came together do not bring the same banner twice.
+// A GIF on show ends for it.
+void alertShow(uint8_t i) {
+  const BandItem &it = bandItems[i];
+  uint8_t icon = (it.icon != ICON_NONE && it.icon < ICON_COUNT) ? it.icon : ICON_WARNING;
+  for (uint8_t k = 0; k < bandItemCount; k++) {
+    const BandItem &o = bandItems[k];
+    if (o.level != LEVEL_ALERT || alertSeenIndex(o.feed, o.tag) >= 0) { continue; }
+    uint8_t oIcon = (o.icon != ICON_NONE && o.icon < ICON_COUNT) ? o.icon : ICON_WARNING;
+    if (k == i || oIcon == icon) { alertSeenAdd(o.feed, o.tag); }
+  }
+  Serial.printf("Alert banner: %s (%s)\n", it.key, ITEM_ICON_NAMES[icon]);
+#if GIF_PLAYBACK
+  if (screen == SCREEN_GIF) { closeScreen(); }
+#endif
+  bannerKind = BANNER_ALERT;
+  bannerIcon = icon;
+  bannerOpen();
+}
+
+// On every pass outside the hotspot. The marker follows the alerts there
+// are; an alert not shown yet comes up as a banner over the face or a GIF,
+// and waits while a menu, an editor or another banner is up. An alert that
+// went before it could be shown is not shown later. One that eased to
+// information is forgotten at once, so it comes up again when it turns back
+// into an alert.
+void alertsUpdate() {
+  bool holds = false;
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    int8_t s = alertSeenIndex(bandItems[i].feed, bandItems[i].tag);
+    if (bandItems[i].level != LEVEL_ALERT) {
+      if (s >= 0) { alertSeen[s] = alertSeen[--alertSeenCount]; }
+      continue;
+    }
+    holds = true;
+    if (s >= 0) { alertSeen[s].lastAt = millisNow; }
+  }
+  if (holds != alertHolds) {
+    alertHolds = holds;
+    panelDirty = true;   // the marker comes or goes
+  }
+  for (int i = (int)alertSeenCount - 1; i >= 0; i--) {
+    if (millisNow - alertSeen[i].lastAt < ALERT_FORGET_MS) { continue; }
+    alertSeen[i] = alertSeen[--alertSeenCount];
+  }
+  if (!holds || (screen != SCREEN_FACE && screen != SCREEN_GIF)) { return; }
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    if (bandItems[i].level == LEVEL_ALERT && alertSeenIndex(bandItems[i].feed, bandItems[i].tag) < 0) {
+      alertShow(i);
+      return;
+    }
+  }
+}
+
+// An icon at (x, y), its top left corner, in one colour.
+void drawItemIcon(int16_t x, int16_t y, uint8_t icon, uint16_t colour) {
+  if (icon >= ICON_COUNT) { return; }
+  for (uint8_t r = 0; r < ICON_SIZE; r++) {
+    uint32_t bits = ITEM_ICONS[icon].row[r];
+    for (uint8_t c = 0; c < ICON_SIZE; c++) {
+      if (bits & (1UL << (ICON_SIZE - 1 - c))) { matrix.drawPixel(x + c, y + r, colour); }
+    }
+  }
+}
+
+// An alert's banner: its icon alone, in the middle, in the alert colour.
+void drawAlertBanner() {
+  matrix.fillScreen(0);
+  drawItemIcon((matrix.width() - ICON_SIZE) / 2, (matrix.height() - ICON_SIZE) / 2, bannerIcon,
+               scaledColorVisible(ALERT_R, ALERT_G, ALERT_B));
+  drawFeedbackIndicator();
+  matrix.show();
+  panelDirty = false;
+}
+
 // A fetch that did not work: again after 1, 2, 4 ... minutes, never later
 // than the source's own interval. Its items stay until they run out.
 void feedFailed(uint8_t f, const char *why) {
@@ -7787,12 +7927,15 @@ void haItem(const char *name, const char *payload, uint16_t len) {
   it.level = strcmp(doc["level"] | "info", "alert") == 0 ? LEVEL_ALERT : LEVEL_INFO;
   it.feed  = SOURCE_HA;
   it.until = (time_t)until;
+  it.tag   = itemTag(name);   // a new text keeps the alert; switched from info to alert it comes up again
   bandPut(it);
 }
 
 // mpclock/<id>/message: for `seconds` (HA_MESSAGE_S unless it says, 5 to
-// 3600). Until the banner on S exists it is an item like the others.
+// 3600), an item like the others; one with level alert comes up as a banner
+// on the 64x32 clock, as every alert does, each message on its own.
 void haMessage(const char *payload, uint16_t len) {
+  static uint32_t messages = 0;
   JsonDocument doc;
   DeserializationError e = deserializeJson(doc, payload, len);
   if (e || !doc.is<JsonObject>()) {
@@ -7812,6 +7955,7 @@ void haMessage(const char *payload, uint16_t len) {
   it.level = strcmp(doc["level"] | "info", "alert") == 0 ? LEVEL_ALERT : LEVEL_INFO;
   it.feed  = SOURCE_HA;
   it.until = clockNow() + seconds;
+  it.tag   = ++messages;
   bandPut(it);
 }
 
