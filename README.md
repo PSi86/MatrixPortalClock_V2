@@ -393,7 +393,10 @@ status line per source says when it was last fetched, or why it failed.
 - **No stale values:** an item runs out after three intervals without a new
   fetch (weather 90 min, warnings 30 min), a warning at its end at the latest.
   A failed fetch is tried again after 1, 2, 4 ... minutes, at most after the
-  source's interval; its items stay until they run out.
+  source's interval; its items stay until they run out. An item goes as soon
+  as its time has come: the clock keeps the earliest end of all items and
+  compares it with the time on every pass, and once a minute it looks at every
+  item as well.
 - **Beside the loop:** a fetch (name lookup, TLS handshake, the answer) blocks
   for half a second to a few seconds, so it runs in a task of its own on the
   other core, and the clock keeps drawing. The answers are read as a stream
