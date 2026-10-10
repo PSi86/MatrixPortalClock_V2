@@ -408,8 +408,11 @@ uint8_t    noticeStepCount = 0;   // 0: none on the panel
 uint8_t    noticeStepAt = 0;      // the step on the panel
 unsigned long noticeStepMs = 0;   // how long it stays
 
-// A text running through: right to left in the 5x7 font, twice, then done.
+// A text running through: right to left in the 5x7 font, twice when it is
+// new - the first run catches the eye, the second lets it be read - and once
+// when it is asked for again, by someone already looking.
 const uint16_t RUN_PX_PER_S      = 30;     // about five characters a second
+uint8_t  noticeRuns = 2;                   // how often the texts of the notices on show run through
 const unsigned long ICON_BEFORE_TEXT_MS = 3000;   // an urgent message's icon, before its text
 char     runText[sizeof(BandItem::text)];  // in the font's code page (CP437)
 uint16_t runWidth = 0;                     // its width in pixels
@@ -6797,7 +6800,7 @@ void textToCp437(char *dst, const char *src, size_t size) {
 
 // Puts step i on the panel; false when its notice has gone meanwhile. An icon
 // stands ALERT_BANNER_MS, or ICON_BEFORE_TEXT_MS when the notice's text comes
-// next; a text runs through twice.
+// next; a text runs through noticeRuns times.
 bool noticeStepShow(uint8_t i) {
   int8_t k = noticeItem(noticeSteps[i]);
   if (k < 0) { return false; }
@@ -6815,7 +6818,7 @@ bool noticeStepShow(uint8_t i) {
     runR = alert ? ALERT_R : 255; runG = alert ? ALERT_G : 255; runB = alert ? ALERT_B : 255;
     runLastX = INT16_MIN;
     bannerKind   = BANNER_RUN;
-    noticeStepMs = 2UL * (runWidth + matrix.width()) * 1000UL / RUN_PX_PER_S;
+    noticeStepMs = (unsigned long)noticeRuns * (runWidth + matrix.width()) * 1000UL / RUN_PX_PER_S;
     Serial.printf("Notice: %s, text for %lu ms\n", it.key, noticeStepMs);
   }
   noticeStepAt = i;
@@ -6852,6 +6855,7 @@ void noticeStepsForNew() {
   uint8_t order[BAND_ITEMS_MAX];
   uint8_t n = noticeOrder(order, true);
   noticeStepCount = 0;
+  noticeRuns = 2;
   for (uint8_t k = 0; k < n; k++) {
     const BandItem &it = bandItems[order[k]];
     noticeSeenAdd(it.feed, it.tag);
@@ -6872,13 +6876,15 @@ void noticeStepsForNew() {
 
 // FN_SHOW_MESSAGES: every notice there is, alerts first, each in the order
 // they came: an alert's icon and then its text in the alert colour, a
-// message's text. Over the face only; "no messages" when there are none.
+// message's text, each text running through once - whoever asked is looking
+// from the start. Over the face only; "no messages" when there are none.
 // Returns how many notices it shows.
 uint8_t noticesShowAgain() {
   if (screen != SCREEN_FACE) { return 0; }
   uint8_t order[BAND_ITEMS_MAX];
   uint8_t n = noticeOrder(order, false);
   noticeStepCount = 0;
+  noticeRuns = 1;
   for (uint8_t k = 0; k < n; k++) {
     const BandItem &it = bandItems[order[k]];
     noticeSeenAdd(it.feed, it.tag);
@@ -6995,12 +7001,13 @@ void drawAlertBanner() {
 }
 
 // A notice's text running through the middle of the panel, in at the right
-// edge and out at the left, twice; drawn when it has moved on a pixel.
+// edge and out at the left, noticeRuns times; drawn when it has moved on a
+// pixel.
 void drawRunBanner() {
   int16_t w = matrix.width(), h = matrix.height();
   uint32_t pass = runWidth + w;
   uint32_t moved = (uint32_t)(millisNow - bannerAt) * RUN_PX_PER_S / 1000UL;
-  int16_t x = moved >= 2 * pass ? -(int16_t)runWidth : w - (int16_t)(moved % pass);
+  int16_t x = moved >= noticeRuns * pass ? -(int16_t)runWidth : w - (int16_t)(moved % pass);
   if (x == runLastX && !panelDirty) { return; }
   runLastX = x;
   matrix.fillScreen(0);

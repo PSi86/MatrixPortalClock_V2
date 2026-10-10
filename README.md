@@ -522,8 +522,9 @@ Other information does not show on it.
 - **Again:** **show messages again** (a face shortcut, UP pressed twice in the
   Default profile, or **Show them now** in the web app's Info band section)
   shows all there are, alerts first with their icon and then their text in red,
-  then the messages, each in the order it came; with none, the panel says "no
-  messages". In the Default profile UP pressed twice makes UP's single press
+  then the messages, each in the order it came, every text running through
+  once - whoever asked is looking from the start; with none, the panel says
+  "no messages". In the Default profile UP pressed twice makes UP's single press
   wait 0.4 s; a clock with shortcuts of its own keeps them.
 - **The mark:** a 2x2 square in the top right corner of the face while there
   are any: red while an alert holds, white for messages alone. In the hotspot's
