@@ -52,13 +52,20 @@ enum FeedId : uint8_t { FEED_WEATHER, FEED_WARNINGS, FEED_COUNT };
 // item past `until` is not shown any more, so the band never passes off an
 // old value as the current one.
 struct BandItem {
-  char    key[24];     // what it is, unique within its source: "weather", "rain", "warn1", or a name Home Assistant gave
-  char    text[96];
-  uint8_t icon;        // ItemIcon
-  uint8_t level;       // ItemLevel
-  uint8_t feed;        // the source it came from (FeedId)
-  time_t  until;       // UTC
+  char     key[24];    // what it is, unique within its source: "weather", "rain", "warn1", or a name Home Assistant gave
+  char     text[96];
+  uint8_t  icon;       // ItemIcon
+  uint8_t  level;      // ItemLevel
+  uint8_t  feed;       // the source it came from (FeedId)
+  time_t   until;      // UTC
+  uint32_t tag;        // which alert it is, for the banner: the same tag is the same alert, even under another key
 };
+
+// A tag from text (FNV-1a), or from several, each one chained onto the last.
+inline uint32_t itemTag(const char *s, uint32_t tag = 2166136261u) {
+  for (; s && *s; s++) { tag = (tag ^ (uint8_t)*s) * 16777619u; }
+  return tag;
+}
 
 // How often a source is fetched, how long its items count without a new
 // fetch (three intervals, so a fetch or two may fail without a gap), and
@@ -146,7 +153,8 @@ inline void itemTextCopy(char *dst, const char *src, size_t size) {
   dst[cut] = '\0';
 }
 
-inline void feedItem(FeedResult &r, const char *key, const char *text, uint8_t icon, uint8_t level, time_t until) {
+inline void feedItem(FeedResult &r, const char *key, const char *text, uint8_t icon, uint8_t level, time_t until,
+                     uint32_t tag) {
   if (r.count >= FEED_ITEMS_MAX) { return; }
   BandItem &it = r.item[r.count++];
   strlcpy(it.key, key, sizeof(it.key));
@@ -155,6 +163,7 @@ inline void feedItem(FeedResult &r, const char *key, const char *text, uint8_t i
   it.level = level;
   it.feed  = r.feed;
   it.until = until;
+  it.tag   = tag;
 }
 
 // ---- HTTPS ------------------------------------------------------------------
@@ -279,7 +288,7 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
   long uv = lroundf(day["uv_index_max"][0] | 0.0f);
   if (uv >= 3 && n > 0 && n < (int)sizeof(text)) { snprintf(text + n, sizeof(text) - n, ", UV %ld", uv); }
   time_t stale = job.now + FEEDS[FEED_WEATHER].staleS;
-  feedItem(r, "weather", text, icon, LEVEL_INFO, stale);
+  feedItem(r, "weather", text, icon, LEVEL_INFO, stale, itemTag("weather"));
 
   // Rain within the next four hours, from the quarter-hour forecast: when it
   // starts while it is dry, or when it stops while it rains.
@@ -293,7 +302,7 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
         char when[16];
         feedWhen(when, sizeof(when), at, job);
         snprintf(text, sizeof(text), wetNow ? "Rain until %s" : "Rain from %s", when);
-        feedItem(r, "rain", text, ICON_RAIN, LEVEL_INFO, min(at, stale));
+        feedItem(r, "rain", text, ICON_RAIN, LEVEL_INFO, min(at, stale), itemTag("rain"));
         break;
       }
     }
@@ -368,7 +377,11 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
     }
     snprintf(key, sizeof(key), "warn%u", slot);
     uint8_t level = feedSeverityRank(al["severity"].as<const char *>()) >= 2 ? LEVEL_ALERT : LEVEL_INFO;
-    feedItem(r, key, text, ICON_WARNING, level, expires != 0 ? min(expires, stale) : stale);
+    // The same warning keeps its headline and onset from fetch to fetch,
+    // while its slot moves when a more severe one comes. Another headline
+    // counts as another warning, with a banner of its own.
+    uint32_t tag = itemTag(al["onset"].as<const char *>(), itemTag(headline));
+    feedItem(r, key, text, ICON_WARNING, level, expires != 0 ? min(expires, stale) : stale, tag);
   }
 }
 

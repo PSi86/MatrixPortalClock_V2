@@ -84,6 +84,10 @@ button pin cannot be carried over.
 - **Info band data** (S3): the weather and the DWD weather warnings for a place,
   fetched over HTTPS, for the info band of the wall clock; for now listed on the
   config page and the console (see [Info band data](#info-band-data))
+- **Alerts** (S3): a weather warning from `moderate` on, or an item or message
+  from Home Assistant marked as an alert, comes up once as a banner with its
+  icon, large and red, and a red mark stays in a corner of the face while it
+  holds (see [Alerts on the panel](#alerts-on-the-panel-s3))
 
 ## Setup
 
@@ -453,8 +457,10 @@ data:
 ```
 
 A message goes to the **Message** entity (`notify.send_message`), or as JSON to
-the message topic. Until the banner on the S class exists, it is listed like an
-item for its seconds.
+the message topic. It is an item for its seconds; with `"level": "alert"` it
+comes up as a banner on the 64x32 clock (see
+[Alerts on the panel](#alerts-on-the-panel-s3)). The Message entity sends the
+text alone, so its messages are information and have no banner.
 
 - **Retained items:** the broker keeps them, so a clock that starts or comes
   back gets the current set at once, and nothing is polled. On every connect
@@ -474,11 +480,35 @@ item for its seconds.
   password refused, nothing answering at the address, address not found).
 - **Flash:** the client costs 41.7 KB (it brings the TLS and WebSocket
   transports the core's build has switched on, which the link does not use),
-  the whole link about 57 KB. Since the flash layout of 2026-10-09 the S3's
-  image has 1,434,800 bytes, 400 KB less than its app slot.
+  the whole link about 57 KB. With the alert banners (2026-10-10) the S3's
+  image has 1,437,264 bytes, 397,744 less than its app slot.
 
 The code is in `src/ha_link.h` (the client, its task and the topics) and at the
 end of the sketch (when it runs, what arrives, the card's part).
+
+## Alerts on the panel (S3)
+
+The 64x32 clock has no room for the info band, so of its items only the alerts
+show there: the DWD warnings from `moderate` on, and the items and messages Home
+Assistant sends with `"level": "alert"`. Information does not show on it.
+
+- **The banner:** an alert's icon alone, 24x24 and red, in the middle of the
+  panel, for 10 s; an item without an icon shows the warning sign. It comes over
+  the face, and a GIF on show ends for it; while the menu, an editor or another
+  banner is up, it waits until the face is back. It dims with the clock, as every
+  banner does, and a button closes it (the press does nothing else).
+- **The mark:** afterwards a red 2x2 square in the top right corner of the face,
+  as long as any alert holds. In the hotspot's preview that corner has the
+  hotspot's blue mark.
+- **Once:** an alert comes up when it is new, or when an item that was
+  information turns into an alert. The same item with a new text does not come
+  up again, and an alert stays known for 15 minutes after it went, so a
+  reconnect to Home Assistant or a fetch that missed it does not bring it back. A
+  DWD warning with another headline counts as another warning; every message is
+  one of its own. Several new alerts with the same icon share one banner.
+
+The icons are drawn as pixels in `src/item_icons.h`, part of the firmware like
+the rest of the band, so they need nothing loaded onto the clock.
 
 ## Web app and the home network (S3)
 
