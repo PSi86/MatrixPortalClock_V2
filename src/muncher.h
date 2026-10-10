@@ -17,7 +17,7 @@
    Two ways through a digit (STYLE_*): the whole old digit eaten and then
    the new one walked, or only the segments that differ. A knock plays a
    scene of its own: the muncher eats a power pellet of the colon, the
-   ghosts turn and flee, and the one it catches runs off as a pair of eyes.
+   ghosts turn and flee, and the one it catches flashes white and is gone.
 
    Everything here counts in steps of one pixel; the sketch says how long a
    step is and asks advanceTo() to catch up with the time.
@@ -151,13 +151,25 @@ const uint8_t MAX_LEGS = 112;
 
 enum Style : uint8_t { STYLE_MIXED, STYLE_ALL, STYLE_DIFF, STYLE_COUNT };   // stored values
 enum Mode : uint8_t { MODE_IDLE, MODE_CHANGE, MODE_POWER };
-enum GhostMode : uint8_t { GHOST_OFF, GHOST_FOLLOW, GHOST_SCARED, GHOST_EYES };
+enum GhostMode : uint8_t { GHOST_OFF, GHOST_FOLLOW, GHOST_SCARED, GHOST_CAUGHT };
 const uint8_t GHOSTS = 2;
 const uint8_t GHOST_DELAY[GHOSTS] = { 8, 16 };   // steps behind the muncher's track
 const uint8_t GHOST_GAP[GHOSTS]   = { 7, 14 };   // never closer to it than this
 const int16_t START_X = -3;                      // just off the left edge
+// A caught ghost flashes white where it was caught for this many steps, a
+// third of a second at the default pace, and is gone. It used to run off
+// as a pair of eyes: two white pixels that on the panel read as a lone dot
+// flying through the corridor (Peter, 2026-10-10).
+const uint8_t CAUGHT_STEPS = 8;
 
-struct Ghost { int16_t x; uint8_t mode; };
+struct Ghost {
+  int16_t x;
+  uint8_t mode;
+  uint8_t timer;      // GHOST_CAUGHT: steps of its flash left
+  // Whether it is drawn on this step: always, but in its flash only every
+  // other pair of steps.
+  bool lit() const { return mode != GHOST_CAUGHT || ((timer >> 1) & 1) == 0; }
+};
 
 class Face {
  public:
@@ -396,12 +408,12 @@ class Face {
         }
         case GHOST_SCARED:
           if (stepsDone % 2 == 0) { h.x--; }               // fleeing, at half speed
-          if (my == L.laneY && abs(mx - h.x) <= 3) { h.mode = GHOST_EYES; }
-          if (h.x < -3) { h.mode = GHOST_OFF; }
+          if (my == L.laneY && abs(mx - h.x) <= 3) { h.mode = GHOST_CAUGHT; h.timer = CAUGHT_STEPS; }
+          else if (h.x < -3) { h.mode = GHOST_OFF; }
           break;
-        case GHOST_EYES:
-          h.x += 2;                                        // home, quickly
-          if (h.x > L.w + 3) { h.mode = GHOST_OFF; }
+        case GHOST_CAUGHT:
+          if (h.timer > 0) { h.timer--; }
+          if (h.timer == 0) { h.mode = GHOST_OFF; }
           break;
         default:
           break;
@@ -413,7 +425,7 @@ class Face {
     for (uint8_t g = 0; g < GHOSTS; g++) {
       const Ghost &h = ghosts[g];
       if (h.mode == GHOST_FOLLOW && h.x - 2 < L.w) { return false; }
-      if (h.mode == GHOST_SCARED || h.mode == GHOST_EYES) { return false; }
+      if (h.mode == GHOST_SCARED || h.mode == GHOST_CAUGHT) { return false; }
     }
     return true;
   }

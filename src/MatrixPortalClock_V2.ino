@@ -3706,12 +3706,12 @@ void muncherDraw(bool colonOn) {
   }
   for (uint8_t g = 0; g < muncher::GHOSTS; g++) {
     const muncher::Ghost &h = munch.ghosts[g];
-    if (h.mode == muncher::GHOST_OFF) { continue; }
-    if (h.mode != muncher::GHOST_EYES) {
-      uint16_t body = (h.mode == muncher::GHOST_SCARED) ? wall
-                    : scaledColor(GHOST_RGB[g][0], GHOST_RGB[g][1], GHOST_RGB[g][2]);
-      muncherSprite(GHOST_BODY, h.x, L.laneY, 1, 0, body);
-    }
+    if (h.mode == muncher::GHOST_OFF || !h.lit()) { continue; }
+    // A caught one flashes white, eyes and all.
+    uint16_t body = (h.mode == muncher::GHOST_CAUGHT) ? eyes
+                  : (h.mode == muncher::GHOST_SCARED) ? wall
+                  : scaledColor(GHOST_RGB[g][0], GHOST_RGB[g][1], GHOST_RGB[g][2]);
+    muncherSprite(GHOST_BODY, h.x, L.laneY, 1, 0, body);
     muncherSprite(GHOST_EYES, h.x, L.laneY, 1, 0, eyes);
   }
   if (munch.muncherOn()) {

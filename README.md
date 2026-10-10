@@ -974,7 +974,9 @@ is 199 steps, 8 s at that pace (the debug build's self-test, below).
 
 **Knock**, and the face action *trigger watchface animation*: *Power pellet*
 (the muncher eats one of the colon's power pellets, the ghosts turn blue and flee,
-and one it catches runs off as a pair of eyes), *Last digit again* (the minutes'
+and one it catches flashes white for a third of a second and is gone; it used to
+run off as a pair of eyes, which on the panel read as a lone dot flying through
+the corridor), *Last digit again* (the minutes'
 ones eaten and laid again), or *Random each time*. A knock is not taken while a
 scene runs, for 1 s after one, or when its scene could not end 1.5 s before the
 next change starts. However the ghosts stand, a scene ends at the latest 150
