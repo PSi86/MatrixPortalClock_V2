@@ -29,8 +29,8 @@ enum InputEvent : uint8_t {
   EV_SWIPE_UP, EV_SWIPE_DOWN, EV_SWIPE_LEFT, EV_SWIPE_RIGHT,
   EV_PUSH,             // a hand moved towards the sensor
   EV_PULL,             // and away from it
-  EV_CIRCLE_CW, EV_CIRCLE_CCW,
-  EV_WAVE,             // a hand waved to and fro over it
+  EV_CIRCLE_CW, EV_CIRCLE_CCW,   // reported, but left out (gestureLeftOut())
+  EV_WAVE,             // a hand waved to and fro over it (not read)
   EV_APPROACH,         // a hand came near and stays (not a gesture: it closes nothing)
   EV_APPROACH_AT_BOOT, // a hand held over the sensor while the clock starts
 };
@@ -108,27 +108,23 @@ constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
   { EV_UP_AT_BOOT,     CTX_BOOT,    FN_TOGGLE_HOTSPOT },
 };
 
-// Gestures, for every profile. Swipes and push move as UP and DOWN do; a
-// circle is the knob - clockwise is up, one step per circle in an editor. A
+// Gestures, for every profile. Swipes and push move as UP and DOWN do. A
 // hand held over the sensor at boot is the recovery, as holding UP is, and a
-// swipe to the left closes the hotspot again. The wave has no row: the sensor
-// reported hardly any wave in the tests of 2026-10-10, so the clock does not
-// read it.
+// swipe to the left closes the hotspot again. The wave and the circles have no
+// row: in the tests of 2026-10-10 the sensor reported hardly any wave, and
+// circles came in the wrong direction now and then, so the clock leaves both
+// out.
 constexpr InputMapping GESTURES_DEFAULT[] = {
   { EV_SWIPE_UP,         CTX_FACE,    FN_OPEN_MENU      },
   { EV_SWIPE_DOWN,       CTX_FACE,    FN_OPEN_MENU      },
   { EV_SWIPE_RIGHT,      CTX_FACE,    FN_OPEN_MENU      },
   { EV_PUSH,             CTX_FACE,    FN_OPEN_MENU      },
-  { EV_CIRCLE_CW,        CTX_FACE,    FN_PLAY_GIF       },
-  { EV_CIRCLE_CCW,       CTX_FACE,    FN_PLAY_GIF       },
   { EV_APPROACH,         CTX_FACE,    FN_SHOW_HINTS     },
   { EV_SWIPE_UP,         CTX_MENU,    FN_PREV           },
   { EV_SWIPE_DOWN,       CTX_MENU,    FN_NEXT           },
   { EV_SWIPE_RIGHT,      CTX_MENU,    FN_ENTER          },
   { EV_PUSH,             CTX_MENU,    FN_ENTER          },
   { EV_SWIPE_LEFT,       CTX_MENU,    FN_BACK           },
-  { EV_CIRCLE_CW,        CTX_MENU,    FN_PREV           },
-  { EV_CIRCLE_CCW,       CTX_MENU,    FN_NEXT           },
   { EV_SWIPE_LEFT,       CTX_HOTSPOT, FN_BACK           },
   { EV_APPROACH_AT_BOOT, CTX_BOOT,    FN_TOGGLE_HOTSPOT },
 };

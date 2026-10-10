@@ -78,8 +78,8 @@ button pin cannot be carried over.
   without the home WiFi; holding UP during boot opens it as well
 - **GIFs** (S3): now and then a GIF takes the panel for a few seconds, and holding
   UP on the face plays one at once (see [GIF playback](#gif-playback))
-- **Gesture sensor (optional):** with a PAJ7620U2 on the I2C bus, swipes, push,
-  circles and a wave work the menu next to the buttons, or instead of them (see
+- **Gesture sensor (optional):** with a PAJ7620U2 on the I2C bus, swipes and
+  push work the menu next to the buttons, or instead of them (see
   [Gesture sensor](#gesture-sensor-paj7620u2))
 - **Info band data** (S3): the weather and the DWD weather warnings for a place,
   fetched over HTTPS, for the info band of the wall clock; for now listed on the
@@ -1002,7 +1002,7 @@ per second.
 ## Gesture sensor (PAJ7620U2)
 
 A PAJ7620U2 on the I2C bus (address 0x73; on the MatrixPortal through the STEMMA
-QT port) recognises nine gestures by itself, eight of which the clock uses.
+QT port) recognises nine gestures by itself, six of which the clock uses.
 The clock looks for it at start-up; without one everything works as before.
 Its gestures do the same in both input profiles; on the face these are the
 shortcuts to begin with, which the Inputs page can change (see
@@ -1013,7 +1013,6 @@ shortcuts to begin with, which the Inputs page can change (see
 | swipe up / down | open the menu | previous / next item, or change the value |
 | swipe right, push | open the menu | open the item; in an editor: save |
 | swipe left | - | back, without saving |
-| circle clockwise / counter-clockwise | play random GIF | previous / next; in an editor one step per circle (clockwise is up) |
 | a hand comes near and stays | a hint: `swipe` / `menu` | - |
 | a hand held over the sensor for 3 s during boot | open the config hotspot | - |
 
@@ -1022,7 +1021,11 @@ hand moving away) does nothing unless the Inputs page gives it something. The
 wave is not used: in the tests of 2026-10-10 the sensor reported a wave for 3
 of 5 waves, and late, in the first run, and for none of 10 in the second
 (with either of the settings below); a wave came as left and right, or as a
-circle, instead.
+circle, instead. Nor are the circles: in the gesture test they came as circles
+(9 of 9, with the settings below), but in the brightness and time editors the
+direction came wrong now and then, and a hand is hard to keep at the distance
+and the size of circle the sensor wants. The sensor still reports them; the
+clock leaves them out, and the Inputs page does not offer them.
 
 - **Directions follow the panel.** The direction the sensor reports, plus the
   turn it is mounted at, minus the rotation the panel is drawn in, gives the
@@ -1031,12 +1034,13 @@ circle, instead.
   if a swipe up acts as another direction, try the next setting.
 - **Reading:** the clock reads the sensor's two result registers itself, in
   one read (as the datasheet's burst read, and the Zephyr and M5Stack drivers
-  do); the library only sets it up. With more than one bit set, a circle
-  counts before push and pull, and those before a swipe. Two of the sensor's
-  values are then set as PixArt's datasheet v1.5 starts it (0x91 = 0x0C, so a
-  hand may be out of view for 12 frames before a trace ends, and 0xCF =
-  0x62): with them circles came as circles in the tests (9 of 9), with the
-  library's values often as swipes (6 of 14).
+  do); the library only sets it up. With more than one bit set, a circle (left
+  out) counts before push and pull, and those before a swipe. Two of the
+  sensor's values are then set as PixArt's datasheet v1.5 starts it (0x91 =
+  0x0C, so a hand may be out of view for 12 frames before a trace ends, and
+  0xCF = 0x62): with them circles came as circles in the tests (9 of 9), with
+  the library's values often as swipes (6 of 14). So a circling hand is left
+  out instead of moving through the menu.
 - **A swipe acts at once.** What comes after a gesture is held against it:
   any gesture within 300 ms, the opposite swipe within 450 ms (the hand going
   back; in the tests it came 250 to 305 ms after the swipe), and a swipe
@@ -1061,8 +1065,9 @@ circle, instead.
   (`- left out, the hand going back, 300 ms after the last`), and a hand that
   came near as `Gesture sensor: a hand near`. The time counts from the last
   gesture taken; when the sensor set more than one bit, the register follows
-  (`0x43=C0`), and the gesture shown is the one the priority above chose. The addresses that answered on the I2C bus at start-up
-  are on the console and in `/api/state` (`hw.i2c`).
+  (`0x43=41`), and the gesture shown is the one the priority above chose. The
+  addresses that answered on the I2C bus at start-up are on the console and in
+  `/api/state` (`hw.i2c`).
 - **Gesture test** (the web app's Inputs section): the panel shows every
   gesture instead of doing it - big, the direction the clock takes, grey when
   it is left out; on top the two result registers in hex and the sensor's own
@@ -1075,8 +1080,8 @@ circle, instead.
   (`on=1|0`, `tune=1|0`).
 
 Tested on 2026-10-10 with a PAJ7620U2 module (Berrybase CJ-PAJ7620) on the
-MatrixPortal S3, mount turn 0: swipes, push and pull came reliably, circles
-with the values above; the wave not (above). Still to be tried: how reliably
+MatrixPortal S3, mount turn 0: swipes, push and pull came reliably; circles
+and the wave not well enough to be used (above). Still to be tried: how reliably
 it tells a hand that stays from one passing by (the hint and the boot hold),
 and whether the panel's own light or a cover in front of the sensor makes it
 see an object that is not there.

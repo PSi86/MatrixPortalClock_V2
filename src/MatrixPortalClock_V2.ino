@@ -604,7 +604,8 @@ Button buttons[] = {
 // recognises the gestures itself and holds them until they are read; reading
 // clears them. The clock reads its two result registers itself (the library
 // only sets it up); the wave it reports is not used, since in the tests of
-// 2026-10-10 it came for hardly any wave. With its INT line wired
+// 2026-10-10 it came for hardly any wave, and neither are the circles
+// (gestureLeftOut()). With its INT line wired
 // (GESTURE_INT_PIN, board_hal.h) the sensor is read only when the line is low;
 // without, it is asked every GESTURE_POLL_MS, and whether a hand is near (for
 // the hints) every APPROACH_POLL_MS while the screen on top maps that.
@@ -4266,6 +4267,7 @@ bool faceEventFitted(InputEvent ev) {
   // without it - the M4 - has no knock, accelerometer or not.
   if (ev == EV_KNOCK) { return accelOK && WATCHFACE_TETRIS != 0; }
   if (ev == EV_WAVE) { return false; }   // not read: too unreliable (updateGestures())
+  if (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) { return false; }   // left out (gestureLeftOut())
   if (isGestureEvent(ev)) { return gestureOK; }
   return true;
 }
@@ -4592,7 +4594,8 @@ void updateInput() {
 // At boot: whether a PAJ7620U2 answers. The library sets it up as PixArt's
 // datasheet v0.8 does; two values are then set as in the datasheet v1.5
 // (gestureTune()): with them circles came as circles in the tests of
-// 2026-10-10 (9 of 9), with the library's often as swipes (6 of 14).
+// 2026-10-10 (9 of 9), with the library's often as swipes (6 of 14). So a
+// circling hand is left out, instead of moving through the menu.
 void gestureBegin() {
   gestureOK = gestureSensor.begin(&Wire) != 0;
   if (!gestureOK) { Serial.println("PAJ7620U2 not found - no gestures"); return; }
@@ -4626,8 +4629,13 @@ InputEvent gestureEvent(Gesture g) {
 }
 
 // Why a gesture is left out, or nullptr when it is taken. A swipe goes out at
-// once; only what comes after a gesture is held against it.
+// once; only what comes after a gesture is held against it. Circles are not
+// used: in the editors of the tests of 2026-10-10 they came in the wrong
+// direction now and then, and a hand is hard to keep at the distance and the
+// size of circle the sensor wants. The sensor still reports them, and the
+// swipes of a circling hand go out with them.
 const char *gestureLeftOut(uint8_t ev) {
+  if (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) { return "circles are not used"; }
   bool swipe = ev >= EV_SWIPE_UP && ev <= EV_SWIPE_RIGHT;
   if (gestureAt && millisNow - gestureAt < GESTURE_LOCKOUT_MS) { return "too soon after the last"; }
   if (swipe && gestureAt && millisNow - gestureAt < GESTURE_RETURN_MS) {
@@ -4640,9 +4648,8 @@ const char *gestureLeftOut(uint8_t ev) {
 }
 
 // Once per loop: a gesture the sensor holds, as an event, unless it is left
-// out (gestureLeftOut()). A circle is one step, as a swipe is: at five steps
-// a circle made the editors jump (tests of 2026-10-10). Every gesture is
-// handling the clock (lastInputAt), as every button press is.
+// out (gestureLeftOut()), one step each. Every gesture is handling the clock
+// (lastInputAt), as every button press is.
 void updateGestures() {
   if (!gestureOK) { return; }
   if (GESTURE_INT >= 0) {
@@ -4823,8 +4830,9 @@ void gestureTune(bool on) {
 }
 
 // The gesture the result registers stand for, also when more than one bit is
-// set: a circle before push and pull, those before a swipe. The wave (0x44)
-// is not used: it came for hardly any wave in the tests of 2026-10-10.
+// set: a circle (left out, gestureLeftOut()) before push and pull, those
+// before a swipe. The wave (0x44) is not used: it came for hardly any wave in
+// the tests of 2026-10-10.
 Gesture gestureDecode(uint8_t r43, uint8_t r44) {
   (void)r44;
   if (r43 & 0x40) { return GES_CLOCKWISE; }
