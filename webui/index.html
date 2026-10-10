@@ -170,6 +170,8 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
 .sc { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
 .sc:first-child { border-top: 0; }
 .sc .ev { font-size: 14px; }
+.sc.closing { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; }
+.sc .close { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
 .err { color: var(--bad); font-size: 13px; }
 .note { font-size: 12.5px; color: var(--muted); }
 progress { width: 100%; height: 8px; accent-color: var(--accent); }
@@ -332,7 +334,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <select id="gmount"><option value="0">not turned</option><option value="1">90° clockwise</option><option value="2">180°</option><option value="3">90° counter-clockwise</option></select>
         </div>
         <div class="row stack">
-          <div><div class="lbl">On the face</div><div class="hint">Giving a button's twice or three times something to do makes its single press wait 0.4 s for the next.</div></div>
+          <div><div class="lbl">On the face</div><div class="hint">Giving a button's twice or three times something to do makes its single press wait 0.4 s for the next.</div>
+            <div class="hint" id="closeHint" hidden>Ticked inputs close an alert or a message on the panel and go on to the next one; nothing else they do runs then.</div></div>
           <div class="shortcuts" id="shortcuts"></div>
           <div class="err" id="scErr" hidden>None of these opens the menu. Give one of them “open the menu”.</div>
         </div>
@@ -389,6 +392,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         </div>
         <div class="row stack" id="fNeedRow1" hidden><div class="need" id="fNeed1"></div></div>
         <div class="row stack"><div class="lbl">On the band now</div><ul class="items" id="items"></ul></div>
+        <div class="row" id="msgRow">
+          <div><div class="lbl">On the 64x32 clock</div><div class="hint">The alerts and messages above, once more on the panel, as “show messages again” on the Inputs page shows them.</div></div>
+          <div class="ctl"><button class="btn" type="button" id="msgShow">Show them now</button></div>
+        </div>
         <div class="row stack"><div class="note">Weather data by Open-Meteo.com (CC BY 4.0). Warnings: Deutscher Wetterdienst, through Bright Sky.</div></div>
       </div>
       <div class="card" id="haCard" hidden>
@@ -469,7 +476,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠'];   // ItemIcon in band_data.h
   // What the page edits; ssid and the WiFi password go through their own form.
   var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
-    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda'];
+    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda'];
   var S = null, saved = null, cur = null, gone = false, auth = '';
   try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
   function headers(extra) { var h = extra || {}; if (auth) { h.Authorization = 'Basic ' + btoa('clock:' + auth); } return h; }
@@ -519,6 +526,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     if (S.hw.rtc) { o.syncd = cur.syncd; }
     if (S.hw.gesture) { o.gmount = cur.gmount; }
     S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } });
+    if (has('closes')) {   // ticks: absent when off; cset says they were sent
+      o.cset = 1;
+      S.lists.events.forEach(function (e, i) { if (e.fitted && cur.closes[i]) { o['c' + i] = 'on'; } });
+    }
     if (has('gifr')) {
       o.gifmin = cur.gifmin; o.gifmax = cur.gifmax; o.gifsec = cur.gifsec; o.gifbr = cur.gifbr; o.gifbx = (cur.gifbx / 10).toFixed(1);
       if (cur.gifr) { o.gifr = 'on'; }
@@ -672,18 +683,27 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     prof.value = cur.prof;
     $('#gmountRow').hidden = !S.hw.gesture;
     $('#gmount').value = cur.gmount;
-    var box = $('#shortcuts');
+    var box = $('#shortcuts'), closing = has('closes');
     box.innerHTML = '';
+    $('#closeHint').hidden = !closing;
     S.lists.events.forEach(function (e, i) {
       if (!e.fitted) { return; }
-      var r = document.createElement('div'); r.className = 'sc';
+      var r = document.createElement('div'); r.className = 'sc' + (closing ? ' closing' : '');
       var l = document.createElement('label'); l.className = 'ev'; l.htmlFor = 'k' + i; l.textContent = e.label;
       var s = document.createElement('select'); s.id = 'k' + i;
       e.actions.forEach(function (a) { var o = document.createElement('option'); o.value = a; o.textContent = S.lists.actions[a]; s.appendChild(o); });
       s.value = cur.keys[i];
       if (s.selectedIndex < 0) { s.value = 0; cur.keys[i] = 0; }
       s.addEventListener('change', function () { cur.keys[i] = +s.value; changed(); });
-      r.appendChild(l); r.appendChild(s); box.appendChild(r);
+      r.appendChild(l); r.appendChild(s);
+      if (closing) {   // whether it closes a notice on the panel
+        var c = document.createElement('label'); c.className = 'close';
+        var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!cur.closes[i];
+        cb.setAttribute('aria-label', e.label + ' closes an alert or a message');
+        cb.addEventListener('change', function () { cur.closes[i] = cb.checked; changed(); });
+        c.appendChild(cb); c.appendChild(document.createTextNode('closes')); r.appendChild(c);
+      }
+      box.appendChild(r);
     });
     if (!prof.dataset.bound) {
       prof.dataset.bound = 1;
@@ -772,6 +792,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }
     // Info band
     if (has('lat')) { setNumber('lat', 'lat'); setNumber('lon', 'lon'); setCheck('feedw', 'feedw', showNeeds); setCheck('feeda', 'feeda', showNeeds); }
+    $('#msgRow').hidden = !has('closes') || S.mode === 'ap';   // over the face only, not while the hotspot is open
     $('#haCard').hidden = !S.ha;
     if (S.ha) { fillHa(); }
     // WiFi
@@ -1047,6 +1068,13 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   $('#typedBtn').addEventListener('click', function () {
     api('/api/time', enc({ date: $('#tdate').value, time: $('#ttime').value })).then(function (r) { $('#timeLine').textContent = r.timeLine; toast('Time set.'); })
       .catch(function (e) { toast(e.message); });
+  });
+  $('#msgShow').addEventListener('click', function () {
+    api('/api/messages', '').then(function (r) {
+      toast(!r.onFace ? 'Not now: they come only over the face.'
+        : r.shown ? 'The clock shows ' + r.shown + (r.shown === 1 ? ' alert or message' : ' alerts and messages') + ' now.'
+        : 'There are none; the clock says so.');
+    }).catch(function () { toast('The clock did not answer.'); });
   });
   $('#gifNow').addEventListener('click', function () {
     api('/api/gif', '').then(function (r) { toast(r.playing ? 'The clock plays a GIF now.' : 'No GIF: one plays only over the face.'); }).catch(function () { toast('The clock did not answer.'); });

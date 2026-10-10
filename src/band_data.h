@@ -59,6 +59,7 @@ struct BandItem {
   uint8_t  feed;       // the source it came from (FeedId)
   time_t   until;      // UTC
   uint32_t tag;        // which alert it is, for the banner: the same tag is the same alert, even under another key
+  uint32_t seq;        // the order the items came in; the loop numbers them as it takes them (bandPut())
 };
 
 // A tag from text (FNV-1a), or from several, each one chained onto the last.

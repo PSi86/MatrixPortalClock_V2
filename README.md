@@ -84,10 +84,11 @@ button pin cannot be carried over.
 - **Info band data** (S3): the weather and the DWD weather warnings for a place,
   fetched over HTTPS, for the info band of the wall clock; for now listed on the
   config page and the console (see [Info band data](#info-band-data))
-- **Alerts** (S3): a weather warning from `moderate` on, or an item or message
-  from Home Assistant marked as an alert, comes up once as a banner with its
-  icon, large and red, and a red mark stays in a corner of the face while it
-  holds (see [Alerts on the panel](#alerts-on-the-panel-s3))
+- **Alerts and messages** (S3): a weather warning from `moderate` on, or an
+  item from Home Assistant marked as an alert, comes up once as a banner with
+  its icon, large and red; a message from Home Assistant runs through as text.
+  A mark in a corner of the face stays while there are any, and they can be
+  shown again (see [Alerts and messages on the panel](#alerts-and-messages-on-the-panel-s3))
 
 ## Setup
 
@@ -232,8 +233,11 @@ three times and held, the knock (with the accelerometer) and each gesture (with
 a gesture sensor), each to one of: nothing, open the menu, play random GIF, play
 last GIF again (both S3), trigger watchface animation, toggle auto brightness
 on / off, toggle daylight saving: auto, summer, winter, toggle hotspot on / off,
-fade brightness while held (held buttons only), show gesture hints. The
-watchface animation is the face's own: the Tetris digits break up in the
+fade brightness while held (held buttons only), show gesture hints, show
+messages again (S3, see [Alerts and messages](#alerts-and-messages-on-the-panel-s3)).
+On the S3 each input also has a tick, **closes**: a ticked input closes an alert
+or a message on the panel and goes on to the next one. The watchface animation
+is the face's own: the Tetris digits break up in the
 break-up effect, and the classic digits all fly in at the next second as if
 every one of them changed. On the classic face a new one is ignored until the
 running one has landed and 0.3 s have passed, so a knock that reports itself
@@ -440,7 +444,7 @@ the card shows its topics.
 | Topic | Direction | Payload |
 |---|---|---|
 | `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required); an empty payload takes the item away |
-| `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (60 unless given, 5 to 3600) |
+| `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600) |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux, once a minute |
 | `homeassistant/notify/<id>/message/config`, `homeassistant/sensor/<id>/light/config` | the clock to Home Assistant, retained | MQTT discovery |
@@ -460,10 +464,12 @@ data:
 ```
 
 A message goes to the **Message** entity (`notify.send_message`), or as JSON to
-the message topic. It is an item for its seconds; with `"level": "alert"` it
-comes up as a banner on the 64x32 clock (see
-[Alerts on the panel](#alerts-on-the-panel-s3)). The Message entity sends the
-text alone, so its messages are information and have no banner.
+the message topic. It is an item for its seconds, an hour unless it says; the
+clock keeps up to four, and a fifth takes the oldest one's place (an urgent
+one's only when all four are urgent). On the 64x32 clock its text runs through,
+and with `"level": "alert"` its icon comes first (see
+[Alerts and messages on the panel](#alerts-and-messages-on-the-panel-s3)). The
+Message entity sends the text alone, so its messages are information.
 
 - **Retained items:** the broker keeps them, so a clock that starts or comes
   back gets the current set at once, and nothing is polled. On every connect
@@ -483,34 +489,53 @@ text alone, so its messages are information and have no banner.
   password refused, nothing answering at the address, address not found).
 - **Flash:** the client costs 41.7 KB (it brings the TLS and WebSocket
   transports the core's build has switched on, which the link does not use),
-  the whole link about 57 KB. With the alert banners (2026-10-10) the S3's
-  image has 1,437,264 bytes, 397,744 less than its app slot.
+  the whole link about 57 KB. With the alerts and messages on the panel
+  (2026-10-10) the S3's image has 1,441,648 bytes, 393,360 less than its app
+  slot.
 
 The code is in `src/ha_link.h` (the client, its task and the topics) and at the
 end of the sketch (when it runs, what arrives, the card's part).
 
-## Alerts on the panel (S3)
+## Alerts and messages on the panel (S3)
 
-The 64x32 clock has no room for the info band, so of its items only the alerts
-show there: the DWD warnings from `moderate` on, and the items and messages Home
-Assistant sends with `"level": "alert"`. Information does not show on it.
+The 64x32 clock has no room for the info band, so of its items only these show
+there: the alerts - the DWD warnings from `moderate` on, and the items Home
+Assistant sends with `"level": "alert"` - and the messages from Home Assistant.
+Other information does not show on it.
 
-- **The banner:** an alert's icon alone, 24x24 and red, in the middle of the
-  panel, for 10 s; an item without an icon shows the warning sign. It comes over
-  the face, and a GIF on show ends for it; while the menu, an editor or another
-  banner is up, it waits until the face is back. It dims with the clock, as every
-  banner does, and a button closes it (the press does nothing else).
-- **The mark:** afterwards a red 2x2 square in the top right corner of the face,
-  as long as any alert holds. In the hotspot's preview that corner has the
-  hotspot's blue mark.
+- **An alert:** its icon alone, 24x24 and red, in the middle of the panel, for
+  10 s; an item without an icon shows the warning sign.
+- **A message:** its text (`title: text`) runs through the middle of the panel
+  in the 5x7 font, white, from the right edge out at the left, twice, at about
+  five characters a second; an urgent one (`"level": "alert"`) shows its icon
+  for 3 s first and runs in red. The font has ä ö ü ß, é è à ç ñ and the other
+  letters of code page 437, and °; other characters show as `?`. A message
+  keeps 96 bytes, so two runs of the longest take about 40 s.
+- **When:** over the face. While the menu, an editor or another banner is up,
+  they wait until the face is back; an alert ends a GIF on show, a message lets
+  it play to its end. Several new ones come one after the other, alerts first,
+  each kind in the order it came; nothing else cuts them short - not a new
+  alert or message, a GIF that is due, turning the clock, the web app - only
+  their own end, a ticked input (the Inputs page: **closes**, every button
+  press and gesture to begin with, not the knock) or a restart. A ticked input
+  goes on to the next one and does nothing else.
+- **Again:** **show messages again** (a face shortcut, UP pressed twice in the
+  Default profile, or **Show them now** in the web app's Info band section)
+  shows all there are, alerts first with their icon and then their text in red,
+  then the messages, each in the order it came; with none, the panel says "no
+  messages". In the Default profile UP pressed twice makes UP's single press
+  wait 0.4 s; a clock with shortcuts of its own keeps them.
+- **The mark:** a 2x2 square in the top right corner of the face while there
+  are any: red while an alert holds, white for messages alone. In the hotspot's
+  preview that corner has the hotspot's blue mark.
 - **Once:** an alert comes up when it is new, or when an item that was
   information turns into an alert. The same item with a new text does not come
-  up again. An alert its source takes away (an empty payload) or that runs out
-  is over: sent again, it comes up again. One dropped for a technical reason
-  stays known for 15 minutes, so a reconnect to Home Assistant or a fetch that
-  missed it does not bring it back. A DWD warning with another headline counts
-  as another warning; every message is one of its own. Several new alerts with
-  the same icon share one banner.
+  up again. One its source takes away (an empty payload) or that runs out is
+  over: sent again, it comes up again. One dropped for a technical reason stays
+  known for 15 minutes, so a reconnect to Home Assistant or a fetch that missed
+  it does not bring it back. A DWD warning with another headline counts as
+  another warning; every message is one of its own. Several new alerts with the
+  same icon share one banner.
 
 The icons are drawn as pixels in `src/item_icons.h`, part of the firmware like
 the rest of the band, so they need nothing loaded onto the clock.
