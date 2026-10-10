@@ -617,6 +617,24 @@ const unsigned long APPROACH_REARM_MS  = 1000;  // gone this long before the nex
 const unsigned long APPROACH_BOOT_MS   = 3000;  // held over the sensor this long at boot: the recovery
 unsigned long gesturePolledAt  = 0;
 unsigned long gestureAt        = 0;   // millis() of the last gesture that counted
+// The last gestures the sensor reported, newest first, for the gesture test
+// and the web app: the sensor's own direction, the event the panel made of it,
+// and whether it was taken or left (within GESTURE_LOCKOUT_MS of the last).
+struct GestureSeen { unsigned long at; uint8_t raw; uint8_t ev; bool taken; };
+const uint8_t GESTURE_SEEN_MAX = 8;
+GestureSeen gestureSeen[GESTURE_SEEN_MAX];
+uint8_t  gestureSeenCount = 0;
+// The gesture test: the panel shows every gesture instead of doing it, and
+// what the sensor sees in front of it; any button ends it, and so does
+// GESTURE_TEST_MS without a gesture.
+const unsigned long GESTURE_TEST_MS = 3UL * 60UL * 1000UL;
+uint16_t gestureTestCount = 0;          // gestures since the test began
+unsigned long gestureTestAt = 0;        // millis() of the start or of the last gesture
+unsigned long gestureNearAt = 0;        // when the sensor was last asked what it sees
+int16_t  gestureNearBright = -1;        // the object in view: its brightness and size; -1 = nothing in view
+int16_t  gestureNearSize   = -1;
+const char *gestureRawName(uint8_t g);  // declared here: the sketch's generated prototypes miss these two
+const char *gestureWord(uint8_t ev);
 unsigned long approachPolledAt = 0;
 unsigned long objectNearSince  = 0;   // 0 = nothing near
 unsigned long objectGoneSince  = 0;
@@ -661,6 +679,7 @@ enum Screen : uint8_t {
   SCREEN_HOTSPOT_INFO,     // config AP up, no client yet: SSID, password and IP
   SCREEN_HOTSPOT_PREVIEW,  // config AP up and a client connected: the live clock
   SCREEN_GIF,              // a GIF in place of the face, over it in the stack
+  SCREEN_GESTURE_TEST,     // every gesture shown instead of done, over the face (the web app's Inputs section)
 };
 Screen        screen = SCREEN_BOOT;    // the screen on top, the one on the panel
 const uint8_t SCREEN_DEPTH = 3;        // room for the screens beneath it
@@ -1432,6 +1451,7 @@ void loop(void) {
     case SCREEN_MENU:   if (panelDirty) { drawMenu(); }   break;   // static: redrawn on a change only
     case SCREEN_BANNER: if (panelDirty || bannerKind == BANNER_RUN) { drawBanner(); } break;   // a running text moves
     case SCREEN_EDITOR: if (panelDirty || editorMoving()) { drawEditor(); } break;
+    case SCREEN_GESTURE_TEST: gestureTestUpdate(); if (panelDirty) { drawGestureTest(); } break;
     default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
   }
 }
@@ -1534,6 +1554,9 @@ void updateScreenTimeouts() {
     case SCREEN_MENU:
     case SCREEN_EDITOR:
       if (inputIdleFor(MENU_IDLE_MS)) { Serial.println("Menu timed out"); setScreen(SCREEN_FACE); }
+      break;
+    case SCREEN_GESTURE_TEST:
+      if (millisNow - gestureTestAt >= GESTURE_TEST_MS) { Serial.println("Gesture test: timed out"); gestureTestStop(); }
       break;
 #if GIF_PLAYBACK
     case SCREEN_GIF:
@@ -4189,7 +4212,8 @@ InputContext contextOf(Screen s) {
   switch (s) {
     case SCREEN_BOOT:            return CTX_BOOT;
     case SCREEN_MENU:
-    case SCREEN_EDITOR:          return CTX_MENU;
+    case SCREEN_EDITOR:
+    case SCREEN_GESTURE_TEST:    return CTX_MENU;   // the test: no 2x or 3x, so a press ends it at once
     case SCREEN_HOTSPOT_INFO:
     case SCREEN_HOTSPOT_PREVIEW: return CTX_HOTSPOT;
     default:                     return CTX_FACE;
@@ -4427,6 +4451,10 @@ void holdEnd(InputFunction fn) {
 // up, since it was meant for a screen the banner hid. With the Classic clicks
 // profile a click sequence that ran something is confirmed by blinks.
 InputFunction handleInput(InputEvent ev, uint8_t steps) {
+  if (screen == SCREEN_GESTURE_TEST) {   // the gestures go to the test itself; a button ends it
+    if (closesBanner(ev)) { gestureTestStop(); }
+    return FN_NONE;
+  }
 #if BAND_DATA
   if (screen == SCREEN_BANNER && noticeStepCount) {
     // A notice on show: the events set on the Inputs page go on to the next
@@ -4595,21 +4623,34 @@ void updateGestures() {
     if (millisNow - gesturePolledAt < GESTURE_POLL_MS) { return; }
     gesturePolledAt = millisNow;
   }
-  InputEvent ev = gestureEvent(gestureSensor.readGesture());   // reading clears it, and the INT line
+  Gesture g = gestureSensor.readGesture();   // reading clears it, and the INT line
+  InputEvent ev = gestureEvent(g);
   if (ev == EV_NONE) { return; }
   // Each one on the console, as it was taken or left: what a hand did, and
-  // what the sensor saw without one.
+  // what the sensor saw without one; with the sensor's own direction and the
+  // two turns that make the panel's of it.
   int8_t name = faceEventIndex(ev);
   const char *label = name >= 0 ? FACE_EVENTS[name].label : "?";
-  if (millisNow - gestureAt < GESTURE_LOCKOUT_MS) {
-    Serial.printf("Gesture: %s - left, %lu ms after the last\n", label, millisNow - gestureAt);
+  bool taken = millisNow - gestureAt >= GESTURE_LOCKOUT_MS;
+  gestureRemember(g, ev, taken);
+  if (!taken) {
+    Serial.printf("Gesture: %s - left, %lu ms after the last (sensor %s, turned %u, panel %u)\n", label,
+                  millisNow - gestureAt, gestureRawName(g), uiSettings.gestureMount, screenRotation);
+    if (screen == SCREEN_GESTURE_TEST) { gestureTestCount++; panelDirty = true; }
     return;
   }
-  Serial.printf("Gesture: %s\n", label);
+  Serial.printf("Gesture: %s (sensor %s, turned %u, panel %u)\n", label, gestureRawName(g),
+                uiSettings.gestureMount, screenRotation);
   gestureAt   = millisNow;
   lastInputAt = millisNow;
   objectNearSince = 0;        // a gesture is no approach
   approachReported = true;    // nor is the hand that made it, until it has gone
+  if (screen == SCREEN_GESTURE_TEST) {   // shown, not done
+    gestureTestCount++;
+    gestureTestAt = millisNow;
+    panelDirty = true;
+    return;
+  }
   handleInput(ev, (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) ? BURST_FAST_STEPS : 1);
 }
 
@@ -4633,6 +4674,128 @@ void updateApproach() {
     if (!objectGoneSince) { objectGoneSince = millisNow; }
     if (millisNow - objectGoneSince >= APPROACH_REARM_MS) { approachReported = false; }
   }
+}
+
+// The sensor's own name of a gesture, before any turn: up, down, left and
+// right as the sensor sees them.
+const char *gestureRawName(uint8_t g) {
+  switch (g) {
+    case GES_UP:            return "up";
+    case GES_DOWN:          return "down";
+    case GES_LEFT:          return "left";
+    case GES_RIGHT:         return "right";
+    case GES_FORWARD:       return "push";
+    case GES_BACKWARD:      return "pull";
+    case GES_CLOCKWISE:     return "cw";
+    case GES_ANTICLOCKWISE: return "ccw";
+    case GES_WAVE:          return "wave";
+    default:                return "?";
+  }
+}
+
+// What the gesture test shows for an event: its direction on the panel, or
+// what it is.
+const char *gestureWord(uint8_t ev) {
+  switch (ev) {
+    case EV_SWIPE_UP:    return "UP";
+    case EV_SWIPE_DOWN:  return "DOWN";
+    case EV_SWIPE_LEFT:  return "LEFT";
+    case EV_SWIPE_RIGHT: return "RIGHT";
+    case EV_PUSH:        return "PUSH";
+    case EV_PULL:        return "PULL";
+    case EV_CIRCLE_CW:   return "CW";
+    case EV_CIRCLE_CCW:  return "CCW";
+    case EV_WAVE:        return "WAVE";
+    default:             return "?";
+  }
+}
+
+void gestureRemember(uint8_t raw, uint8_t ev, bool taken) {
+  if (gestureSeenCount < GESTURE_SEEN_MAX) { gestureSeenCount++; }
+  for (uint8_t i = gestureSeenCount - 1; i > 0; i--) { gestureSeen[i] = gestureSeen[i - 1]; }
+  gestureSeen[0] = { millisNow, raw, ev, taken };
+}
+
+// The gesture test, over the face; a GIF on show ends for it. False when
+// there is no sensor or another screen is up (a menu, a banner, the hotspot).
+bool gestureTestStart() {
+#if GIF_PLAYBACK
+  if (gestureOK && screen == SCREEN_GIF) { closeScreen(); }
+#endif
+  if (!gestureOK || screen != SCREEN_FACE) { return false; }
+  gestureTestCount = 0;
+  gestureTestAt    = millisNow;
+  gestureSeenCount = 0;
+  gestureNearAt    = 0;
+  openScreen(SCREEN_GESTURE_TEST);
+  Serial.println("Gesture test: on");
+  return true;
+}
+
+void gestureTestStop() {
+  if (screen != SCREEN_GESTURE_TEST) { return; }
+  closeScreen();
+  Serial.println("Gesture test: off");
+}
+
+// While the test is up: what the sensor sees in front of it, every
+// APPROACH_POLL_MS; the panel follows when it changes.
+void gestureTestUpdate() {
+  if (millisNow - gestureNearAt < APPROACH_POLL_MS) { return; }
+  gestureNearAt = millisNow;
+  int16_t b = -1, s = -1;
+  if (gestureSensor.isObjectInView()) {
+    b = (int16_t)gestureSensor.getObjectBrightness();
+    s = (int16_t)gestureSensor.getObjectSize();
+  }
+  if (b == gestureNearBright && s == gestureNearSize) { return; }
+  gestureNearBright = b;
+  gestureNearSize   = s;
+  panelDirty = true;
+}
+
+// The test's screen: on top what the sensor reported (S), in the middle the
+// direction the panel made of it - grey when it was left as too soon after
+// the last - and below the count (G), the sensor's turn on the config page
+// (M), the panel's rotation (R) and what is in view (N brightness/size).
+void drawGestureTest() {
+  int16_t w = matrix.width(), h = matrix.height();
+  bool landscape = w > h;
+  const GestureSeen *last = gestureSeenCount ? &gestureSeen[0] : nullptr;
+  char raw[16], line[24], nearTxt[16];
+  if (last) {
+    snprintf(raw, sizeof(raw), "S %s", gestureRawName(last->raw));
+    for (char *p = raw; *p; p++) { *p = (char)toupper((unsigned char)*p); }
+  } else {
+    strlcpy(raw, landscape ? "GESTURE TEST" : "TEST", sizeof(raw));
+  }
+  if (gestureNearBright >= 0) { snprintf(nearTxt, sizeof(nearTxt), "N%d/%d", gestureNearBright, gestureNearSize); }
+  else                        { strlcpy(nearTxt, "N-", sizeof(nearTxt)); }
+
+  matrix.fillScreen(0);
+  uiTiny(0, 0, raw, uiQuiet());
+  const char *word = last ? gestureWord(last->ev) : "-";
+  uint8_t size = (int16_t)(strlen(word) * 12) <= w ? 2 : 1;
+  matrix.setFont();
+  matrix.setTextSize(size);
+  matrix.setTextColor(last && !last->taken ? uiQuiet() : uiInk());
+  int16_t tw = (int16_t)strlen(word) * 6 * size - size, th = 7 * size;
+  matrix.setCursor((w - tw) / 2, (h - th) / 2);
+  matrix.print(word);
+  matrix.setTextSize(1);
+  if (landscape) {
+    snprintf(line, sizeof(line), "G%u M%u R%u %s", gestureTestCount, uiSettings.gestureMount, screenRotation, nearTxt);
+    uiTiny(0, h - 5, line, uiQuiet());
+  } else {
+    snprintf(line, sizeof(line), "G%u", gestureTestCount);
+    uiTiny(0, h - 17, line, uiQuiet());
+    snprintf(line, sizeof(line), "M%u R%u", uiSettings.gestureMount, screenRotation);
+    uiTiny(0, h - 11, line, uiQuiet());
+    uiTiny(0, h - 5, nearTxt, uiQuiet());
+  }
+  drawFeedbackIndicator();
+  matrix.show();
+  panelDirty = false;
 }
 
 // At boot: whether a hand is held over the sensor for APPROACH_BOOT_MS, the
@@ -7579,6 +7742,34 @@ void apiState(Print &c) {
   sendJson(c, d);
 }
 
+// The gesture sensor for the gesture test: whether the test is up, the
+// sensor's turn and the panel's rotation, what is in view, and the last
+// gestures, newest first - the sensor's own direction, the event the panel
+// made of it, and whether it was taken.
+void apiGestures(Print &c) {
+  JsonDocument d;
+  d["found"] = gestureOK;
+  d["test"] = screen == SCREEN_GESTURE_TEST;
+  d["count"] = gestureTestCount;
+  d["mount"] = uiSettings.gestureMount;
+  d["rotation"] = screenRotation;
+  if (screen == SCREEN_GESTURE_TEST && gestureNearBright >= 0) {
+    d["near"]["brightness"] = gestureNearBright;
+    d["near"]["size"] = gestureNearSize;
+  }
+  JsonArray events = d["events"].to<JsonArray>();
+  for (uint8_t i = 0; i < gestureSeenCount; i++) {
+    const GestureSeen &g = gestureSeen[i];
+    int8_t name = faceEventIndex((InputEvent)g.ev);
+    JsonObject o = events.add<JsonObject>();
+    o["ago"] = millisNow - g.at;
+    o["sensor"] = gestureRawName(g.raw);
+    o["panel"] = name >= 0 ? FACE_EVENTS[name].label : "?";
+    o["taken"] = g.taken;
+  }
+  sendJson(c, d);
+}
+
 // The canvas as it is drawn (RGB565, row by row in the panel's own
 // orientation; the page turns it by "rot" from /api/status). A GIF is drawn
 // past the canvas, straight into the panel driver, so it does not show here.
@@ -7825,7 +8016,14 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     return;
   }
   if (path == "/api/panel") { apiPanel(c); return; }
+  if (path == "/api/gestures") { apiGestures(c); return; }
   if (!isPost) { sendJsonError(c, 404, "Unknown request."); return; }
+  if (path == "/api/gesturetest") {
+    // on=1 starts the gesture test over the face, on=0 ends it.
+    if (getParam(body, "on") == "1") { gestureTestStart(); } else { gestureTestStop(); }
+    apiGestures(c);
+    return;
+  }
   if (path == "/api/live") {
     applyLiveParams(body);    // RAM only; Save keeps it, Discard reads the stored settings back
     sendNoContent(c);
