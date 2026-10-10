@@ -59,21 +59,25 @@ enum InputFunction : uint8_t {
   FN_PLAY_GIF,         // a GIF now, on boards with GIF playback
   FN_GIF_AGAIN,        // the last GIF shown once more, on boards with GIF playback
   FN_SHOW_HINTS,       // what the gestures do, for a moment
+  FN_SHOW_MESSAGES,    // the alerts and messages there are, once more, on boards with the info band data
 };
 
 struct InputMapping { InputEvent event; InputContext context; InputFunction function; };
 
 // Profile "Default": on the face any press opens the menu - except holding
 // UP, whose repeats would close the menu again at once; it plays a GIF, which
-// the repeats leave alone. In the menu a short press moves; holding DOWN goes
-// in, holding UP climbs out, one level for every 600 ms it stays held. Nothing
-// uses 2x or 3x, so a short press acts at once. An event without a row does
-// nothing.
+// the repeats leave alone - and UP twice shows the messages again, where a
+// clock has them. In the menu a short press moves; holding DOWN goes in,
+// holding UP climbs out, one level for every 600 ms it stays held. Nothing
+// else uses 2x or 3x, so a short press of DOWN acts at once, and one of UP
+// waits 0.4 s for a second on a clock with messages. An event without a row
+// does nothing.
 constexpr InputMapping PROFILE_DEFAULT[] = {
   { EV_UP_SHORT,       CTX_FACE,    FN_OPEN_MENU      },
   { EV_DOWN_SHORT,     CTX_FACE,    FN_OPEN_MENU      },
   { EV_DOWN_HOLD,      CTX_FACE,    FN_OPEN_MENU      },
   { EV_UP_HOLD,        CTX_FACE,    FN_PLAY_GIF       },
+  { EV_UP_2X,          CTX_FACE,    FN_SHOW_MESSAGES  },
   { EV_KNOCK,          CTX_FACE,    FN_FACE_ANIMATION },
   { EV_UP_SHORT,       CTX_MENU,    FN_PREV           },
   { EV_DOWN_SHORT,     CTX_MENU,    FN_NEXT           },
@@ -221,8 +225,8 @@ constexpr FaceEvent FACE_EVENTS[] = {
 constexpr uint8_t FACE_EVENT_COUNT = sizeof(FACE_EVENTS) / sizeof(FACE_EVENTS[0]);
 
 // What an action needs to be offered: a held button (it runs while the button
-// stays down), GIF playback.
-enum FaceActionNeeds : uint8_t { NEEDS_NOTHING, NEEDS_HOLD, NEEDS_GIFS };
+// stays down), GIF playback, the info band data (alerts and messages).
+enum FaceActionNeeds : uint8_t { NEEDS_NOTHING, NEEDS_HOLD, NEEDS_GIFS, NEEDS_MESSAGES };
 struct FaceAction { uint8_t code; InputFunction function; FaceActionNeeds needs; const char *label; const char *word; };
 constexpr FaceAction FACE_ACTIONS[] = {
   { 0, FN_NONE,           NEEDS_NOTHING, "nothing",                                      ""      },
@@ -235,6 +239,7 @@ constexpr FaceAction FACE_ACTIONS[] = {
   { 7, FN_TOGGLE_HOTSPOT, NEEDS_NOTHING, "toggle hotspot on / off",                      "AP"    },
   { 8, FN_BRIGHT_FADE,    NEEDS_HOLD,    "fade brightness while held",                   "fade"  },
   { 9, FN_SHOW_HINTS,     NEEDS_NOTHING, "show gesture hints",                           "hints" },
+  { 10, FN_SHOW_MESSAGES, NEEDS_MESSAGES, "show messages again",                         "msgs"  },
 };
 constexpr uint8_t FACE_ACTION_COUNT = sizeof(FACE_ACTIONS) / sizeof(FACE_ACTIONS[0]);
 

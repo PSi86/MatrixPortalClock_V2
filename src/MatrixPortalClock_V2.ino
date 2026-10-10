@@ -76,6 +76,7 @@ class JsonObject;
 #else
 struct FeedResult;                     // named by prototypes generated from this sketch
 struct BandItem;
+struct NoticeStep;
 #endif
 
 #if HA_LINK
@@ -374,22 +375,64 @@ const uint8_t BAND_ITEMS_MAX = 16;
 BandItem bandItems[BAND_ITEMS_MAX];
 uint8_t  bandItemCount = 0;
 time_t   bandNextUntil = 0;   // the earliest until of them (UTC), when the next one runs out; 0 = no items
+uint32_t bandSeq = 0;         // the number the last item taken got (BandItem.seq)
 
-// Alerts on the 64x32 clock, which has no room for the band (concept doc,
-// "Decided and open on the band", 2026-10-09): an item at alert level comes
-// up as a banner with its icon alone, once, and the face carries a marker
-// while one is there. The alerts already shown, by source and tag. One its
-// source takes away, or one that runs out, is over and forgotten at once.
-// One dropped for a technical reason stays known for a while, so an alert
-// that comes back (a reconnect to Home Assistant, a fetch that missed it) is
-// not shown again.
-struct AlertSeen { uint8_t feed; uint32_t tag; unsigned long lastAt; };
-const uint8_t       ALERT_SEEN_MAX  = 24;
-const unsigned long ALERT_FORGET_MS = 15UL * 60UL * 1000UL;
+// Notices on the 64x32 clock, which has no room for the band (concept doc,
+// "Decided and open on the band"): the items at alert level and the messages
+// from Home Assistant. A new alert comes up as a banner with its icon alone, a
+// new message as text running through twice, an urgent message as both; the
+// face carries a marker while there are any (red for an alert, white for
+// messages alone), and they can all be shown again.
+//
+// The notices already shown, by source and tag. One its source takes away,
+// or one that runs out, is over and forgotten at once. One dropped for a
+// technical reason stays known for a while, so a notice that comes back (a
+// reconnect to Home Assistant, a fetch that missed it) is not shown again.
+struct NoticeSeen { uint8_t feed; uint32_t tag; unsigned long lastAt; };
+const uint8_t       NOTICE_SEEN_MAX  = 24;
+const unsigned long NOTICE_FORGET_MS = 15UL * 60UL * 1000UL;
 const uint8_t       ALERT_R = 255, ALERT_G = 0, ALERT_B = 0;   // the alert colour
-AlertSeen alertSeen[ALERT_SEEN_MAX];
-uint8_t   alertSeenCount = 0;
-bool      alertHolds = false;     // an item at alert level is there
+NoticeSeen noticeSeen[NOTICE_SEEN_MAX];
+uint8_t    noticeSeenCount = 0;
+enum NoticeMark : uint8_t { MARK_NONE, MARK_MESSAGE, MARK_ALERT };
+NoticeMark noticeMark = MARK_NONE;   // what the face's corner shows
+
+// What is on the panel: the banners of one or more notices, one step after
+// the other - an icon, or a text that runs through twice. A step names its
+// notice by source and tag, so one that went meanwhile is left out.
+enum NoticePhase : uint8_t { PHASE_ICON, PHASE_TEXT };
+struct NoticeStep { uint8_t feed; uint32_t tag; uint8_t phase; };
+const uint8_t NOTICE_STEPS_MAX = 2 * BAND_ITEMS_MAX;
+NoticeStep noticeSteps[NOTICE_STEPS_MAX];
+uint8_t    noticeStepCount = 0;   // 0: none on the panel
+uint8_t    noticeStepAt = 0;      // the step on the panel
+unsigned long noticeStepMs = 0;   // how long it stays
+
+// A text running through: right to left in the 5x7 font, twice when it is
+// new - the first run catches the eye, the second lets it be read - and once
+// when it is asked for again, by someone already looking.
+const uint16_t RUN_PX_PER_S      = 30;     // about five characters a second
+uint8_t  noticeRuns = 2;                   // how often the texts of the notices on show run through
+const unsigned long ICON_BEFORE_TEXT_MS = 3000;   // an urgent message's icon, before its text
+char     runText[sizeof(BandItem::text)];  // in the font's code page (CP437)
+uint16_t runWidth = 0;                     // its width in pixels
+uint8_t  runR = 255, runG = 255, runB = 255;
+int16_t  runLastX = INT16_MIN;             // where it was drawn last
+
+// Which face events close a notice on the panel (and go on to the next):
+// set on the Inputs page, a blob of its own (NVS key "closes"). Nothing
+// stored: what closes every other banner - a press of a button or a
+// gesture, not a knock or a hand that comes near.
+#define NOTICE_KEYS_MAGIC 0xC105
+#define NOTICE_KEYS_REV   1
+struct NoticeKeys {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  count;                          // events stored (FACE_EVENT_COUNT when written)
+  uint8_t  closes[FACE_KEYS_MAX];          // 1: this face event closes a notice, in FACE_EVENTS order
+};
+uint8_t noticeCloses[FACE_EVENT_COUNT];
+SettingsStore<NoticeKeys> noticeKeysStore;
 #endif
 
 #if WEBUI_APP
@@ -466,8 +509,8 @@ const unsigned long HA_LIGHT_MS = 60UL * 1000UL;   // the light sensor's lux to 
 const unsigned long HA_RETRY_MS = 60UL * 1000UL;   // after the client failed to start
 const unsigned long HA_STOP_WAIT_MS = 2000;        // the hotspot waits this long for the goodbye
 const uint8_t  SOURCE_HA = FEED_COUNT;   // BandItem.feed of what Home Assistant sent
-const char *const HA_MESSAGE_KEY = "*message";   // a message's item; no item name has a '*'
-const uint16_t HA_MESSAGE_S = 60;        // how long a message counts when it does not say
+const uint8_t  HA_MESSAGES_MAX = 4;      // messages kept at a time, as items "*msg1" ... (no item name has a '*')
+const uint16_t HA_MESSAGE_S = 3600;      // how long a message counts when it does not say
 #endif
 
 // Home WiFi --------------------------------------------------------------------
@@ -627,7 +670,7 @@ uint8_t       screenUnderCount = 0;
 // banner, after this long at all.
 const unsigned long MENU_IDLE_MS    = 20000;   // menu and editors, back to the face
 const unsigned long BANNER_MS       = 3000;
-const unsigned long ALERT_BANNER_MS = 10000;   // an alert's banner
+const unsigned long ALERT_BANNER_MS = 10000;   // an alert's icon, when no text follows it
 
 #if MENU_SLIDE
 // Slide between the menu list and an editor: the old picture moves out to one
@@ -646,8 +689,9 @@ int8_t   slideDir = 0;              // the slide the next menu picture starts wi
 // it. A time banner shows the time the clock shows now, read when it is drawn.
 // A hint is text as well, but only explains what comes next, so an input on it
 // is not used up (handleInput()). An alert's banner shows the alert's icon in
-// the alert colour, for ALERT_BANNER_MS.
-enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT, BANNER_ALERT };
+// the alert colour; a running one, a notice's text running through. Both are
+// steps of the notices on show (noticeSteps), and last as long as their step.
+enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT, BANNER_ALERT, BANNER_RUN };
 BannerKind    bannerKind = BANNER_TEXT;
 uint8_t       bannerIcon = 0;                    // BANNER_ALERT: the ItemIcon
 char          bannerText[2][12] = { "", "" };   // one or two lines; an empty second one is not drawn
@@ -1236,6 +1280,9 @@ void setup(void) {
   // PAJ7620U2 gesture sensor, also on the bus.
   gestureBegin();
   loadFaceKeys();         // needs to know which sensors were found
+#if BAND_DATA
+  loadNoticeKeys();       // which of those events close a notice on the panel
+#endif
 
   // Initialize matrix...
   matrix.setRotation(3); //1
@@ -1370,7 +1417,7 @@ void loop(void) {
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
   updateScreenTimeouts();
 #if BAND_DATA
-  alertsUpdate();       // a new alert comes up as a banner, before a GIF that is due
+  noticesUpdate();      // a new alert or message comes up, before a GIF that is due
 #endif
 #if GIF_PLAYBACK
   gifUpdate();          // a GIF of its own accord when one is due
@@ -1381,7 +1428,7 @@ void loop(void) {
     case SCREEN_GIF:    drawGif(); break;
 #endif
     case SCREEN_MENU:   if (panelDirty) { drawMenu(); }   break;   // static: redrawn on a change only
-    case SCREEN_BANNER: if (panelDirty) { drawBanner(); } break;
+    case SCREEN_BANNER: if (panelDirty || bannerKind == BANNER_RUN) { drawBanner(); } break;   // a running text moves
     case SCREEN_EDITOR: if (panelDirty || editorMoving()) { drawEditor(); } break;
     default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
   }
@@ -1407,6 +1454,9 @@ void leaveScreen(Screen s) {
   if (s == SCREEN_EDITOR) { editorRevert(); }   // what ENTER did not save goes back
 #if GIF_PLAYBACK
   if (s == SCREEN_GIF) { gifEnd(); }
+#endif
+#if BAND_DATA
+  if (s == SCREEN_BANNER) { noticeStepCount = 0; }   // the notices still to come are off too
 #endif
 }
 
@@ -1471,7 +1521,13 @@ bool inputIdleFor(unsigned long ms) {
 void updateScreenTimeouts() {
   switch (screen) {
     case SCREEN_BANNER:
-      if (millisNow - bannerAt >= (bannerKind == BANNER_ALERT ? ALERT_BANNER_MS : BANNER_MS)) { closeScreen(); }
+#if BAND_DATA
+      if (noticeStepCount) {   // a notice's step: then its next one
+        if (millisNow - bannerAt >= noticeStepMs) { noticeAdvance(false); }
+        break;
+      }
+#endif
+      if (millisNow - bannerAt >= BANNER_MS) { closeScreen(); }
       break;
     case SCREEN_MENU:
     case SCREEN_EDITOR:
@@ -1892,6 +1948,7 @@ void showTimeBanner() {
 void drawBanner() {
 #if BAND_DATA
   if (bannerKind == BANNER_ALERT) { drawAlertBanner(); return; }
+  if (bannerKind == BANNER_RUN)   { drawRunBanner(); return; }
 #endif
   if (bannerKind != BANNER_TIME) {
     drawCenteredLines(bannerText[0], bannerText[1][0] ? bannerText[1] : nullptr,
@@ -2487,15 +2544,17 @@ void drawHotspotMark() {
   matrix.fillRect(matrix.width() - 2, 0, 2, 2, scaledColorB(0, 80, 255, level));
 }
 
-// While an alert is there, a small square in the alert colour in the same
-// corner of the face, after its banner and as long as the alert holds. Not in
-// the hotspot's preview: the hotspot's mark has the corner then.
-void drawAlertMarker() {
+// While there are notices, a small square in the same corner of the face: in
+// the alert colour while an alert holds, white while there are messages
+// alone, so it shows that "show messages again" has something to show. Not
+// in the hotspot's preview: the hotspot's mark has the corner then.
+void drawNoticeMarker() {
 #if BAND_DATA
-  if (!alertHolds || screen != SCREEN_FACE) { return; }
+  if (noticeMark == MARK_NONE || screen != SCREEN_FACE) { return; }
   uint8_t level = effectiveBrightness / 3;
   if (level < STATUS_PIXEL_MIN) { level = STATUS_PIXEL_MIN; }
-  matrix.fillRect(matrix.width() - 2, 0, 2, 2, scaledColorB(ALERT_R, ALERT_G, ALERT_B, level));
+  uint16_t c = noticeMark == MARK_ALERT ? scaledColorB(ALERT_R, ALERT_G, ALERT_B, level) : scaledColorB(255, 255, 255, level);
+  matrix.fillRect(matrix.width() - 2, 0, 2, 2, c);
 #endif
 }
 
@@ -3222,7 +3281,7 @@ void drawTetrisFace() {
   // Same overlays the classic watchface draws, so both behave alike.
   drawStatusPixel();
   drawHotspotMark();
-  drawAlertMarker();
+  drawNoticeMarker();
   drawFeedbackIndicator();
   matrix.show();
 
@@ -3397,7 +3456,7 @@ void renderClock(void) {
 
   drawStatusPixel();
   drawHotspotMark();
-  drawAlertMarker();
+  drawNoticeMarker();
   drawFeedbackIndicator();
 #if defined(CLOCK_DEBUG)
   uint32_t showStart = micros();
@@ -4154,13 +4213,16 @@ bool faceEventFitted(InputEvent ev) {
 bool faceActionOffered(uint8_t code, InputEvent ev) {
   if (code >= FACE_ACTION_COUNT) { return false; }
   switch (FACE_ACTIONS[code].needs) {
-    case NEEDS_HOLD:   return ev == EV_UP_HOLD || ev == EV_DOWN_HOLD;
-    case NEEDS_GIFS:   return GIF_PLAYBACK != 0;
-    default:           return true;
+    case NEEDS_HOLD:     return ev == EV_UP_HOLD || ev == EV_DOWN_HOLD;
+    case NEEDS_GIFS:     return GIF_PLAYBACK != 0;
+    case NEEDS_MESSAGES: return BAND_DATA != 0;
+    default:             return true;
   }
 }
 
-// A profile's own face rows, as shortcuts.
+// A profile's own face rows, as shortcuts. A row whose action this clock does
+// not offer does nothing here: without messages, UP twice would only make
+// UP's single press wait for a second one.
 void faceKeysOfProfile(uint8_t profile, uint8_t *codes) {
   const InputProfile &p = INPUT_PROFILES[profile];
   for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
@@ -4171,7 +4233,7 @@ void faceKeysOfProfile(uint8_t profile, uint8_t *codes) {
     for (uint8_t r = 0; r < count; r++) {
       if (rows[r].event != ev || rows[r].context != CTX_FACE) { continue; }
       for (uint8_t a = 0; a < FACE_ACTION_COUNT; a++) {
-        if (FACE_ACTIONS[a].function == rows[r].function) { codes[i] = a; }
+        if (FACE_ACTIONS[a].function == rows[r].function && faceActionOffered(a, ev)) { codes[i] = a; }
       }
     }
   }
@@ -4293,6 +4355,9 @@ void runFunction(InputFunction fn, uint8_t steps) {
     case FN_GIF_AGAIN:      gifPlayAgain(); break;
 #endif
     case FN_SHOW_HINTS:     showHints(); break;
+#if BAND_DATA
+    case FN_SHOW_MESSAGES:  noticesShowAgain(); break;
+#endif
     default:                break;
   }
 }
@@ -4340,6 +4405,14 @@ void holdEnd(InputFunction fn) {
 // up, since it was meant for a screen the banner hid. With the Classic clicks
 // profile a click sequence that ran something is confirmed by blinks.
 InputFunction handleInput(InputEvent ev, uint8_t steps) {
+#if BAND_DATA
+  if (screen == SCREEN_BANNER && noticeStepCount) {
+    // A notice on show: the events set on the Inputs page go on to the next
+    // one (or back to the face after the last); the input is used up.
+    if (noticeClosedBy(ev)) { noticeAdvance(true); }
+    return FN_NONE;
+  }
+#endif
   if (screen == SCREEN_BANNER && bannerKind == BANNER_HINT) {
     // A hint only says what comes next: it goes, and the input goes on to the
     // screen beneath.
@@ -6531,35 +6604,45 @@ void bandRemoveAt(uint8_t i) {
   bandFindNextUntil();
 }
 
-// Takes an item, in place of the one of its source with its key; says what
-// changed.
-void bandPut(const BandItem &n) {
+// The item of source f with this key; -1 when there is none.
+int8_t bandFind(uint8_t f, const char *key) {
   for (uint8_t i = 0; i < bandItemCount; i++) {
-    if (bandItems[i].feed != n.feed || strcmp(bandItems[i].key, n.key) != 0) { continue; }
+    if (bandItems[i].feed == f && strcmp(bandItems[i].key, key) == 0) { return (int8_t)i; }
+  }
+  return -1;
+}
+
+// Takes an item, in place of the one of its source with its key; says what
+// changed. A new item gets the next number of the order they came in; one
+// that replaces the same item (the same tag) keeps its number.
+void bandPut(const BandItem &n) {
+  BandItem it = n;
+  int8_t i = bandFind(n.feed, n.key);
+  if (i >= 0) {
     bool same = strcmp(bandItems[i].text, n.text) == 0 && bandItems[i].level == n.level;
-    bandItems[i] = n;
+    it.seq = bandItems[i].tag == n.tag ? bandItems[i].seq : ++bandSeq;
+    bandItems[i] = it;
     bandFindNextUntil();
-    if (!same) { printBandItem("~", n); }
+    if (!same) { printBandItem("~", it); }
     return;
   }
   if (bandItemCount == BAND_ITEMS_MAX) {
     Serial.printf("Info band: no room for %s\n", n.key);
     return;
   }
-  bandItems[bandItemCount++] = n;
+  it.seq = ++bandSeq;
+  bandItems[bandItemCount++] = it;
   bandFindNextUntil();
-  printBandItem("+", n);
+  printBandItem("+", it);
 }
 
 // Takes the item of source f with this key away, if there is one.
 void bandRemove(uint8_t f, const char *key) {
-  for (uint8_t i = 0; i < bandItemCount; i++) {
-    if (bandItems[i].feed != f || strcmp(bandItems[i].key, key) != 0) { continue; }
-    Serial.printf("Info band - %s\n", key);
-    alertForget(bandItems[i]);
-    bandRemoveAt(i);
-    return;
-  }
+  int8_t i = bandFind(f, key);
+  if (i < 0) { return; }
+  Serial.printf("Info band - %s\n", key);
+  noticeForget(bandItems[i]);
+  bandRemoveAt((uint8_t)i);
 }
 
 // Drops the items of source f, or only those its new result no longer has.
@@ -6580,96 +6663,319 @@ void bandExpire() {
   for (int i = (int)bandItemCount - 1; i >= 0; i--) {
     if (bandItems[i].until > now) { continue; }
     Serial.printf("Info band - %s (ran out)\n", bandItems[i].key);
-    alertForget(bandItems[i]);
+    noticeForget(bandItems[i]);
     bandRemoveAt((uint8_t)i);
   }
 }
 
-// ---- Alerts: banners and the marker on the face --------------------------------
+// ---- Notices: alerts and messages on the 64x32 clock -----------------------------
 
-// The alert already shown with this source and tag; -1 when there is none.
-int8_t alertSeenIndex(uint8_t feed, uint32_t tag) {
-  for (uint8_t i = 0; i < alertSeenCount; i++) {
-    if (alertSeen[i].feed == feed && alertSeen[i].tag == tag) { return (int8_t)i; }
+// Whether an item is a message from Home Assistant: its key is "*msg1" to
+// "*msg4" (haMessage()), and no item name has a '*'.
+bool isMessage(const BandItem &it) {
+  return it.feed == SOURCE_HA && it.key[0] == '*';
+}
+
+// Whether an item shows on the 64x32 clock: an alert, or a message.
+bool isNotice(const BandItem &it) {
+  return it.level == LEVEL_ALERT || isMessage(it);
+}
+
+// The icon a notice shows: its own, the warning sign for one without.
+uint8_t noticeIcon(const BandItem &it) {
+  return (it.icon != ICON_NONE && it.icon < ICON_COUNT) ? it.icon : ICON_WARNING;
+}
+
+// The notice already shown with this source and tag; -1 when there is none.
+int8_t noticeSeenIndex(uint8_t feed, uint32_t tag) {
+  for (uint8_t i = 0; i < noticeSeenCount; i++) {
+    if (noticeSeen[i].feed == feed && noticeSeen[i].tag == tag) { return (int8_t)i; }
   }
   return -1;
 }
 
 // An item that is over - taken away by its source, or run out - is no
 // longer known as shown, so the same item sent again comes up as new.
-void alertForget(const BandItem &it) {
-  int8_t s = alertSeenIndex(it.feed, it.tag);
-  if (s >= 0) { alertSeen[s] = alertSeen[--alertSeenCount]; }
+void noticeForget(const BandItem &it) {
+  int8_t s = noticeSeenIndex(it.feed, it.tag);
+  if (s >= 0) { noticeSeen[s] = noticeSeen[--noticeSeenCount]; }
 }
 
-// Keeps an alert as shown; when the list is full, in place of the one gone
+// Keeps a notice as shown; when the list is full, in place of the one gone
 // the longest.
-void alertSeenAdd(uint8_t feed, uint32_t tag) {
-  uint8_t i = alertSeenCount;
-  if (i == ALERT_SEEN_MAX) {
+void noticeSeenAdd(uint8_t feed, uint32_t tag) {
+  if (noticeSeenIndex(feed, tag) >= 0) { return; }
+  uint8_t i = noticeSeenCount;
+  if (i == NOTICE_SEEN_MAX) {
     i = 0;
-    for (uint8_t j = 1; j < alertSeenCount; j++) {
-      if (millisNow - alertSeen[j].lastAt > millisNow - alertSeen[i].lastAt) { i = j; }
+    for (uint8_t j = 1; j < noticeSeenCount; j++) {
+      if (millisNow - noticeSeen[j].lastAt > millisNow - noticeSeen[i].lastAt) { i = j; }
     }
   } else {
-    alertSeenCount++;
+    noticeSeenCount++;
   }
-  alertSeen[i] = { feed, tag, millisNow };
+  noticeSeen[i] = { feed, tag, millisNow };
 }
 
-// The banner of item i: its icon, the warning sign for an item without one.
-// An alert with the same icon that is new as well counts as shown with it,
-// so two warnings that came together do not bring the same banner twice.
-// A GIF on show ends for it.
-void alertShow(uint8_t i) {
-  const BandItem &it = bandItems[i];
-  uint8_t icon = (it.icon != ICON_NONE && it.icon < ICON_COUNT) ? it.icon : ICON_WARNING;
-  for (uint8_t k = 0; k < bandItemCount; k++) {
-    const BandItem &o = bandItems[k];
-    if (o.level != LEVEL_ALERT || alertSeenIndex(o.feed, o.tag) >= 0) { continue; }
-    uint8_t oIcon = (o.icon != ICON_NONE && o.icon < ICON_COUNT) ? o.icon : ICON_WARNING;
-    if (k == i || oIcon == icon) { alertSeenAdd(o.feed, o.tag); }
-  }
-  Serial.printf("Alert banner: %s (%s)\n", it.key, ITEM_ICON_NAMES[icon]);
-#if GIF_PLAYBACK
-  if (screen == SCREEN_GIF) { closeScreen(); }
-#endif
-  bannerKind = BANNER_ALERT;
-  bannerIcon = icon;
-  bannerOpen();
+// Whether item x is shown before item y: alerts before messages, each in the
+// order they came.
+bool noticeBefore(uint8_t x, uint8_t y) {
+  const BandItem &a = bandItems[x], &b = bandItems[y];
+  if (a.level != b.level) { return a.level == LEVEL_ALERT; }
+  return a.seq < b.seq;
 }
 
-// On every pass outside the hotspot. The marker follows the alerts there
-// are; an alert not shown yet comes up as a banner over the face or a GIF,
-// and waits while a menu, an editor or another banner is up. An alert that
-// went before it could be shown is not shown later. One that eased to
-// information is forgotten at once, so it comes up again when it turns back
-// into an alert.
-void alertsUpdate() {
-  bool holds = false;
+// The notices in the order they are shown, as positions in bandItems; only
+// those not shown yet with `newOnly`. Returns how many.
+uint8_t noticeOrder(uint8_t *order, bool newOnly) {
+  uint8_t n = 0;
   for (uint8_t i = 0; i < bandItemCount; i++) {
-    int8_t s = alertSeenIndex(bandItems[i].feed, bandItems[i].tag);
-    if (bandItems[i].level != LEVEL_ALERT) {
-      if (s >= 0) { alertSeen[s] = alertSeen[--alertSeenCount]; }
+    if (!isNotice(bandItems[i])) { continue; }
+    if (newOnly && noticeSeenIndex(bandItems[i].feed, bandItems[i].tag) >= 0) { continue; }
+    order[n++] = i;
+  }
+  for (uint8_t a = 1; a < n; a++) {   // insertion sort: there are 16 items at most
+    uint8_t k = order[a], b = a;
+    while (b > 0 && noticeBefore(k, order[b - 1])) { order[b] = order[b - 1]; b--; }
+    order[b] = k;
+  }
+  return n;
+}
+
+void noticeAddStep(const BandItem &it, uint8_t phase) {
+  if (noticeStepCount < NOTICE_STEPS_MAX) { noticeSteps[noticeStepCount++] = { it.feed, it.tag, phase }; }
+}
+
+// The item a step names; -1 when it has gone.
+int8_t noticeItem(const NoticeStep &s) {
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    if (bandItems[i].feed == s.feed && bandItems[i].tag == s.tag) { return (int8_t)i; }
+  }
+  return -1;
+}
+
+bool noticeStepsSame(uint8_t a, uint8_t b) {
+  return noticeSteps[a].feed == noticeSteps[b].feed && noticeSteps[a].tag == noticeSteps[b].tag;
+}
+
+// A text for the 5x7 font, which draws code page 437: the letters it has
+// beyond ASCII (ä ö ü ß, é è à ç ñ ...) and the degree sign as their CP437
+// bytes, a line break as a space, any other character as '?'. Never longer
+// than the UTF-8 text.
+void textToCp437(char *dst, const char *src, size_t size) {
+  struct Cp437 { uint16_t code; uint8_t c; };
+  static const Cp437 MAP[] = {
+    { 0xE4, 0x84 }, { 0xF6, 0x94 }, { 0xFC, 0x81 }, { 0xC4, 0x8E }, { 0xD6, 0x99 }, { 0xDC, 0x9A },
+    { 0xDF, 0xE1 }, { 0xB0, 0xF8 }, { 0xE9, 0x82 }, { 0xE8, 0x8A }, { 0xEA, 0x88 }, { 0xEB, 0x89 },
+    { 0xE0, 0x85 }, { 0xE2, 0x83 }, { 0xE7, 0x87 }, { 0xEF, 0x8B }, { 0xEE, 0x8C }, { 0xF4, 0x93 },
+    { 0xFB, 0x96 }, { 0xF9, 0x97 }, { 0xF1, 0xA4 }, { 0xD1, 0xA5 }, { 0xE1, 0xA0 }, { 0xED, 0xA1 },
+    { 0xF3, 0xA2 }, { 0xFA, 0xA3 }, { 0xC9, 0x90 }, { 0xC7, 0x80 }, { 0xE5, 0x86 }, { 0xC5, 0x8F },
+  };
+  size_t n = 0;
+  const uint8_t *p = (const uint8_t *)src;
+  while (*p && n + 1 < size) {
+    uint32_t code = '?';
+    uint8_t len = 1;
+    if (*p < 0x80) {
+      code = *p;
+    } else if ((p[0] & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
+      code = ((uint32_t)(p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+      len = 2;
+    } else if ((p[0] & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+      code = ((uint32_t)(p[0] & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+      len = 3;
+    } else if ((p[0] & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) {
+      code = 0xFFFF;   // beyond the font, as every emoji is
+      len = 4;
+    }
+    char c = '?';
+    if (code < 0x20)                     { c = ' '; }
+    else if (code < 0x7F)                { c = (char)code; }
+    else { for (const Cp437 &m : MAP) { if (m.code == code) { c = (char)m.c; break; } } }
+    dst[n++] = c;
+    p += len;
+  }
+  dst[n] = '\0';
+}
+
+// Puts step i on the panel; false when its notice has gone meanwhile. An icon
+// stands ALERT_BANNER_MS, or ICON_BEFORE_TEXT_MS when the notice's text comes
+// next; a text runs through noticeRuns times.
+bool noticeStepShow(uint8_t i) {
+  int8_t k = noticeItem(noticeSteps[i]);
+  if (k < 0) { return false; }
+  const BandItem &it = bandItems[k];
+  if (noticeSteps[i].phase == PHASE_ICON) {
+    bool textNext = i + 1 < noticeStepCount && noticeStepsSame(i, i + 1) && noticeSteps[i + 1].phase == PHASE_TEXT;
+    bannerKind   = BANNER_ALERT;
+    bannerIcon   = noticeIcon(it);
+    noticeStepMs = textNext ? ICON_BEFORE_TEXT_MS : ALERT_BANNER_MS;
+    Serial.printf("Notice: %s, icon %s\n", it.key, ITEM_ICON_NAMES[bannerIcon]);
+  } else {
+    textToCp437(runText, it.text, sizeof(runText));
+    runWidth = (uint16_t)(strlen(runText) * 6);   // 5 px a character and 1 between
+    bool alert = it.level == LEVEL_ALERT;
+    runR = alert ? ALERT_R : 255; runG = alert ? ALERT_G : 255; runB = alert ? ALERT_B : 255;
+    runLastX = INT16_MIN;
+    bannerKind   = BANNER_RUN;
+    noticeStepMs = (unsigned long)noticeRuns * (runWidth + matrix.width()) * 1000UL / RUN_PX_PER_S;
+    Serial.printf("Notice: %s, text for %lu ms\n", it.key, noticeStepMs);
+  }
+  noticeStepAt = i;
+  bannerOpen();
+  return true;
+}
+
+// Starts the steps written, from the first whose notice is still there;
+// false when none is.
+bool noticeStart() {
+  for (uint8_t i = 0; i < noticeStepCount; i++) {
+    if (noticeStepShow(i)) { return true; }
+  }
+  noticeStepCount = 0;
+  return false;
+}
+
+// The next step after the one on the panel - with `nextNotice`, the first of
+// another notice - and back to the face when none is left.
+void noticeAdvance(bool nextNotice) {
+  uint8_t i = noticeStepAt + 1;
+  while (nextNotice && i < noticeStepCount && noticeStepsSame(i, noticeStepAt)) { i++; }
+  for (; i < noticeStepCount; i++) {
+    if (noticeStepShow(i)) { return; }
+  }
+  closeScreen();   // its leaving steps clear the steps
+}
+
+// The steps for the notices not shown yet: an alert's icon, an urgent
+// message's icon and then its text, a message's text. Alerts that are not
+// messages and share an icon share one banner, so two warnings that came
+// together do not bring the same banner twice.
+void noticeStepsForNew() {
+  uint8_t order[BAND_ITEMS_MAX];
+  uint8_t n = noticeOrder(order, true);
+  noticeStepCount = 0;
+  noticeRuns = 2;
+  for (uint8_t k = 0; k < n; k++) {
+    const BandItem &it = bandItems[order[k]];
+    noticeSeenAdd(it.feed, it.tag);
+    bool message = isMessage(it), alert = it.level == LEVEL_ALERT;
+    if (alert && !message) {
+      bool shared = false;
+      for (uint8_t s = 0; s < noticeStepCount && !shared; s++) {
+        int8_t j = noticeItem(noticeSteps[s]);
+        shared = j >= 0 && !isMessage(bandItems[j]) && noticeIcon(bandItems[j]) == noticeIcon(it);
+      }
+      if (!shared) { noticeAddStep(it, PHASE_ICON); }
       continue;
     }
-    holds = true;
-    if (s >= 0) { alertSeen[s].lastAt = millisNow; }
+    if (alert)      { noticeAddStep(it, PHASE_ICON); }
+    if (it.text[0]) { noticeAddStep(it, PHASE_TEXT); }
   }
-  if (holds != alertHolds) {
-    alertHolds = holds;
-    panelDirty = true;   // the marker comes or goes
+}
+
+// FN_SHOW_MESSAGES: every notice there is, alerts first, each in the order
+// they came: an alert's icon and then its text in the alert colour, a
+// message's text, each text running through once - whoever asked is looking
+// from the start. Over the face only; "no messages" when there are none.
+// Returns how many notices it shows.
+uint8_t noticesShowAgain() {
+  if (screen != SCREEN_FACE) { return 0; }
+  uint8_t order[BAND_ITEMS_MAX];
+  uint8_t n = noticeOrder(order, false);
+  noticeStepCount = 0;
+  noticeRuns = 1;
+  for (uint8_t k = 0; k < n; k++) {
+    const BandItem &it = bandItems[order[k]];
+    noticeSeenAdd(it.feed, it.tag);
+    if (it.level == LEVEL_ALERT) { noticeAddStep(it, PHASE_ICON); }
+    if (it.text[0])              { noticeAddStep(it, PHASE_TEXT); }
   }
-  for (int i = (int)alertSeenCount - 1; i >= 0; i--) {
-    if (millisNow - alertSeen[i].lastAt < ALERT_FORGET_MS) { continue; }
-    alertSeen[i] = alertSeen[--alertSeenCount];
+  Serial.printf("Notices again: %u\n", n);
+  if (!noticeStart()) {
+    showBanner("no", "messages", 110, 110, 110);
+    return 0;
   }
-  if (!holds || (screen != SCREEN_FACE && screen != SCREEN_GIF)) { return; }
+  return n;
+}
+
+// On every pass outside the hotspot. The marker follows the notices there
+// are. Notices not shown yet come up over the face, and wait while a menu,
+// an editor or another banner is up; an alert ends a GIF on show, while a
+// message lets it play to its end. A notice that went before it could be
+// shown is not shown later. An alert that eased to information is forgotten
+// at once, so it comes up again when it turns back into an alert.
+void noticesUpdate() {
+  NoticeMark mark = MARK_NONE;
+  bool newAlert = false, newAny = false;
   for (uint8_t i = 0; i < bandItemCount; i++) {
-    if (bandItems[i].level == LEVEL_ALERT && alertSeenIndex(bandItems[i].feed, bandItems[i].tag) < 0) {
-      alertShow(i);
-      return;
+    const BandItem &it = bandItems[i];
+    int8_t s = noticeSeenIndex(it.feed, it.tag);
+    if (!isNotice(it)) {
+      if (s >= 0) { noticeSeen[s] = noticeSeen[--noticeSeenCount]; }
+      continue;
     }
+    bool alert = it.level == LEVEL_ALERT;
+    if (alert)                   { mark = MARK_ALERT; }
+    else if (mark == MARK_NONE)  { mark = MARK_MESSAGE; }
+    if (s >= 0) { noticeSeen[s].lastAt = millisNow; continue; }
+    newAny = true;
+    newAlert |= alert;
+  }
+  if (mark != noticeMark) {
+    noticeMark = mark;
+    panelDirty = true;   // the marker comes, goes or changes colour
+  }
+  for (int i = (int)noticeSeenCount - 1; i >= 0; i--) {
+    if (millisNow - noticeSeen[i].lastAt < NOTICE_FORGET_MS) { continue; }
+    noticeSeen[i] = noticeSeen[--noticeSeenCount];
+  }
+  if (!newAny || noticeStepCount) { return; }                     // nothing new, or notices on the panel
+  if (screen != SCREEN_FACE && screen != SCREEN_GIF) { return; }  // waits for the face
+#if GIF_PLAYBACK
+  if (screen == SCREEN_GIF) {
+    if (!newAlert) { return; }                                    // a message waits for the GIF's end
+    closeScreen();
+  }
+#endif
+  noticeStepsForNew();
+  noticeStart();
+}
+
+// Whether a face event closes a notice on the panel (the Inputs page).
+bool noticeClosedBy(InputEvent ev) {
+  int8_t i = faceEventIndex(ev);
+  return i >= 0 && noticeCloses[i] != 0;
+}
+
+// At start-up: what closes a notice, as the Inputs page stored it, or what
+// closes every other banner.
+void loadNoticeKeys() {
+  noticeKeysStore.begin("closes");
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) { noticeCloses[i] = closesBanner(FACE_EVENTS[i].event) ? 1 : 0; }
+  NoticeKeys k;
+  noticeKeysStore.read(k);
+  if (k.magic != NOTICE_KEYS_MAGIC || k.rev != NOTICE_KEYS_REV) { return; }
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT && i < k.count; i++) { noticeCloses[i] = k.closes[i] ? 1 : 0; }
+}
+
+void saveNoticeKeys() {
+  NoticeKeys k;
+  memset(&k, 0, sizeof(k));
+  k.magic = NOTICE_KEYS_MAGIC;
+  k.rev   = NOTICE_KEYS_REV;
+  k.count = FACE_EVENT_COUNT;
+  memcpy(k.closes, noticeCloses, FACE_EVENT_COUNT);
+  noticeKeysStore.write(k);
+}
+
+// The Inputs page's ticks, when it sent them (cset): c<i>=on for each event
+// found that closes a notice; an event not found keeps what it had.
+void applyNoticeKeysForm(const String &q) {
+  if (!getParam(q, "cset").length()) { return; }
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+    if (!faceEventFitted(FACE_EVENTS[i].event)) { continue; }
+    noticeCloses[i] = getParam(q, String("c") + i) == "on" ? 1 : 0;
   }
 }
 
@@ -6689,6 +6995,30 @@ void drawAlertBanner() {
   matrix.fillScreen(0);
   drawItemIcon((matrix.width() - ICON_SIZE) / 2, (matrix.height() - ICON_SIZE) / 2, bannerIcon,
                scaledColorVisible(ALERT_R, ALERT_G, ALERT_B));
+  drawFeedbackIndicator();
+  matrix.show();
+  panelDirty = false;
+}
+
+// A notice's text running through the middle of the panel, in at the right
+// edge and out at the left, noticeRuns times; drawn when it has moved on a
+// pixel.
+void drawRunBanner() {
+  int16_t w = matrix.width(), h = matrix.height();
+  uint32_t pass = runWidth + w;
+  uint32_t moved = (uint32_t)(millisNow - bannerAt) * RUN_PX_PER_S / 1000UL;
+  int16_t x = moved >= noticeRuns * pass ? -(int16_t)runWidth : w - (int16_t)(moved % pass);
+  if (x == runLastX && !panelDirty) { return; }
+  runLastX = x;
+  matrix.fillScreen(0);
+  matrix.setFont();          // the built-in 5x7 font, code page 437
+  matrix.setTextSize(1);
+  matrix.setTextWrap(false);
+  matrix.cp437(true);        // its true code page: the classic mode moves everything from 176 up by one
+  matrix.setTextColor(scaledColorVisible(runR, runG, runB));
+  matrix.setCursor(x, (h - 7) / 2);
+  matrix.print(runText);
+  matrix.cp437(false);
   drawFeedbackIndicator();
   matrix.show();
   panelDirty = false;
@@ -7096,6 +7426,10 @@ void apiState(Print &c) {
   s["gmount"] = uiSettings.gestureMount;
   JsonArray keys = s["keys"].to<JsonArray>();
   for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) { keys.add(faceKeys[i]); }
+#if BAND_DATA
+  JsonArray closes = s["closes"].to<JsonArray>();   // per face event: whether it closes a notice
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) { closes.add(noticeCloses[i] != 0); }
+#endif
 #if GIF_PLAYBACK
   s["gifr"] = gifSettings.randomOn != 0;
   s["gifmin"] = gifSettings.minMinutes;
@@ -7421,6 +7755,10 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
 #endif
   saveUiSettings();
   saveFaceKeys();
+#if BAND_DATA
+  applyNoticeKeysForm(body);
+  saveNoticeKeys();
+#endif
   if (!ntpSyncOn() && syncState != SYNC_IDLE) { setSyncState(SYNC_IDLE); }
 #if GIF_PLAYBACK
   applyGifParams(body);
@@ -7483,6 +7821,18 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     if (onFace) { gifPlayNow(); }
     JsonDocument d;
     d["playing"] = onFace && screen == SCREEN_GIF;
+    sendJson(c, d);
+#endif
+#if BAND_DATA
+  } else if (path == "/api/messages") {
+    // The notices once more, as FN_SHOW_MESSAGES shows them; a GIF on show
+    // ends for them.
+#if GIF_PLAYBACK
+    if (screen == SCREEN_GIF) { closeScreen(); }
+#endif
+    JsonDocument d;
+    d["onFace"] = screen == SCREEN_FACE;
+    d["shown"] = noticesShowAgain();
     sendJson(c, d);
 #endif
   } else if (path == "/api/lan") {
@@ -7874,10 +8224,10 @@ void haApply(const HaIn &m) {
   }
 }
 
-// The items Home Assistant sent, but a message on show.
+// The items Home Assistant sent, but the messages.
 void haDropItems() {
   for (int i = (int)bandItemCount - 1; i >= 0; i--) {
-    if (bandItems[i].feed == SOURCE_HA && strcmp(bandItems[i].key, HA_MESSAGE_KEY) != 0) { bandRemoveAt((uint8_t)i); }
+    if (bandItems[i].feed == SOURCE_HA && !isMessage(bandItems[i])) { bandRemoveAt((uint8_t)i); }
   }
 }
 
@@ -7959,8 +8309,11 @@ void haItem(const char *name, const char *payload, uint16_t len) {
 }
 
 // mpclock/<id>/message: for `seconds` (HA_MESSAGE_S unless it says, 5 to
-// 3600), an item like the others; one with level alert comes up as a banner
-// on the 64x32 clock, as every alert does, each message on its own.
+// 3600), an item like the others, up to HA_MESSAGES_MAX at a time: a new one
+// takes a free place, or the oldest message's - an urgent one's only when all
+// of them are urgent. On the 64x32 clock its text
+// runs through, an urgent one's (level alert) after its icon, each message
+// on its own.
 void haMessage(const char *payload, uint16_t len) {
   static uint32_t messages = 0;
   JsonDocument doc;
@@ -7976,7 +8329,16 @@ void haMessage(const char *payload, uint16_t len) {
   if (title[0] && text[0]) { snprintf(line, sizeof(line), "%s: %s", title, text); }
   else                     { strlcpy(line, text[0] ? text : title, sizeof(line)); }
   BandItem it = {};
-  strlcpy(it.key, HA_MESSAGE_KEY, sizeof(it.key));
+  int8_t oldest = -1;   // the place to take when none is free: the oldest message, an urgent one only when all are
+  for (uint8_t m = 1; m <= HA_MESSAGES_MAX; m++) {
+    snprintf(it.key, sizeof(it.key), "*msg%u", m);
+    int8_t i = bandFind(SOURCE_HA, it.key);
+    if (i < 0) { oldest = -1; break; }   // a free place
+    if (oldest < 0) { oldest = i; continue; }
+    bool urgent = bandItems[i].level == LEVEL_ALERT, oldestUrgent = bandItems[oldest].level == LEVEL_ALERT;
+    if (urgent != oldestUrgent ? oldestUrgent : bandItems[i].seq < bandItems[oldest].seq) { oldest = i; }
+  }
+  if (oldest >= 0) { strlcpy(it.key, bandItems[oldest].key, sizeof(it.key)); }
   itemTextCopy(it.text, line, sizeof(it.text));
   it.icon  = itemIconByName(doc["icon"] | "");
   it.level = strcmp(doc["level"] | "info", "alert") == 0 ? LEVEL_ALERT : LEVEL_INFO;
