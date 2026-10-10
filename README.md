@@ -960,10 +960,14 @@ minute begins. The console says when it was, against the clock's own second:
 `Muncher: the new time stands at :00.000`. It is stepped by the time since it started, so a screen that was on top
 for a while, or a loop held up by a request, does not put it behind; a time that
 moved without a change (set by hand, corrected by a sync) is walked right at once.
-A GIF that comes up of its own accord waits while the muncher walks, or when its
-change starts within the GIF's time plus 6 s: in a first test a GIF came up
-during a change and the new time showed only at :04.7, when it had ended. A GIF
-asked for by hand still plays at once.
+A GIF waits while the muncher walks, or when its change starts within the GIF's
+time plus 6 s: in a first test a GIF came up during a change and the new time
+showed only at :04.7, when it had ended. That goes for one asked for by an input
+too (*play random GIF*, *play last GIF again*, the web app's button): it plays
+once the scene is over, within a minute or not at all - the console says `GIF:
+waits for the muncher's scene`. Played at once, such a GIF covered the change to
+midnight on 2026-10-11 (most likely started by a knock, on *play last GIF
+again*; knocks are not logged).
 
 **Change**, one of three: *Mixed* (the default) eats the whole old digit and
 walks the new one when one digit changes, and walks only the segments that differ

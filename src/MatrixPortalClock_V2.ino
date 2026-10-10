@@ -7126,9 +7126,39 @@ bool gifStart(int16_t i) {
   return true;
 }
 
+#if WATCHFACE_MUNCHER
+// A GIF asked for by an input while the muncher walks, or just before its
+// change: it waits until the scene is over, then plays (gifUpdate()). An
+// input that started a GIF at once covered the change to midnight on
+// 2026-10-11 - very likely a knock, on Peter's "play last GIF again".
+const uint8_t GIF_ASKED_NONE = 0, GIF_ASKED_NEW = 1, GIF_ASKED_AGAIN = 2;
+const unsigned long GIF_ASKED_KEEP_MS = 60000;   // a wait longer than this drops it
+uint8_t       gifAsked   = GIF_ASKED_NONE;
+unsigned long gifAskedAt = 0;
+
+// Whether the muncher needs the panel for as long as a GIF would take it: as
+// for a GIF of its own accord, with the GIF's time and a margin for its last
+// loop.
+bool gifMuncherBusy() {
+  return settings.watchface == WATCHFACE_MUNCHER_ID &&
+         muncherWantsPanel((unsigned long)gifSettings.seconds * 1000UL + 6000UL);
+}
+
+bool gifWaitsForMuncher(uint8_t kind) {
+  if (!gifMuncherBusy()) { return false; }
+  if (gifAsked == GIF_ASKED_NONE) { Serial.println("GIF: waits for the muncher's scene"); }
+  gifAsked = kind;
+  gifAskedAt = millisNow;
+  return true;
+}
+#endif
+
 // A GIF now (FN_PLAY_GIF): on the face only, and only one that fits.
 void gifPlayNow() {
   if (screen != SCREEN_FACE) { return; }
+#if WATCHFACE_MUNCHER
+  if (gifWaitsForMuncher(GIF_ASKED_NEW)) { return; }
+#endif
   if (!gifStart(gifPick())) { gifScheduleNext(); }
 }
 
@@ -7136,6 +7166,9 @@ void gifPlayNow() {
 // when none has played yet or the last no longer fits the panel as it is held.
 void gifPlayAgain() {
   if (screen != SCREEN_FACE) { return; }
+#if WATCHFACE_MUNCHER
+  if (gifWaitsForMuncher(GIF_ASKED_AGAIN)) { return; }
+#endif
   int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifPick();
   if (!gifStart(i)) { gifScheduleNext(); }
 }
@@ -7143,14 +7176,27 @@ void gifPlayAgain() {
 // A GIF of its own accord once it is due, over the plain face only: while
 // another screen is up it waits until the face is back.
 void gifUpdate() {
-  if (screen != SCREEN_FACE || !gifSettings.randomOn || gifCount() == 0) { return; }
+  if (screen != SCREEN_FACE) { return; }
+#if WATCHFACE_MUNCHER
+  // One asked for while the muncher was busy, once it is not.
+  if (gifAsked != GIF_ASKED_NONE) {
+    if (millisNow - gifAskedAt > GIF_ASKED_KEEP_MS || settings.watchface != WATCHFACE_MUNCHER_ID) {
+      gifAsked = GIF_ASKED_NONE;
+    } else if (!gifMuncherBusy()) {
+      uint8_t kind = gifAsked;
+      gifAsked = GIF_ASKED_NONE;
+      if (kind == GIF_ASKED_AGAIN) { gifPlayAgain(); } else { gifPlayNow(); }
+      return;
+    }
+  }
+#endif
+  if (!gifSettings.randomOn || gifCount() == 0) { return; }
   if ((long)(millisNow - gifDueAt) < 0) { return; }
 #if WATCHFACE_MUNCHER
   // Nor into the muncher's change of the time (a GIF that came up during one
   // on 2026-10-10 held the new time back by 4.7 s): it waits until the walk
-  // is over. One asked for by hand still plays at once.
-  if (settings.watchface == WATCHFACE_MUNCHER_ID &&
-      muncherWantsPanel((unsigned long)gifSettings.seconds * 1000UL + 6000UL)) { return; }
+  // is over.
+  if (gifMuncherBusy()) { return; }
 #endif
   if (!gifStart(gifPick())) { gifScheduleNext(); }
 }
@@ -8787,6 +8833,9 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     if (onFace) { gifPlayNow(); }
     JsonDocument d;
     d["playing"] = onFace && screen == SCREEN_GIF;
+#if WATCHFACE_MUNCHER
+    d["waits"] = gifAsked != GIF_ASKED_NONE;   // it plays once the muncher's scene is over
+#endif
     sendJson(c, d);
 #endif
 #if BAND_DATA

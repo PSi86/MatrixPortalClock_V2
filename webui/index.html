@@ -1160,7 +1160,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }).catch(function () { toast('The clock did not answer.'); });
   });
   $('#gifNow').addEventListener('click', function () {
-    api('/api/gif', '').then(function (r) { toast(r.playing ? 'The clock plays a GIF now.' : 'No GIF: one plays only over the face.'); }).catch(function () { toast('The clock did not answer.'); });
+    api('/api/gif', '').then(function (r) { toast(r.playing ? 'The clock plays a GIF now.' : r.waits ? 'The GIF plays once the muncher’s scene is over.' : 'No GIF: one plays only over the face.'); }).catch(function () { toast('The clock did not answer.'); });
   });
   $('#ssid').addEventListener('input', markNet);
   $('#wifiSave').addEventListener('click', function () {
