@@ -1039,6 +1039,15 @@ hand moving away) does nothing unless the Inputs page gives it something.
   (`-D GESTURE_INT_PIN=A0` in `build_flags`), the sensor is read only when the
   line is low, and nothing is polled; the line reports gestures only, so there
   is no hint then. The 3 s hold at boot is asked either way, once at start-up.
+- **Wiring:** four wires, through the STEMMA QT port or to its pins: 3.3 V,
+  GND, SDA, SCL. Not 5 V: the module's pull-ups go to its supply and would put
+  5 V on the ESP32-S3's 3.3 V pins (the board has its own pull-ups to 3.3 V).
+  INT stays free unless it is wanted (above).
+- **On the console** every gesture taken shows as `Gesture: Swipe up`, one the
+  300 ms after another leave out as `Gesture: Swipe down - left, 120 ms after
+  the last`, and a hand that came near as `Gesture sensor: a hand near`. The
+  addresses that answered on the I2C bus at start-up are on the console and in
+  `/api/state` (`hw.i2c`).
 
 Not yet tested on hardware: no gesture sensor has been connected so far. Still
 to be tried with the part: how reliably it tells a hand that stays from one
@@ -1074,6 +1083,14 @@ everything works as before.
 - The sync interval is counted in the clock's calendar days since the last good
   sync, so the sync time of the day it runs out counts, whatever time of day
   that sync was made. Stored with the UI settings (`syncDays`).
+- **Wiring:** four wires are enough: 3.3 V, GND, SDA, SCL (not 5 V, as with the
+  gesture sensor). The other pins of the modules stay free: SQW/INT (alarm or
+  square wave out), 32K (a 32 kHz clock out), RST (reset) and BAT (a second way
+  to the coin cell). The clock reads the time over I2C at start-up and once a
+  minute and uses no alarm. Some modules carry an EEPROM (an AT24C32 at 0x57),
+  which the clock does not use. The ZS-042 module charges its coin cell through
+  a resistor and a diode, made for a rechargeable LIR2032: with a CR2032 in it,
+  never power it from 5 V.
 
 Not yet tested on hardware: no DS3231 has been connected so far.
 

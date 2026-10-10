@@ -994,6 +994,7 @@ const long UTC_PLAUSIBLE_TO   = 4102444799L;   // 2099-12-31 23:59:59
 // the clock does, so the zone and daylight saving never touch it. Found at
 // boot or not at all; with one, the clock has its time at power-up and the
 // NTP sync needs to run only now and then (uiSettings.syncDays).
+uint8_t i2cFound[16];        // the addresses that answered at boot, one bit each (i2cScan())
 RTC_DS3231 rtc;
 bool rtcOK        = false;   // a DS3231 answered at boot
 bool rtcLostPower = false;   // its oscillator had stopped, so its time is not used until it is set again
@@ -1279,6 +1280,7 @@ void setup(void) {
   rtcBegin();
   // PAJ7620U2 gesture sensor, also on the bus.
   gestureBegin();
+  i2cScan();              // after the sensors: a PAJ7620U2 asleep may miss the first call
   loadFaceKeys();         // needs to know which sensors were found
 #if BAND_DATA
   loadNoticeKeys();       // which of those events close a notice on the panel
@@ -3635,6 +3637,26 @@ void setClockTo(time_t utc, TimeSource source) {
   panelDirty = true;
 }
 
+/* ---- The I2C bus ------------------------------------------------------------ */
+
+// At boot: which addresses answer on the I2C bus, for the console and the
+// config page's system section - the onboard LIS3DH (0x19), a BH1750 (0x23),
+// a DS3231 (0x68; many of its modules carry an EEPROM at 0x57 as well), a
+// PAJ7620U2 (0x73). A sensor that is not found can so be told from one the
+// bus does not see at all.
+void i2cScan() {
+  Serial.print("I2C bus:");
+  uint8_t n = 0;
+  for (uint8_t a = 0x08; a < 0x78; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() != 0) { continue; }
+    i2cFound[a / 8] |= (uint8_t)(1 << (a % 8));
+    Serial.printf(" 0x%02X", a);
+    n++;
+  }
+  Serial.println(n ? "" : " nothing answers");
+}
+
 /* ---- Real-time clock (DS3231) -------------------------------------------- */
 
 // At boot: whether a DS3231 answers, and its time if it has one. One whose
@@ -4575,12 +4597,19 @@ void updateGestures() {
   }
   InputEvent ev = gestureEvent(gestureSensor.readGesture());   // reading clears it, and the INT line
   if (ev == EV_NONE) { return; }
-  if (millisNow - gestureAt < GESTURE_LOCKOUT_MS) { return; }
+  // Each one on the console, as it was taken or left: what a hand did, and
+  // what the sensor saw without one.
+  int8_t name = faceEventIndex(ev);
+  const char *label = name >= 0 ? FACE_EVENTS[name].label : "?";
+  if (millisNow - gestureAt < GESTURE_LOCKOUT_MS) {
+    Serial.printf("Gesture: %s - left, %lu ms after the last\n", label, millisNow - gestureAt);
+    return;
+  }
+  Serial.printf("Gesture: %s\n", label);
   gestureAt   = millisNow;
   lastInputAt = millisNow;
   objectNearSince = 0;        // a gesture is no approach
   approachReported = true;    // nor is the hand that made it, until it has gone
-  DEBUG_LOG("gesture event %u\n", (unsigned)ev);
   handleInput(ev, (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) ? BURST_FAST_STEPS : 1);
 }
 
@@ -4596,6 +4625,7 @@ void updateApproach() {
     if (!objectNearSince) { objectNearSince = millisNow; }
     if (!approachReported && millisNow - objectNearSince >= APPROACH_MS) {
       approachReported = true;
+      Serial.printf("Gesture sensor: a hand near for %lu ms\n", millisNow - objectNearSince);
       handleInput(EV_APPROACH, 1);
     }
   } else {
@@ -7504,6 +7534,14 @@ void apiState(Print &c) {
   hw["gestureInt"] = GESTURE_INT >= 0;
   hw["rtc"] = rtcOK;
   hw["rtcLost"] = rtcLostPower;
+  JsonArray i2c = hw["i2c"].to<JsonArray>();   // the addresses that answered at boot
+  for (uint8_t a = 0; a < 128; a++) {
+    if (i2cFound[a / 8] & (1 << (a % 8))) {
+      char hex[8];
+      snprintf(hex, sizeof(hex), "0x%02X", a);
+      i2c.add(hex);
+    }
+  }
   hw["lux"] = lastLux >= 0;
 
 #if GIF_PLAYBACK
