@@ -620,7 +620,7 @@ unsigned long gestureAt        = 0;   // millis() of the last gesture that count
 // The last gestures the sensor reported, newest first, for the gesture test
 // and the web app: the sensor's own direction, the event the panel made of it,
 // and whether it was taken or left (within GESTURE_LOCKOUT_MS of the last).
-struct GestureSeen { unsigned long at; uint8_t raw; uint8_t ev; bool taken; };
+struct GestureSeen { unsigned long at; uint8_t raw; uint8_t ev; bool taken; uint8_t r43, r44; };
 const uint8_t GESTURE_SEEN_MAX = 8;
 GestureSeen gestureSeen[GESTURE_SEEN_MAX];
 uint8_t  gestureSeenCount = 0;
@@ -633,8 +633,9 @@ unsigned long gestureTestAt = 0;        // millis() of the start or of the last 
 unsigned long gestureNearAt = 0;        // when the sensor was last asked what it sees
 int16_t  gestureNearBright = -1;        // the object in view: its brightness and size; -1 = nothing in view
 int16_t  gestureNearSize   = -1;
-const char *gestureRawName(uint8_t g);  // declared here: the sketch's generated prototypes miss these two
+const char *gestureRawName(uint8_t g);  // declared here: the sketch's generated prototypes miss these
 const char *gestureWord(uint8_t ev);
+Gesture gestureDecode(uint8_t r43, uint8_t r44);
 unsigned long approachPolledAt = 0;
 unsigned long objectNearSince  = 0;   // 0 = nothing near
 unsigned long objectGoneSince  = 0;
@@ -4625,7 +4626,20 @@ void updateGestures() {
     if (millisNow - gesturePolledAt < GESTURE_POLL_MS) { return; }
     gesturePolledAt = millisNow;
   }
-  Gesture g = gestureSensor.readGesture();   // reading clears it, and the INT line
+  // In the gesture test the two result registers are read as they are and
+  // logged, to see what the sensor reports for a circle or a wave; outside it
+  // the library's reading still decides.
+  uint8_t r43 = 0, r44 = 0;
+  Gesture g;
+  if (screen == SCREEN_GESTURE_TEST) {
+    if (!gestureReadRaw(r43, r44) || (r43 == 0 && r44 == 0)) { return; }
+    static unsigned long rawAt = 0;
+    Serial.printf("Gesture raw: 0x43=%02X 0x44=%02X, %lu ms after the last\n", r43, r44, millisNow - rawAt);
+    rawAt = millisNow;
+    g = gestureDecode(r43, r44);
+  } else {
+    g = gestureSensor.readGesture();   // reading clears it, and the INT line
+  }
   InputEvent ev = gestureEvent(g);
   if (ev == EV_NONE) { return; }
   // Each one on the console, as it was taken or left: what a hand did, and
@@ -4634,7 +4648,7 @@ void updateGestures() {
   int8_t name = faceEventIndex(ev);
   const char *label = name >= 0 ? FACE_EVENTS[name].label : "?";
   bool taken = millisNow - gestureAt >= GESTURE_LOCKOUT_MS;
-  gestureRemember(g, ev, taken);
+  gestureRemember(g, ev, taken, r43, r44);
   if (!taken) {
     Serial.printf("Gesture: %s - left, %lu ms after the last (sensor %s, turned %u, panel %u)\n", label,
                   millisNow - gestureAt, gestureRawName(g), uiSettings.gestureMount, screenRotation);
@@ -4712,10 +4726,43 @@ const char *gestureWord(uint8_t ev) {
   }
 }
 
-void gestureRemember(uint8_t raw, uint8_t ev, bool taken) {
+void gestureRemember(uint8_t raw, uint8_t ev, bool taken, uint8_t r43, uint8_t r44) {
   if (gestureSeenCount < GESTURE_SEEN_MAX) { gestureSeenCount++; }
   for (uint8_t i = gestureSeenCount - 1; i > 0; i--) { gestureSeen[i] = gestureSeen[i - 1]; }
-  gestureSeen[0] = { millisNow, raw, ev, taken };
+  gestureSeen[0] = { millisNow, raw, ev, taken, r43, r44 };
+}
+
+// One of the sensor's registers in bank 0, which the library keeps selected.
+bool gestureReadReg(uint8_t reg, uint8_t &value) {
+  Wire.beginTransmission((uint8_t)0x73);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) { return false; }
+  if (Wire.requestFrom((uint8_t)0x73, (uint8_t)1) != 1) { return false; }
+  value = (uint8_t)Wire.read();
+  return true;
+}
+
+// The two gesture result registers: 0x43 up, down, left, right, push, pull,
+// clockwise, counter-clockwise (bit 0 to 7), 0x44 the wave (bit 0).
+bool gestureReadRaw(uint8_t &r43, uint8_t &r44) {
+  r43 = r44 = 0;
+  if (!gestureReadReg(0x43, r43)) { return false; }
+  return gestureReadReg(0x44, r44);
+}
+
+// The gesture the two registers stand for when more than one bit is set: a
+// circle before a wave, a wave before push and pull, those before a swipe.
+Gesture gestureDecode(uint8_t r43, uint8_t r44) {
+  if (r43 & 0x40) { return GES_CLOCKWISE; }
+  if (r43 & 0x80) { return GES_ANTICLOCKWISE; }
+  if (r44 & 0x01) { return GES_WAVE; }
+  if (r43 & 0x10) { return GES_FORWARD; }
+  if (r43 & 0x20) { return GES_BACKWARD; }
+  if (r43 & 0x01) { return GES_UP; }
+  if (r43 & 0x02) { return GES_DOWN; }
+  if (r43 & 0x04) { return GES_LEFT; }
+  if (r43 & 0x08) { return GES_RIGHT; }
+  return GES_NONE;
 }
 
 // The gesture test, over the face; a GIF on show ends for it. False when
@@ -4765,8 +4812,8 @@ void drawGestureTest() {
   bool landscape = w > h;
   const GestureSeen *last = gestureSeenCount ? &gestureSeen[0] : nullptr;
   char raw[16], line[24], nearTxt[16];
-  if (last) {
-    snprintf(raw, sizeof(raw), "S %s", gestureRawName(last->raw));
+  if (last) {   // the two registers as read, in hex: 0x43 and 0x44
+    snprintf(raw, sizeof(raw), "%02X %02X %s", last->r43, last->r44, landscape ? gestureRawName(last->raw) : "");
     for (char *p = raw; *p; p++) { *p = (char)toupper((unsigned char)*p); }
   } else {
     strlcpy(raw, landscape ? "GESTURE TEST" : "TEST", sizeof(raw));
@@ -7768,6 +7815,9 @@ void apiGestures(Print &c) {
     o["sensor"] = gestureRawName(g.raw);
     o["panel"] = name >= 0 ? FACE_EVENTS[name].label : "?";
     o["taken"] = g.taken;
+    char bits[8];
+    snprintf(bits, sizeof(bits), "%02X %02X", g.r43, g.r44);   // the registers 0x43 and 0x44 as read (the test only)
+    o["bits"] = bits;
   }
   sendJson(c, d);
 }
