@@ -29,13 +29,13 @@
 #       board has the ffat partition this build expects, so another ESP32-S3
 #       board on the PC is never written over; with GIF_PACK_MAC set (the
 #       board's MAC, as esptool prints it when it connects) only that board.
-# The GIFs come from gifs/ (the repository's examples, always taken) and the
-# folders listed in gif_pack.local in the project folder (one per line, git
-# ignores the file), or from GIF_PACK_DIRS if that is set (folders separated
-# by ";" on Windows, ":" elsewhere), with their exclude.txt, and have to fit
-# the panel the way the clock stands (custom_gif_panel,
-# custom_gif_orientation). A second copy of a GIF is left out. They go in
-# smallest first while the partition has room.
+# The GIFs come from the folders listed in gif_pack.local in the project
+# folder (one per line, git ignores the file), or from GIF_PACK_DIRS if that
+# is set (folders separated by ";" on Windows, ":" elsewhere), with their
+# exclude.txt, and have to fit the panel the way the clock stands
+# (custom_gif_panel, custom_gif_orientation). The repository brings no GIFs of
+# its own. A second copy of a GIF is left out. They go in smallest first while
+# the partition has room.
 #
 # Each GIF is kept as it is or deflated (zlib, level 9), whichever is smaller;
 # the clock inflates a deflated one into PSRAM with the inflate in the chip's
@@ -259,10 +259,10 @@ def _pio(env):
             folders, source = [d for d in listed.split(os.pathsep) if d.strip()], "GIF_PACK_DIRS"
         else:
             folders, source = gif_common.listed_dirs(project, "gif_pack.local"), "gif_pack.local"
-        listed = [d.strip() for d in folders if os.path.isdir(d.strip())]
-        if not listed:
-            print("GIF pack: %s names no folder that exists - the examples in gifs/ only" % source)
-        folders = [os.path.join(project, "gifs")] + listed
+        folders = [d.strip() for d in folders if os.path.isdir(d.strip())]
+        if not folders:
+            sys.stderr.write("GIF pack: %s names no folder that exists\n" % source)
+            return 1
         offset, capacity = where()
         gifs, too_big, copies = collect(folders, panel, orientation)
         pack, taken, left_out = layout(gifs, capacity)
