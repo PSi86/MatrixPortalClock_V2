@@ -377,9 +377,11 @@ uint8_t  bandItemCount = 0;
 // Alerts on the 64x32 clock, which has no room for the band (concept doc,
 // "Decided and open on the band", 2026-10-09): an item at alert level comes
 // up as a banner with its icon alone, once, and the face carries a marker
-// while one is there. The alerts already shown, by source and tag; one stays
-// known for a while after it went, so an alert that drops out and comes back
-// (a reconnect to Home Assistant, a fetch that missed it) is not shown again.
+// while one is there. The alerts already shown, by source and tag. One its
+// source takes away, or one that runs out, is over and forgotten at once.
+// One dropped for a technical reason stays known for a while, so an alert
+// that comes back (a reconnect to Home Assistant, a fetch that missed it) is
+// not shown again.
 struct AlertSeen { uint8_t feed; uint32_t tag; unsigned long lastAt; };
 const uint8_t       ALERT_SEEN_MAX  = 24;
 const unsigned long ALERT_FORGET_MS = 15UL * 60UL * 1000UL;
@@ -6541,6 +6543,7 @@ void bandRemove(uint8_t f, const char *key) {
   for (uint8_t i = 0; i < bandItemCount; i++) {
     if (bandItems[i].feed != f || strcmp(bandItems[i].key, key) != 0) { continue; }
     Serial.printf("Info band - %s\n", key);
+    alertForget(bandItems[i]);
     bandRemoveAt(i);
     return;
   }
@@ -6564,6 +6567,7 @@ void bandExpire() {
   for (int i = (int)bandItemCount - 1; i >= 0; i--) {
     if (bandItems[i].until > now) { continue; }
     Serial.printf("Info band - %s (ran out)\n", bandItems[i].key);
+    alertForget(bandItems[i]);
     bandRemoveAt((uint8_t)i);
   }
 }
@@ -6576,6 +6580,13 @@ int8_t alertSeenIndex(uint8_t feed, uint32_t tag) {
     if (alertSeen[i].feed == feed && alertSeen[i].tag == tag) { return (int8_t)i; }
   }
   return -1;
+}
+
+// An item that is over - taken away by its source, or run out - is no
+// longer known as shown, so the same item sent again comes up as new.
+void alertForget(const BandItem &it) {
+  int8_t s = alertSeenIndex(it.feed, it.tag);
+  if (s >= 0) { alertSeen[s] = alertSeen[--alertSeenCount]; }
 }
 
 // Keeps an alert as shown; when the list is full, in place of the one gone

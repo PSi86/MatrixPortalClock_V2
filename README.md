@@ -502,10 +502,12 @@ Assistant sends with `"level": "alert"`. Information does not show on it.
   hotspot's blue mark.
 - **Once:** an alert comes up when it is new, or when an item that was
   information turns into an alert. The same item with a new text does not come
-  up again, and an alert stays known for 15 minutes after it went, so a
-  reconnect to Home Assistant or a fetch that missed it does not bring it back. A
-  DWD warning with another headline counts as another warning; every message is
-  one of its own. Several new alerts with the same icon share one banner.
+  up again. An alert its source takes away (an empty payload) or that runs out
+  is over: sent again, it comes up again. One dropped for a technical reason
+  stays known for 15 minutes, so a reconnect to Home Assistant or a fetch that
+  missed it does not bring it back. A DWD warning with another headline counts
+  as another warning; every message is one of its own. Several new alerts with
+  the same icon share one banner.
 
 The icons are drawn as pixels in `src/item_icons.h`, part of the firmware like
 the rest of the band, so they need nothing loaded onto the clock.
