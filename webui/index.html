@@ -269,7 +269,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       <div class="card" data-for-face="2">
         <div class="group-title">Muncher</div>
         <div class="row">
-          <div><div class="lbl">Change</div><div class="hint">How a digit that changes is walked. Mixed: the whole digit when one changes, only the difference when several do.</div></div>
+          <div><div class="lbl">Change</div><div class="hint">How a digit that changes is walked, seen at the next change of the time. Mixed: the whole digit when one changes, only the difference when several do.</div></div>
           <div class="seg" id="mst" role="group" aria-label="Change"></div>
         </div>
         <div class="row">
@@ -784,9 +784,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       setSeg(shs, 'shs', true, true);
     }
     if (S.hw.muncher) {
-      // A change of style or pace shows a change; a new knock shows its scene (the clock sees the new value).
+      // A new pace shows a change of the minutes' ones; a new knock shows its scene (the clock sees the new
+      // value). A new style shows at the next change of the time: no preview could show it without a wrong time.
       // The knock's values in the order shown: random last, though it is stored as 2.
-      [['mst', true, [0, 1, 2]], ['mkn', false, [0, 1, 3, 2]]].forEach(function (m) {
+      [['mst', false, [0, 1, 2]], ['mkn', false, [0, 1, 3, 2]]].forEach(function (m) {
         var el = $('#' + m[0]);
         if (!el.children.length) { m[2].forEach(function (v) { if (S.lists[m[0]][v] === undefined) { return; } var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists[m[0]][v]; el.appendChild(b); }); }
         setSeg(el, m[0], true, m[1]);

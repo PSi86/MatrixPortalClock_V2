@@ -3520,6 +3520,10 @@ const uint8_t MUNCHER_AFTER_HOUR    = 2;
 const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
 const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
 const unsigned long MUNCHER_KNOCK_ROOM_MS = 1500;   // a knock's scene ends this long before a change starts
+// The most steps what the web app asks to see can take: a change of the
+// minutes' ones, or a knock's scene; the change to a full hour with its show.
+const long MUNCHER_PREVIEW_STEPS      = 260;
+const long MUNCHER_PREVIEW_HOUR_STEPS = 520;
 
 struct MuncherSettings {
   uint16_t magic;
@@ -3671,25 +3675,30 @@ void muncherIdle(const uint8_t now[4]) {
     muncherFruitReq = false;
     muncherPlaceFruit();
   }
-  if (muncherPreviewReq || muncherHourReq) {
-    // The web app wants to see a change, the last minute's to this one; as
-    // the change to a full hour, with four ghosts and the hour show after.
+  // What the web app asks to see waits until it can end before the next
+  // change starts, and for the rest after a scene: a preview never holds up
+  // a change of the time.
+  long room = (long)(muncherStartAt - millisNow) - (long)MUNCHER_KNOCK_ROOM_MS;
+  bool rested = millisNow - muncherSceneEndedAt >= MUNCHER_KNOCK_REST_MS;
+  long pace = muncherSettings.paceMs;
+  if ((muncherPreviewReq || muncherHourReq) && rested &&
+      room >= (muncherHourReq ? MUNCHER_PREVIEW_HOUR_STEPS : MUNCHER_PREVIEW_STEPS) * pace) {
+    // A change, as the change to a full hour with four ghosts and the hour
+    // show after. The time on show stays right: the minutes' ones are eaten
+    // and laid again, as the knock's "last digit again" does. Showing the
+    // last minute's digits first, as this did, set the clock back a minute
+    // for the preview's time (midnight, 2026-10-11).
     bool hour = muncherHourReq;
     muncherPreviewReq = muncherHourReq = false;
-    uint8_t before[4];
-    muncherDigitsAt(localTime - 60, before);
-    munch.show(before);
-    if (munch.planChange(now, muncherSettings.style, 0, hour ? 4 : 2)) {
+    uint8_t same[4];
+    memcpy(same, now, 4);
+    if (munch.planChange(same, muncher::STYLE_ALL, 1 << 3, hour ? 4 : 2)) {
       muncherStartScene(muncher::MODE_CHANGE, millisNow, hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_NOTHING);
-    } else {
-      munch.show(now);
     }
     muncherPlannedFor = 0;
     return;
   }
-  // The web app's knock waits out the rest after a scene, instead of being
-  // refused for it.
-  if (muncherKnockReq && millisNow - muncherSceneEndedAt >= MUNCHER_KNOCK_REST_MS) {
+  if (muncherKnockReq && rested && room >= MUNCHER_PREVIEW_STEPS * pace) {
     muncherKnockReq = false;
     if (muncherKnock()) { return; }
   }
