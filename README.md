@@ -31,10 +31,12 @@ button pin cannot be carried over.
 
 ## Features
 
-- **Two watchfaces**, selectable on the config page:
+- **Three watchfaces**, selectable on the config page:
   - *Classic* — six animated digits `HH MM SS` (fly-in, direction configurable per digit)
   - *Tetris* — `HH:MM` built up from falling tetromino blocks, and knocking the
     clock throws them apart and rebuilds them (S3 only)
+  - *Muncher* — `HH:MM` in dots, which a muncher eats and lays anew at a change
+    of the time, two ghosts behind it (S3 only)
 - **Automatic orientation** via the onboard accelerometer: the display rotates in
   90° steps to match how the panel is held (both portrait and both landscape
   positions)
@@ -238,7 +240,7 @@ messages again (S3, see [Alerts and messages](#alerts-and-messages-on-the-panel-
 On the S3 each input also has a tick, **closes**: a ticked input closes an alert
 or a message on the panel and goes on to the next one. The watchface animation
 is the face's own: the Tetris digits break up in the
-break-up effect, and the classic digits all fly in at the next second as if
+break-up effect, the muncher plays its knock scene, and the classic digits all fly in at the next second as if
 every one of them changed. On the classic face a new one is ignored until the
 running one has landed and 0.3 s have passed, so a knock that reports itself
 more than once (2 to 7 times, seen) plays it once, and a fast run of knocks
@@ -763,8 +765,9 @@ real change, build with `-D DST_TEST_UTC=<utc seconds>` in addition to
 
 ## Watchfaces
 
-The **watchface** setting on the config page switches between two clock faces. It
-previews live, so the choice can be judged on the panel before saving.
+The **watchface** setting on the config page switches between the clock faces:
+Classic on both boards, Tetris and Muncher on the S3. It previews live, so the
+choice can be judged on the panel before saving.
 
 **Classic** (default) shows `HH MM SS` with the six flying digits. This is the
 face the clock has always had; nothing about it changed.
@@ -928,6 +931,61 @@ The face only repaints while blocks are falling or when something visible change
 The face is switched on for the S3 only (`WATCHFACE_TETRIS` in `board_hal.h`).
 Nothing in it is board specific any more, but it has not been tested on the M4,
 whose config page therefore has no watchface selector.
+
+### Muncher
+
+**Muncher** shows `HH:MM` as dots on a seven-segment grid, 5 × 9 dots 2 px
+apart, so a digit is 9 × 17 px, in the colour of a game's pellets. The colon is
+two power pellets that blink with the seconds. Below the digits runs a corridor
+between two blue walls, with an opening under each digit's lower right corner.
+Between changes nothing moves.
+
+| | layout |
+|---|---|
+| landscape 64x32 | digits at x 3, 15, 40 and 52, rows 2..18; colon at x 30..33; corridor walls in rows 21 and 31 |
+| portrait 32x64 | hours in rows 4..20, minutes in rows 27..43, x 3..11 and 20..28; colon in rows 22..25; one shaft up between the columns; corridor walls in rows 47 and 57 |
+
+**A change of the time.** The muncher comes in along the corridor from the
+left, two ghosts behind it, goes up into each digit that changes and walks its
+segments: the dots that go are eaten, the ones that come appear behind it. While
+it is up in a digit the ghosts wait below. Then it leaves to the right, and
+the corridor's pellets are back. The way through a digit is the shortest walk
+over the segments it has to pass, from the corner where the muncher comes in and
+back to it (a breadth-first search over corner and segments passed, in
+`src/muncher.h`).
+
+**The time stands at :00.** A change is planned backwards from the next minute:
+it starts as early as its walk needs, so the last digit is complete as the new
+minute begins. The console says when it was, against the clock's own second:
+`Muncher: the new time stands at :00.000`. It is stepped by the time since it started, so a screen that was on top
+for a while, or a loop held up by a request, does not put it behind; a time that
+moved without a change (set by hand, corrected by a sync) is walked right at once.
+A GIF that comes up of its own accord waits while the muncher walks, or when its
+change starts within the GIF's time plus 6 s: in a first test a GIF came up
+during a change and the new time showed only at :04.7, when it had ended. A GIF
+asked for by hand still plays at once.
+
+**Change**, one of three: *Mixed* (the default) eats the whole old digit and
+walks the new one when one digit changes, and walks only the segments that differ
+when several do; *Whole digit* and *Only the difference* do one of the two
+always. The walk takes 25 px/s by default (*Pace*, 20 to 80 ms per pixel); the
+longest change of a single digit, from the left edge to the digit complete,
+is 199 steps, 8 s at that pace (the debug build's self-test, below).
+
+**Knock**, and the face action *trigger watchface animation*: *Power pellet*
+(the muncher eats one of the colon's power pellets, the ghosts turn blue and flee,
+and one it catches runs off as a pair of eyes), *Last digit again* (the minutes'
+ones eaten and laid again), or *Random each time*. A knock is not taken while a
+scene runs, for 1 s after one, or when its scene could not end 1.5 s before the
+next change starts. However the ghosts stand, a scene ends at the latest 150
+steps after the muncher's walk, so no scene can hold up a change of the time.
+
+The settings are in a blob of their own (NVS key `muncher`), as the Tetris ones
+are; `mst`, `mkn` and `mpace` in the web app's interface. Changing the change
+style or the pace shows the change from the last minute to this one; choosing
+another knock shows its scene. The debug build walks every change of every digit,
+both ways and on both layouts, and the knock's scene, ten seconds after start-up
+and says on the console whether each left exactly the new digit.
 
 ## Animation timing
 

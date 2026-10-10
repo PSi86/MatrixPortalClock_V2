@@ -238,6 +238,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="faces" role="group" aria-label="Watchface">
           <button class="face" type="button" data-face="0"><canvas width="128" height="64" data-mini="classic"></canvas><span><b>Classic</b><small>HH MM SS, digits fly in</small></span></button>
           <button class="face" type="button" data-face="1"><canvas width="128" height="64" data-mini="tetris"></canvas><span><b>Tetris</b><small>HH:MM of falling blocks</small></span></button>
+          <button class="face" type="button" data-face="2" id="faceMuncher"><canvas width="128" height="64" data-mini="muncher"></canvas><span><b>Muncher</b><small>HH:MM of dots, eaten anew</small></span></button>
         </div>
       </div>
       <div class="card" data-for-face="0">
@@ -263,6 +264,21 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="row">
           <div><div class="lbl">Break-up effect</div><div class="hint">How digits come apart when time changes.</div></div>
           <div class="seg" id="shs" role="group" aria-label="Break-up effect"></div>
+        </div>
+      </div>
+      <div class="card" data-for-face="2">
+        <div class="group-title">Muncher</div>
+        <div class="row">
+          <div><div class="lbl">Change</div><div class="hint">How a digit that changes is walked. Mixed: the whole digit when one changes, only the difference when several do.</div></div>
+          <div class="seg" id="mst" role="group" aria-label="Change"></div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="mpace">Pace</label><div class="hint">Milliseconds per pixel; higher is slower. The change ends as the minute begins.</div></div>
+          <div class="range"><input type="range" id="mpace" min="20" max="80" data-live data-pv><output for="mpace"></output></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays.</div></div>
+          <div class="seg" id="mkn" role="group" aria-label="Knock"></div>
         </div>
       </div>
     </section>
@@ -481,7 +497,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var DIR_NAMES = ['from the top', 'from the right', 'from the bottom', 'from the left'];
   var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠'];   // ItemIcon in band_data.h
   // What the page edits; ssid and the WiFi password go through their own form.
-  var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
+  var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'mst', 'mkn', 'mpace', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
     'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda'];
   var S = null, saved = null, cur = null, gone = false, auth = '';
   try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
@@ -520,6 +536,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     var o = { bright: cur.bright, autob: cur.autob ? 'on' : 'off', luxd: cur.luxd, luxb: cur.luxb, brmin: cur.brmin, brmax: cur.brmax,
       speed: cur.speed, digit: cur.digit, trail: cur.trail };
     if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
+    if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; }
     if (pv) { o.pv = 1; }
     return enc(o);
   }
@@ -529,6 +546,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     if (cur.autob) { o.autob = 'on'; }   // checkboxes: absent when off, as the old page sent them
     for (var i = 0; i < 6; i++) { o['dir' + i] = cur.dirs[i]; }
     if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
+    if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; }
     if (S.hw.rtc) { o.syncd = cur.syncd; }
     if (S.hw.gesture) { o.gmount = cur.gmount; }
     S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } });
@@ -745,7 +763,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#gifs').hidden = !has('gifr');
     $('#band').hidden = !has('lat');
     $('#facePick').hidden = !S.hw.tetris;
-    if (!S.hw.tetris) { cur.wf = 0; }
+    $('#faceMuncher').hidden = !S.hw.muncher;
+    if (!S.hw.tetris || (cur.wf === 2 && !S.hw.muncher)) { cur.wf = 0; }
     buildNav();
     // Face
     $$('.face').forEach(function (b) {
@@ -759,6 +778,15 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       var shs = $('#shs');
       if (!shs.children.length) { [3, 0, 1, 2].forEach(function (v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists.shs[v]; shs.appendChild(b); }); }
       setSeg(shs, 'shs', true, true);
+    }
+    if (S.hw.muncher) {
+      // A change of style or pace shows a change; a new knock shows its scene (the clock sees the new value).
+      [['mst', true], ['mkn', false]].forEach(function (m) {
+        var el = $('#' + m[0]);
+        if (!el.children.length) { S.lists[m[0]].forEach(function (t, v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = t; el.appendChild(b); }); }
+        setSeg(el, m[0], true, m[1]);
+      });
+      setRange('mpace', 'mpace', ' ms');
     }
     // The knock's sensitivity: an input setting, kept with the Tetris settings.
     $('#shkRow').hidden = !(S.hw.tetris && S.hw.accel);
@@ -1031,20 +1059,26 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       var off = document.createElement('canvas'); off.width = 64; off.height = 32;
       var o = off.getContext('2d'), d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
       o.fillStyle = '#fff'; o.textAlign = 'center'; o.textBaseline = 'middle';
-      var tet = cv.dataset.mini === 'tetris';
-      o.font = (tet ? '900 22px ' : '800 13px ') + getComputedStyle(document.body).fontFamily;
+      var tet = cv.dataset.mini === 'tetris', mun = cv.dataset.mini === 'muncher';
+      o.font = (tet ? '900 22px ' : mun ? '900 19px ' : '800 13px ') + getComputedStyle(document.body).fontFamily;
       if (tet) { o.fillText(p(d.getHours()) + ':' + p(d.getMinutes()), 32, 17); }
+      else if (mun) { o.fillText(p(d.getHours()) + ':' + p(d.getMinutes()), 32, 12); }
       else { var t = p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()); [6, 15, 26, 35, 47, 56].forEach(function (x, i) { o.fillText(t[i], x, 17); }); }
       var data = o.getImageData(0, 0, 64, 32).data, c = cv.getContext('2d'), cell = cv.width / 64;
       var TET = ['#ff3b30', '#ffcc00', '#34c759', '#00c7be', '#0a84ff', '#bf5af2'];
+      var led = function (x, y, col) { c.fillStyle = col; c.beginPath(); c.arc(x * cell + cell / 2, y * cell + cell / 2, cell * 0.4, 0, 6.283); c.fill(); };
       c.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() || '#07090c';
       c.fillRect(0, 0, cv.width, cv.height);
       for (var y = 0; y < 32; y++) {
         for (var x = 0; x < 64; x++) {
           if (data[(y * 64 + x) * 4 + 3] < 115) { continue; }
-          c.fillStyle = tet ? TET[(Math.floor(x / 3) * 7 + Math.floor(y / 3) * 3) % 6] : (cur ? cur.digit : '#00c0ff');
-          c.beginPath(); c.arc(x * cell + cell / 2, y * cell + cell / 2, cell * 0.4, 0, 6.283); c.fill();
+          if (mun && (x % 2 || y % 2)) { continue; }   // the time in dots
+          led(x, y, tet ? TET[(Math.floor(x / 3) * 7 + Math.floor(y / 3) * 3) % 6] : mun ? '#ffb897' : (cur ? cur.digit : '#00c0ff'));
         }
+      }
+      if (mun) {   // the corridor, its pellets and the muncher
+        for (var wx = 0; wx < 64; wx++) { led(wx, 24, '#2828ff'); led(wx, 31, '#2828ff'); if (wx % 4 === 2 && wx > 26) { led(wx, 27, '#ffb897'); } }
+        ['.###.', '###..', '##...', '###..', '.###.'].forEach(function (row, j) { for (var i = 0; i < 5; i++) { if (row[i] === '#') { led(20 + i, 25 + j, '#ffff00'); } } });
       }
     });
   }

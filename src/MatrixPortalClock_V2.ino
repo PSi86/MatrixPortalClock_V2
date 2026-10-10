@@ -37,6 +37,12 @@ Todo Concept:
 #if WATCHFACE_TETRIS
 #include "tetris_digits.h"     // generated block tables for the Tetris watchface
 #endif
+#if WATCHFACE_MUNCHER
+#if !WATCHFACE_TETRIS
+#error "The Muncher watchface uses the Tetris face's knock: WATCHFACE_TETRIS has to be on as well"
+#endif
+#include "muncher.h"           // the Muncher watchface's logic
+#endif
 
 #include <math.h>              // powf() for perceptual brightness fade
 
@@ -123,7 +129,7 @@ Adafruit_Protomatter matrix(
 struct Settings {
   uint16_t magic;        // validity marker
   uint8_t  settingsRev;  // layout revision, see SETTINGS_REV (was padding in rev 0)
-  uint8_t  watchface;    // WATCHFACE_CLASSIC or WATCHFACE_TETRIS_ID
+  uint8_t  watchface;    // WATCHFACE_CLASSIC, WATCHFACE_TETRIS_ID or WATCHFACE_MUNCHER_ID
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
   uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
@@ -151,10 +157,16 @@ static_assert(sizeof(Settings) == 32,
 // has landed before the next second's flights start.
 const uint16_t FLY_IN_MIN_MS = 100, FLY_IN_MAX_MS = 850;
 
-// Watchfaces (Settings::watchface).
-const uint8_t WATCHFACE_CLASSIC   = 0;  // six flying GFX-font digits, HH MM SS
-const uint8_t WATCHFACE_TETRIS_ID = 1;  // HH:MM built from falling tetromino blocks
-const uint8_t WATCHFACE_COUNT     = 2;
+// Watchfaces (Settings::watchface). A value a firmware does not know falls
+// back to the classic face (applySettings()).
+const uint8_t WATCHFACE_CLASSIC    = 0;  // six flying GFX-font digits, HH MM SS
+const uint8_t WATCHFACE_TETRIS_ID  = 1;  // HH:MM built from falling tetromino blocks
+const uint8_t WATCHFACE_MUNCHER_ID = 2;  // HH:MM in dots, eaten and laid anew by a muncher
+#if WATCHFACE_MUNCHER
+const uint8_t WATCHFACE_COUNT      = 3;
+#else
+const uint8_t WATCHFACE_COUNT      = 2;
+#endif
 
 // Daylight saving modes (Settings::dst). 0 and 1 keep the meaning the byte had
 // before the automatic mode existed, so stored settings stay valid.
@@ -962,6 +974,7 @@ uint8_t hourNow, minuteNow, secondNow;
 bool secondTrigger, minuteTrigger, hourTrigger;
 uint8_t syncTimeHour = 5, syncTimeMinute = 11;
 unsigned long millisNow, deltaT;
+unsigned long secondStartedAt = 0;   // millis() when the second on show began (timekeeper())
 time_t localTime;   // what the panel shows: the clock's UTC plus zone and daylight saving
 
 // NTP sync -----------------------------------------------------------------
@@ -1405,6 +1418,11 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
+#if WATCHFACE_MUNCHER && defined(CLOCK_DEBUG)
+  // Ten seconds in, so the console has come back after a restart.
+  static bool muncherTested = false;
+  if (!muncherTested && millisNow > 10000) { muncherTested = true; muncherSelfTest(); }
+#endif
   if (minuteTrigger) { panelDirty = true; }   // whatever shows the time has to follow it
   if (secondTrigger && secondNow == 30) { rtcFollow(); }   // half way through every minute
   updatePanelRate();
@@ -1621,9 +1639,14 @@ void updateApDisplay() {
   // (5 fps on the M4): skipped frames are computed, not slowed down. This leaves
   // the radio free for the slow WiFiNINA web server; the S3 draws every frame.
 #if WATCHFACE_TETRIS
-  // The Tetris watchface throttles itself (it only repaints on an animation step
-  // or a visible change), so it needs no preview rate on top of that.
-  if (activeWatchface() == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
+  // The Tetris and Muncher watchfaces throttle themselves (they only repaint on
+  // an animation step or a visible change), so they need no preview rate on
+  // top of that.
+  uint8_t face = activeWatchface();
+  if (face == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
+#if WATCHFACE_MUNCHER
+  if (face == WATCHFACE_MUNCHER_ID) { drawMuncherFace(); return; }
+#endif
 #else
   activeWatchface();
 #endif
@@ -3465,6 +3488,333 @@ void shakeDiscardLatched() {
 }
 #endif  // WATCHFACE_TETRIS
 
+/* ======================================================================
+   Muncher watchface
+
+   HH:MM in dots, which a muncher eats and lays anew when the time changes;
+   the logic is in src/muncher.h, here is when it moves and what the panel
+   shows. Between changes nothing moves. A change is planned backwards from
+   second 00, so the last digit is complete as the new minute begins, and it
+   is stepped by the time since it started: a screen that was on top for a
+   while, or a loop held up by a request, does not put it behind.
+   ====================================================================== */
+#if WATCHFACE_MUNCHER
+
+// Settings of this watchface, in their own blob, as the Tetris ones are.
+#define MUNCHER_SETTINGS_MAGIC 0x3C1A
+#define MUNCHER_SETTINGS_REV   1
+
+// What a knock, or the face action "trigger watchface animation", plays.
+const uint8_t MUNCHER_KNOCK_POWER  = 0;   // the power pellet: the ghosts turn and flee
+const uint8_t MUNCHER_KNOCK_REPLAY = 1;   // the minutes' ones eaten and laid again
+const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the two, drawn each time
+const uint8_t MUNCHER_KNOCK_COUNT  = 3;
+const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
+const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
+const unsigned long MUNCHER_KNOCK_ROOM_MS = 1500;   // a knock's scene ends this long before a change starts
+
+struct MuncherSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  style;     // muncher::STYLE_*: how a changing digit is walked
+  uint8_t  knock;     // MUNCHER_KNOCK_*
+  uint8_t  paceMs;    // milliseconds per pixel the muncher walks
+  uint8_t  spare[2];
+};
+
+const MuncherSettings MUNCHER_DEFAULTS = {
+  MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV,
+  muncher::STYLE_MIXED,   // the whole digit when one changes, only the difference when several do
+  MUNCHER_KNOCK_RANDOM,
+  40,                     // 25 pixels a second
+  { 0, 0 }
+};
+
+MuncherSettings muncherSettings;
+SettingsStore<MuncherSettings> muncherStore;
+muncher::Face munch;
+uint8_t       muncherRotation     = 0xFF;   // rotation the layout was built for
+unsigned long muncherStartAt      = 0;      // when the planned or running scene starts
+time_t        muncherPlannedFor   = 0;      // the minute the planned change is for; 0 = none
+uint16_t      muncherPlannedDone  = 0;      // the step the planned minute change completes the time at
+uint16_t      muncherDoneSteps    = 0;      // the same for the running one, until it is logged; 0 = none
+unsigned long muncherSceneEndedAt = 0;
+bool          muncherColonDrawn   = false;
+bool          muncherPreviewReq   = false;  // the web app asks to see a change
+bool          muncherKnockReq     = false;  // ... or the knock's scene
+
+// The four digits of a moment; dashes while the clock has no time.
+void muncherDigitsAt(time_t t, uint8_t d[4]) {
+  if (!clockIsSet()) {
+    for (uint8_t i = 0; i < 4; i++) { d[i] = muncher::NO_DIGIT; }
+    return;
+  }
+  uint8_t h = (uint8_t)clockHour(t), m = (uint8_t)clockMinute(t);
+  d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
+}
+
+void muncherStartScene(muncher::Mode mode, unsigned long at) {
+  munch.start(mode);
+  muncherStartAt = at;
+  muncherPlannedFor = 0;
+  muncherDoneSteps = 0;   // not a planned minute change: nothing to time
+}
+
+// The knock's scene, or the face action's: refused while a scene runs, just
+// after one, and when it could not end before the next change starts.
+bool muncherKnock() {
+  if (munch.mode != muncher::MODE_IDLE || munch.shown[0] == muncher::NO_DIGIT) { return false; }
+  if (millisNow - muncherSceneEndedAt < MUNCHER_KNOCK_REST_MS) { return false; }
+  uint8_t kind = muncherSettings.knock;
+  if (kind >= MUNCHER_KNOCK_RANDOM) { kind = (uint8_t)random(MUNCHER_KNOCK_RANDOM); }
+  // Only against a planned change: until the face has planned one (it does
+  // on its next pass), there is nothing to measure the scene against.
+  bool planned = munch.legsPlanned() && muncherPlannedFor != 0;
+  if (!planned) { return false; }
+  unsigned long plannedStart = muncherStartAt;
+  uint16_t steps;
+  if (kind == MUNCHER_KNOCK_POWER) {
+    steps = munch.planPower();
+    steps += 120;                      // the walk back and the ghosts, at the most
+  } else {
+    uint8_t same[4];
+    memcpy(same, munch.shown, 4);
+    steps = munch.planChange(same, muncher::STYLE_ALL, 1 << 3);
+    steps += 60;                       // the walk out and the ghosts
+  }
+  unsigned long needs = (unsigned long)steps * muncherSettings.paceMs + MUNCHER_KNOCK_ROOM_MS;
+  muncherPlannedFor = 0;               // the change is planned anew afterwards
+  if ((long)(plannedStart - millisNow) < (long)needs) {
+    munch.show(munch.shown);           // drop the knock's walk
+    return false;
+  }
+  muncherStartScene(kind == MUNCHER_KNOCK_POWER ? muncher::MODE_POWER : muncher::MODE_CHANGE, millisNow);
+  Serial.println(kind == MUNCHER_KNOCK_POWER ? "Muncher: the power pellet" : "Muncher: the minute's ones again");
+  return true;
+}
+
+// Nothing moving: put a time that moved on without a change right (a time
+// set by hand, a sync that corrected it, a minute the face missed), plan
+// the next change once per minute, and start it when its moment has come.
+void muncherIdle(const uint8_t now[4]) {
+  if (memcmp(munch.shown, now, 4) != 0) {
+    if (munch.shown[0] == muncher::NO_DIGIT || now[0] == muncher::NO_DIGIT) {
+      munch.show(now);                 // dashes come and go without a muncher
+      panelDirty = true;
+    } else if (munch.planChange(now, muncherSettings.style)) {
+      muncherStartScene(muncher::MODE_CHANGE, millisNow);
+    }
+    muncherPlannedFor = 0;
+    return;
+  }
+  if (now[0] == muncher::NO_DIGIT) { return; }
+  // The next change first: a knock is measured against it.
+  uint8_t sec = (uint8_t)clockSecond(localTime);
+  time_t next = localTime - sec + 60;
+  if (muncherPlannedFor != next) {
+    uint8_t to[4];
+    muncherDigitsAt(next, to);
+    uint16_t done = munch.planChange(to, muncherSettings.style);
+    muncherPlannedFor = next;
+    muncherPlannedDone = done;
+    unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
+    muncherStartAt = nextMinuteAt - (unsigned long)done * muncherSettings.paceMs;
+  }
+  if (muncherPreviewReq) {
+    // The web app wants to see a change: the last minute's to this one.
+    muncherPreviewReq = false;
+    uint8_t before[4];
+    muncherDigitsAt(localTime - 60, before);
+    munch.show(before);
+    if (munch.planChange(now, muncherSettings.style)) { muncherStartScene(muncher::MODE_CHANGE, millisNow); }
+    else { munch.show(now); }
+    muncherPlannedFor = 0;
+    return;
+  }
+  if (muncherKnockReq) {
+    muncherKnockReq = false;
+    if (muncherKnock()) { return; }
+  }
+  // Started at its planned moment even when that has passed (the face was
+  // away): stepped from there, the muncher is where it ought to be by now.
+  if (munch.legsPlanned() && (long)(millisNow - muncherStartAt) >= 0) {
+    munch.start(muncher::MODE_CHANGE);
+    muncherDoneSteps = muncherPlannedDone;
+    muncherPlannedFor = 0;
+  }
+}
+
+// Whether the muncher is walking, or a planned change starts within `ms`: a
+// GIF that comes up of its own accord waits for it (gifUpdate()). A GIF
+// plays its whole loops, so `ms` has to cover a little more than its time.
+bool muncherWantsPanel(unsigned long ms) {
+  if (munch.mode != muncher::MODE_IDLE) { return true; }
+  if (!munch.legsPlanned() || muncherPlannedFor == 0) { return false; }
+  return (long)(muncherStartAt - millisNow) < (long)ms;
+}
+
+// A sprite of 5 x 5, its rows with the leftmost pixel in bit 4, drawn round
+// its middle and turned to face (dx, dy); as drawn it faces right.
+void muncherSprite(const uint8_t rows[5], int16_t cx, int16_t cy, int8_t dx, int8_t dy, uint16_t colour) {
+  for (uint8_t r = 0; r < 5; r++) {
+    for (uint8_t c = 0; c < 5; c++) {
+      uint8_t sr = r, sc = c;
+      if (dx < 0)      { sc = 4 - c; }
+      else if (dy < 0) { sr = c; sc = 4 - r; }
+      else if (dy > 0) { sr = c; sc = r; }
+      if (rows[sr] & (0x10 >> sc)) { matrix.drawPixel(cx - 2 + c, cy - 2 + r, colour); }
+    }
+  }
+}
+
+const uint8_t MUNCH_OPEN[5]  = { 0x0E, 0x1C, 0x18, 0x1C, 0x0E };   // .###. ###.. ##... ###.. .###.
+const uint8_t MUNCH_SHUT[5]  = { 0x0E, 0x1F, 0x1F, 0x1F, 0x0E };
+const uint8_t GHOST_BODY[5]  = { 0x0E, 0x1F, 0x15, 0x1F, 0x15 };   // .###. ##### #.#.# ##### #.#.#
+const uint8_t GHOST_EYES[5]  = { 0x00, 0x00, 0x0A, 0x00, 0x00 };   // the two gaps of row 2
+const uint8_t GHOST_RGB[muncher::GHOSTS][3] = { { 255, 0, 0 }, { 255, 184, 255 } };
+
+void muncherDraw(bool colonOn) {
+  const muncher::Layout &L = munch.L;
+  uint16_t dot   = scaledColor(255, 184, 151);
+  uint16_t wall  = scaledColor(40, 40, 255);
+  uint16_t eyes  = scaledColor(255, 255, 255);
+  matrix.fillScreen(0);
+  for (uint8_t i = 0; i < 4; i++) {
+    uint64_t bits = munch.dots[i];
+    for (uint8_t k = 0; k < muncher::COLS * muncher::ROWS; k++) {
+      if (bits & (1ULL << k)) {
+        matrix.drawPixel(L.digitX[i] + 2 * (k % muncher::COLS), L.digitY[i] + 2 * (k / muncher::COLS), dot);
+      }
+    }
+  }
+  // The colon: two power pellets, 4 x 4 without their corners, on the
+  // second's beat. The one the knock's muncher ate stays away until its
+  // scene is over.
+  if (colonOn) {
+    for (uint8_t p = 0; p < 2; p++) {
+      if (munch.pelletEaten && p == L.knockPellet) { continue; }
+      matrix.fillRect(L.colonX[p] + 1, L.colonY[p], 2, 4, dot);
+      matrix.fillRect(L.colonX[p], L.colonY[p] + 1, 4, 2, dot);
+    }
+  }
+  for (int16_t x = 0; x < L.w; x++) {
+    if (!muncher::wallOpen(L, x)) { matrix.drawPixel(x, L.wallTop, wall); }
+    matrix.drawPixel(x, L.wallBottom, wall);
+  }
+  for (uint8_t k = 0; k < 32 && 2 + 4 * k < L.w; k++) {
+    if (munch.lanePellets & (1UL << k)) { matrix.drawPixel(2 + 4 * k, L.laneY, dot); }
+  }
+  for (uint8_t g = 0; g < muncher::GHOSTS; g++) {
+    const muncher::Ghost &h = munch.ghosts[g];
+    if (h.mode == muncher::GHOST_OFF) { continue; }
+    if (h.mode != muncher::GHOST_EYES) {
+      uint16_t body = (h.mode == muncher::GHOST_SCARED) ? wall
+                    : scaledColor(GHOST_RGB[g][0], GHOST_RGB[g][1], GHOST_RGB[g][2]);
+      muncherSprite(GHOST_BODY, h.x, L.laneY, 1, 0, body);
+    }
+    muncherSprite(GHOST_EYES, h.x, L.laneY, 1, 0, eyes);
+  }
+  if (munch.muncherOn()) {
+    muncherSprite(munch.mouthOpen() ? MUNCH_OPEN : MUNCH_SHUT, munch.mx, munch.my, munch.dx, munch.dy,
+                  scaledColor(255, 255, 0));
+  }
+  drawStatusPixel();
+  drawHotspotMark();
+  drawNoticeMarker();
+  drawFeedbackIndicator();
+  matrix.show();
+  panelDirty = false;
+}
+
+// One pass of the watchface. Between changes it only repaints when what it
+// shows has changed (the colon's beat, another screen having drawn over it),
+// so an idle clock costs almost nothing, as with the Tetris face.
+void drawMuncherFace() {
+  if (screenRotation != muncherRotation) {
+    // A rotation moves everything: the time is shown as it is, at once.
+    muncherRotation = screenRotation;
+    munch.setLayout(screenIsLandscape() ? muncher::LANDSCAPE : muncher::PORTRAIT);
+    uint8_t now[4];
+    muncherDigitsAt(localTime, now);
+    munch.show(now);
+    muncherPlannedFor = 0;
+    panelDirty = true;
+  }
+  bool moved = false;
+  if (munch.mode != muncher::MODE_IDLE) {
+    long since = (long)(millisNow - muncherStartAt);
+    if (since >= 0) {
+      uint32_t steps = (uint32_t)since / muncherSettings.paceMs;
+      moved = munch.advanceTo((uint16_t)min(steps, (uint32_t)0xFFFF));
+      if (muncherDoneSteps && (munch.stepsDone >= muncherDoneSteps || munch.mode == muncher::MODE_IDLE)) {
+        // When the new time stood complete, against the clock's own second:
+        // :00.0xx is on time.
+        Serial.printf("Muncher: the new time stands at :%02d.%03lu\n", clockSecond(localTime),
+                      millisNow - secondStartedAt);
+        muncherDoneSteps = 0;
+      }
+      if (munch.mode == muncher::MODE_IDLE) { muncherSceneEndedAt = millisNow; panelDirty = true; }
+    }
+  }
+  if (munch.mode == muncher::MODE_IDLE) {
+    uint8_t now[4];
+    muncherDigitsAt(localTime, now);
+    muncherIdle(now);
+    if (munch.mode != muncher::MODE_IDLE) { moved = true; }
+  }
+  bool colonOn = (localTime % 2) == 0;   // 1 Hz, in step with the seconds, as on the Tetris face
+  if (!moved && !panelDirty && colonOn == muncherColonDrawn) { return; }
+  muncherDraw(colonOn);
+  muncherColonDrawn = colonOn;
+}
+
+void loadMuncherSettings() {
+  muncherStore.begin("muncher");
+  muncherStore.read(muncherSettings);
+  if (muncherSettings.magic != MUNCHER_SETTINGS_MAGIC) {
+    muncherSettings = MUNCHER_DEFAULTS;   // written with the next save
+  }
+  if (muncherSettings.style >= muncher::STYLE_COUNT) { muncherSettings.style = muncher::STYLE_MIXED; }
+  if (muncherSettings.knock >= MUNCHER_KNOCK_COUNT)  { muncherSettings.knock = MUNCHER_KNOCK_RANDOM; }
+  muncherSettings.paceMs = constrain(muncherSettings.paceMs, MUNCHER_PACE_MIN, MUNCHER_PACE_MAX);
+}
+
+void saveMuncherSettings() {
+  muncherSettings.magic = MUNCHER_SETTINGS_MAGIC;
+  muncherSettings.rev   = MUNCHER_SETTINGS_REV;
+  muncherStore.write(muncherSettings);
+}
+
+// The web app's Muncher controls, live or saved; a changed knock shows its
+// scene, and the page's pv says a control asked to see a change.
+void applyMuncherParams(const String &q, bool live) {
+  String v;
+  v = getParam(q, "mst");   if (v.length()) { muncherSettings.style = constrain(v.toInt(), 0, muncher::STYLE_COUNT - 1); }
+  v = getParam(q, "mpace"); if (v.length()) { muncherSettings.paceMs = constrain(v.toInt(), MUNCHER_PACE_MIN, MUNCHER_PACE_MAX); }
+  v = getParam(q, "mkn");
+  if (v.length()) {
+    uint8_t knock = constrain(v.toInt(), 0, MUNCHER_KNOCK_COUNT - 1);
+    if (live && knock != muncherSettings.knock && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherKnockReq = true; }
+    muncherSettings.knock = knock;
+  }
+  if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherPreviewReq = true; }
+}
+
+#if defined(CLOCK_DEBUG)
+// Every change of a digit walked through, at start-up: see muncher::selfTest().
+void muncherSelfTest() {
+  muncher::Face f;
+  uint16_t longest = 0, failed = 0;
+  unsigned long t0 = millis();
+  bool ok = muncher::selfTest(f, longest, failed);
+  Serial.printf("Muncher self-test: %s, longest digit walk %u steps, %lu ms", ok ? "all changes right" : "FAILED",
+                longest, millis() - t0);
+  if (!ok) { Serial.printf(", first wrong: %u", failed); }
+  Serial.println();
+}
+#endif
+#endif  // WATCHFACE_MUNCHER
+
 // Draw the current clock state to the panel. This is the expensive part (clears
 // the framebuffer, prints all six digits and pushes via matrix.show()). In the M4's
 // AP preview it is throttled to 5 fps while stepClockAnim() keeps the state moving,
@@ -3522,6 +3872,9 @@ uint8_t activeWatchface() {
 #if WATCHFACE_TETRIS
   tetrisRotation = 0xFF;           // force a fresh layout and a fresh drop
 #endif
+#if WATCHFACE_MUNCHER
+  muncherRotation = 0xFF;          // a fresh layout, the time shown at once
+#endif
   panelDirty = true;               // the other face's picture is still on the panel
   return shown;
 }
@@ -3559,7 +3912,11 @@ void classicDigits() {
 // classic fly-in animation is not stepped while it is showing.
 void drawClock(void) {
 #if WATCHFACE_TETRIS
-  if (activeWatchface() == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
+  uint8_t face = activeWatchface();
+  if (face == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
+#if WATCHFACE_MUNCHER
+  if (face == WATCHFACE_MUNCHER_ID) { drawMuncherFace(); return; }
+#endif
 #else
   activeWatchface();
 #endif
@@ -3593,7 +3950,7 @@ void timekeeper(void) {
   millisNow=millis();
   localTime=clockNow() + tzTotalOffset();   // the clock keeps UTC; the panel shows local time
 
-  if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; }
+  if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; secondStartedAt=millisNow; }
   else { secondTrigger=false; }
  
   if(secondTrigger && minuteNow != clockMinute(localTime)) { minuteNow=clockMinute(localTime); minuteTrigger=true; }
@@ -4031,6 +4388,9 @@ void loadSettings() {
 #if WATCHFACE_TETRIS
   loadTetrisSettings();
 #endif
+#if WATCHFACE_MUNCHER
+  loadMuncherSettings();
+#endif
   applySettings();
 }
 
@@ -4434,6 +4794,9 @@ void runFunction(InputFunction fn, uint8_t steps) {
 // 200 lines in 30 s).
 void faceAnimationStart() {
   if (screen != SCREEN_FACE) { return; }
+#if WATCHFACE_MUNCHER
+  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherKnock(); return; }
+#endif
 #if WATCHFACE_TETRIS
   if (settings.watchface == WATCHFACE_TETRIS_ID) {
     if (knockEffectReady()) { shakeStartAll(); }
@@ -5864,6 +6227,9 @@ void applyParams(const String &q) {
   v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); shakeApplyThreshold(); }
   v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
 #endif
+#if WATCHFACE_MUNCHER
+  applyMuncherParams(q, false);
+#endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.flyInTime  = flyInUnits(v.toInt()); }   // ms
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
@@ -5984,7 +6350,10 @@ void applyLiveParams(const String &q) {
   // did at first, was unreliable: the updates sent while a slider was being
   // dragged had already pushed the final value across, so the release looked
   // like no change at all and nothing was shown.
-  if (getParam(q, "pv").length()) { shakePreviewReq = true; }
+  if (getParam(q, "pv").length() && settings.watchface == WATCHFACE_TETRIS_ID) { shakePreviewReq = true; }
+#endif
+#if WATCHFACE_MUNCHER
+  applyMuncherParams(q, true);
 #endif
 }
 
@@ -6583,6 +6952,13 @@ void gifPlayAgain() {
 void gifUpdate() {
   if (screen != SCREEN_FACE || !gifSettings.randomOn || gifCount() == 0) { return; }
   if ((long)(millisNow - gifDueAt) < 0) { return; }
+#if WATCHFACE_MUNCHER
+  // Nor into the muncher's change of the time (a GIF that came up during one
+  // on 2026-10-10 held the new time back by 4.7 s): it waits until the walk
+  // is over. One asked for by hand still plays at once.
+  if (settings.watchface == WATCHFACE_MUNCHER_ID &&
+      muncherWantsPanel((unsigned long)gifSettings.seconds * 1000UL + 6000UL)) { return; }
+#endif
   if (!gifStart(gifPick())) { gifScheduleNext(); }
 }
 
@@ -7736,6 +8112,11 @@ void apiState(Print &c) {
   s["shk"] = tetrisSettings.shakeLevel;
   s["shs"] = tetrisSettings.shakeStyle;
 #endif
+#if WATCHFACE_MUNCHER
+  s["mst"] = muncherSettings.style;
+  s["mkn"] = muncherSettings.knock;
+  s["mpace"] = muncherSettings.paceMs;
+#endif
   s["autob"] = settings.autoBright != 0;
   s["bright"] = settings.brightness;
   s["luxd"] = settings.luxDark;
@@ -7821,9 +8202,20 @@ void apiState(Print &c) {
   shs.add("Scatter");
   shs.add("Clear rows");
   shs.add("Random each time");
+#if WATCHFACE_MUNCHER
+  JsonArray mst = lists["mst"].to<JsonArray>();   // by value: muncher::STYLE_*
+  mst.add("Mixed");
+  mst.add("Whole digit");
+  mst.add("Only the difference");
+  JsonArray mkn = lists["mkn"].to<JsonArray>();   // by value: MUNCHER_KNOCK_*
+  mkn.add("Power pellet");
+  mkn.add("Last digit again");
+  mkn.add("Random each time");
+#endif
 
   JsonObject hw = d["hw"].to<JsonObject>();
   hw["tetris"] = WATCHFACE_TETRIS != 0;
+  hw["muncher"] = WATCHFACE_MUNCHER != 0;
   hw["accel"] = accelOK;
   hw["gesture"] = gestureOK;
   hw["gestureInt"] = GESTURE_INT >= 0;
@@ -8118,6 +8510,9 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
   saveSettings();
 #if WATCHFACE_TETRIS
   saveTetrisSettings();
+#endif
+#if WATCHFACE_MUNCHER
+  saveMuncherSettings();
 #endif
   saveUiSettings();
   saveFaceKeys();
