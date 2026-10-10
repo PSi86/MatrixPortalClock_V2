@@ -633,6 +633,7 @@ unsigned long gestureTestAt = 0;        // millis() of the start or of the last 
 unsigned long gestureNearAt = 0;        // when the sensor was last asked what it sees
 int16_t  gestureNearBright = -1;        // the object in view: its brightness and size; -1 = nothing in view
 int16_t  gestureNearSize   = -1;
+uint8_t  gestureWaves = 0;              // the sensor's wave count (0xB7) as last read in the test
 const char *gestureRawName(uint8_t g);  // declared here: the sketch's generated prototypes miss these
 const char *gestureWord(uint8_t ev);
 Gesture gestureDecode(uint8_t r43, uint8_t r44);
@@ -4632,10 +4633,25 @@ void updateGestures() {
   uint8_t r43 = 0, r44 = 0;
   Gesture g;
   if (screen == SCREEN_GESTURE_TEST) {
-    if (!gestureReadRaw(r43, r44) || (r43 == 0 && r44 == 0)) { return; }
+    // With the debug registers 0xB6 (the sensor's own result, not kept) and
+    // 0xB7 (the wave count, bits 0-3, which counts while the hand still
+    // waves; the abort count, bits 4-6): a line whenever any of them shows
+    // something or changes.
     static unsigned long rawAt = 0;
-    Serial.printf("Gesture raw: 0x43=%02X 0x44=%02X, %lu ms after the last\n", r43, r44, millisNow - rawAt);
-    rawAt = millisNow;
+    static uint8_t b6Last = 0, b7Last = 0;
+    bool got = gestureReadRaw(r43, r44);
+    uint8_t dbg[2] = { 0, 0 };
+    gestureReadRegs(0xB6, dbg, 2);
+    if (r43 || r44 || dbg[0] != b6Last || dbg[1] != b7Last) {
+      Serial.printf("Gesture raw: 0x43=%02X 0x44=%02X 0xB6=%u waves %u aborts %u, %lu ms after the last\n", r43, r44,
+                    dbg[0], dbg[1] & 0x0F, (dbg[1] >> 4) & 0x07, millisNow - rawAt);
+      rawAt = millisNow;
+      if ((dbg[1] & 0x0F) != (b7Last & 0x0F)) { panelDirty = true; }
+      b6Last = dbg[0];
+      b7Last = dbg[1];
+      gestureWaves = dbg[1] & 0x0F;
+    }
+    if (!got || (r43 == 0 && r44 == 0)) { return; }
     g = gestureDecode(r43, r44);
   } else {
     g = gestureSensor.readGesture();   // reading clears it, and the INT line
@@ -4732,22 +4748,49 @@ void gestureRemember(uint8_t raw, uint8_t ev, bool taken, uint8_t r43, uint8_t r
   gestureSeen[0] = { millisNow, raw, ev, taken, r43, r44 };
 }
 
-// One of the sensor's registers in bank 0, which the library keeps selected.
-bool gestureReadReg(uint8_t reg, uint8_t &value) {
+// `count` of the sensor's registers from `reg` on, in bank 0, which the
+// library keeps selected (the datasheet's burst read: one address, the
+// registers after it follow).
+bool gestureReadRegs(uint8_t reg, uint8_t *values, uint8_t count) {
   Wire.beginTransmission((uint8_t)0x73);
   Wire.write(reg);
   if (Wire.endTransmission(false) != 0) { return false; }
-  if (Wire.requestFrom((uint8_t)0x73, (uint8_t)1) != 1) { return false; }
-  value = (uint8_t)Wire.read();
+  if (Wire.requestFrom((uint8_t)0x73, count) != count) { return false; }
+  for (uint8_t i = 0; i < count; i++) { values[i] = (uint8_t)Wire.read(); }
   return true;
 }
 
-// The two gesture result registers: 0x43 up, down, left, right, push, pull,
-// clockwise, counter-clockwise (bit 0 to 7), 0x44 the wave (bit 0).
+bool gestureWriteReg(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission((uint8_t)0x73);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+// The two gesture result registers in one read: 0x43 up, down, left, right,
+// push, pull, clockwise, counter-clockwise (bit 0 to 7), 0x44 the wave
+// (bit 0). Reading clears them.
 bool gestureReadRaw(uint8_t &r43, uint8_t &r44) {
-  r43 = r44 = 0;
-  if (!gestureReadReg(0x43, r43)) { return false; }
-  return gestureReadReg(0x44, r44);
+  uint8_t v[2] = { 0, 0 };
+  bool ok = gestureReadRegs(0x43, v, 2);
+  r43 = v[0];
+  r44 = v[1];
+  return ok;
+}
+
+// The gesture test's sensor settings for the wave: as the library leaves
+// them (0xCF 0x64: a wave from 4 swings; 0x91 0x06: a hand may be out of
+// view for 6 frames before its trace ends), or as PixArt's datasheet v1.5
+// starts the sensor (0xCF 0x62: from 2 swings; 0x91 0x0C: 12 frames). In RAM
+// only, until the next restart.
+bool gestureTuned = false;
+void gestureTune(bool on) {
+  gestureWriteReg(0xEF, 0x00);   // bank 0
+  gestureWriteReg(0xCF, on ? 0x62 : 0x64);
+  gestureWriteReg(0x91, on ? 0x0C : 0x06);
+  gestureTuned = on;
+  Serial.printf("Gesture sensor: %s\n", on ? "wave settings of the datasheet v1.5 (0xCF=0x62, 0x91=0x0C)"
+                                           : "wave settings of the library (0xCF=0x64, 0x91=0x06)");
 }
 
 // The gesture the two registers stand for when more than one bit is set: a
@@ -4805,8 +4848,10 @@ void gestureTestUpdate() {
 
 // The test's screen: on top what the sensor reported (S), in the middle the
 // direction the panel made of it - grey when it was left as too soon after
-// the last - and below the count (G), the sensor's turn on the config page
-// (M), the panel's rotation (R) and what is in view (N brightness/size).
+// the last - and below the count (G), the sensor's wave count (W, a T after
+// it with the datasheet's wave settings), and what is in view (N
+// brightness/size); in portrait also the sensor's turn (M) and the panel's
+// rotation (R).
 void drawGestureTest() {
   int16_t w = matrix.width(), h = matrix.height();
   bool landscape = w > h;
@@ -4833,7 +4878,7 @@ void drawGestureTest() {
   matrix.print(word);
   matrix.setTextSize(1);
   if (landscape) {
-    snprintf(line, sizeof(line), "G%u M%u R%u %s", gestureTestCount, uiSettings.gestureMount, screenRotation, nearTxt);
+    snprintf(line, sizeof(line), "G%u W%u%s %s", gestureTestCount, gestureWaves, gestureTuned ? "T" : "", nearTxt);
     uiTiny(0, h - 5, line, uiQuiet());
   } else {
     snprintf(line, sizeof(line), "G%u", gestureTestCount);
@@ -7802,6 +7847,8 @@ void apiGestures(Print &c) {
   d["count"] = gestureTestCount;
   d["mount"] = uiSettings.gestureMount;
   d["rotation"] = screenRotation;
+  d["tuned"] = gestureTuned;
+  d["waves"] = gestureWaves;
   if (screen == SCREEN_GESTURE_TEST && gestureNearBright >= 0) {
     d["near"]["brightness"] = gestureNearBright;
     d["near"]["size"] = gestureNearSize;
@@ -8071,8 +8118,12 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
   if (path == "/api/gestures") { apiGestures(c); return; }
   if (!isPost) { sendJsonError(c, 404, "Unknown request."); return; }
   if (path == "/api/gesturetest") {
-    // on=1 starts the gesture test over the face, on=0 ends it.
-    if (getParam(body, "on") == "1") { gestureTestStart(); } else { gestureTestStop(); }
+    // on=1 starts the gesture test over the face, on=0 ends it; tune=1 or 0
+    // alone switches the sensor's wave settings.
+    String tune = getParam(body, "tune");
+    if (tune.length() && gestureOK) { gestureTune(tune == "1"); }
+    String on = getParam(body, "on");
+    if (on == "1") { gestureTestStart(); } else if (on == "0") { gestureTestStop(); }
     apiGestures(c);
     return;
   }
