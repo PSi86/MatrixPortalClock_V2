@@ -280,6 +280,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays.</div></div>
           <div class="seg" id="mkn" role="group" aria-label="Knock"></div>
         </div>
+        <div class="row">
+          <div><div class="lbl">See now</div><div class="hint">Without waiting: the change to a full hour with its show, or a bonus fruit for the next change to eat.</div></div>
+          <div class="ctl"><button class="btn" type="button" id="mHour">Hour show</button><button class="btn" type="button" id="mFruit">Bonus fruit</button></div>
+        </div>
       </div>
     </section>
 
@@ -781,12 +785,17 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }
     if (S.hw.muncher) {
       // A change of style or pace shows a change; a new knock shows its scene (the clock sees the new value).
-      [['mst', true], ['mkn', false]].forEach(function (m) {
+      // The knock's values in the order shown: random last, though it is stored as 2.
+      [['mst', true, [0, 1, 2]], ['mkn', false, [0, 1, 3, 2]]].forEach(function (m) {
         var el = $('#' + m[0]);
-        if (!el.children.length) { S.lists[m[0]].forEach(function (t, v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = t; el.appendChild(b); }); }
+        if (!el.children.length) { m[2].forEach(function (v) { if (S.lists[m[0]][v] === undefined) { return; } var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists[m[0]][v]; el.appendChild(b); }); }
         setSeg(el, m[0], true, m[1]);
       });
       setRange('mpace', 'mpace', ' ms');
+      [['mHour', 'hour'], ['mFruit', 'fruit']].forEach(function (m) {
+        var b = $('#' + m[0]);
+        if (!b.dataset.bound) { b.dataset.bound = 1; b.addEventListener('click', function () { api('/api/live', 'mshow=' + m[1]).catch(function () { toast('The clock did not answer.'); }); }); }
+      });
     }
     // The knock's sensitivity: an input setting, kept with the Tetris settings.
     $('#shkRow').hidden = !(S.hw.tetris && S.hw.accel);

@@ -150,15 +150,39 @@ struct Leg { int16_t x, y; uint8_t act, digit; };
 const uint8_t MAX_LEGS = 112;
 
 enum Style : uint8_t { STYLE_MIXED, STYLE_ALL, STYLE_DIFF, STYLE_COUNT };   // stored values
-enum Mode : uint8_t { MODE_IDLE, MODE_CHANGE, MODE_POWER };
+// CHANGE: a change of the time. POWER and DEATH: the knock's scenes, the
+// power pellet and the ghosts winning. HOUR: the show after the full hour.
+enum Mode : uint8_t { MODE_IDLE, MODE_CHANGE, MODE_POWER, MODE_HOUR, MODE_DEATH };
 // FOLLOW: behind the muncher along the corridor. CLOSE: closing in on the
 // opening the knock's muncher went up, one ghost on either side. SCARED:
 // blue after the power pellet. CAUGHT: its flash, then gone.
 enum GhostMode : uint8_t { GHOST_OFF, GHOST_FOLLOW, GHOST_CLOSE, GHOST_SCARED, GHOST_CAUGHT };
-const uint8_t GHOSTS = 2;
-const uint8_t GHOST_DELAY[GHOSTS] = { 8, 16 };   // steps behind the muncher's track
-const uint8_t GHOST_GAP[GHOSTS]   = { 7, 14 };   // never closer to it than this
-const int16_t START_X = -3;                      // just off the left edge
+// Two ghosts follow the muncher, four at the change to a full hour.
+const uint8_t GHOSTS = 4;                                  // the most a scene has
+const uint8_t GHOST_DELAY[GHOSTS] = { 8, 16, 24, 32 };     // steps behind the muncher's track
+const uint8_t GHOST_GAP[GHOSTS]   = { 7, 14, 21, 28 };     // never closer to it than this
+const int16_t START_X = -3;                                // just off the left edge
+// The show after the full hour: the corridor's walls flash, as when a
+// level is cleared, then the intermission - a ghost chases the muncher out
+// to the left, and a giant muncher chases the ghost, turned blue, back out
+// to the right.
+const uint8_t HOUR_FLASHES = 4;            // white flashes of the walls
+const uint8_t HOUR_FLASH_STEPS = 6;        // steps for each half of one
+const uint8_t HOUR_PAUSE_STEPS = 15;       // between the two chases
+const uint8_t GIANT = 13;                  // the giant muncher's size
+const int16_t CHASE_GAP = 9;               // chaser behind chased, middle to middle
+// The ghosts win (a knock): the muncher turns back and runs into the ghost
+// behind it; everything stands still for a moment, the ghosts vanish, the
+// muncher folds up and is gone, and after a pause a new one walks through.
+const uint8_t DEATH_FREEZE = 12;           // steps standing still on contact
+const uint8_t DEATH_FRAMES = 8;            // pictures of it folding up
+const uint8_t DEATH_FRAME_STEPS = 4;       // steps each
+const uint8_t DEATH_PAUSE = 12;            // the empty corridor before the next one
+const uint8_t DEATH_TURN = 16;             // how far it turns back at most
+// A bonus fruit now and then lies in the corridor until the next change,
+// whose muncher eats it on its way along.
+const int16_t NO_FRUIT = -100;
+const uint8_t FRUIT_KINDS = 4;             // cherry, strawberry, orange, apple (the sketch draws them)
 // The knock's scene starts as a change of the time does, the muncher in
 // from the left and both ghosts behind it, so it does not give itself away
 // before the muncher turns up to the power pellet. Then the ghosts close in
@@ -200,11 +224,20 @@ class Face {
   int16_t mx = START_X, my = 0;                // the muncher's middle
   int8_t dx = 1, dy = 0;                       // the way it faces
   Ghost ghosts[GHOSTS] = {};
+  uint8_t ghostCount = 2;                      // ghosts in this scene
   uint16_t stepsDone = 0;
   uint8_t caughtCount = 0;                     // ghosts caught in this scene
   int16_t caughtX[GHOSTS] = {};                // where, in the order caught
+  int16_t fruitX = NO_FRUIT;                   // the bonus fruit in the corridor, if any
+  uint8_t fruitKind = 0;
+  uint16_t fruitsEaten = 0;                    // counted for the console
+  bool deathSeen = false;                      // the ghosts won in this scene
+  int16_t giantX = 0;                          // the hour show's giant muncher
 
-  void setLayout(const Layout &layout) { L = layout; show(shown); }
+  void setLayout(const Layout &layout) { L = layout; fruitX = NO_FRUIT; show(shown); }
+
+  // A bonus fruit at x in the corridor, until a muncher passes it.
+  void placeFruit(int16_t x, uint8_t kind) { fruitX = x; fruitKind = kind % FRUIT_KINDS; }
 
   // Snap to these digits: nothing moves, nothing is planned.
   void show(const uint8_t d[4]) {
@@ -214,14 +247,17 @@ class Face {
     lanePellets = allLanePellets();
     for (uint8_t g = 0; g < GHOSTS; g++) { ghosts[g].mode = GHOST_OFF; }
     legCount = 0;
+    deathStep = 0;
   }
 
   // Lay the walk from the digits on show to `to`, visiting the digits that
-  // change and those in `force`. Returns the steps up to the moment the
-  // last digit is complete, 0 when there is nothing to do.
-  uint16_t planChange(const uint8_t to[4], uint8_t style, uint8_t force = 0) {
+  // change and those in `force`, with `ghosts` ghosts behind the muncher.
+  // Returns the steps up to the moment the last digit is complete, 0 when
+  // there is nothing to do.
+  uint16_t planChange(const uint8_t to[4], uint8_t style, uint8_t force = 0, uint8_t ghosts = 2) {
     legCount = 0;
     steps = 0;
+    planGhosts = constrain(ghosts, 1, GHOSTS);
     uint8_t visit[4], count = 0;
     for (uint8_t i = 0; i < 4; i++) {
       if (shown[i] != to[i] || (force & (1 << i))) { visit[count++] = i; }
@@ -253,9 +289,25 @@ class Face {
       if (!sameShaft) { leg(L.hubX[i], L.laneY, ACT_WALK, i); }      // down to the corridor
     }
     // Out to the right, far enough for the ghosts to leave as well.
-    leg(L.w + 3 + GHOST_DELAY[GHOSTS - 1] + 2, L.laneY, ACT_WALK, 0);
+    leg(L.w + 3 + GHOST_DELAY[planGhosts - 1] + 2, L.laneY, ACT_WALK, 0);
     pathSteps = steps;
     return done;
+  }
+
+  // The knock's scene the ghosts win: as far as the power pellet's opening,
+  // as the power pellet scene goes, then back to the left into the ghost
+  // behind it (stepOnce()). Returns the steps up to the turn.
+  uint16_t planDeath() {
+    legCount = 0;
+    steps = 0;
+    planGhosts = 2;
+    for (uint8_t i = 0; i < 4; i++) { target[i] = shown[i]; targetDots[i] = dotsOf(segsOf(shown[i])); }
+    px = START_X; py = L.laneY;
+    leg(L.knockX, L.laneY, ACT_WALK, 0);
+    uint16_t turn = steps;
+    leg(L.knockX - DEATH_TURN, L.laneY, ACT_WALK, 0);
+    pathSteps = steps;
+    return turn;
   }
 
   // The knock's scene: up to the power pellet and back down; from there it
@@ -264,6 +316,7 @@ class Face {
   uint16_t planPower() {
     legCount = 0;
     steps = 0;
+    planGhosts = 2;
     for (uint8_t i = 0; i < 4; i++) { target[i] = shown[i]; targetDots[i] = dotsOf(segsOf(shown[i])); }
     px = START_X; py = L.laneY;
     leg(L.knockX, L.laneY, ACT_WALK, 0);
@@ -279,7 +332,7 @@ class Face {
     return pellet;
   }
 
-  // Start what was planned: a change, or the knock's scene.
+  // Start what was planned: a change, or one of the knock's scenes.
   void start(Mode m) {
     if (legCount == 0) { return; }
     mode = m;
@@ -289,8 +342,30 @@ class Face {
     laneX = START_X;
     caughtCount = 0;
     moves = 0;
-    for (uint8_t g = 0; g < GHOSTS; g++) { ghosts[g].mode = GHOST_FOLLOW; ghosts[g].x = START_X - GHOST_GAP[g]; }
+    deathStep = 0;
+    deathSeen = false;
+    ghostCount = planGhosts;
+    for (uint8_t g = 0; g < GHOSTS; g++) {
+      ghosts[g].mode = (g < ghostCount) ? GHOST_FOLLOW : GHOST_OFF;
+      ghosts[g].x = START_X - GHOST_GAP[g];
+    }
     for (uint8_t k = 0; k < TRACK; k++) { track[k] = START_X; }
+  }
+
+  // The show after the full hour, over the digits on show.
+  void startHour() {
+    mode = MODE_HOUR;
+    stepsDone = 0;
+    hourPhase = HOUR_PHASE_FLASH;
+    hourStep = 0;
+    moves = 0;
+    legCount = 0;
+    caughtCount = 0;
+    deathStep = 0;
+    ghostCount = 1;
+    for (uint8_t i = 0; i < 4; i++) { target[i] = shown[i]; }
+    for (uint8_t g = 0; g < GHOSTS; g++) { ghosts[g].mode = GHOST_OFF; }
+    mx = -100; my = L.laneY; dx = -1; dy = 0;
   }
 
   // Catch up to `n` steps since the start. True when anything moved; the
@@ -303,10 +378,39 @@ class Face {
   }
 
   bool mouthOpen() const { return (moves / 3) % 2 == 0; }
-  bool muncherOn() const { return mode != MODE_IDLE; }   // drawn clipped: off the panel at either end
+  // The muncher as it walks, drawn clipped (it is off the panel at either
+  // end); not while it folds up, nor in the hour show but in its first chase.
+  bool muncherOn() const {
+    if (mode == MODE_IDLE) { return false; }
+    if (mode == MODE_HOUR) { return hourPhase == HOUR_PHASE_CHASE; }
+    return deathStep < DEATH_FREEZE;
+  }
   uint8_t legsPlanned() const { return legCount; }
+  // Its picture while it folds up, 0 .. DEATH_FRAMES - 1; 0xFF when it does not.
+  uint8_t deathFrame() const {
+    if (deathStep < DEATH_FREEZE) { return 0xFF; }
+    uint16_t k = (deathStep - DEATH_FREEZE) / DEATH_FRAME_STEPS;
+    return (k < DEATH_FRAMES) ? (uint8_t)k : 0xFF;
+  }
+  // The hour show: whether the walls are white on this step, and the giant.
+  bool wallsWhite() const {
+    return mode == MODE_HOUR && hourPhase == HOUR_PHASE_FLASH && ((hourStep / HOUR_FLASH_STEPS) % 2 == 0);
+  }
+  bool giantOn() const { return mode == MODE_HOUR && hourPhase == HOUR_PHASE_GIANT; }
+  bool giantMouthOpen() const { return (moves / 4) % 2 == 0; }
+  // A blue ghost blinks white as the muncher closes in on it, as the game's
+  // do when their fright runs out.
+  bool scaredBlink(const Ghost &h) const {
+    return h.mode == GHOST_SCARED && mode == MODE_POWER && my == L.laneY && abs(mx - h.x) < 12 &&
+           ((stepsDone >> 1) & 1);
+  }
 
  private:
+  enum HourPhase : uint8_t { HOUR_PHASE_FLASH, HOUR_PHASE_CHASE, HOUR_PHASE_PAUSE, HOUR_PHASE_GIANT };
+  HourPhase hourPhase = HOUR_PHASE_FLASH;
+  uint16_t hourStep = 0;
+  uint16_t deathStep = 0;            // steps since the ghost touched it; 0 = it did not
+  uint8_t planGhosts = 2;            // the ghosts the planned scene has
   Leg legs[MAX_LEGS];
   uint8_t legCount = 0, legAt = 0;
   uint64_t targetDots[4] = { 0, 0, 0, 0 };   // the dots the walk leaves
@@ -319,7 +423,7 @@ class Face {
   // the time after it.
   static const uint16_t AFTER_WALK_MAX = 150;
   int16_t laneX = START_X;           // the muncher's place along the corridor
-  static const uint8_t TRACK = 32;   // its last places there, for the ghosts
+  static const uint8_t TRACK = 64;   // its last places there, for the ghosts (more than the longest delay)
   int16_t track[TRACK] = {};
 
   uint32_t allLanePellets() const {
@@ -406,11 +510,84 @@ class Face {
     moves++;
   }
 
+  // The muncher in the corridor at its place along it: the pellet there,
+  // and a bonus fruit.
+  void laneTouch() {
+    laneX = mx;
+    if (mx >= 2 && (mx - 2) % 4 == 0 && (mx - 2) / 4 < 32) { lanePellets &= ~(1UL << ((mx - 2) / 4)); }
+    if (mx == fruitX) { fruitX = NO_FRUIT; fruitsEaten++; }
+  }
+
+  void stepHour() {
+    hourStep++;
+    Ghost &h = ghosts[0];
+    switch (hourPhase) {
+      case HOUR_PHASE_FLASH:
+        if (hourStep >= 2 * HOUR_FLASHES * HOUR_FLASH_STEPS) {
+          // The ghost after the muncher, in from the right, out to the left.
+          hourPhase = HOUR_PHASE_CHASE;
+          hourStep = 0;
+          mx = L.w + 3;
+          dx = -1;
+          h.mode = GHOST_FOLLOW;
+          h.x = mx + CHASE_GAP;
+        }
+        break;
+      case HOUR_PHASE_CHASE:
+        mx--;
+        moves++;
+        h.x--;
+        laneTouch();
+        if (h.x < -3) {
+          hourPhase = HOUR_PHASE_PAUSE;
+          hourStep = 0;
+          h.mode = GHOST_OFF;
+          mx = -100;
+        }
+        break;
+      case HOUR_PHASE_PAUSE:
+        if (hourStep >= HOUR_PAUSE_STEPS) {
+          // The giant muncher after the ghost, now blue, back to the right.
+          hourPhase = HOUR_PHASE_GIANT;
+          hourStep = 0;
+          h.mode = GHOST_SCARED;
+          h.x = -3;
+          giantX = h.x - CHASE_GAP - GIANT / 2;
+        }
+        break;
+      case HOUR_PHASE_GIANT:
+        h.x++;
+        giantX++;
+        moves++;
+        if (giantX - GIANT / 2 > L.w) { finish(); }
+        break;
+    }
+  }
+
+  // The ghosts won: standing still, then folding up, then a new muncher.
+  void stepDeath() {
+    deathStep++;
+    if (deathStep == DEATH_FREEZE) {
+      for (uint8_t g = 0; g < GHOSTS; g++) { ghosts[g].mode = GHOST_OFF; }   // gone as it folds up
+    }
+    if (deathStep >= DEATH_FREEZE + DEATH_FRAMES * DEATH_FRAME_STEPS + DEATH_PAUSE) {
+      deathStep = 0;
+      legCount = 0;
+      steps = 0;
+      px = START_X; py = L.laneY;
+      leg(L.w + 3, L.laneY, ACT_WALK, 0);
+      legAt = 0;
+      mx = START_X; my = L.laneY; dx = 1; dy = 0;
+      pathSteps = stepsDone + steps;
+    }
+  }
+
   void stepOnce() {
     stepsDone++;
-    bool still = frozen();
+    if (mode == MODE_HOUR) { stepHour(); return; }
+    bool still = frozen() || deathStep > 0;
     if (still) {
-      // nothing moves but the flash
+      // nothing moves but a flash, or the muncher folding up
     } else if (legAt < legCount) {
       const Leg &g = legs[legAt];
       int8_t sx = (g.x > mx) - (g.x < mx), sy = (g.y > my) - (g.y < my);
@@ -430,14 +607,22 @@ class Face {
     } else if (mode == MODE_POWER) {
       chase();
     }
-    if (!still && my == L.laneY) {
-      laneX = mx;
-      if (mx >= 2 && (mx - 2) % 4 == 0 && (mx - 2) / 4 < 32) { lanePellets &= ~(1UL << ((mx - 2) / 4)); }
-    }
+    if (!still && my == L.laneY) { laneTouch(); }
     track[stepsDone % TRACK] = laneX;
-    moveGhosts(still);
-    bool out = mode != MODE_POWER || mx > L.w + 2;   // the knock's muncher leaves on its own
-    if (legAt >= legCount && ((out && ghostsGone()) || stepsDone > pathSteps + AFTER_WALK_MAX)) { finish(); }
+    if (deathStep > 0) {
+      stepDeath();
+    } else {
+      moveGhosts(still);
+      if (mode == MODE_DEATH && !deathSeen && my == L.laneY && dx < 0) {
+        for (uint8_t g = 0; g < GHOSTS; g++) {
+          if (ghosts[g].mode == GHOST_FOLLOW && abs(mx - ghosts[g].x) <= 4) { deathStep = 1; deathSeen = true; }
+        }
+      }
+    }
+    // The knock's muncher leaves on its own, after the ghosts or after its fall.
+    bool out = (mode != MODE_POWER && mode != MODE_DEATH) || mx > L.w + 2;
+    if (deathStep == 0 && legAt >= legCount &&
+        ((out && ghostsGone()) || stepsDone > pathSteps + AFTER_WALK_MAX)) { finish(); }
   }
 
   void powerPellet() {
@@ -516,20 +701,53 @@ class Face {
   }
 };
 
+// Whether a knock's scene starts as a change of the minutes' ones does: the
+// muncher and both ghosts in the same places, step by step, until the
+// muncher turns (up to the power pellet, or back towards the ghosts).
+inline bool sameStart(Face &f, Mode m) {
+  const uint8_t SAME_MAX = 64;
+  int16_t pm[SAME_MAX], pg[2][SAME_MAX];
+  uint8_t d[4] = { 1, 2, 3, 4 };
+  uint8_t same = 0;
+  f.show(d);
+  if (m == MODE_POWER) { f.planPower(); } else { f.planDeath(); }
+  f.start(m);
+  while (same < SAME_MAX) {
+    f.advanceTo(same + 1);
+    if (f.my != f.L.laneY || f.dx < 0) { break; }
+    pm[same] = f.mx;
+    for (uint8_t g = 0; g < 2; g++) { pg[g][same] = f.ghosts[g].x; }
+    same++;
+  }
+  f.show(d);
+  f.planChange(d, STYLE_ALL, 1 << 3);
+  f.start(MODE_CHANGE);
+  for (uint8_t k = 0; k < same; k++) {
+    f.advanceTo(k + 1);
+    if (f.mx != pm[k] || f.ghosts[0].x != pg[0][k] || f.ghosts[1].x != pg[1][k]) { return false; }
+  }
+  f.advanceTo(3000);
+  return same > 8;
+}
+
 // Every change of a digit, both ways, walked through on both layouts and
 // from both kinds of corner a digit is entered at (portrait: lower right on
 // the left, lower left on the right): true when each leaves exactly the new
-// digit's dots at the moment planChange() said. `failed` names the first
-// that did not, as layout * 10000 + style * 1000 + position * 100 + from * 10
-// + to (layout 0 landscape, 1 portrait; style STYLE_*).
+// digit's dots at the moment planChange() said; and every scene besides,
+// each of which has to end. `failed` names the first that did not, as
+// layout * 10000 + style * 1000 + position * 100 + from * 10 + to (layout 0
+// landscape, 1 portrait; style STYLE_*), or for the other scenes 50000 +
+// 1000 * the scene + layout: 0 the power pellet, 1 its start, 2 the ghosts
+// winning, 3 its start, 4 a change with four ghosts, 5 the hour show, 6 a
+// bonus fruit eaten.
 inline bool selfTest(Face &f, uint16_t &longest, uint16_t &failed) {
   longest = 0;
   failed = 0;
   const Layout *layouts[2] = { &LANDSCAPE, &PORTRAIT };
   for (uint8_t l = 0; l < 2; l++) {
-    // The knock's scene: the pellet is eaten when the muncher reaches it,
-    // the ghosts turn, it catches both of them on the panel, away from its
-    // edges, and the scene ends. failed = 50000 + layout.
+    // The power pellet: eaten when the muncher reaches it, the ghosts turn,
+    // it catches both of them on the panel, away from its edges, and the
+    // scene ends.
     uint8_t d[4] = { 1, 2, 3, 4 };
     f.setLayout(*layouts[l]);
     f.show(d);
@@ -538,36 +756,41 @@ inline bool selfTest(Face &f, uint16_t &longest, uint16_t &failed) {
     f.advanceTo(pellet);
     bool scared = f.pelletEaten && f.ghosts[0].mode == GHOST_SCARED;
     f.advanceTo(3000);
-    bool caught = f.caughtCount == GHOSTS;
+    bool caught = f.caughtCount == 2;
     for (uint8_t g = 0; g < f.caughtCount; g++) {
       if (f.caughtX[g] < 4 || f.caughtX[g] > layouts[l]->w - 5) { caught = false; }
     }
     if (!scared || !caught || f.mode != MODE_IDLE) { failed = 50000 + l; return false; }
-    // It starts as a change of the time does: the muncher and the ghosts in
-    // the same places, step by step, until the muncher turns up to the
-    // pellet. failed = 60000 + layout.
-    const uint8_t SAME_MAX = 64;
-    int16_t pm[SAME_MAX], pg[GHOSTS][SAME_MAX];
-    uint8_t same = 0;
+    if (!sameStart(f, MODE_POWER)) { failed = 51000 + l; return false; }
+    // The ghosts win: it runs into one, folds up, and a new one walks out.
     f.show(d);
-    f.planPower();
-    f.start(MODE_POWER);
-    while (same < SAME_MAX) {
-      f.advanceTo(same + 1);
-      if (f.my != layouts[l]->laneY) { break; }
-      pm[same] = f.mx;
-      for (uint8_t g = 0; g < GHOSTS; g++) { pg[g][same] = f.ghosts[g].x; }
-      same++;
-    }
-    f.show(d);
-    f.planChange(d, STYLE_ALL, 1 << 3);
+    f.planDeath();
+    f.start(MODE_DEATH);
+    f.advanceTo(3000);
+    if (!f.deathSeen || f.mode != MODE_IDLE) { failed = 52000 + l; return false; }
+    if (!sameStart(f, MODE_DEATH)) { failed = 53000 + l; return false; }
+    // To a full hour, four ghosts behind it: 12:59 to 13:00.
+    uint8_t h1[4] = { 1, 2, 5, 9 }, h2[4] = { 1, 3, 0, 0 };
+    f.show(h1);
+    uint16_t done = f.planChange(h2, STYLE_MIXED, 0, 4);
     f.start(MODE_CHANGE);
-    for (uint8_t k = 0; k < same; k++) {
-      f.advanceTo(k + 1);
-      bool alike = f.mx == pm[k];
-      for (uint8_t g = 0; g < GHOSTS; g++) { alike = alike && f.ghosts[g].x == pg[g][k]; }
-      if (!alike) { failed = 60000 + l; return false; }
-    }
+    f.advanceTo(done);
+    bool four = done > 0 && f.ghostCount == 4 && f.dots[1] == dotsOf(segsOf(3)) && f.dots[2] == dotsOf(segsOf(0)) &&
+                f.dots[3] == dotsOf(segsOf(0));
+    f.advanceTo(3000);
+    if (!four || f.mode != MODE_IDLE) { failed = 54000 + l; return false; }
+    // The hour show ends.
+    f.startHour();
+    f.advanceTo(3000);
+    if (f.mode != MODE_IDLE) { failed = 55000 + l; return false; }
+    // A bonus fruit is eaten by the next change's muncher.
+    f.show(d);
+    f.placeFruit(layouts[l]->w - 10, 0);
+    uint8_t d2[4] = { 1, 2, 3, 5 };
+    f.planChange(d2, STYLE_MIXED);
+    f.start(MODE_CHANGE);
+    f.advanceTo(3000);
+    if (f.fruitX != NO_FRUIT || f.mode != MODE_IDLE) { failed = 56000 + l; return false; }
     for (uint8_t pos = 2; pos <= 3; pos++) {
       for (uint8_t style = STYLE_ALL; style <= STYLE_DIFF; style++) {
         for (uint8_t from = 0; from <= 9; from++) {

@@ -3505,10 +3505,18 @@ void shakeDiscardLatched() {
 #define MUNCHER_SETTINGS_REV   1
 
 // What a knock, or the face action "trigger watchface animation", plays.
+// Stored values: a new one goes at the end, so "random" keeps its 2.
 const uint8_t MUNCHER_KNOCK_POWER  = 0;   // the power pellet: the ghosts turn and flee
 const uint8_t MUNCHER_KNOCK_REPLAY = 1;   // the minutes' ones eaten and laid again
-const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the two, drawn each time
-const uint8_t MUNCHER_KNOCK_COUNT  = 3;
+const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
+const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
+const uint8_t MUNCHER_KNOCK_COUNT  = 4;
+const uint8_t MUNCHER_FRUIT_ONE_IN = 5;   // a bonus fruit after one minute change in this many
+// What a scene that ends leads to: a minute change may leave a bonus fruit,
+// and the change to a full hour is followed by the hour show.
+const uint8_t MUNCHER_AFTER_NOTHING = 0;
+const uint8_t MUNCHER_AFTER_MINUTE  = 1;
+const uint8_t MUNCHER_AFTER_HOUR    = 2;
 const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
 const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
 const unsigned long MUNCHER_KNOCK_ROOM_MS = 1500;   // a knock's scene ends this long before a change starts
@@ -3539,9 +3547,14 @@ time_t        muncherPlannedFor   = 0;      // the minute the planned change is 
 uint16_t      muncherPlannedDone  = 0;      // the step the planned minute change completes the time at
 uint16_t      muncherDoneSteps    = 0;      // the same for the running one, until it is logged; 0 = none
 unsigned long muncherSceneEndedAt = 0;
+uint8_t       muncherPlannedAfter = MUNCHER_AFTER_NOTHING;   // what the planned change leads to
+uint8_t       muncherAfter        = MUNCHER_AFTER_NOTHING;   // ... and the running scene
+uint16_t      muncherFruitsLogged = 0;      // bonus fruits eaten, as far as the console knows
 bool          muncherColonDrawn   = false;
 bool          muncherPreviewReq   = false;  // the web app asks to see a change
 bool          muncherKnockReq     = false;  // ... or the knock's scene
+bool          muncherHourReq      = false;  // ... or the change to a full hour with its show
+bool          muncherFruitReq     = false;  // ... or a bonus fruit
 
 // The four digits of a moment; dashes while the clock has no time.
 void muncherDigitsAt(time_t t, uint8_t d[4]) {
@@ -3553,11 +3566,21 @@ void muncherDigitsAt(time_t t, uint8_t d[4]) {
   d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
 }
 
-void muncherStartScene(muncher::Mode mode, unsigned long at) {
+void muncherStartScene(muncher::Mode mode, unsigned long at, uint8_t after = MUNCHER_AFTER_NOTHING) {
   munch.start(mode);
   muncherStartAt = at;
   muncherPlannedFor = 0;
   muncherDoneSteps = 0;   // not a planned minute change: nothing to time
+  muncherAfter = after;
+}
+
+// A bonus fruit somewhere along the corridor, of any kind, unless one lies
+// there already.
+void muncherPlaceFruit() {
+  if (munch.fruitX != muncher::NO_FRUIT) { return; }
+  int16_t slots = (munch.L.w - 20) / 4 + 1;   // the corridor's pellet places, 10 px off either end
+  munch.placeFruit(10 + 4 * (int16_t)random(slots), (uint8_t)random(muncher::FRUIT_KINDS));
+  panelDirty = true;
 }
 
 // The knock's scene, or the face action's: refused while a scene runs, just
@@ -3566,21 +3589,35 @@ bool muncherKnock() {
   if (munch.mode != muncher::MODE_IDLE || munch.shown[0] == muncher::NO_DIGIT) { return false; }
   if (millisNow - muncherSceneEndedAt < MUNCHER_KNOCK_REST_MS) { return false; }
   uint8_t kind = muncherSettings.knock;
-  if (kind >= MUNCHER_KNOCK_RANDOM) { kind = (uint8_t)random(MUNCHER_KNOCK_RANDOM); }
+  if (kind == MUNCHER_KNOCK_RANDOM) {
+    const uint8_t KINDS[3] = { MUNCHER_KNOCK_POWER, MUNCHER_KNOCK_REPLAY, MUNCHER_KNOCK_DEATH };
+    kind = KINDS[random(3)];
+  }
   // Only against a planned change: until the face has planned one (it does
   // on its next pass), there is nothing to measure the scene against.
   bool planned = munch.legsPlanned() && muncherPlannedFor != 0;
   if (!planned) { return false; }
   unsigned long plannedStart = muncherStartAt;
   uint16_t steps;
+  muncher::Mode mode;
+  const char *what;
   if (kind == MUNCHER_KNOCK_POWER) {
     steps = munch.planPower();
     steps += 120;                      // the walk back and the ghosts, at the most
+    mode = muncher::MODE_POWER;
+    what = "the power pellet";
+  } else if (kind == MUNCHER_KNOCK_DEATH) {
+    steps = munch.planDeath();
+    steps += 140;                      // the fall, the pause and the next one's walk
+    mode = muncher::MODE_DEATH;
+    what = "the ghosts win";
   } else {
     uint8_t same[4];
     memcpy(same, munch.shown, 4);
     steps = munch.planChange(same, muncher::STYLE_ALL, 1 << 3);
     steps += 60;                       // the walk out and the ghosts
+    mode = muncher::MODE_CHANGE;
+    what = "the minute's ones again";
   }
   unsigned long needs = (unsigned long)steps * muncherSettings.paceMs + MUNCHER_KNOCK_ROOM_MS;
   muncherPlannedFor = 0;               // the change is planned anew afterwards
@@ -3588,8 +3625,8 @@ bool muncherKnock() {
     munch.show(munch.shown);           // drop the knock's walk
     return false;
   }
-  muncherStartScene(kind == MUNCHER_KNOCK_POWER ? muncher::MODE_POWER : muncher::MODE_CHANGE, millisNow);
-  Serial.println(kind == MUNCHER_KNOCK_POWER ? "Muncher: the power pellet" : "Muncher: the minute's ones again");
+  muncherStartScene(mode, millisNow);
+  Serial.printf("Muncher: %s\n", what);
   return true;
 }
 
@@ -3612,9 +3649,13 @@ void muncherIdle(const uint8_t now[4]) {
   uint8_t sec = (uint8_t)clockSecond(localTime);
   time_t next = localTime - sec + 60;
   if (muncherPlannedFor != next) {
+    // To a full hour four ghosts follow the muncher, and the hour show
+    // comes after.
     uint8_t to[4];
     muncherDigitsAt(next, to);
-    muncherPlannedDone = munch.planChange(to, muncherSettings.style);
+    bool hour = clockMinute(next) == 0;
+    muncherPlannedDone = munch.planChange(to, muncherSettings.style, 0, hour ? 4 : 2);
+    muncherPlannedAfter = hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_MINUTE;
     muncherPlannedFor = next;
   }
   // The start, worked out anew on every pass until the change begins: the
@@ -3626,18 +3667,29 @@ void muncherIdle(const uint8_t now[4]) {
   // followed the same way.
   unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
   muncherStartAt = nextMinuteAt - (unsigned long)muncherPlannedDone * muncherSettings.paceMs;
-  if (muncherPreviewReq) {
-    // The web app wants to see a change: the last minute's to this one.
-    muncherPreviewReq = false;
+  if (muncherFruitReq) {   // the web app wants to see a bonus fruit
+    muncherFruitReq = false;
+    muncherPlaceFruit();
+  }
+  if (muncherPreviewReq || muncherHourReq) {
+    // The web app wants to see a change, the last minute's to this one; as
+    // the change to a full hour, with four ghosts and the hour show after.
+    bool hour = muncherHourReq;
+    muncherPreviewReq = muncherHourReq = false;
     uint8_t before[4];
     muncherDigitsAt(localTime - 60, before);
     munch.show(before);
-    if (munch.planChange(now, muncherSettings.style)) { muncherStartScene(muncher::MODE_CHANGE, millisNow); }
-    else { munch.show(now); }
+    if (munch.planChange(now, muncherSettings.style, 0, hour ? 4 : 2)) {
+      muncherStartScene(muncher::MODE_CHANGE, millisNow, hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_NOTHING);
+    } else {
+      munch.show(now);
+    }
     muncherPlannedFor = 0;
     return;
   }
-  if (muncherKnockReq) {
+  // The web app's knock waits out the rest after a scene, instead of being
+  // refused for it.
+  if (muncherKnockReq && millisNow - muncherSceneEndedAt >= MUNCHER_KNOCK_REST_MS) {
     muncherKnockReq = false;
     if (muncherKnock()) { return; }
   }
@@ -3646,7 +3698,25 @@ void muncherIdle(const uint8_t now[4]) {
   if (munch.legsPlanned() && (long)(millisNow - muncherStartAt) >= 0) {
     munch.start(muncher::MODE_CHANGE);
     muncherDoneSteps = muncherPlannedDone;
+    muncherAfter = muncherPlannedAfter;
     muncherPlannedFor = 0;
+  }
+}
+
+// A scene is over: what it leads to. After the change to a full hour the
+// hour show; after a minute change now and then a bonus fruit.
+void muncherSceneEnded() {
+  uint8_t after = muncherAfter;
+  muncherAfter = MUNCHER_AFTER_NOTHING;
+  muncherSceneEndedAt = millisNow;
+  panelDirty = true;
+  if (after == MUNCHER_AFTER_HOUR) {
+    munch.startHour();
+    muncherStartAt = millisNow;
+    muncherPlannedFor = 0;
+    Serial.println("Muncher: the hour show");
+  } else if (after == MUNCHER_AFTER_MINUTE && random(MUNCHER_FRUIT_ONE_IN) == 0) {
+    muncherPlaceFruit();
   }
 }
 
@@ -3677,13 +3747,66 @@ const uint8_t MUNCH_OPEN[5]  = { 0x0E, 0x1C, 0x18, 0x1C, 0x0E };   // .###. ###.
 const uint8_t MUNCH_SHUT[5]  = { 0x0E, 0x1F, 0x1F, 0x1F, 0x0E };
 const uint8_t GHOST_BODY[5]  = { 0x0E, 0x1F, 0x15, 0x1F, 0x15 };   // .###. ##### #.#.# ##### #.#.#
 const uint8_t GHOST_EYES[5]  = { 0x00, 0x00, 0x0A, 0x00, 0x00 };   // the two gaps of row 2
-const uint8_t GHOST_RGB[muncher::GHOSTS][3] = { { 255, 0, 0 }, { 255, 184, 255 } };
+// Red and pink follow the muncher; cyan and orange join them to a full hour.
+const uint8_t GHOST_RGB[muncher::GHOSTS][3] = { { 255, 0, 0 }, { 255, 184, 255 }, { 0, 255, 255 }, { 255, 184, 82 } };
+// The muncher folding up after the ghosts won, facing up: its mouth opens
+// wider and wider until nothing is left, then a little burst.
+const uint8_t MUNCH_FOLD[muncher::DEATH_FRAMES][5] = {
+  { 0x0E, 0x1F, 0x1F, 0x1F, 0x0E },   // .###. ##### ##### ##### .###.
+  { 0x0A, 0x1B, 0x1F, 0x1F, 0x0E },   // .#.#. ##.## ##### ##### .###.
+  { 0x11, 0x1B, 0x1F, 0x1F, 0x0E },   // #...# ##.## ##### ##### .###.
+  { 0x00, 0x11, 0x1B, 0x1F, 0x0E },   // ..... #...# ##.## ##### .###.
+  { 0x00, 0x00, 0x11, 0x1B, 0x0E },   // ..... ..... #...# ##.## .###.
+  { 0x00, 0x00, 0x00, 0x11, 0x0E },   // ..... ..... ..... #...# .###.
+  { 0x00, 0x0A, 0x00, 0x0A, 0x00 },   // ..... .#.#. ..... .#.#. .....
+  { 0x11, 0x00, 0x00, 0x00, 0x11 },   // #...# ..... ..... ..... #...#
+};
+
+// The hour show's giant muncher, 13 x 13, facing right; '#' lights a pixel.
+constexpr uint16_t giantRow(const char (&row)[muncher::GIANT + 1]) {
+  uint16_t bits = 0;
+  for (uint8_t i = 0; i < muncher::GIANT; i++) { bits = (uint16_t)((bits << 1) | (row[i] == '#' ? 1 : 0)); }
+  return bits;
+}
+constexpr uint16_t GIANT_OPEN[muncher::GIANT] = {
+  giantRow("....#####...."), giantRow("..#########.."), giantRow(".###########."), giantRow(".#########..."),
+  giantRow("########....."), giantRow("######......."), giantRow("#####........"), giantRow("######......."),
+  giantRow("########....."), giantRow(".#########..."), giantRow(".###########."), giantRow("..#########.."),
+  giantRow("....#####...."),
+};
+constexpr uint16_t GIANT_SHUT[muncher::GIANT] = {
+  giantRow("....#####...."), giantRow("..#########.."), giantRow(".###########."), giantRow(".###########."),
+  giantRow("#############"), giantRow("#############"), giantRow("#############"), giantRow("#############"),
+  giantRow("#############"), giantRow(".###########."), giantRow(".###########."), giantRow("..#########.."),
+  giantRow("....#####...."),
+};
+
+// The bonus fruits, 7 x 7, in muncher::FRUIT_KINDS' order: cherry,
+// strawberry, orange, apple. A letter is a colour (FRUIT_RGB), '.' nothing.
+const char *const FRUITS[muncher::FRUIT_KINDS][7] = {
+  { ".....GG", "....GG.", "..GG.G.", ".R...R.", "RRR.RRR", "RRR.RRR", ".R...R." },
+  { "..GGG..", ".RGGGR.", "RRWRWRR", "RWRRRWR", ".RRWRR.", "..RWR..", "...R..." },
+  { "...GG..", "..OGO..", ".OOOOO.", ".OOOOO.", ".OOOOO.", "..OOO..", "......." },
+  { "...BG..", "..RBR..", ".RRRRR.", ".RRRRR.", ".RRRRR.", "..R.R..", "......." },
+};
+
+uint16_t fruitColour(char c) {
+  switch (c) {
+    case 'R': return scaledColor(255, 0, 0);
+    case 'G': return scaledColor(0, 200, 0);
+    case 'W': return scaledColor(255, 255, 255);
+    case 'O': return scaledColor(255, 140, 0);
+    case 'B': return scaledColor(150, 75, 0);
+    default:  return 0;
+  }
+}
 
 void muncherDraw(bool colonOn) {
   const muncher::Layout &L = munch.L;
   uint16_t dot   = scaledColor(255, 184, 151);
   uint16_t wall  = scaledColor(40, 40, 255);
   uint16_t eyes  = scaledColor(255, 255, 255);
+  uint16_t walls = munch.wallsWhite() ? eyes : wall;   // the hour show flashes them
   matrix.fillScreen(0);
   for (uint8_t i = 0; i < 4; i++) {
     uint64_t bits = munch.dots[i];
@@ -3704,28 +3827,51 @@ void muncherDraw(bool colonOn) {
     }
   }
   for (int16_t x = 0; x < L.w; x++) {
-    if (!muncher::wallOpen(L, x)) { matrix.drawPixel(x, L.wallTop, wall); }
-    matrix.drawPixel(x, L.wallBottom, wall);
+    if (!muncher::wallOpen(L, x)) { matrix.drawPixel(x, L.wallTop, walls); }
+    matrix.drawPixel(x, L.wallBottom, walls);
   }
   for (uint8_t k = 0; k < 32 && 2 + 4 * k < L.w; k++) {
     if (munch.lanePellets & (1UL << k)) { matrix.drawPixel(2 + 4 * k, L.laneY, dot); }
   }
+  if (munch.fruitX != muncher::NO_FRUIT) {
+    const char *const *rows = FRUITS[munch.fruitKind];
+    for (uint8_t r = 0; r < 7; r++) {
+      for (uint8_t c = 0; c < 7; c++) {
+        if (rows[r][c] != '.') { matrix.drawPixel(munch.fruitX - 3 + c, L.laneY - 3 + r, fruitColour(rows[r][c])); }
+      }
+    }
+  }
   // The ghosts under the muncher, except one caught: its white flash goes on
   // top, or the muncher standing next to it would hide most of it.
+  uint16_t yellow = scaledColor(255, 255, 0);
   for (uint8_t pass = 0; pass < 2; pass++) {
     if (pass == 1 && munch.muncherOn()) {
-      muncherSprite(munch.mouthOpen() ? MUNCH_OPEN : MUNCH_SHUT, munch.mx, munch.my, munch.dx, munch.dy,
-                    scaledColor(255, 255, 0));
+      muncherSprite(munch.mouthOpen() ? MUNCH_OPEN : MUNCH_SHUT, munch.mx, munch.my, munch.dx, munch.dy, yellow);
+    }
+    if (pass == 1 && munch.deathFrame() != 0xFF) {
+      muncherSprite(MUNCH_FOLD[munch.deathFrame()], munch.mx, munch.my, 1, 0, yellow);
     }
     for (uint8_t g = 0; g < muncher::GHOSTS; g++) {
       const muncher::Ghost &h = munch.ghosts[g];
       bool caught = h.mode == muncher::GHOST_CAUGHT;
       if (h.mode == muncher::GHOST_OFF || !h.lit() || caught != (pass == 1)) { continue; }
+      // A blue one blinks white as the muncher closes in.
       uint16_t body = caught ? eyes
-                    : (h.mode == muncher::GHOST_SCARED) ? wall
+                    : (h.mode == muncher::GHOST_SCARED) ? (munch.scaredBlink(h) ? eyes : wall)
                     : scaledColor(GHOST_RGB[g][0], GHOST_RGB[g][1], GHOST_RGB[g][2]);
       muncherSprite(GHOST_BODY, h.x, L.laneY, 1, 0, body);
       muncherSprite(GHOST_EYES, h.x, L.laneY, 1, 0, eyes);
+    }
+  }
+  if (munch.giantOn()) {
+    const uint16_t *rows = munch.giantMouthOpen() ? GIANT_OPEN : GIANT_SHUT;
+    int16_t half = muncher::GIANT / 2;
+    for (uint8_t r = 0; r < muncher::GIANT; r++) {
+      for (uint8_t c = 0; c < muncher::GIANT; c++) {
+        if (rows[r] & (1 << (muncher::GIANT - 1 - c))) {
+          matrix.drawPixel(munch.giantX - half + c, L.laneY - half + r, yellow);
+        }
+      }
     }
   }
   drawStatusPixel();
@@ -3763,7 +3909,14 @@ void drawMuncherFace() {
                       millisNow - secondStartedAt);
         muncherDoneSteps = 0;
       }
-      if (munch.mode == muncher::MODE_IDLE) { muncherSceneEndedAt = millisNow; panelDirty = true; }
+      if (munch.fruitsEaten != muncherFruitsLogged) {
+        muncherFruitsLogged = munch.fruitsEaten;
+        Serial.println("Muncher: a bonus fruit eaten");
+      }
+      if (munch.mode == muncher::MODE_IDLE) {
+        muncherSceneEnded();
+        if (munch.mode != muncher::MODE_IDLE) { moved = true; }
+      }
     }
   }
   if (munch.mode == muncher::MODE_IDLE) {
@@ -3808,6 +3961,13 @@ void applyMuncherParams(const String &q, bool live) {
     muncherSettings.knock = knock;
   }
   if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherPreviewReq = true; }
+  // The web app's buttons: the change to a full hour with its show, or a
+  // bonus fruit, to see them without waiting.
+  v = getParam(q, "mshow");
+  if (live && settings.watchface == WATCHFACE_MUNCHER_ID) {
+    if (v == "hour")  { muncherHourReq = true; }
+    if (v == "fruit") { muncherFruitReq = true; }
+  }
 }
 
 #if defined(CLOCK_DEBUG)
@@ -8235,6 +8395,7 @@ void apiState(Print &c) {
   mkn.add("Power pellet");
   mkn.add("Last digit again");
   mkn.add("Random each time");
+  mkn.add("Ghosts win");
 #endif
 
   JsonObject hw = d["hw"].to<JsonObject>();
