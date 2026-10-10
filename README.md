@@ -285,12 +285,13 @@ stays dark too.
 All the GIFs are in the **GIF pack**, in the board's `ffat` partition (4544 KB,
 see [Flash layout](#flash-layout-s3)); none is built into the firmware, so the
 firmware stays small and the room goes to GIFs. Without a pack the clock plays no
-GIFs. The pack takes every GIF in [`gifs/`](gifs/README.md) that fits the panel
-(four examples with their licences and authors) and those of the folders listed
-in `gif_pack.local` in the project folder (one per line, ignored by git, for
-private GIFs) or in `GIF_PACK_DIRS`, smallest first while there is room. Private
-GIFs stay out of the repository and out of the firmware, so a firmware build can
-be passed on while a pack with private GIFs is not.
+GIFs, and the repository brings none: the pack takes those of the folders listed
+in `gif_pack.local` in the project folder (one per line, ignored by git) or in
+`GIF_PACK_DIRS`, smallest first while there is room. A folder's `exclude.txt` (or
+its parent's) names files to leave out, one per line; a line matches the end of a
+file's path. Many well-known GIFs belong to their creators: keep them out of the
+repository, and do not publish a GIF pack built with them. The firmware holds no
+GIFs, so it can be passed on.
 
 Which GIFs fit depends on how the clock stands, `custom_gif_orientation` in
 `platformio.ini`: `landscape` (the default) takes GIFs up to 64x32, `portrait`
