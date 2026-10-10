@@ -1006,8 +1006,10 @@ time_t     ntpSyncedAt = 0;   // UTC of the last good NTP sync since the start; 
 
 // The range a time has to lie in to be taken: anything before 2024 is a phone
 // or a real-time clock without a time, and the DS3231 counts only to 2099.
-const long UTC_PLAUSIBLE_FROM = 1704067200L;   // 2024-01-01
-const long UTC_PLAUSIBLE_TO   = 4102444799L;   // 2099-12-31 23:59:59
+// 64 bits: the end of 2099 is past a 32-bit long, which both boards have, and
+// as a long it turned negative, so every time was refused (2026-10-10).
+const int64_t UTC_PLAUSIBLE_FROM = 1704067200LL;   // 2024-01-01
+const int64_t UTC_PLAUSIBLE_TO   = 4102444799LL;   // 2099-12-31 23:59:59
 
 // Real-time clock: a DS3231 on the I2C bus (0x68), optional. It holds UTC, as
 // the clock does, so the zone and daylight saving never touch it. Found at
@@ -3708,13 +3710,13 @@ void rtcBegin() {
 // that went wrong reads as garbage).
 time_t rtcRead() {
   uint32_t utc = rtc.now().unixtime();
-  if ((long)utc < UTC_PLAUSIBLE_FROM || (long)utc > UTC_PLAUSIBLE_TO) { return 0; }
+  if ((int64_t)utc < UTC_PLAUSIBLE_FROM || (int64_t)utc > UTC_PLAUSIBLE_TO) { return 0; }
   return (time_t)utc;
 }
 
 // Set the RTC; that also clears its lost-power flag.
 void rtcWrite(time_t utc) {
-  if (!rtcOK || utc < UTC_PLAUSIBLE_FROM || utc > UTC_PLAUSIBLE_TO) { return; }
+  if (!rtcOK || (int64_t)utc < UTC_PLAUSIBLE_FROM || (int64_t)utc > UTC_PLAUSIBLE_TO) { return; }
   rtc.adjust(DateTime((uint32_t)utc));
   rtcLostPower = false;
   Serial.println("DS3231 set");
@@ -5641,13 +5643,13 @@ void serveClient(WiFiClient &client, bool lan) {
 void handleSetTime(Print &out, const String &query) {
   String utc = getParam(query, "utc");
   if (utc.length()) {
-    long t = utc.toInt();
+    int64_t t = strtoll(utc.c_str(), nullptr, 10);
     if (t < UTC_PLAUSIBLE_FROM || t > UTC_PLAUSIBLE_TO) {
       sendPlainText(out, "Not set: the phone's time looks wrong.");
       return;
     }
     setClockTo((time_t)t, TIME_PHONE);
-    Serial.print("Time set from a phone: "); Serial.println(t);
+    Serial.print("Time set from a phone: "); Serial.println((unsigned long)t);
     sendPlainText(out, timeStatusText().c_str());
     return;
   }
@@ -7947,10 +7949,10 @@ void drawPackProgress(uint32_t done, uint32_t total) {
 void apiSetTime(Print &c, const String &q) {
   String utc = getParam(q, "utc");
   if (utc.length()) {
-    long t = utc.toInt();
+    int64_t t = strtoll(utc.c_str(), nullptr, 10);
     if (t < UTC_PLAUSIBLE_FROM || t > UTC_PLAUSIBLE_TO) { sendJsonError(c, 400, "Not set: the phone's time looks wrong."); return; }
     setClockTo((time_t)t, TIME_PHONE);
-    Serial.print("Time set from a phone: "); Serial.println(t);
+    Serial.print("Time set from a phone: "); Serial.println((unsigned long)t);
   } else {
     String date = getParam(q, "date"), hm = getParam(q, "time");
     int y = date.substring(0, 4).toInt(), mo = date.substring(5, 7).toInt(), dd = date.substring(8, 10).toInt();
