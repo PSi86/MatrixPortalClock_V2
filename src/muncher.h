@@ -151,22 +151,24 @@ const uint8_t MAX_LEGS = 112;
 
 enum Style : uint8_t { STYLE_MIXED, STYLE_ALL, STYLE_DIFF, STYLE_COUNT };   // stored values
 enum Mode : uint8_t { MODE_IDLE, MODE_CHANGE, MODE_POWER };
-// FOLLOW: behind the muncher along the corridor. AMBUSH: in from the right,
-// waiting on the other side of the opening (the knock's scene). SCARED:
+// FOLLOW: behind the muncher along the corridor. CLOSE: closing in on the
+// opening the knock's muncher went up, one ghost on either side. SCARED:
 // blue after the power pellet. CAUGHT: its flash, then gone.
-enum GhostMode : uint8_t { GHOST_OFF, GHOST_FOLLOW, GHOST_AMBUSH, GHOST_SCARED, GHOST_CAUGHT };
+enum GhostMode : uint8_t { GHOST_OFF, GHOST_FOLLOW, GHOST_CLOSE, GHOST_SCARED, GHOST_CAUGHT };
 const uint8_t GHOSTS = 2;
 const uint8_t GHOST_DELAY[GHOSTS] = { 8, 16 };   // steps behind the muncher's track
 const uint8_t GHOST_GAP[GHOSTS]   = { 7, 14 };   // never closer to it than this
 const int16_t START_X = -3;                      // just off the left edge
-// The knock's scene puts the catch in the middle of the panel: one ghost
-// follows the muncher, the other comes in from the right, and both wait on
-// either side of the opening while it eats the pellet. Turned blue, they
-// stand frozen until it is back in the corridor, then shuffle away, one
-// pixel every SCARED_EVERY steps, and it catches the one on the left, then
-// the one on the right. Before, both fled to the left at half speed: on
-// the panel the muncher caught one at the very edge, and upright none
-// (Peter, 2026-10-10).
+// The knock's scene starts as a change of the time does, the muncher in
+// from the left and both ghosts behind it, so it does not give itself away
+// before the muncher turns up to the power pellet. Then the ghosts close in
+// on the opening, the first passing under it to the far side, as if the
+// muncher were trapped. Turned blue, they stand frozen until it is back in
+// the corridor, then shuffle away, one pixel every SCARED_EVERY steps, and
+// it catches them one after the other near the middle of the panel.
+// Before, both fled to the left at half speed, and the muncher caught one
+// at the very edge, and upright none; a ghost coming in from the right
+// instead gave the scene away from its start (Peter, 2026-10-10).
 const uint8_t SCARED_EVERY = 8;
 // A caught ghost flashes white where it was caught for this many steps,
 // half a second at the default pace, while everything else stands still,
@@ -177,6 +179,7 @@ const uint8_t CAUGHT_STEPS = 12;
 
 struct Ghost {
   int16_t x;
+  int16_t to;         // GHOST_CLOSE: where it waits
   uint8_t mode;
   int8_t  flee;       // GHOST_SCARED: the way it shuffles off, -1 left, +1 right
   uint8_t timer;      // GHOST_CAUGHT: steps of its flash left
@@ -287,10 +290,6 @@ class Face {
     caughtCount = 0;
     moves = 0;
     for (uint8_t g = 0; g < GHOSTS; g++) { ghosts[g].mode = GHOST_FOLLOW; ghosts[g].x = START_X - GHOST_GAP[g]; }
-    if (m == MODE_POWER) {   // the second one comes in from the right
-      ghosts[1].mode = GHOST_AMBUSH;
-      ghosts[1].x = L.w + 3;
-    }
     for (uint8_t k = 0; k < TRACK; k++) { track[k] = START_X; }
   }
 
@@ -445,7 +444,7 @@ class Face {
     pelletEaten = true;
     for (uint8_t g = 0; g < GHOSTS; g++) {
       Ghost &h = ghosts[g];
-      if (h.mode != GHOST_FOLLOW && h.mode != GHOST_AMBUSH) { continue; }
+      if (h.mode != GHOST_FOLLOW && h.mode != GHOST_CLOSE) { continue; }
       h.flee = (h.x < L.knockX) ? -1 : 1;    // away from the opening, on its own side
       h.mode = GHOST_SCARED;
     }
@@ -456,6 +455,14 @@ class Face {
       Ghost &h = ghosts[g];
       switch (h.mode) {
         case GHOST_FOLLOW: {
+          if (mode == MODE_POWER && my != L.laneY) {
+            // The knock's muncher has gone up to the pellet: the first ghost
+            // goes on under the opening to its far side, the second takes
+            // the near side, each its gap away from it.
+            h.mode = GHOST_CLOSE;
+            h.to = (g == 0) ? L.knockX + GHOST_GAP[0] : L.knockX - GHOST_GAP[0];
+            break;
+          }
           // On the muncher's track, some steps behind it, and never closer to
           // it than its gap: while it is up in a digit the ghosts wait below.
           int16_t behind = (stepsDone >= GHOST_DELAY[g]) ? track[(stepsDone - GHOST_DELAY[g]) % TRACK]
@@ -464,10 +471,8 @@ class Face {
           if (x > h.x) { h.x = x; }
           break;
         }
-        case GHOST_AMBUSH:
-          // In from the right, to wait as far on the other side of the
-          // opening as the first ghost waits on its own side.
-          if (h.x > L.knockX + GHOST_GAP[0]) { h.x--; }
+        case GHOST_CLOSE:
+          h.x += (h.to > h.x) - (h.to < h.x);
           break;
         case GHOST_SCARED:
           if (still) { break; }
@@ -496,7 +501,7 @@ class Face {
     for (uint8_t g = 0; g < GHOSTS; g++) {
       const Ghost &h = ghosts[g];
       if (h.mode == GHOST_FOLLOW && h.x - 2 < L.w) { return false; }
-      if (h.mode == GHOST_AMBUSH || h.mode == GHOST_SCARED || h.mode == GHOST_CAUGHT) { return false; }
+      if (h.mode == GHOST_CLOSE || h.mode == GHOST_SCARED || h.mode == GHOST_CAUGHT) { return false; }
     }
     return true;
   }
@@ -538,6 +543,31 @@ inline bool selfTest(Face &f, uint16_t &longest, uint16_t &failed) {
       if (f.caughtX[g] < 4 || f.caughtX[g] > layouts[l]->w - 5) { caught = false; }
     }
     if (!scared || !caught || f.mode != MODE_IDLE) { failed = 50000 + l; return false; }
+    // It starts as a change of the time does: the muncher and the ghosts in
+    // the same places, step by step, until the muncher turns up to the
+    // pellet. failed = 60000 + layout.
+    const uint8_t SAME_MAX = 64;
+    int16_t pm[SAME_MAX], pg[GHOSTS][SAME_MAX];
+    uint8_t same = 0;
+    f.show(d);
+    f.planPower();
+    f.start(MODE_POWER);
+    while (same < SAME_MAX) {
+      f.advanceTo(same + 1);
+      if (f.my != layouts[l]->laneY) { break; }
+      pm[same] = f.mx;
+      for (uint8_t g = 0; g < GHOSTS; g++) { pg[g][same] = f.ghosts[g].x; }
+      same++;
+    }
+    f.show(d);
+    f.planChange(d, STYLE_ALL, 1 << 3);
+    f.start(MODE_CHANGE);
+    for (uint8_t k = 0; k < same; k++) {
+      f.advanceTo(k + 1);
+      bool alike = f.mx == pm[k];
+      for (uint8_t g = 0; g < GHOSTS; g++) { alike = alike && f.ghosts[g].x == pg[g][k]; }
+      if (!alike) { failed = 60000 + l; return false; }
+    }
     for (uint8_t pos = 2; pos <= 3; pos++) {
       for (uint8_t style = STYLE_ALL; style <= STYLE_DIFF; style++) {
         for (uint8_t from = 0; from <= 9; from++) {

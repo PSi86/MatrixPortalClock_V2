@@ -974,16 +974,18 @@ is 199 steps, 8 s at that pace (the debug build's self-test, below).
 
 **Knock**, and the face action *trigger watchface animation*: *Power pellet*,
 *Last digit again* (the minutes' ones eaten and laid again), or *Random each
-time*. In the power pellet scene one ghost follows the muncher and the other
-comes in from the right; while the muncher eats one of the colon's power pellets
-they wait on either side of the opening. Turned blue, they stand frozen until it
-is back in the corridor, then shuffle away, and it catches the one on the left,
-then the one on the right, both near the middle (in landscape at x 24 and 39,
-upright at x 8 and 23): each flashes white for half a second while everything
-else stands still, as in the game, and is gone. Before, both fled to the left,
-and the muncher caught one at the very edge of the panel and, upright, none; and
-a caught ghost ran off as a pair of eyes, which on the panel read as a lone dot
-flying through the corridor. A knock is not taken while a
+time*. Both scenes start as a change of the time does, the muncher in from the
+left with both ghosts behind it, so neither gives itself away before the muncher
+turns. In the power pellet scene it turns up to one of the colon's power pellets,
+and the ghosts close in on the opening, the first passing under it to the far
+side, as if the muncher were trapped. Turned blue, they stand frozen until it is
+back in the corridor, then shuffle away, and it catches them one after the other
+near the middle (in landscape at x 34 and 24, upright at x 8 and 23): each
+flashes white for half a second while everything else stands still, as in the
+game, and is gone. Before, both fled to the left, and the muncher caught one at
+the very edge of the panel and, upright, none; then a ghost coming in from the
+right gave the scene away from its start; and a caught ghost ran off as a pair of
+eyes, which on the panel read as a lone dot flying through the corridor. A knock is not taken while a
 scene runs, for 1 s after one, or when its scene could not end 1.5 s before the
 next change starts. However the ghosts stand, a scene ends at the latest 150
 steps after the muncher's walk, so no scene can hold up a change of the time.
@@ -993,7 +995,8 @@ are; `mst`, `mkn` and `mpace` in the web app's interface. Changing the change
 style or the pace shows the change from the last minute to this one; choosing
 another knock shows its scene. The debug build walks every change of every digit,
 both ways and on both layouts, and the knock's scene (both ghosts caught, away
-from the panel's edges), ten seconds after start-up, says on the console whether
+from the panel's edges, and the same start as a change, step by step), ten
+seconds after start-up, says on the console whether
 each came out right, and where the knock's scene caught its ghosts.
 
 ## Animation timing
