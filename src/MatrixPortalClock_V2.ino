@@ -1028,7 +1028,22 @@ const unsigned long SYNC_PAUSE_MS   = 10UL * 60UL * 1000UL;
 // Where the clock's time came from, for the config page.
 enum TimeSource : uint8_t { TIME_NONE, TIME_NTP, TIME_PHONE, TIME_MANUAL, TIME_RTC };
 TimeSource timeSource = TIME_NONE;
-time_t     ntpSyncedAt = 0;   // UTC of the last good NTP sync since the start; 0 = none yet
+time_t     ntpSyncedAt = 0;   // UTC of the last good NTP sync; 0 = none known
+
+// When the last good NTP sync was, kept over a restart (S3: NVS key "ntp",
+// M4: an 8 KB flash block of its own), so a clock with a real-time clock
+// syncs by its interval and not at every start. Written on every good sync
+// while a DS3231 is there; without one the clock has no time at start-up and
+// syncs then anyway.
+#define SYNC_RECORD_MAGIC 0x5C7D
+#define SYNC_RECORD_REV   1
+struct SyncRecord {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  reserved;
+  uint32_t syncedAt;          // UTC
+};
+SettingsStore<SyncRecord> syncStore;
 
 // The range a time has to lie in to be taken: anything before 2024 is a phone
 // or a real-time clock without a time, and the DS3231 counts only to 2099.
@@ -1323,8 +1338,10 @@ void setup(void) {
     Serial.println("BH1750 not found - auto-brightness disabled");
   }
 
-  // DS3231 real-time clock on the same bus: the time at once, if it has one.
+  // DS3231 real-time clock on the same bus: the time at once, if it has one,
+  // and with it when the last NTP sync was.
   rtcBegin();
+  loadSyncRecord();
   // PAJ7620U2 gesture sensor, also on the bus.
   gestureBegin();
   i2cScan();              // after the sensors: a PAJ7620U2 asleep may miss the first call
@@ -1396,10 +1413,18 @@ void setup(void) {
   // Start joining the home WiFi, without waiting for it: the clock comes up at
   // once and the join and the first sync run in the loop (SYNC_JOINING). The
   // config AP, if it was opened above, has the radio until it closes. With the
-  // NTP sync switched off (a clock with a real-time clock only) nothing is due.
+  // NTP sync switched off (a clock with a real-time clock only) nothing is due,
+  // nor while the time came from the RTC and the interval since the last sync
+  // has not run out: then the sync waits for the sync time it falls due at.
   if (!ntpSyncOn()) {
     setSyncState(SYNC_IDLE);
     Serial.println("NTP sync off - the clock runs on its real-time clock");
+  } else if (ntpSyncedAt != 0 && !syncDueAt(clockNow())) {
+    setSyncState(SYNC_IDLE);
+    long offset = tzTotalOffset();
+    long ago = (long)((clockNow() + offset) / 86400) - (long)((ntpSyncedAt + offset) / 86400);
+    Serial.printf("NTP sync not due - the last one was %ld day(s) ago, one every %u days\n",
+                  ago, (unsigned)uiSettings.syncDays);
   } else if (!apActive && wifiStored()) {
     netRadioInit();
     netPrintRadioInfo();
@@ -4442,6 +4467,25 @@ void stationUpdate() {
   }
 }
 
+// At start-up, after the DS3231 was read: when the last good sync was, if one
+// is stored and the clock has its time from the RTC. A stored sync later than
+// that time is not taken - an RTC set back would otherwise put the next sync
+// off by as much.
+void loadSyncRecord() {
+  syncStore.begin("ntp");
+  if (!rtcOK || rtcLostPower || !clockIsSet()) { return; }
+  SyncRecord rec;
+  syncStore.read(rec);
+  if (rec.magic != SYNC_RECORD_MAGIC) { return; }
+  if ((int64_t)rec.syncedAt < UTC_PLAUSIBLE_FROM || (int64_t)rec.syncedAt > (int64_t)clockNow() + 60) { return; }
+  ntpSyncedAt = (time_t)rec.syncedAt;
+}
+
+void saveSyncRecord() {
+  SyncRecord rec = { SYNC_RECORD_MAGIC, SYNC_RECORD_REV, 0, (uint32_t)ntpSyncedAt };
+  syncStore.write(rec);
+}
+
 // Ask NTP for the time once (board_hal.h: the NINA's own SNTP client on the M4,
 // lwIP's on the S3). netNtpEpoch() returns 0 until SNTP has an answer, which takes
 // a few seconds after joining.
@@ -4462,6 +4506,7 @@ void ntpAsk() {
   long drift = clockIsSet() ? (long)(utc - clockNow()) : 0;
   setClockTo(utc, TIME_NTP); // UTC as delivered; zone and daylight saving are added for the panel
   ntpSyncedAt = utc;
+  if (rtcOK) { saveSyncRecord(); }
   if (wifiStored() && !wifiCreds.verified) {   // the first sync over this WiFi: a known-good config now
     wifiCreds.verified = 1;
     saveWifiCreds();

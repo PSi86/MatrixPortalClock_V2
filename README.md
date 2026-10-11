@@ -75,7 +75,7 @@ button pin cannot be carried over.
 - All settings, the home WiFi included, are stored outside the program image, so
   they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
   a normal upload does not touch - `pio run -t erase` does; M4: one 8 KB flash
-  block each at the top of the flash, from 0x78000 up)
+  block each at the top of the flash, from 0x76000 up)
 - Recovery: the config hotspot is in the menu from the first second, also
   without the home WiFi; holding UP during boot opens it as well
 - **GIFs** (S3): now and then a GIF takes the panel for a few seconds, and holding
@@ -1208,7 +1208,7 @@ everything works as before.
 | | Without RTC | With DS3231 |
 |---|---|---|
 | Power-up | `--:--` until the first NTP sync or a time set from a phone | the time from the RTC at once |
-| NTP sync | daily at the sync time, and at every power-up | at the sync time on the day the interval runs out (7 days by default; daily, 30 days, 3, 6 or 12 months, or never), and at every power-up unless it is never |
+| NTP sync | daily at the sync time, and at every power-up | at the sync time on the day the interval runs out (7 days by default; daily, 30 days, 3, 6 or 12 months, or never); at power-up only when the interval has run out, the RTC had no time, or no sync is known yet |
 | Sync never | not offered | the radio stays off unless the hotspot is opened, and the status pixel stays off |
 | Setting the time | phone or date and time fields on the config page | the same, plus the menu item **Time** |
 
@@ -1226,6 +1226,11 @@ everything works as before.
 - The sync interval is counted in the clock's calendar days since the last good
   sync, so the sync time of the day it runs out counts, whatever time of day
   that sync was made. Stored with the UI settings (`syncDays`).
+- When the last good sync was is stored too (S3: NVS key `ntp`, M4: the flash
+  block at 0x76000), written at every sync while a DS3231 is there, so a
+  restart neither syncs by itself nor starts the interval anew. A stored sync
+  later than the RTC's time (an RTC set back) is not taken, and the clock
+  syncs at start-up.
 - **Wiring:** four wires are enough: 3.3 V, GND, SDA, SCL (not 5 V, as with the
   gesture sensor). The other pins of the modules stay free: SQW/INT (alarm or
   square wave out), 32K (a 32 kHz clock out), RST (reset) and BAT (a second way
@@ -1235,7 +1240,8 @@ everything works as before.
   a resistor and a diode, made for a rechargeable LIR2032: with a CR2032 in it,
   never power it from 5 V.
 
-Not yet tested on hardware: no DS3231 has been connected so far.
+Tested on the MatrixPortal S3 with Adafruit's DS3231 breakout (3013) and a
+CR1220 on 2026-10-10.
 
 ## Libraries
 

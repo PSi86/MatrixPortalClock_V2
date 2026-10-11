@@ -520,8 +520,9 @@ class SettingsStore {
 #define UI_FLASH_ADDR       0x0007C000UL   // UI settings
 #define WIFI_FLASH_ADDR     0x0007A000UL   // home WiFi credentials
 #define KEYS_FLASH_ADDR     0x00078000UL   // face shortcuts
+#define NTP_FLASH_ADDR      0x00076000UL   // when the last NTP sync was
 // The program has to end below the lowest of these. platformio.ini caps its
-// size (board_upload.maximum_size = 0x78000 - 0x4000), so a sketch that grew
+// size (board_upload.maximum_size = 0x76000 - 0x4000), so a sketch that grew
 // into them would fail to build instead of being overwritten by a save.
 
 // The block of a key; 0 for a key that has none.
@@ -530,6 +531,7 @@ inline uint32_t settingsFlashAddr(const char *key) {
   if (strcmp(key, "ui") == 0)       { return UI_FLASH_ADDR; }
   if (strcmp(key, "wifi") == 0)     { return WIFI_FLASH_ADDR; }
   if (strcmp(key, "keys") == 0)     { return KEYS_FLASH_ADDR; }
+  if (strcmp(key, "ntp") == 0)      { return NTP_FLASH_ADDR; }
   return 0;
 }
 
