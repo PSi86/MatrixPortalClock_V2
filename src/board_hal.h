@@ -112,6 +112,9 @@
   // only been tested on the S3, so it stays switched off elsewhere until the M4
   // gets a hardware test.
   #define WATCHFACE_TETRIS 1
+  // The Muncher watchface (src/muncher.h). It shares the knock with the
+  // Tetris face, so it needs that one too.
+  #define WATCHFACE_MUNCHER 1
   // Moving between the menu list and an editor slides the picture sideways.
   #define MENU_SLIDE 1
   // GIFs now and then in place of the face, from the GIF pack in the ffat
@@ -145,6 +148,7 @@
   // it on also needs the AP preview to keep respecting AP_PREVIEW_INTERVAL_MS,
   // or the Tetris face would out-draw what WiFiNINA can serve around.
   #define WATCHFACE_TETRIS 0
+  #define WATCHFACE_MUNCHER 0
   // The menu changes its picture at once, without a slide (UI concept: the
   // S class slides on the S3 only).
   #define MENU_SLIDE 0
