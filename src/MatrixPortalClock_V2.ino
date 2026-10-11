@@ -3521,9 +3521,8 @@ const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
 const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
 const unsigned long MUNCHER_KNOCK_ROOM_MS = 1500;   // a knock's scene ends this long before a change starts
 // The most steps what the web app asks to see can take: a change of the
-// minutes' ones, or a knock's scene; the change to a full hour with its show.
-const long MUNCHER_PREVIEW_STEPS      = 260;
-const long MUNCHER_PREVIEW_HOUR_STEPS = 520;
+// minutes' ones, or a knock's scene.
+const long MUNCHER_PREVIEW_STEPS = 260;
 
 struct MuncherSettings {
   uint16_t magic;
@@ -3557,8 +3556,6 @@ uint16_t      muncherFruitsLogged = 0;      // bonus fruits eaten, as far as the
 bool          muncherColonDrawn   = false;
 bool          muncherPreviewReq   = false;  // the web app asks to see a change
 bool          muncherKnockReq     = false;  // ... or the knock's scene
-bool          muncherHourReq      = false;  // ... or the change to a full hour with its show
-bool          muncherFruitReq     = false;  // ... or a bonus fruit
 
 // The four digits of a moment; dashes while the clock has no time.
 void muncherDigitsAt(time_t t, uint8_t d[4]) {
@@ -3671,30 +3668,21 @@ void muncherIdle(const uint8_t now[4]) {
   // followed the same way.
   unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
   muncherStartAt = nextMinuteAt - (unsigned long)muncherPlannedDone * muncherSettings.paceMs;
-  if (muncherFruitReq) {   // the web app wants to see a bonus fruit
-    muncherFruitReq = false;
-    muncherPlaceFruit();
-  }
   // What the web app asks to see waits until it can end before the next
   // change starts, and for the rest after a scene: a preview never holds up
   // a change of the time.
   long room = (long)(muncherStartAt - millisNow) - (long)MUNCHER_KNOCK_ROOM_MS;
   bool rested = millisNow - muncherSceneEndedAt >= MUNCHER_KNOCK_REST_MS;
   long pace = muncherSettings.paceMs;
-  if ((muncherPreviewReq || muncherHourReq) && rested &&
-      room >= (muncherHourReq ? MUNCHER_PREVIEW_HOUR_STEPS : MUNCHER_PREVIEW_STEPS) * pace) {
-    // A change, as the change to a full hour with four ghosts and the hour
-    // show after. The time on show stays right: the minutes' ones are eaten
-    // and laid again, as the knock's "last digit again" does. Showing the
-    // last minute's digits first, as this did, set the clock back a minute
-    // for the preview's time (midnight, 2026-10-11).
-    bool hour = muncherHourReq;
-    muncherPreviewReq = muncherHourReq = false;
+  if (muncherPreviewReq && rested && room >= MUNCHER_PREVIEW_STEPS * pace) {
+    // A change: the minutes' ones eaten and laid again, as the knock's "last
+    // digit again" does, so the time on show stays right. Showing the last
+    // minute's digits first, as this did, set the clock back a minute for
+    // the preview's time (midnight, 2026-10-11).
+    muncherPreviewReq = false;
     uint8_t same[4];
     memcpy(same, now, 4);
-    if (munch.planChange(same, muncher::STYLE_ALL, 1 << 3, hour ? 4 : 2)) {
-      muncherStartScene(muncher::MODE_CHANGE, millisNow, hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_NOTHING);
-    }
+    if (munch.planChange(same, muncher::STYLE_ALL, 1 << 3)) { muncherStartScene(muncher::MODE_CHANGE, millisNow); }
     muncherPlannedFor = 0;
     return;
   }
@@ -3970,13 +3958,6 @@ void applyMuncherParams(const String &q, bool live) {
     muncherSettings.knock = knock;
   }
   if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherPreviewReq = true; }
-  // The web app's buttons: the change to a full hour with its show, or a
-  // bonus fruit, to see them without waiting.
-  v = getParam(q, "mshow");
-  if (live && settings.watchface == WATCHFACE_MUNCHER_ID) {
-    if (v == "hour")  { muncherHourReq = true; }
-    if (v == "fruit") { muncherFruitReq = true; }
-  }
 }
 
 #if defined(CLOCK_DEBUG)

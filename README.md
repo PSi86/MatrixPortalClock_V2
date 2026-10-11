@@ -1019,13 +1019,10 @@ are; `mst`, `mkn` (0 power pellet, 1 last digit again, 2 random, 3 ghosts win:
 the newest value went to the end, so a stored *random* stays random) and `mpace`
 in the web app's interface. Changing the pace shows a change of the minutes' ones
 (eaten and laid again); choosing another knock shows its scene; a new change
-style shows at the next change of the time. Under *See now* two buttons show the
-change to a full hour with its show, again on the minutes' ones, and lay a bonus
-fruit for the next change (`mshow=hour` and `mshow=fruit` with
-`POST /api/live`). What is asked for there waits until it can end 1.5 s before the
-next change starts, so it never holds one up, and the time on show is never
-wrong for it: the first previews showed the last minute's digits and walked them
-to this minute's, which at midnight set the clock back to 23:59 for a moment.
+style shows at the next change of the time. A preview waits until it can end 1.5 s
+before the next change starts, so it never holds one up, and the time on show is
+never wrong for it: the first previews showed the last minute's digits and walked
+them to this minute's, which at midnight set the clock back to 23:59 for a moment.
 The debug build walks every change of every digit, both ways
 and on both layouts, and every other scene - the power pellet (both ghosts
 caught, away from the panel's edges), the ghosts winning, both with the same

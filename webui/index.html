@@ -280,10 +280,6 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays.</div></div>
           <div class="seg" id="mkn" role="group" aria-label="Knock"></div>
         </div>
-        <div class="row">
-          <div><div class="lbl">See now</div><div class="hint">Without waiting: the change to a full hour with its show, or a bonus fruit for the next change to eat.</div></div>
-          <div class="ctl"><button class="btn" type="button" id="mHour">Hour show</button><button class="btn" type="button" id="mFruit">Bonus fruit</button></div>
-        </div>
       </div>
     </section>
 
@@ -793,10 +789,6 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         setSeg(el, m[0], true, m[1]);
       });
       setRange('mpace', 'mpace', ' ms');
-      [['mHour', 'hour'], ['mFruit', 'fruit']].forEach(function (m) {
-        var b = $('#' + m[0]);
-        if (!b.dataset.bound) { b.dataset.bound = 1; b.addEventListener('click', function () { api('/api/live', 'mshow=' + m[1]).catch(function () { toast('The clock did not answer.'); }); }); }
-      });
     }
     // The knock's sensitivity: an input setting, kept with the Tetris settings.
     $('#shkRow').hidden = !(S.hw.tetris && S.hw.accel);
