@@ -3512,15 +3512,18 @@ const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
 const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
 const uint8_t MUNCHER_KNOCK_COUNT  = 4;
 const uint8_t MUNCHER_FRUIT_ONE_IN = 5;   // a bonus fruit after one minute change in this many
-// The LEDs of a pellet, in the digits and the corridor: one, or two to be
-// seen better from afar (Peter, 2026-10-11) - side by side, which makes the
-// level strokes solid lines, or one above the other, which makes the upright
-// ones solid. The second LED goes right of, or below, the pellet's own, so a
-// digit grows by a pixel; the muncher's way stays on the pellet's own.
+// The LEDs of a pellet, in the digits and the corridor: one, or more to be
+// seen better from afar (Peter, 2026-10-11) - two side by side, which makes
+// the level strokes solid lines, two one above the other, which makes the
+// upright ones solid, or a block of 2 x 2, which makes every stroke a solid
+// line 2 px thick: the digits drawn for reading first, the game kept as a
+// token. The other LEDs go right of and below the pellet's own, so a digit
+// grows by a pixel; the muncher's way stays on the pellet's own.
 const uint8_t MUNCHER_PELLETS_ONE   = 0;
 const uint8_t MUNCHER_PELLETS_WIDE  = 1;
 const uint8_t MUNCHER_PELLETS_TALL  = 2;
-const uint8_t MUNCHER_PELLETS_COUNT = 3;
+const uint8_t MUNCHER_PELLETS_SOLID = 3;
+const uint8_t MUNCHER_PELLETS_COUNT = 4;
 // What a scene that ends leads to: a minute change may leave a bonus fruit,
 // and the change to a full hour is followed by the hour show.
 const uint8_t MUNCHER_AFTER_NOTHING = 0;
@@ -3810,11 +3813,13 @@ uint16_t fruitColour(char c) {
   }
 }
 
-// One pellet at (x, y), with its second LED when the setting says so.
+// One pellet at (x, y), with the LEDs the setting adds to it.
 void muncherPellet(int16_t x, int16_t y, uint16_t colour) {
+  uint8_t p = muncherSettings.pellets;
   matrix.drawPixel(x, y, colour);
-  if (muncherSettings.pellets == MUNCHER_PELLETS_WIDE)      { matrix.drawPixel(x + 1, y, colour); }
-  else if (muncherSettings.pellets == MUNCHER_PELLETS_TALL) { matrix.drawPixel(x, y + 1, colour); }
+  if (p == MUNCHER_PELLETS_WIDE || p == MUNCHER_PELLETS_SOLID) { matrix.drawPixel(x + 1, y, colour); }
+  if (p == MUNCHER_PELLETS_TALL || p == MUNCHER_PELLETS_SOLID) { matrix.drawPixel(x, y + 1, colour); }
+  if (p == MUNCHER_PELLETS_SOLID)                              { matrix.drawPixel(x + 1, y + 1, colour); }
 }
 
 void muncherDraw(bool colonOn) {
@@ -8468,6 +8473,7 @@ void apiState(Print &c) {
   mpel.add("One LED");
   mpel.add("Side by side");
   mpel.add("One above the other");
+  mpel.add("Solid");
 #endif
 
   JsonObject hw = d["hw"].to<JsonObject>();

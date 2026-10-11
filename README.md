@@ -978,12 +978,16 @@ always. The walk takes 25 px/s by default (*Pace*, 20 to 80 ms per pixel); the
 longest change of a single digit, from the left edge to the digit complete,
 is 199 steps, 8 s at that pace (the debug build's self-test, below).
 
-**Pellets**: one LED each (the default), or two to be seen better from afar -
-*side by side*, which makes the level strokes solid lines and leaves the upright
-ones dotted, or *one above the other*, the other way round; the corridor's
-pellets alike. The second LED goes right of, or below, the pellet's own, so a
-digit grows by a pixel; the muncher's way stays the same. Stored as `mpel` (rev 2
-of the blob, in a byte that was spare).
+**Pellets**: one LED each (the default), or more to be seen better from afar -
+two *side by side*, which makes the level strokes solid lines and leaves the
+upright ones dotted, two *one above the other*, the other way round, or *Solid*,
+a block of 2 × 2 for every pellet, which makes every stroke a solid line 2 px
+thick: the digits drawn for reading first, the game kept as a token. The
+corridor's pellets take the same shape. The other LEDs go right of and below the
+pellet's own, so a digit grows by a pixel; the muncher's way stays the same.
+Stored as `mpel` (0 to 3; rev 2 of the blob, in a byte that was spare). A block
+of 2 × 2 with gaps, every other dot of the grid, was tried and left out: the two
+digits of the hours and of the minutes stood too close and read badly.
 
 **To a full hour** four ghosts follow the muncher instead of two (cyan and orange
 join red and pink), and after the change comes the **hour show**: the corridor's
