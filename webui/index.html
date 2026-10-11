@@ -277,12 +277,12 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div class="range"><input type="range" id="mpace" min="20" max="80" data-live data-pv><output for="mpace"></output></div>
         </div>
         <div class="row">
-          <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays.</div></div>
-          <div class="seg" id="mkn" role="group" aria-label="Knock"></div>
+          <div><div class="lbl">Pellets</div><div class="hint">LEDs per pellet; more are seen better from afar. Side by side makes the level strokes solid, one above the other the upright ones; Solid draws every stroke 2 px thick, with pellets of 2 × 2 in the corridor.</div></div>
+          <div class="seg" id="mpel" role="group" aria-label="Pellets"></div>
         </div>
         <div class="row">
-          <div><div class="lbl">See now</div><div class="hint">Without waiting: the change to a full hour with its show, or a bonus fruit for the next change to eat.</div></div>
-          <div class="ctl"><button class="btn" type="button" id="mHour">Hour show</button><button class="btn" type="button" id="mFruit">Bonus fruit</button></div>
+          <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays.</div></div>
+          <div class="seg" id="mkn" role="group" aria-label="Knock"></div>
         </div>
       </div>
     </section>
@@ -501,7 +501,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var DIR_NAMES = ['from the top', 'from the right', 'from the bottom', 'from the left'];
   var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠'];   // ItemIcon in band_data.h
   // What the page edits; ssid and the WiFi password go through their own form.
-  var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'mst', 'mkn', 'mpace', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
+  var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'mst', 'mkn', 'mpace', 'mpel', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
     'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda'];
   var S = null, saved = null, cur = null, gone = false, auth = '';
   try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
@@ -540,7 +540,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     var o = { bright: cur.bright, autob: cur.autob ? 'on' : 'off', luxd: cur.luxd, luxb: cur.luxb, brmin: cur.brmin, brmax: cur.brmax,
       speed: cur.speed, digit: cur.digit, trail: cur.trail };
     if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
-    if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; }
+    if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; o.mpel = cur.mpel; }
     if (pv) { o.pv = 1; }
     return enc(o);
   }
@@ -550,7 +550,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     if (cur.autob) { o.autob = 'on'; }   // checkboxes: absent when off, as the old page sent them
     for (var i = 0; i < 6; i++) { o['dir' + i] = cur.dirs[i]; }
     if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
-    if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; }
+    if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; o.mpel = cur.mpel; }
     if (S.hw.rtc) { o.syncd = cur.syncd; }
     if (S.hw.gesture) { o.gmount = cur.gmount; }
     S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } });
@@ -787,16 +787,12 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       // A new pace shows a change of the minutes' ones; a new knock shows its scene (the clock sees the new
       // value). A new style shows at the next change of the time: no preview could show it without a wrong time.
       // The knock's values in the order shown: random last, though it is stored as 2.
-      [['mst', false, [0, 1, 2]], ['mkn', false, [0, 1, 3, 2]]].forEach(function (m) {
+      [['mst', false, [0, 1, 2]], ['mpel', false, [0, 1, 2, 3]], ['mkn', false, [0, 1, 3, 2]]].forEach(function (m) {
         var el = $('#' + m[0]);
         if (!el.children.length) { m[2].forEach(function (v) { if (S.lists[m[0]][v] === undefined) { return; } var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists[m[0]][v]; el.appendChild(b); }); }
         setSeg(el, m[0], true, m[1]);
       });
       setRange('mpace', 'mpace', ' ms');
-      [['mHour', 'hour'], ['mFruit', 'fruit']].forEach(function (m) {
-        var b = $('#' + m[0]);
-        if (!b.dataset.bound) { b.dataset.bound = 1; b.addEventListener('click', function () { api('/api/live', 'mshow=' + m[1]).catch(function () { toast('The clock did not answer.'); }); }); }
-      });
     }
     // The knock's sensitivity: an input setting, kept with the Tetris settings.
     $('#shkRow').hidden = !(S.hw.tetris && S.hw.accel);

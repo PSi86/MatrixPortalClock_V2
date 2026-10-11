@@ -978,6 +978,17 @@ always. The walk takes 25 px/s by default (*Pace*, 20 to 80 ms per pixel); the
 longest change of a single digit, from the left edge to the digit complete,
 is 199 steps, 8 s at that pace (the debug build's self-test, below).
 
+**Pellets**: one LED each (the default), or more to be seen better from afar -
+two *side by side*, which makes the level strokes solid lines and leaves the
+upright ones dotted, two *one above the other*, the other way round, or *Solid*,
+a block of 2 × 2 for every pellet, which makes every stroke a solid line 2 px
+thick: the digits drawn for reading first, the game kept as a token. The
+corridor's pellets take the same shape. The other LEDs go right of and below the
+pellet's own, so a digit grows by a pixel; the muncher's way stays the same.
+Stored as `mpel` (0 to 3; rev 2 of the blob, in a byte that was spare). A block
+of 2 × 2 with gaps, every other dot of the grid, was tried and left out: the two
+digits of the hours and of the minutes stood too close and read badly.
+
 **To a full hour** four ghosts follow the muncher instead of two (cyan and orange
 join red and pink), and after the change comes the **hour show**: the corridor's
 walls flash white four times, as when a level of the game is cleared, then the
@@ -1019,13 +1030,10 @@ are; `mst`, `mkn` (0 power pellet, 1 last digit again, 2 random, 3 ghosts win:
 the newest value went to the end, so a stored *random* stays random) and `mpace`
 in the web app's interface. Changing the pace shows a change of the minutes' ones
 (eaten and laid again); choosing another knock shows its scene; a new change
-style shows at the next change of the time. Under *See now* two buttons show the
-change to a full hour with its show, again on the minutes' ones, and lay a bonus
-fruit for the next change (`mshow=hour` and `mshow=fruit` with
-`POST /api/live`). What is asked for there waits until it can end 1.5 s before the
-next change starts, so it never holds one up, and the time on show is never
-wrong for it: the first previews showed the last minute's digits and walked them
-to this minute's, which at midnight set the clock back to 23:59 for a moment.
+style shows at the next change of the time. A preview waits until it can end 1.5 s
+before the next change starts, so it never holds one up, and the time on show is
+never wrong for it: the first previews showed the last minute's digits and walked
+them to this minute's, which at midnight set the clock back to 23:59 for a moment.
 The debug build walks every change of every digit, both ways
 and on both layouts, and every other scene - the power pellet (both ghosts
 caught, away from the panel's edges), the ghosts winning, both with the same

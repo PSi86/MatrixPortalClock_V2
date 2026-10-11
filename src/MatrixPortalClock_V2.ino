@@ -3502,7 +3502,7 @@ void shakeDiscardLatched() {
 
 // Settings of this watchface, in their own blob, as the Tetris ones are.
 #define MUNCHER_SETTINGS_MAGIC 0x3C1A
-#define MUNCHER_SETTINGS_REV   1
+#define MUNCHER_SETTINGS_REV   2   // 2 = adds pellets
 
 // What a knock, or the face action "trigger watchface animation", plays.
 // Stored values: a new one goes at the end, so "random" keeps its 2.
@@ -3512,6 +3512,18 @@ const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
 const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
 const uint8_t MUNCHER_KNOCK_COUNT  = 4;
 const uint8_t MUNCHER_FRUIT_ONE_IN = 5;   // a bonus fruit after one minute change in this many
+// The LEDs of a pellet, in the digits and the corridor: one, or more to be
+// seen better from afar (Peter, 2026-10-11) - two side by side, which makes
+// the level strokes solid lines, two one above the other, which makes the
+// upright ones solid, or a block of 2 x 2, which makes every stroke a solid
+// line 2 px thick: the digits drawn for reading first, the game kept as a
+// token. The other LEDs go right of and below the pellet's own, so a digit
+// grows by a pixel; the muncher's way stays on the pellet's own.
+const uint8_t MUNCHER_PELLETS_ONE   = 0;
+const uint8_t MUNCHER_PELLETS_WIDE  = 1;
+const uint8_t MUNCHER_PELLETS_TALL  = 2;
+const uint8_t MUNCHER_PELLETS_SOLID = 3;
+const uint8_t MUNCHER_PELLETS_COUNT = 4;
 // What a scene that ends leads to: a minute change may leave a bonus fruit,
 // and the change to a full hour is followed by the hour show.
 const uint8_t MUNCHER_AFTER_NOTHING = 0;
@@ -3521,9 +3533,8 @@ const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
 const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
 const unsigned long MUNCHER_KNOCK_ROOM_MS = 1500;   // a knock's scene ends this long before a change starts
 // The most steps what the web app asks to see can take: a change of the
-// minutes' ones, or a knock's scene; the change to a full hour with its show.
-const long MUNCHER_PREVIEW_STEPS      = 260;
-const long MUNCHER_PREVIEW_HOUR_STEPS = 520;
+// minutes' ones, or a knock's scene.
+const long MUNCHER_PREVIEW_STEPS = 260;
 
 struct MuncherSettings {
   uint16_t magic;
@@ -3531,15 +3542,18 @@ struct MuncherSettings {
   uint8_t  style;     // muncher::STYLE_*: how a changing digit is walked
   uint8_t  knock;     // MUNCHER_KNOCK_*
   uint8_t  paceMs;    // milliseconds per pixel the muncher walks
-  uint8_t  spare[2];
+  uint8_t  pellets;   // rev 2: MUNCHER_PELLETS_*, the LEDs of a pellet (was a spare byte, 0)
+  uint8_t  spare[1];
 };
+static_assert(sizeof(MuncherSettings) == 8, "the stored blob keeps its size");
 
 const MuncherSettings MUNCHER_DEFAULTS = {
   MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV,
   muncher::STYLE_MIXED,   // the whole digit when one changes, only the difference when several do
   MUNCHER_KNOCK_RANDOM,
   40,                     // 25 pixels a second
-  { 0, 0 }
+  0,                      // one LED a pellet
+  { 0 }
 };
 
 MuncherSettings muncherSettings;
@@ -3557,8 +3571,6 @@ uint16_t      muncherFruitsLogged = 0;      // bonus fruits eaten, as far as the
 bool          muncherColonDrawn   = false;
 bool          muncherPreviewReq   = false;  // the web app asks to see a change
 bool          muncherKnockReq     = false;  // ... or the knock's scene
-bool          muncherHourReq      = false;  // ... or the change to a full hour with its show
-bool          muncherFruitReq     = false;  // ... or a bonus fruit
 
 // The four digits of a moment; dashes while the clock has no time.
 void muncherDigitsAt(time_t t, uint8_t d[4]) {
@@ -3671,30 +3683,21 @@ void muncherIdle(const uint8_t now[4]) {
   // followed the same way.
   unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
   muncherStartAt = nextMinuteAt - (unsigned long)muncherPlannedDone * muncherSettings.paceMs;
-  if (muncherFruitReq) {   // the web app wants to see a bonus fruit
-    muncherFruitReq = false;
-    muncherPlaceFruit();
-  }
   // What the web app asks to see waits until it can end before the next
   // change starts, and for the rest after a scene: a preview never holds up
   // a change of the time.
   long room = (long)(muncherStartAt - millisNow) - (long)MUNCHER_KNOCK_ROOM_MS;
   bool rested = millisNow - muncherSceneEndedAt >= MUNCHER_KNOCK_REST_MS;
   long pace = muncherSettings.paceMs;
-  if ((muncherPreviewReq || muncherHourReq) && rested &&
-      room >= (muncherHourReq ? MUNCHER_PREVIEW_HOUR_STEPS : MUNCHER_PREVIEW_STEPS) * pace) {
-    // A change, as the change to a full hour with four ghosts and the hour
-    // show after. The time on show stays right: the minutes' ones are eaten
-    // and laid again, as the knock's "last digit again" does. Showing the
-    // last minute's digits first, as this did, set the clock back a minute
-    // for the preview's time (midnight, 2026-10-11).
-    bool hour = muncherHourReq;
-    muncherPreviewReq = muncherHourReq = false;
+  if (muncherPreviewReq && rested && room >= MUNCHER_PREVIEW_STEPS * pace) {
+    // A change: the minutes' ones eaten and laid again, as the knock's "last
+    // digit again" does, so the time on show stays right. Showing the last
+    // minute's digits first, as this did, set the clock back a minute for
+    // the preview's time (midnight, 2026-10-11).
+    muncherPreviewReq = false;
     uint8_t same[4];
     memcpy(same, now, 4);
-    if (munch.planChange(same, muncher::STYLE_ALL, 1 << 3, hour ? 4 : 2)) {
-      muncherStartScene(muncher::MODE_CHANGE, millisNow, hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_NOTHING);
-    }
+    if (munch.planChange(same, muncher::STYLE_ALL, 1 << 3)) { muncherStartScene(muncher::MODE_CHANGE, millisNow); }
     muncherPlannedFor = 0;
     return;
   }
@@ -3810,6 +3813,15 @@ uint16_t fruitColour(char c) {
   }
 }
 
+// One pellet at (x, y), with the LEDs the setting adds to it.
+void muncherPellet(int16_t x, int16_t y, uint16_t colour) {
+  uint8_t p = muncherSettings.pellets;
+  matrix.drawPixel(x, y, colour);
+  if (p == MUNCHER_PELLETS_WIDE || p == MUNCHER_PELLETS_SOLID) { matrix.drawPixel(x + 1, y, colour); }
+  if (p == MUNCHER_PELLETS_TALL || p == MUNCHER_PELLETS_SOLID) { matrix.drawPixel(x, y + 1, colour); }
+  if (p == MUNCHER_PELLETS_SOLID)                              { matrix.drawPixel(x + 1, y + 1, colour); }
+}
+
 void muncherDraw(bool colonOn) {
   const muncher::Layout &L = munch.L;
   uint16_t dot   = scaledColor(255, 184, 151);
@@ -3821,7 +3833,7 @@ void muncherDraw(bool colonOn) {
     uint64_t bits = munch.dots[i];
     for (uint8_t k = 0; k < muncher::COLS * muncher::ROWS; k++) {
       if (bits & (1ULL << k)) {
-        matrix.drawPixel(L.digitX[i] + 2 * (k % muncher::COLS), L.digitY[i] + 2 * (k / muncher::COLS), dot);
+        muncherPellet(L.digitX[i] + 2 * (k % muncher::COLS), L.digitY[i] + 2 * (k / muncher::COLS), dot);
       }
     }
   }
@@ -3840,7 +3852,7 @@ void muncherDraw(bool colonOn) {
     matrix.drawPixel(x, L.wallBottom, walls);
   }
   for (uint8_t k = 0; k < 32 && 2 + 4 * k < L.w; k++) {
-    if (munch.lanePellets & (1UL << k)) { matrix.drawPixel(2 + 4 * k, L.laneY, dot); }
+    if (munch.lanePellets & (1UL << k)) { muncherPellet(2 + 4 * k, L.laneY, dot); }
   }
   if (munch.fruitX != muncher::NO_FRUIT) {
     const char *const *rows = FRUITS[munch.fruitKind];
@@ -3945,9 +3957,12 @@ void loadMuncherSettings() {
   muncherStore.read(muncherSettings);
   if (muncherSettings.magic != MUNCHER_SETTINGS_MAGIC) {
     muncherSettings = MUNCHER_DEFAULTS;   // written with the next save
+  } else if (muncherSettings.rev < 2) {
+    muncherSettings.pellets = MUNCHER_PELLETS_ONE;   // rev 1 had a spare byte there; written with the next save
   }
   if (muncherSettings.style >= muncher::STYLE_COUNT) { muncherSettings.style = muncher::STYLE_MIXED; }
   if (muncherSettings.knock >= MUNCHER_KNOCK_COUNT)  { muncherSettings.knock = MUNCHER_KNOCK_RANDOM; }
+  if (muncherSettings.pellets >= MUNCHER_PELLETS_COUNT) { muncherSettings.pellets = MUNCHER_PELLETS_ONE; }
   muncherSettings.paceMs = constrain(muncherSettings.paceMs, MUNCHER_PACE_MIN, MUNCHER_PACE_MAX);
 }
 
@@ -3963,6 +3978,12 @@ void applyMuncherParams(const String &q, bool live) {
   String v;
   v = getParam(q, "mst");   if (v.length()) { muncherSettings.style = constrain(v.toInt(), 0, muncher::STYLE_COUNT - 1); }
   v = getParam(q, "mpace"); if (v.length()) { muncherSettings.paceMs = constrain(v.toInt(), MUNCHER_PACE_MIN, MUNCHER_PACE_MAX); }
+  v = getParam(q, "mpel");
+  if (v.length()) {
+    uint8_t pellets = constrain(v.toInt(), 0, MUNCHER_PELLETS_COUNT - 1);
+    if (pellets != muncherSettings.pellets) { panelDirty = true; }   // the face redraws at once
+    muncherSettings.pellets = pellets;
+  }
   v = getParam(q, "mkn");
   if (v.length()) {
     uint8_t knock = constrain(v.toInt(), 0, MUNCHER_KNOCK_COUNT - 1);
@@ -3970,13 +3991,6 @@ void applyMuncherParams(const String &q, bool live) {
     muncherSettings.knock = knock;
   }
   if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherPreviewReq = true; }
-  // The web app's buttons: the change to a full hour with its show, or a
-  // bonus fruit, to see them without waiting.
-  v = getParam(q, "mshow");
-  if (live && settings.watchface == WATCHFACE_MUNCHER_ID) {
-    if (v == "hour")  { muncherHourReq = true; }
-    if (v == "fruit") { muncherFruitReq = true; }
-  }
 }
 
 #if defined(CLOCK_DEBUG)
@@ -8358,6 +8372,7 @@ void apiState(Print &c) {
   s["mst"] = muncherSettings.style;
   s["mkn"] = muncherSettings.knock;
   s["mpace"] = muncherSettings.paceMs;
+  s["mpel"] = muncherSettings.pellets;
 #endif
   s["autob"] = settings.autoBright != 0;
   s["bright"] = settings.brightness;
@@ -8454,6 +8469,11 @@ void apiState(Print &c) {
   mkn.add("Last digit again");
   mkn.add("Random each time");
   mkn.add("Ghosts win");
+  JsonArray mpel = lists["mpel"].to<JsonArray>();   // by value: MUNCHER_PELLETS_*
+  mpel.add("One LED");
+  mpel.add("Side by side");
+  mpel.add("One above the other");
+  mpel.add("Solid");
 #endif
 
   JsonObject hw = d["hw"].to<JsonObject>();
