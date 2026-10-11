@@ -978,6 +978,13 @@ always. The walk takes 25 px/s by default (*Pace*, 20 to 80 ms per pixel); the
 longest change of a single digit, from the left edge to the digit complete,
 is 199 steps, 8 s at that pace (the debug build's self-test, below).
 
+**Pellets**: one LED each (the default), or two to be seen better from afar -
+*side by side*, which makes the level strokes solid lines and leaves the upright
+ones dotted, or *one above the other*, the other way round; the corridor's
+pellets alike. The second LED goes right of, or below, the pellet's own, so a
+digit grows by a pixel; the muncher's way stays the same. Stored as `mpel` (rev 2
+of the blob, in a byte that was spare).
+
 **To a full hour** four ghosts follow the muncher instead of two (cyan and orange
 join red and pink), and after the change comes the **hour show**: the corridor's
 walls flash white four times, as when a level of the game is cleared, then the

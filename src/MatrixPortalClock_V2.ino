@@ -3502,7 +3502,7 @@ void shakeDiscardLatched() {
 
 // Settings of this watchface, in their own blob, as the Tetris ones are.
 #define MUNCHER_SETTINGS_MAGIC 0x3C1A
-#define MUNCHER_SETTINGS_REV   1
+#define MUNCHER_SETTINGS_REV   2   // 2 = adds pellets
 
 // What a knock, or the face action "trigger watchface animation", plays.
 // Stored values: a new one goes at the end, so "random" keeps its 2.
@@ -3512,6 +3512,15 @@ const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
 const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
 const uint8_t MUNCHER_KNOCK_COUNT  = 4;
 const uint8_t MUNCHER_FRUIT_ONE_IN = 5;   // a bonus fruit after one minute change in this many
+// The LEDs of a pellet, in the digits and the corridor: one, or two to be
+// seen better from afar (Peter, 2026-10-11) - side by side, which makes the
+// level strokes solid lines, or one above the other, which makes the upright
+// ones solid. The second LED goes right of, or below, the pellet's own, so a
+// digit grows by a pixel; the muncher's way stays on the pellet's own.
+const uint8_t MUNCHER_PELLETS_ONE   = 0;
+const uint8_t MUNCHER_PELLETS_WIDE  = 1;
+const uint8_t MUNCHER_PELLETS_TALL  = 2;
+const uint8_t MUNCHER_PELLETS_COUNT = 3;
 // What a scene that ends leads to: a minute change may leave a bonus fruit,
 // and the change to a full hour is followed by the hour show.
 const uint8_t MUNCHER_AFTER_NOTHING = 0;
@@ -3530,15 +3539,18 @@ struct MuncherSettings {
   uint8_t  style;     // muncher::STYLE_*: how a changing digit is walked
   uint8_t  knock;     // MUNCHER_KNOCK_*
   uint8_t  paceMs;    // milliseconds per pixel the muncher walks
-  uint8_t  spare[2];
+  uint8_t  pellets;   // rev 2: MUNCHER_PELLETS_*, the LEDs of a pellet (was a spare byte, 0)
+  uint8_t  spare[1];
 };
+static_assert(sizeof(MuncherSettings) == 8, "the stored blob keeps its size");
 
 const MuncherSettings MUNCHER_DEFAULTS = {
   MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV,
   muncher::STYLE_MIXED,   // the whole digit when one changes, only the difference when several do
   MUNCHER_KNOCK_RANDOM,
   40,                     // 25 pixels a second
-  { 0, 0 }
+  0,                      // one LED a pellet
+  { 0 }
 };
 
 MuncherSettings muncherSettings;
@@ -3798,6 +3810,13 @@ uint16_t fruitColour(char c) {
   }
 }
 
+// One pellet at (x, y), with its second LED when the setting says so.
+void muncherPellet(int16_t x, int16_t y, uint16_t colour) {
+  matrix.drawPixel(x, y, colour);
+  if (muncherSettings.pellets == MUNCHER_PELLETS_WIDE)      { matrix.drawPixel(x + 1, y, colour); }
+  else if (muncherSettings.pellets == MUNCHER_PELLETS_TALL) { matrix.drawPixel(x, y + 1, colour); }
+}
+
 void muncherDraw(bool colonOn) {
   const muncher::Layout &L = munch.L;
   uint16_t dot   = scaledColor(255, 184, 151);
@@ -3809,7 +3828,7 @@ void muncherDraw(bool colonOn) {
     uint64_t bits = munch.dots[i];
     for (uint8_t k = 0; k < muncher::COLS * muncher::ROWS; k++) {
       if (bits & (1ULL << k)) {
-        matrix.drawPixel(L.digitX[i] + 2 * (k % muncher::COLS), L.digitY[i] + 2 * (k / muncher::COLS), dot);
+        muncherPellet(L.digitX[i] + 2 * (k % muncher::COLS), L.digitY[i] + 2 * (k / muncher::COLS), dot);
       }
     }
   }
@@ -3828,7 +3847,7 @@ void muncherDraw(bool colonOn) {
     matrix.drawPixel(x, L.wallBottom, walls);
   }
   for (uint8_t k = 0; k < 32 && 2 + 4 * k < L.w; k++) {
-    if (munch.lanePellets & (1UL << k)) { matrix.drawPixel(2 + 4 * k, L.laneY, dot); }
+    if (munch.lanePellets & (1UL << k)) { muncherPellet(2 + 4 * k, L.laneY, dot); }
   }
   if (munch.fruitX != muncher::NO_FRUIT) {
     const char *const *rows = FRUITS[munch.fruitKind];
@@ -3933,9 +3952,12 @@ void loadMuncherSettings() {
   muncherStore.read(muncherSettings);
   if (muncherSettings.magic != MUNCHER_SETTINGS_MAGIC) {
     muncherSettings = MUNCHER_DEFAULTS;   // written with the next save
+  } else if (muncherSettings.rev < 2) {
+    muncherSettings.pellets = MUNCHER_PELLETS_ONE;   // rev 1 had a spare byte there; written with the next save
   }
   if (muncherSettings.style >= muncher::STYLE_COUNT) { muncherSettings.style = muncher::STYLE_MIXED; }
   if (muncherSettings.knock >= MUNCHER_KNOCK_COUNT)  { muncherSettings.knock = MUNCHER_KNOCK_RANDOM; }
+  if (muncherSettings.pellets >= MUNCHER_PELLETS_COUNT) { muncherSettings.pellets = MUNCHER_PELLETS_ONE; }
   muncherSettings.paceMs = constrain(muncherSettings.paceMs, MUNCHER_PACE_MIN, MUNCHER_PACE_MAX);
 }
 
@@ -3951,6 +3973,12 @@ void applyMuncherParams(const String &q, bool live) {
   String v;
   v = getParam(q, "mst");   if (v.length()) { muncherSettings.style = constrain(v.toInt(), 0, muncher::STYLE_COUNT - 1); }
   v = getParam(q, "mpace"); if (v.length()) { muncherSettings.paceMs = constrain(v.toInt(), MUNCHER_PACE_MIN, MUNCHER_PACE_MAX); }
+  v = getParam(q, "mpel");
+  if (v.length()) {
+    uint8_t pellets = constrain(v.toInt(), 0, MUNCHER_PELLETS_COUNT - 1);
+    if (pellets != muncherSettings.pellets) { panelDirty = true; }   // the face redraws at once
+    muncherSettings.pellets = pellets;
+  }
   v = getParam(q, "mkn");
   if (v.length()) {
     uint8_t knock = constrain(v.toInt(), 0, MUNCHER_KNOCK_COUNT - 1);
@@ -8339,6 +8367,7 @@ void apiState(Print &c) {
   s["mst"] = muncherSettings.style;
   s["mkn"] = muncherSettings.knock;
   s["mpace"] = muncherSettings.paceMs;
+  s["mpel"] = muncherSettings.pellets;
 #endif
   s["autob"] = settings.autoBright != 0;
   s["bright"] = settings.brightness;
@@ -8435,6 +8464,10 @@ void apiState(Print &c) {
   mkn.add("Last digit again");
   mkn.add("Random each time");
   mkn.add("Ghosts win");
+  JsonArray mpel = lists["mpel"].to<JsonArray>();   // by value: MUNCHER_PELLETS_*
+  mpel.add("One LED");
+  mpel.add("Side by side");
+  mpel.add("One above the other");
 #endif
 
   JsonObject hw = d["hw"].to<JsonObject>();
