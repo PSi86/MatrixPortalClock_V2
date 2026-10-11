@@ -86,11 +86,13 @@ button pin cannot be carried over.
 - **Info band data** (S3): the weather and the DWD weather warnings for a place,
   fetched over HTTPS, for the info band of the wall clock; for now listed on the
   config page and the console (see [Info band data](#info-band-data))
-- **Alerts and messages** (S3): a weather warning from `moderate` on, or an
-  item from Home Assistant marked as an alert, comes up once as a banner with
-  its icon, large and red; a message from Home Assistant runs through as text.
-  A mark in a corner of the face stays while there are any, and they can be
-  shown again (see [Alerts and messages on the panel](#alerts-and-messages-on-the-panel-s3))
+- **Alerts, messages and info** (S3): a weather warning from `moderate` on, or
+  an item from Home Assistant marked as an alert, comes up once as a banner
+  with its icon, large and in colour; a message from Home Assistant runs
+  through as text; the weather and the other information come as info cards,
+  once when new and in an info round on the clock's time (every 15 minutes at
+  :00, :15, :30 and :45). A mark in a corner of the face stays while there are
+  alerts or messages, and everything can be shown again (see [Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel-s3))
 
 ## Setup
 
@@ -236,7 +238,7 @@ a gesture sensor), each to one of: nothing, open the menu, play random GIF, play
 last GIF again (both S3), trigger watchface animation, toggle auto brightness
 on / off, toggle daylight saving: auto, summer, winter, toggle hotspot on / off,
 fade brightness while held (held buttons only), show gesture hints, show
-messages again (S3, see [Alerts and messages](#alerts-and-messages-on-the-panel-s3)).
+notifications (S3, see [Alerts, messages and info](#alerts-messages-and-info-on-the-panel-s3)).
 On the S3 each input also has a tick, **closes**: a ticked input closes an alert
 or a message on the panel and goes on to the next one. The watchface animation
 is the face's own: the Tetris digits break up in the
@@ -445,7 +447,7 @@ the card shows its topics.
 
 | Topic | Direction | Payload |
 |---|---|---|
-| `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required), and optionally `severity`, `intensity`, `chance`; an empty payload takes the item away |
+| `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required), and optionally `severity`, `intensity`, `chance`, `short`; an empty payload takes the item away |
 | `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600), and optionally `severity`, `intensity`, `chance` |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux, once a minute |
@@ -466,8 +468,12 @@ the icon looks:
   grey at 0 and take their colour as it rises; without it, they have their
   colour.
 
-A value that is none of these counts as not given. An item for the band, from
-an automation:
+A value that is none of these counts as not given. `short` is the item's info
+card on the 64x32 clock: two lines with `|` between them, up to six
+characters each (five upright), such as `"31°|feels"`; a first line of three
+characters or fewer is drawn at double size. The card shows it, when the item
+is new, in the round and on **show notifications**; the band and the web app
+show `text`. Without `short`, the card runs `text` beside the icon. An item for the band, from an automation:
 
 ```yaml
 action: mqtt.publish
@@ -484,7 +490,7 @@ the message topic. It is an item for its seconds, an hour unless it says; the
 clock keeps up to four, and a fifth takes the oldest one's place (an urgent
 one's only when all four are urgent). On the 64x32 clock its text runs through,
 and with `"level": "alert"` its icon comes first (see
-[Alerts and messages on the panel](#alerts-and-messages-on-the-panel-s3)). The
+[Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel-s3)). The
 Message entity sends the text alone, so its messages are information.
 
 - **Retained items:** the broker keeps them, so a clock that starts or comes
@@ -512,19 +518,39 @@ Message entity sends the text alone, so its messages are information.
 The code is in `src/ha_link.h` (the client, its task and the topics) and at the
 end of the sketch (when it runs, what arrives, the card's part).
 
-## Alerts and messages on the panel (S3)
+## Alerts, messages and info on the panel (S3)
 
-The 64x32 clock has no room for the info band, so of its items only these show
-there: the alerts - the DWD warnings from `moderate` on, and the items Home
-Assistant sends with `"level": "alert"` - and the messages from Home Assistant.
-Other information does not show on it.
+The 64x32 clock has no room for the info band, so its items come over the face
+as banners: the alerts - the DWD warnings from `moderate` on, and the items Home
+Assistant sends with `"level": "alert"` - as their icon, the messages from Home
+Assistant as running text, and all the other information as **info cards**.
 
 - **An alert:** its icon alone, 24x24 in its colours, in the middle of the
   panel, for 10 s; an item without an icon shows the warning sign. Round the
   panel's edge runs a frame in the colour of the alert's level - the DWD's
   yellow, orange, red or violet, and red for an alert that gives no level. The
-  web app's Info band section switches the frames off (**Frame round an
-  alert**); the icon then stands alone.
+  web app's Info section switches the frames off (**Frame round an alert**);
+  the icon then stands alone.
+- **An info card:** the item's icon on the left and its short form in two lines
+  beside it (upright: below it), for 4 s - the weather's temperature at double
+  size with the day's high and low, rain soon "from" or "until" and the time, a
+  DWD warning at level 1 "until" and the time in a yellow frame, a Home
+  Assistant item its `short` field. An item without a short form has its text
+  running beside the icon once, or across the panel without an icon.
+- **When a card comes:** once when its item is new - an item that was not there
+  before, or the weather when its icon changes (cloudy to rain); a new
+  temperature does not count - and in the **info round**: every card once more,
+  one after the other, in the band's order (DWD warnings, rain soon, the
+  weather, then Home Assistant's items as they came). The round goes by the
+  clock's time, every 15 minutes at :00, :15, :30 and :45 (the web app: never,
+  or every 5, 10, 15, 20, 30 or 60 minutes, always on the minutes the interval
+  divides), 3 s after the face has shown the new time - the classic face's
+  fly-in, the Tetris blocks, the muncher's walk and hour show - and stood at
+  rest. One that finds no free face within a minute is left out. A GIF of its
+  own accord gives way: none starts when it would still play at the round's
+  minute or end less than a minute before it, and none comes within a minute
+  after the round. New cards wait for a GIF's end and for the muncher's change
+  of the time. A ticked input (see below) ends the cards on show.
 - **A message:** its text (`title: text`) runs through the middle of the panel
   in the 5x7 font, white, from the right edge out at the left, twice, at about
   five characters a second; an urgent one (`"level": "alert"`) shows its icon
@@ -539,13 +565,15 @@ Other information does not show on it.
   their own end, a ticked input (the Inputs page: **closes**, every button
   press and gesture to begin with, not the knock) or a restart. A ticked input
   goes on to the next one and does nothing else.
-- **Again:** **show messages again** (a face shortcut, UP pressed twice in the
-  Default profile, or **Show them now** in the web app's Info band section)
-  shows all there are, alerts first with their icon and then their text in red,
-  then the messages, each in the order it came, every text running through
-  once - whoever asked is looking from the start; with none, the panel says
-  "no messages". In the Default profile UP pressed twice makes UP's single press
-  wait 0.4 s; a clock with shortcuts of its own keeps them.
+- **Show notifications** (a face shortcut, UP pressed twice in the Default
+  profile, or **Show notifications now** in the web app's Info section) shows
+  everything there is: the alerts first with their icon and then their text in
+  red, then the messages, each in the order it came, every text running through
+  once - whoever asked is looking from the start - and then the info cards,
+  each a card alone: the text is for what is urgent. With nothing
+  there, the panel says "nothing to show". In the Default profile UP pressed
+  twice makes UP's single press wait 0.4 s; a clock with shortcuts of its own
+  keeps them.
 - **The mark:** a 2x2 square in the top right corner of the face while there
   are any: red while an alert holds, white for messages alone. In the hotspot's
   preview that corner has the hotspot's blue mark.

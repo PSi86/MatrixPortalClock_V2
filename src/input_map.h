@@ -59,14 +59,14 @@ enum InputFunction : uint8_t {
   FN_PLAY_GIF,         // a GIF now, on boards with GIF playback
   FN_GIF_AGAIN,        // the last GIF shown once more, on boards with GIF playback
   FN_SHOW_HINTS,       // what the gestures do, for a moment
-  FN_SHOW_MESSAGES,    // the alerts and messages there are, once more, on boards with the info band data
+  FN_SHOW_MESSAGES,    // "show notifications": the alerts, messages and information there are, on boards with the info band data
 };
 
 struct InputMapping { InputEvent event; InputContext context; InputFunction function; };
 
 // Profile "Default": on the face any press opens the menu - except holding
 // UP, whose repeats would close the menu again at once; it plays a GIF, which
-// the repeats leave alone - and UP twice shows the messages again, where a
+// the repeats leave alone - and UP twice shows the notifications, where a
 // clock has them. In the menu a short press moves; holding DOWN goes in,
 // holding UP climbs out, one level for every 600 ms it stays held. Nothing
 // else uses 2x or 3x, so a short press of DOWN acts at once, and one of UP
@@ -234,7 +234,7 @@ constexpr FaceAction FACE_ACTIONS[] = {
   { 7, FN_TOGGLE_HOTSPOT, NEEDS_NOTHING, "toggle hotspot on / off",                      "AP"    },
   { 8, FN_BRIGHT_FADE,    NEEDS_HOLD,    "fade brightness while held",                   "fade"  },
   { 9, FN_SHOW_HINTS,     NEEDS_NOTHING, "show gesture hints",                           "hints" },
-  { 10, FN_SHOW_MESSAGES, NEEDS_MESSAGES, "show messages again",                         "msgs"  },
+  { 10, FN_SHOW_MESSAGES, NEEDS_MESSAGES, "show notifications",                          "notif" },
 };
 constexpr uint8_t FACE_ACTION_COUNT = sizeof(FACE_ACTIONS) / sizeof(FACE_ACTIONS[0]);
 
