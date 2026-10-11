@@ -25,17 +25,46 @@
 
 enum ItemLevel : uint8_t { LEVEL_INFO, LEVEL_ALERT };
 
-// What an item's icon shows; the pictures come with the band.
+// What an item's icon shows; the pictures come with the band (item_icons.h).
+// New icons go on the end, so the numbers the web app gets stay the same.
 enum ItemIcon : uint8_t {
   ICON_NONE, ICON_CLEAR_DAY, ICON_CLEAR_NIGHT, ICON_PARTLY_DAY, ICON_PARTLY_NIGHT, ICON_CLOUDY,
-  ICON_FOG, ICON_DRIZZLE, ICON_RAIN, ICON_SNOW, ICON_THUNDER, ICON_WARNING, ICON_COUNT
+  ICON_FOG, ICON_DRIZZLE, ICON_RAIN, ICON_SNOW, ICON_THUNDER, ICON_WARNING,
+  ICON_WIND, ICON_FROST, ICON_HEAT, ICON_COUNT
 };
 
 // The icons by name, as Home Assistant gives them, in ItemIcon's order.
 const char *const ITEM_ICON_NAMES[ICON_COUNT] = {
   "", "clear-day", "clear-night", "partly-day", "partly-night", "cloudy",
-  "fog", "drizzle", "rain", "snow", "thunder", "warning",
+  "fog", "drizzle", "rain", "snow", "thunder", "warning", "wind", "frost", "heat",
 };
+
+// How heavy rain or snow is (BandItem::intensity); its icon shows it by the
+// shape of its drops or flakes.
+enum ItemIntensity : uint8_t { INTENSITY_NONE, INTENSITY_LIGHT, INTENSITY_MODERATE, INTENSITY_HEAVY };
+const char *const ITEM_INTENSITY_NAMES[] = { "", "light", "moderate", "heavy" };
+
+// BandItem::chance when no source said how likely it is: the icon in full colour.
+const uint8_t CHANCE_UNKNOWN = 255;
+
+// A warning's level as the DWD and Home Assistant name it, 1 (minor) to 4
+// (extreme); 0 for none or an unknown one.
+inline uint8_t itemSeverityByName(const char *s) {
+  if (!s) { return 0; }
+  if (strcmp(s, "extreme") == 0)  { return 4; }
+  if (strcmp(s, "severe") == 0)   { return 3; }
+  if (strcmp(s, "moderate") == 0) { return 2; }
+  if (strcmp(s, "minor") == 0)    { return 1; }
+  return 0;
+}
+
+// INTENSITY_NONE for a name that is none of them.
+inline uint8_t itemIntensityByName(const char *s) {
+  for (uint8_t i = 1; s && i <= INTENSITY_HEAVY; i++) {
+    if (strcmp(s, ITEM_INTENSITY_NAMES[i]) == 0) { return i; }
+  }
+  return INTENSITY_NONE;
+}
 
 // ICON_NONE for a name that is none of them.
 inline uint8_t itemIconByName(const char *name) {
@@ -56,6 +85,9 @@ struct BandItem {
   char     text[96];
   uint8_t  icon;       // ItemIcon
   uint8_t  level;      // ItemLevel
+  uint8_t  severity;   // a warning's level, 1 (minor) to 4 (extreme); 0 = none given
+  uint8_t  intensity;  // ItemIntensity of rain or snow; INTENSITY_NONE = none given
+  uint8_t  chance;     // how likely, 0 to 100 %; CHANCE_UNKNOWN = not said
   uint8_t  feed;       // the source it came from (FeedId)
   time_t   until;      // UTC
   uint32_t tag;        // which alert it is, for the banner: the same tag is the same alert, even under another key
@@ -155,16 +187,19 @@ inline void itemTextCopy(char *dst, const char *src, size_t size) {
 }
 
 inline void feedItem(FeedResult &r, const char *key, const char *text, uint8_t icon, uint8_t level, time_t until,
-                     uint32_t tag) {
+                     uint32_t tag, uint8_t severity = 0, uint8_t intensity = INTENSITY_NONE) {
   if (r.count >= FEED_ITEMS_MAX) { return; }
   BandItem &it = r.item[r.count++];
   strlcpy(it.key, key, sizeof(it.key));
   strlcpy(it.text, text, sizeof(it.text));
-  it.icon  = icon;
-  it.level = level;
-  it.feed  = r.feed;
-  it.until = until;
-  it.tag   = tag;
+  it.icon      = icon;
+  it.level     = level;
+  it.severity  = severity;
+  it.intensity = intensity;
+  it.chance    = CHANCE_UNKNOWN;
+  it.feed      = r.feed;
+  it.until     = until;
+  it.tag       = tag;
 }
 
 // ---- HTTPS ------------------------------------------------------------------
@@ -217,23 +252,49 @@ inline bool feedGet(const char *url, JsonDocument &filter, JsonDocument &doc, Fe
 // https://open-meteo.com/en/docs - no key, non-commercial use, under 10,000
 // calls a day, CC BY 4.0 ("Weather data by Open-Meteo.com"). About 1.5 KB.
 
-struct WmoWeather { uint8_t code; const char *text; uint8_t icon; };
+// The codes' intensities as the WMO table gives them (slight, moderate,
+// heavy or dense; "violent" showers count as heavy).
+struct WmoWeather { uint8_t code; const char *text; uint8_t icon; uint8_t intensity; };
+const uint8_t WMO_L = INTENSITY_LIGHT, WMO_M = INTENSITY_MODERATE, WMO_H = INTENSITY_HEAVY;
 const WmoWeather WMO_WEATHER[] = {
-  {  0, "clear",              ICON_CLEAR_DAY }, {  1, "mainly clear",   ICON_PARTLY_DAY },
-  {  2, "partly cloudy",      ICON_PARTLY_DAY }, {  3, "overcast",      ICON_CLOUDY },
-  { 45, "fog",                ICON_FOG },       { 48, "rime fog",        ICON_FOG },
-  { 51, "light drizzle",      ICON_DRIZZLE },   { 53, "drizzle",         ICON_DRIZZLE },
-  { 55, "dense drizzle",      ICON_DRIZZLE },   { 56, "freezing drizzle", ICON_DRIZZLE },
-  { 57, "freezing drizzle",   ICON_DRIZZLE },   { 61, "light rain",      ICON_RAIN },
-  { 63, "rain",               ICON_RAIN },      { 65, "heavy rain",      ICON_RAIN },
-  { 66, "freezing rain",      ICON_RAIN },      { 67, "freezing rain",   ICON_RAIN },
-  { 71, "light snow",         ICON_SNOW },      { 73, "snow",            ICON_SNOW },
-  { 75, "heavy snow",         ICON_SNOW },      { 77, "snow grains",     ICON_SNOW },
-  { 80, "light showers",      ICON_RAIN },      { 81, "showers",         ICON_RAIN },
-  { 82, "heavy showers",      ICON_RAIN },      { 85, "snow showers",    ICON_SNOW },
-  { 86, "heavy snow showers", ICON_SNOW },      { 95, "thunderstorm",    ICON_THUNDER },
-  { 96, "thunderstorm, hail", ICON_THUNDER },   { 99, "thunderstorm, hail", ICON_THUNDER },
+  {  0, "clear",              ICON_CLEAR_DAY, 0 },     {  1, "mainly clear",     ICON_PARTLY_DAY, 0 },
+  {  2, "partly cloudy",      ICON_PARTLY_DAY, 0 },    {  3, "overcast",         ICON_CLOUDY, 0 },
+  { 45, "fog",                ICON_FOG, 0 },           { 48, "rime fog",         ICON_FOG, 0 },
+  { 51, "light drizzle",      ICON_DRIZZLE, WMO_L },   { 53, "drizzle",          ICON_DRIZZLE, WMO_M },
+  { 55, "dense drizzle",      ICON_DRIZZLE, WMO_H },   { 56, "freezing drizzle", ICON_DRIZZLE, WMO_L },
+  { 57, "freezing drizzle",   ICON_DRIZZLE, WMO_H },   { 61, "light rain",       ICON_RAIN, WMO_L },
+  { 63, "rain",               ICON_RAIN, WMO_M },      { 65, "heavy rain",       ICON_RAIN, WMO_H },
+  { 66, "freezing rain",      ICON_RAIN, WMO_L },      { 67, "freezing rain",    ICON_RAIN, WMO_H },
+  { 71, "light snow",         ICON_SNOW, WMO_L },      { 73, "snow",             ICON_SNOW, WMO_M },
+  { 75, "heavy snow",         ICON_SNOW, WMO_H },      { 77, "snow grains",      ICON_SNOW, WMO_L },
+  { 80, "light showers",      ICON_RAIN, WMO_L },      { 81, "showers",          ICON_RAIN, WMO_M },
+  { 82, "heavy showers",      ICON_RAIN, WMO_H },      { 85, "snow showers",     ICON_SNOW, WMO_L },
+  { 86, "heavy snow showers", ICON_SNOW, WMO_H },      { 95, "thunderstorm",     ICON_THUNDER, 0 },
+  { 96, "thunderstorm, hail", ICON_THUNDER, 0 },       { 99, "thunderstorm, hail", ICON_THUNDER, 0 },
 };
+
+// A DWD warning's icon, from its event as Bright Sky names it in English
+// ("wind gusts", "thunderstorms, possibly with wind gusts", "frost", "heavy
+// rain"): thunder before wind, since a thunderstorm warning names the gusts
+// too. An event none of them fits keeps the warning triangle.
+inline uint8_t feedWarningIcon(const char *event) {
+  if (!event) { return ICON_WARNING; }
+  struct Word { const char *word; uint8_t icon; };
+  static const Word WORDS[] = {
+    { "thunder", ICON_THUNDER }, { "heat", ICON_HEAT },  { "frost", ICON_FROST }, { "icy", ICON_FROST },
+    { "ice", ICON_FROST },       { "glaze", ICON_FROST }, { "snow", ICON_SNOW },  { "rain", ICON_RAIN },
+    { "fog", ICON_FOG },         { "gust", ICON_WIND },  { "wind", ICON_WIND },   { "gale", ICON_WIND },
+    { "storm", ICON_WIND },      { "hurricane", ICON_WIND },
+  };
+  char low[64];
+  size_t n = 0;
+  for (; event[n] && n + 1 < sizeof(low); n++) { low[n] = (char)tolower((unsigned char)event[n]); }
+  low[n] = '\0';
+  for (const Word &w : WORDS) {
+    if (strstr(low, w.word)) { return w.icon; }
+  }
+  return ICON_WARNING;
+}
 
 // Rain counts from 0.1 mm in a quarter of an hour.
 const float FEED_WET_MM = 0.1f;
@@ -269,9 +330,9 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
   int code = cur["weather_code"] | 0;
   bool isDay = (cur["is_day"] | 1) != 0;
   const char *what = "unknown weather";
-  uint8_t icon = ICON_NONE;
+  uint8_t icon = ICON_NONE, intensity = INTENSITY_NONE;
   for (const WmoWeather &w : WMO_WEATHER) {
-    if (w.code == code) { what = w.text; icon = w.icon; break; }
+    if (w.code == code) { what = w.text; icon = w.icon; intensity = w.intensity; break; }
   }
   if (!isDay && icon == ICON_CLEAR_DAY)  { icon = ICON_CLEAR_NIGHT; }
   if (!isDay && icon == ICON_PARTLY_DAY) { icon = ICON_PARTLY_NIGHT; }
@@ -289,7 +350,7 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
   long uv = lroundf(day["uv_index_max"][0] | 0.0f);
   if (uv >= 3 && n > 0 && n < (int)sizeof(text)) { snprintf(text + n, sizeof(text) - n, ", UV %ld", uv); }
   time_t stale = job.now + FEEDS[FEED_WEATHER].staleS;
-  feedItem(r, "weather", text, icon, LEVEL_INFO, stale, itemTag("weather"));
+  feedItem(r, "weather", text, icon, LEVEL_INFO, stale, itemTag("weather"), 0, intensity);
 
   // Rain within the next four hours, from the quarter-hour forecast: when it
   // starts while it is dry, or when it stops while it rains.
@@ -314,15 +375,6 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
 // https://brightsky.dev - DWD warnings by place, no key, free for all
 // purposes, the DWD's terms apply. 172 bytes without a warning.
 
-inline uint8_t feedSeverityRank(const char *s) {
-  if (!s) { return 0; }
-  if (strcmp(s, "extreme") == 0)  { return 4; }
-  if (strcmp(s, "severe") == 0)   { return 3; }
-  if (strcmp(s, "moderate") == 0) { return 2; }
-  if (strcmp(s, "minor") == 0)    { return 1; }
-  return 0;
-}
-
 inline void feedWarnings(const FeedJob &job, FeedResult &r) {
   char lat[16], lon[16], url[160];
   feedDegrees(lat, sizeof(lat), job.lat);
@@ -332,6 +384,7 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
   JsonObject a = filter["alerts"].add<JsonObject>();   // for every alert in the array
   a["status"] = true;
   a["severity"] = true;
+  a["event_en"] = true;
   a["headline_en"] = true;
   a["onset"] = true;
   a["expires"] = true;
@@ -358,7 +411,7 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
       if (taken[i] || strcmp(al["status"] | "actual", "actual") != 0) { continue; }
       time_t expires = feedIsoTime(al["expires"].as<const char *>());
       if (expires != 0 && expires <= job.now) { continue; }
-      uint8_t rank = feedSeverityRank(al["severity"].as<const char *>()) + 1;   // 1 even for an unknown severity
+      uint8_t rank = itemSeverityByName(al["severity"].as<const char *>()) + 1;   // 1 even for an unknown severity
       if (rank > bestRank) { best = (int)i; bestRank = rank; }
     }
     if (best < 0) { break; }
@@ -377,12 +430,14 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
       strlcpy(text, headline, sizeof(text));
     }
     snprintf(key, sizeof(key), "warn%u", slot);
-    uint8_t level = feedSeverityRank(al["severity"].as<const char *>()) >= 2 ? LEVEL_ALERT : LEVEL_INFO;
+    uint8_t severity = itemSeverityByName(al["severity"].as<const char *>());
+    uint8_t level = severity >= 2 ? LEVEL_ALERT : LEVEL_INFO;
     // The same warning keeps its headline and onset from fetch to fetch,
     // while its slot moves when a more severe one comes. Another headline
     // counts as another warning, with a banner of its own.
     uint32_t tag = itemTag(al["onset"].as<const char *>(), itemTag(headline));
-    feedItem(r, key, text, ICON_WARNING, level, expires != 0 ? min(expires, stale) : stale, tag);
+    feedItem(r, key, text, feedWarningIcon(al["event_en"].as<const char *>()), level,
+             expires != 0 ? min(expires, stale) : stale, tag, severity);
   }
 }
 

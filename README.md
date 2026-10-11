@@ -381,8 +381,8 @@ everything else is to come through Home Assistant:
 
 | Source | What it gives | How often |
 |---|---|---|
-| [Open-Meteo](https://open-meteo.com) | temperature, weather, the day's high and low, chance of rain, UV index from 3; when rain starts or stops within the next 4 hours | every 30 min |
-| [Bright Sky](https://brightsky.dev) | the DWD's weather warnings for the place, the most severe first (up to four): `minor` as information, from `moderate` on as an alert | every 10 min |
+| [Open-Meteo](https://open-meteo.com) | temperature, weather (with how heavy rain or snow is, from the weather code), the day's high and low, chance of rain, UV index from 3; when rain starts or stops within the next 4 hours | every 30 min |
+| [Bright Sky](https://brightsky.dev) | the DWD's weather warnings for the place, the most severe first (up to four): `minor` as information, from `moderate` on as an alert; each with its level and the icon of its event (wind, thunder, rain, snow, frost or black ice, heat, fog; the warning triangle for any other) | every 10 min |
 
 Weather data by Open-Meteo.com (CC BY 4.0); the warnings are the Deutscher
 Wetterdienst's, through Bright Sky, under the DWD's terms of use. Neither needs a
@@ -445,15 +445,29 @@ the card shows its topics.
 
 | Topic | Direction | Payload |
 |---|---|---|
-| `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required); an empty payload takes the item away |
-| `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600) |
+| `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required), and optionally `severity`, `intensity`, `chance`; an empty payload takes the item away |
+| `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600), and optionally `severity`, `intensity`, `chance` |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux, once a minute |
 | `homeassistant/notify/<id>/message/config`, `homeassistant/sensor/<id>/light/config` | the clock to Home Assistant, retained | MQTT discovery |
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
-`thunder`, `warning`. An item for the band, from an automation:
+`thunder`, `warning`, `wind`, `frost`, `heat`. The optional fields change how
+the icon looks:
+
+- `severity`: a warning's level, as the DWD names them - `minor`, `moderate`,
+  `severe` or `extreme`. The warning triangle and an alert's frame take its
+  colour: yellow, orange, red, violet.
+- `intensity`: how heavy drizzle, rain or snow is - `light`, `moderate` or
+  `heavy`. The icon shows one, two or three of its drops, dots or flakes; an
+  item that gives no intensity shows two.
+- `chance`: how likely rain or snow is, 0 to 100 (%). The drops or flakes are
+  grey at 0 and take their colour as it rises; without it, they have their
+  colour.
+
+A value that is none of these counts as not given. An item for the band, from
+an automation:
 
 ```yaml
 action: mqtt.publish
@@ -505,8 +519,12 @@ there: the alerts - the DWD warnings from `moderate` on, and the items Home
 Assistant sends with `"level": "alert"` - and the messages from Home Assistant.
 Other information does not show on it.
 
-- **An alert:** its icon alone, 24x24 and red, in the middle of the panel, for
-  10 s; an item without an icon shows the warning sign.
+- **An alert:** its icon alone, 24x24 in its colours, in the middle of the
+  panel, for 10 s; an item without an icon shows the warning sign. Round the
+  panel's edge runs a frame in the colour of the alert's level - the DWD's
+  yellow, orange, red or violet, and red for an alert that gives no level. The
+  web app's Info band section switches the frames off (**Frame round an
+  alert**); the icon then stands alone.
 - **A message:** its text (`title: text`) runs through the middle of the panel
   in the 5x7 font, white, from the right edge out at the left, twice, at about
   five characters a second; an urgent one (`"level": "alert"`) shows its icon
@@ -538,10 +556,16 @@ Other information does not show on it.
   known for 15 minutes, so a reconnect to Home Assistant or a fetch that missed
   it does not bring it back. A DWD warning with another headline counts as
   another warning; every message is one of its own. Several new alerts with the
-  same icon share one banner.
+  same icon share one banner, which shows the most severe of them.
 
 The icons are drawn as pixels in `src/item_icons.h`, part of the firmware like
-the rest of the band, so they need nothing loaded onto the clock.
+the rest of the band, so they need nothing loaded onto the clock. Each has up
+to three parts, and each part a role whose colour the clock picks when it draws
+it: the sun yellow with orange rays, the moon pale yellow, a cloud white (grey
+over rain, snow and thunder), rain blue, snow white, the bolt yellow, wind light
+blue, a thermometer white with blue (frost) or red (heat), the warning triangle
+in its level's colour with a white mark. Drizzle, rain and snow have a light
+and a heavy picture beside the usual one (see `intensity` above).
 
 ## Web app and the home network (S3)
 

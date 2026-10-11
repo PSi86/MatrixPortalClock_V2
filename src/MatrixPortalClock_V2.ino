@@ -349,17 +349,19 @@ uint8_t      *gifPackCopy = nullptr;
 // sources are on: a blob of its own (NVS key "feeds"). The sources and the
 // items are in src/band_data.h, their scheduling at the end of the sketch.
 #define FEED_SETTINGS_MAGIC 0xFEED
-#define FEED_SETTINGS_REV   1
+#define FEED_SETTINGS_REV   2          // 1 = before frames
 struct FeedSettings {
   uint16_t magic;
   uint8_t  rev;
   uint8_t  on;          // one bit per FeedId: the sources fetched
   int32_t  lat, lon;    // the place, in millionths of a degree
   uint8_t  located;     // 1 once a place is set; nothing is fetched before
-  uint8_t  reserved[3];
+  uint8_t  frames;      // 1: an alert's banner has a frame in its level's colour (rev 2)
+  uint8_t  reserved[2];
 };
+static_assert(sizeof(FeedSettings) == 16, "FeedSettings keeps the size stored blobs have");
 const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
-                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS)), 0, 0, 0, { 0 } };
+                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS)), 0, 0, 0, 1, { 0 } };
 FeedSettings feedSettings;
 SettingsStore<FeedSettings> feedStore;
 
@@ -733,11 +735,16 @@ int8_t   slideDir = 0;              // the slide the next menu picture starts wi
 // it. A time banner shows the time the clock shows now, read when it is drawn.
 // A hint is text as well, but only explains what comes next, so an input on it
 // is not used up (handleInput()). An alert's banner shows the alert's icon in
-// the alert colour; a running one, a notice's text running through. Both are
-// steps of the notices on show (noticeSteps), and last as long as their step.
+// its colours, framed in the colour of its level; a running one, a notice's
+// text running through. Both are steps of the notices on show (noticeSteps),
+// and last as long as their step.
 enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT, BANNER_ALERT, BANNER_RUN };
 BannerKind    bannerKind = BANNER_TEXT;
-uint8_t       bannerIcon = 0;                    // BANNER_ALERT: the ItemIcon
+// An icon and how it looks: the ItemIcon, then its item's severity,
+// intensity and chance (BandItem).
+struct IconLook { uint8_t icon, severity, intensity, chance; };
+IconLook      bannerLook = { 0, 0, 0, 0 };       // BANNER_ALERT: its icon
+struct IconRgb { uint8_t r, g, b; };             // a colour of an icon's part (roleRgb())
 char          bannerText[2][12] = { "", "" };   // one or two lines; an empty second one is not drawn
 uint8_t       bannerR = 255, bannerG = 255, bannerB = 255;
 unsigned long bannerAt = 0;      // millis() the banner came up
@@ -1447,6 +1454,10 @@ void loop(void) {
   // Ten seconds in, so the console has come back after a restart.
   static bool muncherTested = false;
   if (!muncherTested && millisNow > 10000) { muncherTested = true; muncherSelfTest(); }
+#endif
+#if BAND_DATA && defined(CLOCK_DEBUG)
+  static bool warningIconsTested = false;
+  if (!warningIconsTested && millisNow > 10000) { warningIconsTested = true; warningIconSelfTest(); }
 #endif
   if (minuteTrigger) { panelDirty = true; }   // whatever shows the time has to follow it
   if (secondTrigger && secondNow == 30) { rtcFollow(); }   // half way through every minute
@@ -7528,6 +7539,7 @@ void loadFeedSettings() {
   feedStore.begin("feeds");
   feedStore.read(feedSettings);
   if (feedSettings.magic != FEED_SETTINGS_MAGIC) { feedSettings = FEED_DEFAULTS; }
+  if (feedSettings.rev < 2) { feedSettings.frames = FEED_DEFAULTS.frames; }
   feedTaskOK = feedBegin();
   if (!feedTaskOK) {
     Serial.println("Info band: no RAM for the fetch task");
@@ -7587,8 +7599,12 @@ void bandWhen(char *buf, size_t size, time_t utc) {
 void printBandItem(const char *mark, const BandItem &it) {
   char until[16];
   bandWhen(until, sizeof(until), it.until);
-  Serial.printf("Info band %s %s (%s, until %s):\n", mark, it.key, it.level == LEVEL_ALERT ? "alert" : "info", until);
-  Serial.printf("  %s\n", it.text);
+  Serial.printf("Info band %s %s (%s, until %s, icon %s", mark, it.key, it.level == LEVEL_ALERT ? "alert" : "info", until,
+                it.icon < ICON_COUNT && it.icon != ICON_NONE ? ITEM_ICON_NAMES[it.icon] : "none");
+  if (it.severity)  { Serial.printf(", level %u", (unsigned)it.severity); }
+  if (it.intensity) { Serial.printf(", %s", ITEM_INTENSITY_NAMES[it.intensity]); }
+  if (it.chance <= 100) { Serial.printf(", %u %%", (unsigned)it.chance); }
+  Serial.printf("):\n  %s\n", it.text);
 }
 
 // The earliest until of all items, worked out anew after every change to
@@ -7810,9 +7826,9 @@ bool noticeStepShow(uint8_t i) {
   if (noticeSteps[i].phase == PHASE_ICON) {
     bool textNext = i + 1 < noticeStepCount && noticeStepsSame(i, i + 1) && noticeSteps[i + 1].phase == PHASE_TEXT;
     bannerKind   = BANNER_ALERT;
-    bannerIcon   = noticeIcon(it);
+    bannerLook   = { noticeIcon(it), it.severity, it.intensity, it.chance };
     noticeStepMs = textNext ? ICON_BEFORE_TEXT_MS : ALERT_BANNER_MS;
-    Serial.printf("Notice: %s, icon %s\n", it.key, ITEM_ICON_NAMES[bannerIcon]);
+    Serial.printf("Notice: %s, icon %s\n", it.key, ITEM_ICON_NAMES[bannerLook.icon]);
   } else {
     textToCp437(runText, it.text, sizeof(runText));
     runWidth = (uint16_t)(strlen(runText) * 6);   // 5 px a character and 1 between
@@ -7852,7 +7868,7 @@ void noticeAdvance(bool nextNotice) {
 // The steps for the notices not shown yet: an alert's icon, an urgent
 // message's icon and then its text, a message's text. Alerts that are not
 // messages and share an icon share one banner, so two warnings that came
-// together do not bring the same banner twice.
+// together do not bring the same banner twice; it shows the most severe.
 void noticeStepsForNew() {
   uint8_t order[BAND_ITEMS_MAX];
   uint8_t n = noticeOrder(order, true);
@@ -7863,12 +7879,16 @@ void noticeStepsForNew() {
     noticeSeenAdd(it.feed, it.tag);
     bool message = isMessage(it), alert = it.level == LEVEL_ALERT;
     if (alert && !message) {
-      bool shared = false;
-      for (uint8_t s = 0; s < noticeStepCount && !shared; s++) {
-        int8_t j = noticeItem(noticeSteps[s]);
-        shared = j >= 0 && !isMessage(bandItems[j]) && noticeIcon(bandItems[j]) == noticeIcon(it);
+      int8_t shared = -1, j = -1;   // the step of the banner it shares, and that step's item
+      for (uint8_t s = 0; s < noticeStepCount && shared < 0; s++) {
+        j = noticeItem(noticeSteps[s]);
+        if (j >= 0 && !isMessage(bandItems[j]) && noticeIcon(bandItems[j]) == noticeIcon(it)) { shared = (int8_t)s; }
       }
-      if (!shared) { noticeAddStep(it, PHASE_ICON); }
+      if (shared < 0) {
+        noticeAddStep(it, PHASE_ICON);
+      } else if (it.severity > bandItems[j].severity) {
+        noticeSteps[shared] = { it.feed, it.tag, PHASE_ICON };
+      }
       continue;
     }
     if (alert)      { noticeAddStep(it, PHASE_ICON); }
@@ -7981,22 +8001,105 @@ void applyNoticeKeysForm(const String &q) {
   }
 }
 
-// An icon at (x, y), its top left corner, in one colour.
-void drawItemIcon(int16_t x, int16_t y, uint8_t icon, uint16_t colour) {
-  if (icon >= ICON_COUNT) { return; }
+// The colours of the icons (decided on 2026-10-11): every part its own; a
+// warning's level in the DWD's colours - yellow, orange, red, violet - and in
+// the alert colour when none is given; rain and snow grey when they are
+// unlikely, taking their colour as their chance rises.
+IconRgb levelRgb(uint8_t severity) {
+  switch (severity) {
+    case 1:  return { 255, 230, 0 };
+    case 2:  return { 255, 130, 0 };
+    case 3:  return { 255, 0, 0 };
+    case 4:  return { 170, 0, 255 };
+    default: return { ALERT_R, ALERT_G, ALERT_B };
+  }
+}
+
+IconRgb chanceRgb(IconRgb c, uint8_t chance) {
+  if (chance > 100) { return c; }   // CHANCE_UNKNOWN
+  const IconRgb grey = { 70, 72, 82 };
+  return { (uint8_t)(grey.r + ((int)c.r - grey.r) * chance / 100), (uint8_t)(grey.g + ((int)c.g - grey.g) * chance / 100),
+           (uint8_t)(grey.b + ((int)c.b - grey.b) * chance / 100) };
+}
+
+IconRgb roleRgb(uint8_t role, const IconLook &look) {
+  switch (role) {
+    case ROLE_CLOUD:     return { 205, 210, 225 };
+    case ROLE_CLOUD_WET: return { 140, 148, 168 };
+    case ROLE_SUN:       return { 255, 190, 0 };
+    case ROLE_RAYS:      return { 255, 110, 0 };
+    case ROLE_MOON:      return { 255, 225, 120 };
+    case ROLE_FOG:       return { 150, 150, 165 };
+    case ROLE_RAIN:      return chanceRgb({ 0, 105, 255 }, look.chance);
+    case ROLE_SNOW:      return chanceRgb({ 235, 245, 255 }, look.chance);
+    case ROLE_BOLT:      return { 255, 225, 0 };
+    case ROLE_LEVEL:     return levelRgb(look.severity);
+    case ROLE_MARK:      return { 255, 255, 255 };
+    case ROLE_WIND:      return { 120, 210, 255 };
+    case ROLE_GLASS:     return { 225, 235, 245 };
+    case ROLE_COLD:      return { 0, 105, 255 };
+    case ROLE_HOT:       return { 255, 20, 0 };
+    case ROLE_WAVES:     return { 255, 110, 0 };
+    case ROLE_FLAKE:     return { 120, 210, 255 };
+    default:             return { 0, 0, 0 };
+  }
+}
+
+// An icon at (x, y), its top left corner, each part in its colour.
+void drawItemIcon(int16_t x, int16_t y, const IconLook &look) {
+  const IconBits &pic = iconPicture(look.icon, look.intensity);
+  uint16_t colour[3];
+  for (uint8_t p = 0; p < 3; p++) {
+    IconRgb c = roleRgb(pic.role[p], look);
+    colour[p] = scaledColorVisible(c.r, c.g, c.b);
+  }
   for (uint8_t r = 0; r < ICON_SIZE; r++) {
-    uint32_t bits = ITEM_ICONS[icon].row[r];
+    uint32_t lo = pic.row[r].lo, hi = pic.row[r].hi;
     for (uint8_t c = 0; c < ICON_SIZE; c++) {
-      if (bits & (1UL << (ICON_SIZE - 1 - c))) { matrix.drawPixel(x + c, y + r, colour); }
+      uint8_t bit = ICON_SIZE - 1 - c;
+      uint8_t part = (uint8_t)((((hi >> bit) & 1u) << 1) | ((lo >> bit) & 1u));
+      if (part) { matrix.drawPixel(x + c, y + r, colour[part - 1]); }
     }
   }
 }
 
-// An alert's banner: its icon alone, in the middle, in the alert colour.
+#if defined(CLOCK_DEBUG)
+// At start-up: the icon each DWD event gets (feedWarningIcon()). The first
+// six are the English names Bright Sky gave on 2026-10-11 for the warnings
+// in force then; the others are the words of the DWD's headlines for frost,
+// black ice and heat, and events that keep the triangle.
+void warningIconSelfTest() {
+  struct Case { const char *event; uint8_t icon; };
+  static const Case CASES[] = {
+    { "near gale", ICON_WIND }, { "thunderstorms, possibly with wind gusts", ICON_THUNDER },
+    { "wind gusts", ICON_WIND }, { "gale-force gusts", ICON_WIND }, { "strong wind", ICON_WIND },
+    { "heavy rain", ICON_RAIN }, { "frost", ICON_FROST }, { "SIGNIFICANT ICY SURFACES", ICON_FROST },
+    { "black ice", ICON_FROST }, { "strong heat", ICON_HEAT }, { "heavy snowfall", ICON_SNOW },
+    { "fog", ICON_FOG }, { "UV index", ICON_WARNING }, { "", ICON_WARNING }, { nullptr, ICON_WARNING },
+  };
+  uint8_t wrong = 0;
+  for (const Case &c : CASES) {
+    uint8_t got = feedWarningIcon(c.event);
+    if (got == c.icon) { continue; }
+    wrong++;
+    Serial.printf("Warning icons: \"%s\" gave %s, not %s\n", c.event ? c.event : "(none)", ITEM_ICON_NAMES[got],
+                  ITEM_ICON_NAMES[c.icon]);
+  }
+  Serial.printf("Warning icons self-test: %s, %u cases\n", wrong ? "FAILED" : "all right",
+                (unsigned)(sizeof(CASES) / sizeof(CASES[0])));
+}
+#endif
+
+// An alert's banner: its icon alone, in the middle, and round the panel's
+// edge a frame in the colour of its level, unless the frames are switched
+// off (the web app's Info band section).
 void drawAlertBanner() {
   matrix.fillScreen(0);
-  drawItemIcon((matrix.width() - ICON_SIZE) / 2, (matrix.height() - ICON_SIZE) / 2, bannerIcon,
-               scaledColorVisible(ALERT_R, ALERT_G, ALERT_B));
+  if (feedSettings.frames) {
+    IconRgb f = levelRgb(bannerLook.severity);
+    matrix.drawRect(0, 0, matrix.width(), matrix.height(), scaledColorVisible(f.r, f.g, f.b));
+  }
+  drawItemIcon((matrix.width() - ICON_SIZE) / 2, (matrix.height() - ICON_SIZE) / 2, bannerLook);
   drawFeedbackIndicator();
   matrix.show();
   panelDirty = false;
@@ -8134,6 +8237,7 @@ void applyFeedParams(const String &q) {
   if (getParam(q, "feedw") == "on") { on |= (uint8_t)(1 << FEED_WEATHER); }   // checkboxes: absent when unticked
   if (getParam(q, "feeda") == "on") { on |= (uint8_t)(1 << FEED_WARNINGS); }
   feedSettings.on = on;
+  feedSettings.frames = getParam(q, "afr") == "on" ? 1 : 0;
   String la = getParam(q, "lat"), lo = getParam(q, "lon");
   la.trim();
   lo.trim();
@@ -8213,6 +8317,9 @@ void printFeedSection(Print &c) {
   c.print("<label><input type=checkbox name=feeda ");
   if (feedOn(FEED_WARNINGS)) { c.print("checked"); }
   c.println("> Weather warnings, every 10 min (Deutscher Wetterdienst, through Bright Sky)</label>");
+  c.print("<label><input type=checkbox name=afr ");
+  if (feedSettings.frames) { c.print("checked"); }
+  c.println("> A frame round an alert's banner, in the colour of its level</label>");
   c.print("<p style=\"font-size:13px\">");
   for (uint8_t f = 0; f < FEED_COUNT; f++) { printFeedStatus(c, f); }
   if (feedPlace[0]) { c.print("The DWD's place for it: "); printHtmlEscaped(c, feedPlace); c.println("<br>"); }
@@ -8454,6 +8561,7 @@ void apiState(Print &c) {
   s["lon"] = feedSettings.located ? deg : "";
   s["feedw"] = feedOn(FEED_WEATHER);
   s["feeda"] = feedOn(FEED_WARNINGS);
+  s["afr"] = feedSettings.frames != 0;
 #endif
   s["ssid"] = wifiCreds.ssid;
 
@@ -9354,6 +9462,17 @@ bool haNameOk(const char *name) {
   return true;
 }
 
+// The optional fields of an item or a message that its icon shows: a
+// warning's level (severity: minor, moderate, severe, extreme), how heavy
+// rain or snow is (intensity: light, moderate, heavy) and how likely it is
+// (chance, 0 to 100 %). A value that is none of them counts as not given.
+void haIconLook(JsonDocument &doc, BandItem &it) {
+  it.severity  = itemSeverityByName(doc["severity"] | "");
+  it.intensity = itemIntensityByName(doc["intensity"] | "");
+  JsonVariant chance = doc["chance"];
+  it.chance = chance.is<float>() ? (uint8_t)constrain(lroundf(chance.as<float>()), 0L, 100L) : CHANCE_UNKNOWN;
+}
+
 // mpclock/<id>/item/<name>: an item for the band, or its end (an empty
 // payload, or an until that has passed).
 void haItem(const char *name, const char *payload, uint16_t len) {
@@ -9385,6 +9504,7 @@ void haItem(const char *name, const char *payload, uint16_t len) {
   itemTextCopy(it.text, text, sizeof(it.text));
   it.icon  = icon;
   it.level = strcmp(doc["level"] | "info", "alert") == 0 ? LEVEL_ALERT : LEVEL_INFO;
+  haIconLook(doc, it);
   it.feed  = SOURCE_HA;
   it.until = (time_t)until;
   it.tag   = itemTag(name);   // a new text keeps the alert; switched from info to alert it comes up again
@@ -9425,6 +9545,7 @@ void haMessage(const char *payload, uint16_t len) {
   itemTextCopy(it.text, line, sizeof(it.text));
   it.icon  = itemIconByName(doc["icon"] | "");
   it.level = strcmp(doc["level"] | "info", "alert") == 0 ? LEVEL_ALERT : LEVEL_INFO;
+  haIconLook(doc, it);
   it.feed  = SOURCE_HA;
   it.until = clockNow() + seconds;
   it.tag   = ++messages;
