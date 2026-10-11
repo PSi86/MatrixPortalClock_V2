@@ -960,9 +960,11 @@ minute begins. The console says when it was, against the clock's own second:
 `Muncher: the new time stands at :00.000`. It is stepped by the time since it started, so a screen that was on top
 for a while, or a loop held up by a request, does not put it behind; a time that
 moved without a change (set by hand, corrected by a sync) is walked right at once.
-A GIF waits while the muncher walks, or when its change starts within the GIF's
-time plus 6 s: in a first test a GIF came up during a change and the new time
-showed only at :04.7, when it had ended. That goes for one asked for by an input
+A GIF waits while the muncher walks, or when its change starts within the GIF
+time set (*seconds per GIF*; not the GIF's own length, nor a margin for its last
+loop, so that a GIF asked for never seems to be ignored for long - a long last
+loop may overlap the start of a change): in a first test a GIF came up during a
+change and the new time showed only at :04.7, when it had ended. That goes for one asked for by an input
 too (*play random GIF*, *play last GIF again*, the web app's button): it plays
 once the scene is over, within a minute or not at all - the console says `GIF:
 waits for the muncher's scene`. Played at once, such a GIF covered the change to
@@ -999,7 +1001,8 @@ nothing is left, then a little burst), and after a pause a new one walks through
 In the power pellet scene it turns up to one of the colon's power pellets,
 and the ghosts close in on the opening, the first passing under it to the far
 side, as if the muncher were trapped. Turned blue, they stand frozen until it is
-back in the corridor, then shuffle away, blinking white as it closes in, and it
+back in the corridor, then shuffle away, blinking white as it closes in (but not
+while the other one is caught: white is the caught one's colour), and it
 catches them one after the other near the middle (in landscape at x 34 and 24,
 upright at x 8 and 23): each
 flashes white for half a second while everything else stands still, as in the

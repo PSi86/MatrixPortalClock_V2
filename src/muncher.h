@@ -399,10 +399,13 @@ class Face {
   bool giantOn() const { return mode == MODE_HOUR && hourPhase == HOUR_PHASE_GIANT; }
   bool giantMouthOpen() const { return (moves / 4) % 2 == 0; }
   // A blue ghost blinks white as the muncher closes in on it, as the game's
-  // do when their fright runs out.
+  // do when their fright runs out - but not while another one is caught:
+  // then everything stands still, and white is the caught one's colour, so
+  // the second ghost blinking beside it looked eaten as well (Peter,
+  // 2026-10-11).
   bool scaredBlink(const Ghost &h) const {
     return h.mode == GHOST_SCARED && mode == MODE_POWER && my == L.laneY && abs(mx - h.x) < 12 &&
-           ((stepsDone >> 1) & 1);
+           !frozen() && ((stepsDone >> 1) & 1);
   }
 
  private:

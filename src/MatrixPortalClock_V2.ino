@@ -7136,12 +7136,15 @@ const unsigned long GIF_ASKED_KEEP_MS = 60000;   // a wait longer than this drop
 uint8_t       gifAsked   = GIF_ASKED_NONE;
 unsigned long gifAskedAt = 0;
 
-// Whether the muncher needs the panel for as long as a GIF would take it: as
-// for a GIF of its own accord, with the GIF's time and a margin for its last
-// loop.
+// Whether the muncher needs the panel within the GIF time set: no margin for
+// a GIF's last loop, nor its own length. A GIF that waits for a change about
+// to start explains itself when the change starts at once; one that waited
+// for seconds with nothing happening would look as if the button or the
+// sensor had not worked (Peter, 2026-10-11). A long last loop may overlap
+// the start of a change - there is no perfect lock.
 bool gifMuncherBusy() {
   return settings.watchface == WATCHFACE_MUNCHER_ID &&
-         muncherWantsPanel((unsigned long)gifSettings.seconds * 1000UL + 6000UL);
+         muncherWantsPanel((unsigned long)gifSettings.seconds * 1000UL);
 }
 
 bool gifWaitsForMuncher(uint8_t kind) {
