@@ -88,6 +88,7 @@ struct BandItem {
   uint8_t  severity;   // a warning's level, 1 (minor) to 4 (extreme); 0 = none given
   uint8_t  intensity;  // ItemIntensity of rain or snow; INTENSITY_NONE = none given
   uint8_t  chance;     // how likely, 0 to 100 %; CHANCE_UNKNOWN = not said
+  char     shortText[16];   // the info card's two lines, "12°|13/9°" (UTF-8, '|' between); empty = none
   uint8_t  feed;       // the source it came from (FeedId)
   time_t   until;      // UTC
   uint32_t tag;        // which alert it is, for the banner: the same tag is the same alert, even under another key
@@ -158,6 +159,19 @@ inline void feedWhen(char *buf, size_t size, time_t utc, const FeedJob &job) {
   }
 }
 
+// An info card's two lines for a time: "until|19:00" - the time alone when it
+// is within a day, the weekday when it is further off, so the line keeps to
+// five characters.
+inline void feedCardWhen(char *buf, size_t size, const char *word, time_t utc, const FeedJob &job) {
+  static const char *const WEEKDAY[7] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+  long local = (long)utc + job.utcOffset;
+  if (utc - job.now < 86400L) {
+    snprintf(buf, size, "%s|%02d:%02d", word, (int)((local % 86400L) / 3600L), (int)((local % 3600L) / 60L));
+  } else {
+    snprintf(buf, size, "%s|%s", word, WEEKDAY[(local / 86400L + 4) % 7]);
+  }
+}
+
 // UTC of a time such as "2023-08-07T08:00:00+00:00" (Bright Sky's); 0 when it is none.
 inline time_t feedIsoTime(const char *s) {
   if (!s) { return 0; }
@@ -187,11 +201,13 @@ inline void itemTextCopy(char *dst, const char *src, size_t size) {
 }
 
 inline void feedItem(FeedResult &r, const char *key, const char *text, uint8_t icon, uint8_t level, time_t until,
-                     uint32_t tag, uint8_t severity = 0, uint8_t intensity = INTENSITY_NONE) {
+                     uint32_t tag, uint8_t severity = 0, uint8_t intensity = INTENSITY_NONE,
+                     const char *shortText = "") {
   if (r.count >= FEED_ITEMS_MAX) { return; }
   BandItem &it = r.item[r.count++];
   strlcpy(it.key, key, sizeof(it.key));
   strlcpy(it.text, text, sizeof(it.text));
+  strlcpy(it.shortText, shortText, sizeof(it.shortText));
   it.icon      = icon;
   it.level     = level;
   it.severity  = severity;
@@ -350,7 +366,14 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
   long uv = lroundf(day["uv_index_max"][0] | 0.0f);
   if (uv >= 3 && n > 0 && n < (int)sizeof(text)) { snprintf(text + n, sizeof(text) - n, ", UV %ld", uv); }
   time_t stale = job.now + FEEDS[FEED_WEATHER].staleS;
-  feedItem(r, "weather", text, icon, LEVEL_INFO, stale, itemTag("weather"), 0, intensity);
+  // The card: the temperature, and the day's high and low below it.
+  char card[16];
+  int c = snprintf(card, sizeof(card), "%ld\xC2\xB0", lroundf(cur["temperature_2m"].as<float>()));
+  if (!day["temperature_2m_max"][0].isNull() && c > 0 && c < (int)sizeof(card)) {
+    snprintf(card + c, sizeof(card) - c, "|%ld/%ld\xC2\xB0", lroundf(day["temperature_2m_max"][0].as<float>()),
+             lroundf(day["temperature_2m_min"][0].as<float>()));
+  }
+  feedItem(r, "weather", text, icon, LEVEL_INFO, stale, itemTag("weather"), 0, intensity, card);
 
   // Rain within the next four hours, from the quarter-hour forecast: when it
   // starts while it is dry, or when it stops while it rains.
@@ -364,7 +387,9 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
         char when[16];
         feedWhen(when, sizeof(when), at, job);
         snprintf(text, sizeof(text), wetNow ? "Rain until %s" : "Rain from %s", when);
-        feedItem(r, "rain", text, ICON_RAIN, LEVEL_INFO, min(at, stale), itemTag("rain"));
+        char card[16];
+        feedCardWhen(card, sizeof(card), wetNow ? "until" : "from", at, job);
+        feedItem(r, "rain", text, ICON_RAIN, LEVEL_INFO, min(at, stale), itemTag("rain"), 0, INTENSITY_NONE, card);
         break;
       }
     }
@@ -418,14 +443,16 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
     taken[best] = true;
     JsonObject al = alerts[best];
     time_t onset = feedIsoTime(al["onset"].as<const char *>()), expires = feedIsoTime(al["expires"].as<const char *>());
-    char text[96], when[16], key[8];
+    char text[96], when[16], key[8], card[16] = "";
     const char *headline = al["headline_en"] | "Weather warning";
     if (onset > job.now) {
       feedWhen(when, sizeof(when), onset, job);
       snprintf(text, sizeof(text), "%s from %s", headline, when);
+      feedCardWhen(card, sizeof(card), "from", onset, job);
     } else if (expires != 0) {
       feedWhen(when, sizeof(when), expires, job);
       snprintf(text, sizeof(text), "%s until %s", headline, when);
+      feedCardWhen(card, sizeof(card), "until", expires, job);
     } else {
       strlcpy(text, headline, sizeof(text));
     }
@@ -437,7 +464,7 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
     // counts as another warning, with a banner of its own.
     uint32_t tag = itemTag(al["onset"].as<const char *>(), itemTag(headline));
     feedItem(r, key, text, feedWarningIcon(al["event_en"].as<const char *>()), level,
-             expires != 0 ? min(expires, stale) : stale, tag, severity);
+             expires != 0 ? min(expires, stale) : stale, tag, severity, INTENSITY_NONE, card);
   }
 }
 

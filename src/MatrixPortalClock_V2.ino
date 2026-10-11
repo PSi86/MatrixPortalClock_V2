@@ -349,7 +349,7 @@ uint8_t      *gifPackCopy = nullptr;
 // sources are on: a blob of its own (NVS key "feeds"). The sources and the
 // items are in src/band_data.h, their scheduling at the end of the sketch.
 #define FEED_SETTINGS_MAGIC 0xFEED
-#define FEED_SETTINGS_REV   2          // 1 = before frames
+#define FEED_SETTINGS_REV   3          // 1 = before frames, 2 = before the info round
 struct FeedSettings {
   uint16_t magic;
   uint8_t  rev;
@@ -357,11 +357,14 @@ struct FeedSettings {
   int32_t  lat, lon;    // the place, in millionths of a degree
   uint8_t  located;     // 1 once a place is set; nothing is fetched before
   uint8_t  frames;      // 1: an alert's banner has a frame in its level's colour (rev 2)
-  uint8_t  reserved[2];
+  uint8_t  roundMinutes;   // minutes between info rounds on a clock without a band; 0 = none (rev 3)
+  uint8_t  reserved;
 };
 static_assert(sizeof(FeedSettings) == 16, "FeedSettings keeps the size stored blobs have");
 const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
-                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS)), 0, 0, 0, 1, { 0 } };
+                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS)), 0, 0, 0, 1, 15, 0 };
+// The info round's choices, in minutes (0 = never): each divides the hour.
+const uint8_t ROUND_CHOICES[] = { 0, 5, 10, 15, 20, 30, 60 };
 FeedSettings feedSettings;
 SettingsStore<FeedSettings> feedStore;
 
@@ -391,18 +394,22 @@ uint8_t  bandItemCount = 0;
 time_t   bandNextUntil = 0;   // the earliest until of them (UTC), when the next one runs out; 0 = no items
 uint32_t bandSeq = 0;         // the number the last item taken got (BandItem.seq)
 
-// Notices on the 64x32 clock, which has no room for the band (concept doc,
-// "Decided and open on the band"): the items at alert level and the messages
-// from Home Assistant. A new alert comes up as a banner with its icon alone, a
-// new message as text running through twice, an urgent message as both; the
-// face carries a marker while there are any (red for an alert, white for
-// messages alone), and they can all be shown again.
+// The items on the 64x32 clock, which has no room for the band (concept doc,
+// "Info for every clock"). The notices - the items at alert level and the
+// messages from Home Assistant: a new alert comes up as a banner with its
+// icon alone, a new message as text running through twice, an urgent message
+// as both; the face carries a marker while there are any (red for an alert,
+// white for messages alone). The other items, the information, come as cards:
+// once when they are new, and all of them in the info round every
+// roundMinutes. "Show notifications" shows everything once more.
 //
-// The notices already shown, by source and tag. One its source takes away,
-// or one that runs out, is over and forgotten at once. One dropped for a
-// technical reason stays known for a while, so a notice that comes back (a
-// reconnect to Home Assistant, a fetch that missed it) is not shown again.
-struct NoticeSeen { uint8_t feed; uint32_t tag; unsigned long lastAt; };
+// The items already shown, by source and tag; information also by its icon,
+// so the weather comes again when it turns from cloudy to rain. One its
+// source takes away, or one that runs out, is over and forgotten at once.
+// One dropped for a technical reason stays known for a while, so one that
+// comes back (a reconnect to Home Assistant, a fetch that missed it) is not
+// shown again.
+struct NoticeSeen { uint8_t feed; uint32_t tag; uint8_t icon; bool notice; unsigned long lastAt; };
 const uint8_t       NOTICE_SEEN_MAX  = 24;
 const unsigned long NOTICE_FORGET_MS = 15UL * 60UL * 1000UL;
 const uint8_t       ALERT_R = 255, ALERT_G = 0, ALERT_B = 0;   // the alert colour
@@ -411,16 +418,36 @@ uint8_t    noticeSeenCount = 0;
 enum NoticeMark : uint8_t { MARK_NONE, MARK_MESSAGE, MARK_ALERT };
 NoticeMark noticeMark = MARK_NONE;   // what the face's corner shows
 
-// What is on the panel: the banners of one or more notices, one step after
-// the other - an icon, or a text that runs through twice. A step names its
-// notice by source and tag, so one that went meanwhile is left out.
-enum NoticePhase : uint8_t { PHASE_ICON, PHASE_TEXT };
+// What is on the panel: the banners of one or more items, one step after the
+// other - an icon, a text that runs through, or an info card. A step names
+// its item by source and tag, so one that went meanwhile is left out.
+enum NoticePhase : uint8_t { PHASE_ICON, PHASE_TEXT, PHASE_CARD };
 struct NoticeStep { uint8_t feed; uint32_t tag; uint8_t phase; };
 const uint8_t NOTICE_STEPS_MAX = 2 * BAND_ITEMS_MAX;
 NoticeStep noticeSteps[NOTICE_STEPS_MAX];
 uint8_t    noticeStepCount = 0;   // 0: none on the panel
 uint8_t    noticeStepAt = 0;      // the step on the panel
 unsigned long noticeStepMs = 0;   // how long it stays
+bool       noticeCardsRound = false;   // the steps on the panel are cards of their own accord: an input ends them
+
+// An info card: the item's icon, and beside it (below it, upright) its short
+// form in two lines - a first line of three characters or fewer at double
+// size - or, without a short form, its text running through once.
+//
+// The info round goes by the clock's time (Peter, 2026-10-11): on the minutes
+// roundMinutes divides - every 15 min at :00, :15, :30 and :45 - once the face
+// has shown the new time (the classic face's fly-in, the Tetris blocks, the
+// muncher's walk and hour show) and stood at rest for ROUND_AFTER_FACE_MS. One
+// that cannot start within ROUND_LATEST_MS of its minute is left out. A GIF of
+// its own accord gives way to it, and waits ROUND_GIF_GAP_MS after it.
+const unsigned long CARD_MS = 4000;                 // a card with its two lines
+const unsigned long ROUND_GIF_GAP_MS = 60000;       // at least this between a round and a GIF
+const unsigned long ROUND_AFTER_FACE_MS = 3000;
+const unsigned long ROUND_LATEST_MS = 60000;
+char          cardLine[2][8];                       // the two lines, in the font's code page (CP437)
+bool          cardRuns = false;                     // no short form: the text runs (runText)
+unsigned long roundMinuteAt = 0;                    // millis() the round's minute began; 0 = no round waits
+unsigned long faceRestAt = 0;                       // millis() since the face is at rest; 0 = it is not
 
 // A text running through: right to left in the 5x7 font, twice when it is
 // new - the first run catches the eye, the second lets it be read - and once
@@ -738,13 +765,14 @@ int8_t   slideDir = 0;              // the slide the next menu picture starts wi
 // its colours, framed in the colour of its level; a running one, a notice's
 // text running through. Both are steps of the notices on show (noticeSteps),
 // and last as long as their step.
-enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT, BANNER_ALERT, BANNER_RUN };
+enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT, BANNER_ALERT, BANNER_RUN, BANNER_CARD };
 BannerKind    bannerKind = BANNER_TEXT;
 // An icon and how it looks: the ItemIcon, then its item's severity,
 // intensity and chance (BandItem).
 struct IconLook { uint8_t icon, severity, intensity, chance; };
 IconLook      bannerLook = { 0, 0, 0, 0 };       // BANNER_ALERT: its icon
 struct IconRgb { uint8_t r, g, b; };             // a colour of an icon's part (roleRgb())
+struct CardLayout { int16_t iconX, iconY, areaX, areaW, lineY[2], bigY[2], runY; };   // an info card's parts (cardLayout())
 char          bannerText[2][12] = { "", "" };   // one or two lines; an empty second one is not drawn
 uint8_t       bannerR = 255, bannerG = 255, bannerB = 255;
 unsigned long bannerAt = 0;      // millis() the banner came up
@@ -1518,7 +1546,13 @@ void loop(void) {
     case SCREEN_GIF:    drawGif(); break;
 #endif
     case SCREEN_MENU:   if (panelDirty) { drawMenu(); }   break;   // static: redrawn on a change only
-    case SCREEN_BANNER: if (panelDirty || bannerKind == BANNER_RUN) { drawBanner(); } break;   // a running text moves
+    case SCREEN_BANNER:   // a running text moves
+#if BAND_DATA
+      if (panelDirty || bannerKind == BANNER_RUN || (bannerKind == BANNER_CARD && cardRuns)) { drawBanner(); }
+#else
+      if (panelDirty) { drawBanner(); }
+#endif
+      break;
     case SCREEN_EDITOR: if (panelDirty || editorMoving()) { drawEditor(); } break;
     case SCREEN_GESTURE_TEST: gestureTestUpdate(); if (panelDirty) { drawGestureTest(); } break;
     default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
@@ -1547,7 +1581,11 @@ void leaveScreen(Screen s) {
   if (s == SCREEN_GIF) { gifEnd(); }
 #endif
 #if BAND_DATA
-  if (s == SCREEN_BANNER) { noticeStepCount = 0; }   // the notices still to come are off too
+  if (s == SCREEN_BANNER) {                          // the items still to come are off too
+    if (noticeCardsRound) { infoCardsEnded(); }
+    noticeStepCount = 0;
+    noticeCardsRound = false;
+  }
 #endif
 }
 
@@ -2048,6 +2086,7 @@ void drawBanner() {
 #if BAND_DATA
   if (bannerKind == BANNER_ALERT) { drawAlertBanner(); return; }
   if (bannerKind == BANNER_RUN)   { drawRunBanner(); return; }
+  if (bannerKind == BANNER_CARD)  { drawCardBanner(); return; }
 #endif
   if (bannerKind != BANNER_TIME) {
     drawCenteredLines(bannerText[0], bannerText[1][0] ? bannerText[1] : nullptr,
@@ -2645,7 +2684,7 @@ void drawHotspotMark() {
 
 // While there are notices, a small square in the same corner of the face: in
 // the alert colour while an alert holds, white while there are messages
-// alone, so it shows that "show messages again" has something to show. Not
+// alone, so it shows that "show notifications" has something to show. Not
 // in the hotspot's preview: the hotspot's mark has the corner then.
 void drawNoticeMarker() {
 #if BAND_DATA
@@ -5101,8 +5140,11 @@ InputFunction handleInput(InputEvent ev, uint8_t steps) {
 #if BAND_DATA
   if (screen == SCREEN_BANNER && noticeStepCount) {
     // A notice on show: the events set on the Inputs page go on to the next
-    // one (or back to the face after the last); the input is used up.
-    if (noticeClosedBy(ev)) { noticeAdvance(true); }
+    // one (or back to the face after the last); cards that came of their own
+    // accord all go. The input is used up.
+    if (noticeClosedBy(ev)) {
+      if (noticeCardsRound) { closeScreen(); } else { noticeAdvance(true); }
+    }
     return FN_NONE;
   }
 #endif
@@ -7265,6 +7307,11 @@ void gifUpdate() {
 #endif
   if (!gifSettings.randomOn || gifCount() == 0) { return; }
   if ((long)(millisNow - gifDueAt) < 0) { return; }
+#if BAND_DATA
+  // The info round goes by the clock's time: a GIF that would still play at
+  // its minute, or end less than ROUND_GIF_GAP_MS before it, waits for it.
+  if (roundMinuteAt != 0 || roundNextIn() < (unsigned long)gifSettings.seconds * 1000UL + ROUND_GIF_GAP_MS) { return; }
+#endif
 #if WATCHFACE_MUNCHER
   // Nor into the muncher's change of the time (a GIF that came up during one
   // on 2026-10-10 held the new time back by 4.7 s): it waits until the walk
@@ -7540,6 +7587,8 @@ void loadFeedSettings() {
   feedStore.read(feedSettings);
   if (feedSettings.magic != FEED_SETTINGS_MAGIC) { feedSettings = FEED_DEFAULTS; }
   if (feedSettings.rev < 2) { feedSettings.frames = FEED_DEFAULTS.frames; }
+  if (feedSettings.rev < 3) { feedSettings.roundMinutes = FEED_DEFAULTS.roundMinutes; }
+  if (!roundChoice(feedSettings.roundMinutes)) { feedSettings.roundMinutes = FEED_DEFAULTS.roundMinutes; }
   feedTaskOK = feedBegin();
   if (!feedTaskOK) {
     Serial.println("Info band: no RAM for the fetch task");
@@ -7694,9 +7743,18 @@ bool isMessage(const BandItem &it) {
   return it.feed == SOURCE_HA && it.key[0] == '*';
 }
 
-// Whether an item shows on the 64x32 clock: an alert, or a message.
+// Whether an item is a notice on the 64x32 clock: an alert, or a message.
+// The others, the information, come there as cards.
 bool isNotice(const BandItem &it) {
   return it.level == LEVEL_ALERT || isMessage(it);
+}
+
+// How this clock shows an item, for the web app's list: the 64x32 clock has
+// no band.
+const char *itemShowsHere(const BandItem &it) {
+  if (isMessage(it))            { return it.level == LEVEL_ALERT ? "banner, then running text" : "running text"; }
+  if (it.level == LEVEL_ALERT)  { return "banner"; }
+  return "card";
 }
 
 // The icon a notice shows: its own, the warning sign for one without.
@@ -7719,20 +7777,55 @@ void noticeForget(const BandItem &it) {
   if (s >= 0) { noticeSeen[s] = noticeSeen[--noticeSeenCount]; }
 }
 
-// Keeps a notice as shown; when the list is full, in place of the one gone
-// the longest.
-void noticeSeenAdd(uint8_t feed, uint32_t tag) {
-  if (noticeSeenIndex(feed, tag) >= 0) { return; }
-  uint8_t i = noticeSeenCount;
-  if (i == NOTICE_SEEN_MAX) {
+// Keeps an item as shown, as it is now (its icon, whether it is a notice);
+// when the list is full, in place of the one gone the longest.
+void noticeSeenAdd(const BandItem &it) {
+  int8_t s = noticeSeenIndex(it.feed, it.tag);
+  uint8_t i = s >= 0 ? (uint8_t)s : noticeSeenCount;
+  if (s < 0 && i == NOTICE_SEEN_MAX) {
     i = 0;
     for (uint8_t j = 1; j < noticeSeenCount; j++) {
       if (millisNow - noticeSeen[j].lastAt > millisNow - noticeSeen[i].lastAt) { i = j; }
     }
-  } else {
+  } else if (s < 0) {
     noticeSeenCount++;
   }
-  noticeSeen[i] = { feed, tag, millisNow };
+  noticeSeen[i] = { it.feed, it.tag, it.icon, isNotice(it), millisNow };
+}
+
+// Whether information is new: not shown yet, or shown with another icon.
+bool infoIsNew(const BandItem &it) {
+  int8_t s = noticeSeenIndex(it.feed, it.tag);
+  return s < 0 || noticeSeen[s].icon != it.icon;
+}
+
+// The information's order on the panel, the band's: DWD warnings first, then
+// rain soon, the weather, then Home Assistant's items in the order they came.
+uint8_t infoRank(const BandItem &it) {
+  if (it.feed == FEED_WARNINGS) { return 0; }
+  if (it.feed == FEED_WEATHER)  { return strcmp(it.key, "rain") == 0 ? 1 : 2; }
+  return 3;
+}
+
+// The information in that order, as positions in bandItems; only what is new
+// with `newOnly`. Returns how many.
+uint8_t infoOrder(uint8_t *order, bool newOnly) {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    if (isNotice(bandItems[i]) || (newOnly && !infoIsNew(bandItems[i]))) { continue; }
+    order[n++] = i;
+  }
+  for (uint8_t a = 1; a < n; a++) {   // insertion sort, as noticeOrder()
+    uint8_t k = order[a], b = a;
+    while (b > 0 && (infoRank(bandItems[k]) < infoRank(bandItems[order[b - 1]]) ||
+                     (infoRank(bandItems[k]) == infoRank(bandItems[order[b - 1]]) &&
+                      bandItems[k].seq < bandItems[order[b - 1]].seq))) {
+      order[b] = order[b - 1];
+      b--;
+    }
+    order[b] = k;
+  }
+  return n;
 }
 
 // Whether item x is shown before item y: alerts before messages, each in the
@@ -7816,14 +7909,37 @@ void textToCp437(char *dst, const char *src, size_t size) {
   dst[n] = '\0';
 }
 
-// Puts step i on the panel; false when its notice has gone meanwhile. An icon
+// Puts step i on the panel; false when its item has gone meanwhile. An icon
 // stands ALERT_BANNER_MS, or ICON_BEFORE_TEXT_MS when the notice's text comes
-// next; a text runs through noticeRuns times.
+// next; a text runs through noticeRuns times; a card stands CARD_MS, or as
+// long as its text takes to run through once.
 bool noticeStepShow(uint8_t i) {
   int8_t k = noticeItem(noticeSteps[i]);
   if (k < 0) { return false; }
   const BandItem &it = bandItems[k];
-  if (noticeSteps[i].phase == PHASE_ICON) {
+  if (noticeSteps[i].phase == PHASE_CARD) {
+    bannerKind = BANNER_CARD;
+    bannerLook = { (uint8_t)(it.icon < ICON_COUNT ? it.icon : ICON_NONE), it.severity, it.intensity, it.chance };
+    cardRuns = it.shortText[0] == '\0';
+    if (cardRuns) {
+      textToCp437(runText, it.text, sizeof(runText));
+      runWidth = (uint16_t)(strlen(runText) * 6);
+      runLastX = INT16_MIN;
+      CardLayout L = cardLayout();
+      unsigned long aw = bannerLook.icon != ICON_NONE ? (unsigned long)L.areaW : (unsigned long)matrix.width();
+      noticeStepMs = max(CARD_MS, (runWidth + aw) * 1000UL / RUN_PX_PER_S);
+    } else {
+      char line[sizeof(it.shortText)];
+      strlcpy(line, it.shortText, sizeof(line));
+      char *bar = strchr(line, '|');
+      if (bar) { *bar = '\0'; }
+      textToCp437(cardLine[0], line, sizeof(cardLine[0]));
+      textToCp437(cardLine[1], bar ? bar + 1 : "", sizeof(cardLine[1]));
+      noticeStepMs = CARD_MS;
+    }
+    Serial.printf("Info card: %s, icon %s, %s\n", it.key, bannerLook.icon != ICON_NONE ? ITEM_ICON_NAMES[bannerLook.icon] : "none",
+                  cardRuns ? "its text running" : it.shortText);
+  } else if (noticeSteps[i].phase == PHASE_ICON) {
     bool textNext = i + 1 < noticeStepCount && noticeStepsSame(i, i + 1) && noticeSteps[i + 1].phase == PHASE_TEXT;
     bannerKind   = BANNER_ALERT;
     bannerLook   = { noticeIcon(it), it.severity, it.intensity, it.chance };
@@ -7874,9 +7990,10 @@ void noticeStepsForNew() {
   uint8_t n = noticeOrder(order, true);
   noticeStepCount = 0;
   noticeRuns = 2;
+  noticeCardsRound = false;
   for (uint8_t k = 0; k < n; k++) {
     const BandItem &it = bandItems[order[k]];
-    noticeSeenAdd(it.feed, it.tag);
+    noticeSeenAdd(it);
     bool message = isMessage(it), alert = it.level == LEVEL_ALERT;
     if (alert && !message) {
       int8_t shared = -1, j = -1;   // the step of the banner it shares, and that step's item
@@ -7896,46 +8013,145 @@ void noticeStepsForNew() {
   }
 }
 
-// FN_SHOW_MESSAGES: every notice there is, alerts first, each in the order
-// they came: an alert's icon and then its text in the alert colour, a
-// message's text, each text running through once - whoever asked is looking
-// from the start. Over the face only; "no messages" when there are none.
-// Returns how many notices it shows.
+// FN_SHOW_MESSAGES, "Show notifications": every item there is - the alerts
+// first, then the messages, each in the order they came, then the
+// information in the band's order: an alert's icon and then its text in the
+// alert colour, a message's text, each text running through once - whoever
+// asked is looking from the start - and an info card alone: the text is for
+// what is urgent (Peter, 2026-10-11). Over the face only; "nothing to show"
+// when there is nothing. Returns how many items it shows.
 uint8_t noticesShowAgain() {
   if (screen != SCREEN_FACE) { return 0; }
   uint8_t order[BAND_ITEMS_MAX];
   uint8_t n = noticeOrder(order, false);
   noticeStepCount = 0;
   noticeRuns = 1;
+  noticeCardsRound = false;
   for (uint8_t k = 0; k < n; k++) {
     const BandItem &it = bandItems[order[k]];
-    noticeSeenAdd(it.feed, it.tag);
+    noticeSeenAdd(it);
     if (it.level == LEVEL_ALERT) { noticeAddStep(it, PHASE_ICON); }
     if (it.text[0])              { noticeAddStep(it, PHASE_TEXT); }
   }
-  Serial.printf("Notices again: %u\n", n);
+  uint8_t m = infoOrder(order, false);
+  for (uint8_t k = 0; k < m; k++) {
+    const BandItem &it = bandItems[order[k]];
+    noticeSeenAdd(it);
+    noticeAddStep(it, PHASE_CARD);
+  }
+  Serial.printf("Notifications: %u notices, %u information\n", n, m);
   if (!noticeStart()) {
-    showBanner("no", "messages", 110, 110, 110);
+    showBanner("nothing", "to show", 110, 110, 110);
     return 0;
   }
-  return n;
+  return n + m;
+}
+
+// Whether the face has shown the time's last change and moves no more for
+// it: the classic face's fly-in of the new minute, the Tetris blocks, the
+// muncher's walk and hour show.
+bool faceTimeShown() {
+#if WATCHFACE_TETRIS
+  if (settings.watchface == WATCHFACE_TETRIS_ID) {
+    for (uint8_t i = 0; i < 4; i++) { if (shakeBusy[i]) { return false; } }
+    return tetrisSettled;
+  }
+#endif
+#if WATCHFACE_MUNCHER
+  if (settings.watchface == WATCHFACE_MUNCHER_ID) { return munch.mode == muncher::MODE_IDLE; }
+#endif
+  return secondNow != 0 || millisNow - secondStartedAt >= (unsigned long)settings.flyInTime * 10UL;
+}
+
+// On every pass: a round's minute begins, and whether its round starts now -
+// the face at rest, with nothing over it, for ROUND_AFTER_FACE_MS.
+bool infoRoundReady() {
+  if (minuteTrigger && feedSettings.roundMinutes && minuteNow % feedSettings.roundMinutes == 0) {
+    roundMinuteAt = secondStartedAt;
+    faceRestAt = 0;
+  }
+  if (roundMinuteAt == 0) { return false; }
+  if (millisNow - roundMinuteAt > ROUND_LATEST_MS) {
+    Serial.println("Info round left out: the face was not free within a minute");
+    roundMinuteAt = 0;
+    return false;
+  }
+  if (screen != SCREEN_FACE || noticeStepCount || !faceTimeShown()) { faceRestAt = 0; return false; }
+  if (faceRestAt == 0) { faceRestAt = millisNow; }
+  return millisNow - faceRestAt >= ROUND_AFTER_FACE_MS;
+}
+
+// How long until the next round's minute begins, in ms; ~0UL when none comes.
+unsigned long roundNextIn() {
+  if (!feedSettings.roundMinutes || !clockIsSet()) { return ~0UL; }
+  uint8_t d = 1;
+  while ((minuteNow + d) % feedSettings.roundMinutes != 0) { d++; }
+  long ms = ((long)d * 60L - (long)secondNow) * 1000L - (long)(millisNow - secondStartedAt);
+  return ms > 0 ? (unsigned long)ms : 0;
+}
+
+bool roundChoice(long minutes) {
+  for (uint8_t c : ROUND_CHOICES) { if (c == minutes) { return true; } }
+  return false;
+}
+
+// Cards for the information: all of it in the round, else what is new. They
+// wait for a face's scene (the muncher's change), as a GIF asked for does.
+// False when they wait.
+bool infoCardsStart(bool round) {
+  uint8_t order[BAND_ITEMS_MAX];
+  uint8_t n = infoOrder(order, !round);
+#if WATCHFACE_MUNCHER
+  if (n && settings.watchface == WATCHFACE_MUNCHER_ID && muncherWantsPanel(CARD_MS * n)) { return false; }
+#endif
+  if (round) { roundMinuteAt = 0; }
+  if (!n) { return true; }
+  noticeStepCount = 0;
+  noticeRuns = 1;
+  for (uint8_t k = 0; k < n; k++) {
+    noticeSeenAdd(bandItems[order[k]]);
+    noticeAddStep(bandItems[order[k]], PHASE_CARD);
+  }
+  Serial.printf("Info cards: %u, %s\n", n, round ? "the round" : "new");
+  if (noticeStart()) { noticeCardsRound = true; }
+  return true;
+}
+
+// After a round of cards: a GIF waits a while, so the two never follow each
+// other at once.
+void infoCardsEnded() {
+#if GIF_PLAYBACK
+  if ((long)(gifDueAt - millisNow) < (long)ROUND_GIF_GAP_MS) { gifDueAt = millisNow + ROUND_GIF_GAP_MS; }
+#endif
 }
 
 // On every pass outside the hotspot. The marker follows the notices there
 // are. Notices not shown yet come up over the face, and wait while a menu,
 // an editor or another banner is up; an alert ends a GIF on show, while a
 // message lets it play to its end. A notice that went before it could be
-// shown is not shown later. An alert that eased to information is forgotten
-// at once, so it comes up again when it turns back into an alert.
+// shown is not shown later. An alert that eased to information stays known,
+// as information; information that turns into an alert comes up as new.
+// After the notices, the information: what is new as cards at once, all of
+// it in the info round; over the face only, after a GIF's end.
 void noticesUpdate() {
+  bool round = infoRoundReady();   // on every pass: it keeps watch for the round's minute
   NoticeMark mark = MARK_NONE;
-  bool newAlert = false, newAny = false;
+  bool newAlert = false, newAny = false, newInfo = false;
   for (uint8_t i = 0; i < bandItemCount; i++) {
     const BandItem &it = bandItems[i];
     int8_t s = noticeSeenIndex(it.feed, it.tag);
     if (!isNotice(it)) {
-      if (s >= 0) { noticeSeen[s] = noticeSeen[--noticeSeenCount]; }
+      if (s >= 0 && noticeSeen[s].notice) {   // an alert that eased: shown, now as information
+        noticeSeen[s].notice = false;
+        noticeSeen[s].icon = it.icon;
+      }
+      if (s >= 0 && noticeSeen[s].icon == it.icon) { noticeSeen[s].lastAt = millisNow; }
+      else                                         { newInfo = true; }
       continue;
+    }
+    if (s >= 0 && !noticeSeen[s].notice) {   // information that turned into an alert
+      noticeSeen[s] = noticeSeen[--noticeSeenCount];
+      s = -1;
     }
     bool alert = it.level == LEVEL_ALERT;
     if (alert)                   { mark = MARK_ALERT; }
@@ -7952,16 +8168,21 @@ void noticesUpdate() {
     if (millisNow - noticeSeen[i].lastAt < NOTICE_FORGET_MS) { continue; }
     noticeSeen[i] = noticeSeen[--noticeSeenCount];
   }
-  if (!newAny || noticeStepCount) { return; }                     // nothing new, or notices on the panel
+  if (noticeStepCount) { return; }                                // items on the panel
   if (screen != SCREEN_FACE && screen != SCREEN_GIF) { return; }  // waits for the face
+  if (newAny) {
 #if GIF_PLAYBACK
-  if (screen == SCREEN_GIF) {
-    if (!newAlert) { return; }                                    // a message waits for the GIF's end
-    closeScreen();
-  }
+    if (screen == SCREEN_GIF) {
+      if (!newAlert) { return; }                                  // a message waits for the GIF's end
+      closeScreen();
+    }
 #endif
-  noticeStepsForNew();
-  noticeStart();
+    noticeStepsForNew();
+    noticeStart();
+    return;
+  }
+  if (screen != SCREEN_FACE) { return; }                          // information waits for a GIF's end
+  if (newInfo || round) { infoCardsStart(round); }
 }
 
 // Whether a face event closes a notice on the panel (the Inputs page).
@@ -8092,7 +8313,7 @@ void warningIconSelfTest() {
 
 // An alert's banner: its icon alone, in the middle, and round the panel's
 // edge a frame in the colour of its level, unless the frames are switched
-// off (the web app's Info band section).
+// off (the web app's Info section).
 void drawAlertBanner() {
   matrix.fillScreen(0);
   if (feedSettings.frames) {
@@ -8100,6 +8321,84 @@ void drawAlertBanner() {
     matrix.drawRect(0, 0, matrix.width(), matrix.height(), scaledColorVisible(f.r, f.g, f.b));
   }
   drawItemIcon((matrix.width() - ICON_SIZE) / 2, (matrix.height() - ICON_SIZE) / 2, bannerLook);
+  drawFeedbackIndicator();
+  matrix.show();
+  panelDirty = false;
+}
+
+// Where an info card puts its parts (CardLayout): the lines beside the icon
+// on the wide panel, below it on the upright one; their area is where a text
+// without a short form runs through.
+CardLayout cardLayout() {
+  int16_t w = matrix.width(), h = matrix.height();
+  if (h > w) { return { (int16_t)((w - ICON_SIZE) / 2), 4, 0, w, { 34, 46 }, { 31, 49 }, 40 }; }
+  return { 2, (int16_t)((h - ICON_SIZE) / 2), 26, (int16_t)(w - 26), { 7, 18 }, { 3, 21 }, (int16_t)((h - 7) / 2) };
+}
+
+// A card's line in the 5x7 font (CP437) at a size, its width in pixels: 6 a
+// character and a size more for each at double size, but a degree sign stays
+// small there.
+int16_t cardLineWidth(const char *s, uint8_t size) {
+  int16_t w = 0;
+  for (const char *p = s; *p; p++) { w += ((uint8_t)*p == 0xF8 && size > 1) ? 6 : 6 * size; }
+  return w > 0 ? w - size : 0;   // no gap after the last character
+}
+
+void drawCardLine(const char *s, int16_t x, int16_t y, uint8_t size, uint16_t colour) {
+  for (const char *p = s; *p; p++) {
+    uint8_t c = (uint8_t)*p;
+    if (c == 0xF8 && size > 1) {   // a degree sign small and raised, as it is written
+      matrix.drawChar(x, y, c, colour, colour, 1);
+      x += 6;
+      continue;
+    }
+    matrix.drawChar(x, y, c, colour, colour, size);
+    x += 6 * size;
+  }
+}
+
+// An info card: its icon, and its two lines or its text running through once;
+// a frame in its level's colour for an item that has one (a DWD warning).
+void drawCardBanner() {
+  CardLayout L = cardLayout();
+  int16_t w = matrix.width(), h = matrix.height();
+  bool icon = bannerLook.icon != ICON_NONE;
+  int16_t ax = icon ? L.areaX : 0, aw = icon ? L.areaW : w;
+  int16_t x = 0;
+  if (cardRuns) {
+    uint32_t moved = (uint32_t)(millisNow - bannerAt) * RUN_PX_PER_S / 1000UL;
+    x = moved >= (uint32_t)(runWidth + aw) ? ax - (int16_t)runWidth : ax + aw - (int16_t)moved;
+    if (x == runLastX && !panelDirty) { return; }
+    runLastX = x;
+  }
+  matrix.fillScreen(0);
+  matrix.setFont();          // the built-in 5x7 font, code page 437
+  matrix.setTextWrap(false);
+  matrix.cp437(true);
+  uint16_t white = scaledColorVisible(235, 235, 235), grey = scaledColorVisible(150, 150, 160);
+  if (cardRuns) {
+    matrix.setTextSize(1);
+    matrix.setTextColor(white);
+    matrix.setCursor(x, icon ? L.runY : (h - 7) / 2);
+    matrix.print(runText);
+    if (icon && L.areaX > 0) { matrix.fillRect(0, 0, L.areaX, h, 0); }   // the text goes in and out beside the icon
+  } else {
+    bool two = cardLine[1][0] != '\0';
+    bool big = two && cardLineWidth(cardLine[0], 2) <= aw - 2;   // a first line of a few characters, the temperature
+    for (uint8_t i = 0; i < (two ? 2 : 1); i++) {
+      uint8_t size = (big && i == 0) ? 2 : 1;
+      int16_t lw = cardLineWidth(cardLine[i], size);
+      int16_t y = big ? L.bigY[i] : two ? L.lineY[i] : (L.lineY[0] + L.lineY[1]) / 2;
+      if (!icon) { y += (h > w) ? -16 : 0; }   // upright without an icon: the lines in the middle
+      drawCardLine(cardLine[i], ax + (aw - lw) / 2, y, size, (big && i == 1) ? grey : white);
+    }
+  }
+  matrix.cp437(false);
+  if (feedSettings.frames && bannerLook.severity) {
+    IconRgb f = levelRgb(bannerLook.severity);
+    matrix.drawRect(0, 0, w, h, scaledColorVisible(f.r, f.g, f.b));
+  }
+  if (icon) { drawItemIcon(L.iconX, L.iconY, bannerLook); }
   drawFeedbackIndicator();
   matrix.show();
   panelDirty = false;
@@ -8238,6 +8537,11 @@ void applyFeedParams(const String &q) {
   if (getParam(q, "feeda") == "on") { on |= (uint8_t)(1 << FEED_WARNINGS); }
   feedSettings.on = on;
   feedSettings.frames = getParam(q, "afr") == "on" ? 1 : 0;
+  String iround = getParam(q, "iround");
+  if (iround.length() && roundChoice(iround.toInt()) && iround.toInt() != feedSettings.roundMinutes) {
+    feedSettings.roundMinutes = (uint8_t)iround.toInt();
+    roundMinuteAt = 0;     // a round waiting goes by the old interval
+  }
   String la = getParam(q, "lat"), lo = getParam(q, "lon");
   la.trim();
   lo.trim();
@@ -8476,6 +8780,13 @@ void apiStatusInto(JsonDocument &d) {
     }
   }
   d["place"] = feedPlace;
+  // The minute of the next info round, in the clock's time; empty while it is off.
+  char roundAt[16] = "";
+  if (feedSettings.roundMinutes && clockIsSet()) {
+    unsigned long in = roundMinuteAt ? 0 : roundNextIn();
+    bandWhen(roundAt, sizeof(roundAt), clockNow() + (time_t)((in + 999UL) / 1000UL));
+  }
+  d["round"] = roundAt;
   JsonArray items = d["items"].to<JsonArray>();
   for (uint8_t i = 0; i < bandItemCount; i++) {
     JsonObject o = items.add<JsonObject>();
@@ -8486,6 +8797,7 @@ void apiStatusInto(JsonDocument &d) {
     o["icon"] = bandItems[i].icon;
     o["alert"] = bandItems[i].level == LEVEL_ALERT;
     o["until"] = until;
+    o["shows"] = itemShowsHere(bandItems[i]);
 #if HA_LINK
     o["ha"] = bandItems[i].feed == SOURCE_HA;
 #endif
@@ -8562,6 +8874,7 @@ void apiState(Print &c) {
   s["feedw"] = feedOn(FEED_WEATHER);
   s["feeda"] = feedOn(FEED_WARNINGS);
   s["afr"] = feedSettings.frames != 0;
+  s["iround"] = feedSettings.roundMinutes;
 #endif
   s["ssid"] = wifiCreds.ssid;
 
@@ -9505,6 +9818,7 @@ void haItem(const char *name, const char *payload, uint16_t len) {
   it.icon  = icon;
   it.level = strcmp(doc["level"] | "info", "alert") == 0 ? LEVEL_ALERT : LEVEL_INFO;
   haIconLook(doc, it);
+  itemTextCopy(it.shortText, doc["short"] | "", sizeof(it.shortText));   // the card's two lines, "a|b"
   it.feed  = SOURCE_HA;
   it.until = (time_t)until;
   it.tag   = itemTag(name);   // a new text keeps the alert; switched from info to alert it comes up again
