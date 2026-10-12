@@ -239,6 +239,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <button class="face" type="button" data-face="0"><canvas width="128" height="64" data-mini="classic"></canvas><span><b>Classic</b><small>HH MM SS, digits fly in</small></span></button>
           <button class="face" type="button" data-face="1"><canvas width="128" height="64" data-mini="tetris"></canvas><span><b>Tetris</b><small>HH:MM of falling blocks</small></span></button>
           <button class="face" type="button" data-face="2" id="faceMuncher"><canvas width="128" height="64" data-mini="muncher"></canvas><span><b>Muncher</b><small>HH:MM of dots, eaten anew</small></span></button>
+          <button class="face" type="button" data-face="3" id="faceAliens"><canvas width="128" height="64" data-mini="aliens"></canvas><span><b>Aliens</b><small>HH:MM of blocks that wake as aliens</small></span></button>
         </div>
       </div>
       <div class="card" data-for-face="0">
@@ -283,6 +284,32 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="row">
           <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays.</div></div>
           <div class="seg" id="mkn" role="group" aria-label="Knock"></div>
+        </div>
+      </div>
+      <div class="card" data-for-face="3">
+        <div class="group-title">Aliens</div>
+        <div class="row">
+          <div><div class="lbl">Change</div><div class="hint">How a digit that changes goes, seen at the next change of the time: all its blocks wake as aliens, are shot and the new formation marches down, or only the blocks the new digit does not have. Mixed: the whole digit when one changes, only the difference when several do.</div></div>
+          <div class="seg" id="ast" role="group" aria-label="Change"></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">Colours</div><div class="hint">White, as the arcade's, or each row in a colour of its own.</div></div>
+          <div class="seg" id="acol" role="group" aria-label="Colours"></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays. A saucer and an alien shooting back also come now and then, as often as Extras below says; every full hour the whole time goes as a wave.</div></div>
+          <div class="seg" id="akn" role="group" aria-label="Knock"></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">Waking blocks</div><div class="hint">Now and then, among the extras, a single block wakes as an alien for a moment and turns back.</div></div>
+          <div class="seg" id="anap" role="group" aria-label="Waking blocks"></div>
+        </div>
+      </div>
+      <div class="card" id="extrasCard" hidden>
+        <div class="group-title">Extras</div>
+        <div class="row">
+          <div><label class="lbl" for="dxr">How often</label><div class="hint">The face's own scenes between changes - the Aliens' saucer, an alien shooting back, a waking block; the Muncher's fruit - shared by the faces. Never around the time's change; one that has no room when it is due is left out. None in the quiet hours set under GIFs.</div></div>
+          <div class="range"><input type="range" id="dxr" min="0" max="6"><output for="dxr"></output></div>
         </div>
       </div>
     </section>
@@ -396,6 +423,17 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="row">
           <div class="lbl">Try one</div>
           <div class="ctl"><button class="btn" type="button" id="gifNow">Play a GIF now</button><span class="note" id="gifNowNote"></span></div>
+        </div>
+      </div>
+      <div class="card" id="quietCard">
+        <div class="group-title">Quiet</div>
+        <div class="row">
+          <div><div class="lbl">Quiet hours</div><div class="hint">No GIFs and no extras of their own accord from the first hour to the second; the same hour twice: none. What an input asks for still plays.</div></div>
+          <div class="pair"><label>From<select id="dqf"></select></label><label>To<select id="dqt"></select></label></div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="ddk">Dark room</label><div class="hint">No GIFs and no extras of their own accord while the room is darker than this, in lux (the light sensor's 10 s average); 0: off.</div></div>
+          <input type="number" id="ddk" min="0" max="60000">
         </div>
       </div>
     </section>
@@ -513,7 +551,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠', '〜', '❅', '♨'];   // ItemIcon in band_data.h
   // What the page edits; ssid and the WiFi password go through their own form.
   var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'mst', 'mkn', 'mpace', 'mpel', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
-    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda', 'afr', 'iround'];
+    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda', 'afr', 'iround', 'ast', 'acol', 'akn', 'anap', 'dxr', 'dqf', 'dqt', 'ddk'];
   var S = null, saved = null, cur = null, gone = false, auth = '';
   try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
   function headers(extra) { var h = extra || {}; if (auth) { h.Authorization = 'Basic ' + btoa('clock:' + auth); } return h; }
@@ -552,6 +590,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       speed: cur.speed, digit: cur.digit, trail: cur.trail };
     if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
     if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; o.mpel = cur.mpel; }
+    if (S.hw.aliens) { o.ast = cur.ast; o.acol = cur.acol; o.akn = cur.akn; o.anap = cur.anap; }
     if (pv) { o.pv = 1; }
     return enc(o);
   }
@@ -562,6 +601,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     for (var i = 0; i < 6; i++) { o['dir' + i] = cur.dirs[i]; }
     if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
     if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; o.mpel = cur.mpel; }
+    if (S.hw.aliens) { o.ast = cur.ast; o.acol = cur.acol; o.akn = cur.akn; o.anap = cur.anap; }
     if (S.hw.rtc) { o.syncd = cur.syncd; }
     if (S.hw.gesture) { o.gmount = cur.gmount; }
     S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } });
@@ -573,6 +613,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       o.gifmin = cur.gifmin; o.gifmax = cur.gifmax; o.gifsec = cur.gifsec; o.gifbr = cur.gifbr; o.gifbx = (cur.gifbx / 10).toFixed(1);
       if (cur.gifr) { o.gifr = 'on'; }
     }
+    if (has('dxr')) { o.dxr = cur.dxr; o.dqf = cur.dqf; o.dqt = cur.dqt; o.ddk = cur.ddk; }
     if (has('lat')) {
       o.lat = cur.lat; o.lon = cur.lon;
       if (cur.feedw) { o.feedw = 'on'; }
@@ -691,6 +732,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   function showFace() {
     $$('.face').forEach(function (b) { b.setAttribute('aria-pressed', +b.dataset.face === cur.wf ? 'true' : 'false'); });
     $$('[data-for-face]').forEach(function (c) { c.hidden = +c.dataset.forFace !== cur.wf; });
+    // The extras' pace, shared by the faces that have extras: the Muncher, the Aliens.
+    $('#extrasCard').hidden = !(has('dxr') && (cur.wf === 2 || cur.wf === 3));
   }
   function showAuto() {
     var sensor = S.hw.lux;
@@ -781,7 +824,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#band').hidden = !has('lat');
     $('#facePick').hidden = !S.hw.tetris;
     $('#faceMuncher').hidden = !S.hw.muncher;
-    if (!S.hw.tetris || (cur.wf === 2 && !S.hw.muncher)) { cur.wf = 0; }
+    $('#faceAliens').hidden = !S.hw.aliens;
+    if (!S.hw.tetris || (cur.wf === 2 && !S.hw.muncher) || (cur.wf === 3 && !S.hw.aliens)) { cur.wf = 0; }
     buildNav();
     // Face
     $$('.face').forEach(function (b) {
@@ -806,6 +850,14 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         setSeg(el, m[0], true, m[1]);
       });
       setRange('mpace', 'mpace', ' ms');
+    }
+    if (S.hw.aliens) {
+      // The colours show at once, the change at the next change of the time; a new knock shows its scene.
+      [['ast', false], ['acol', false], ['akn', false], ['anap', false]].forEach(function (m) {
+        var el = $('#' + m[0]);
+        if (!el.children.length) { S.lists[m[0]].forEach(function (t, v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = t; el.appendChild(b); }); }
+        setSeg(el, m[0], true, m[1]);
+      });
     }
     // The knock's sensitivity: an input setting, kept with the Tetris settings.
     $('#shkRow').hidden = !(S.hw.tetris && S.hw.accel);
@@ -844,6 +896,18 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       setRange('gifsec', 'gifsec', ' s');
       $('#gifNow').hidden = S.mode === 'ap';
       $('#gifNowNote').textContent = S.mode === 'ap' ? 'GIFs play over the face, not while the hotspot is open.' : '';
+    }
+    // Extras and quiet
+    $('#quietCard').hidden = !has('dxr');
+    if (has('dxr')) {
+      setRange('dxr', 'dxr', '', function (v) { return S.lists.dxr[v]; });
+      ['dqf', 'dqt'].forEach(function (k) {
+        var sel = $('#' + k);
+        if (!sel.children.length) { for (var h = 0; h < 24; h++) { var o = document.createElement('option'); o.value = h; o.textContent = pad(h) + ':00'; sel.appendChild(o); } }
+        sel.value = cur[k];
+        if (!sel.dataset.bound) { sel.dataset.bound = 1; sel.addEventListener('change', function () { cur[k] = +sel.value; changed(); }); }
+      });
+      setNumber('ddk', 'ddk');
     }
     // Info band
     if (has('lat')) { setNumber('lat', 'lat'); setNumber('lon', 'lon'); setCheck('feedw', 'feedw', showNeeds); setCheck('feeda', 'feeda', showNeeds); }
@@ -1088,7 +1152,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       var off = document.createElement('canvas'); off.width = 64; off.height = 32;
       var o = off.getContext('2d'), d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
       o.fillStyle = '#fff'; o.textAlign = 'center'; o.textBaseline = 'middle';
-      var tet = cv.dataset.mini === 'tetris', mun = cv.dataset.mini === 'muncher';
+      var tet = cv.dataset.mini === 'tetris', mun = cv.dataset.mini === 'muncher', ali = cv.dataset.mini === 'aliens';
+      if (ali) { drawAliensMini(cv, d.getHours(), d.getMinutes()); return; }
       o.font = (tet ? '900 22px ' : mun ? '900 19px ' : '800 13px ') + getComputedStyle(document.body).fontFamily;
       if (tet) { o.fillText(p(d.getHours()) + ':' + p(d.getMinutes()), 32, 17); }
       else if (mun) { o.fillText(p(d.getHours()) + ':' + p(d.getMinutes()), 32, 12); }
@@ -1110,6 +1175,30 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         ['.###.', '###..', '##...', '###..', '.###.'].forEach(function (row, j) { for (var i = 0; i < 5; i++) { if (row[i] === '#') { led(20 + i, 25 + j, '#ffff00'); } } });
       }
     });
+  }
+
+  // The Aliens face in the picker: its digits as blocks on their 3 x 5 grid, two of them awake, the cannon below.
+  function drawAliensMini(cv, h, m) {
+    var CELLS = [[7, 5, 5, 5, 7], [2, 3, 2, 2, 7], [7, 4, 7, 1, 7], [7, 4, 7, 4, 7], [5, 5, 7, 4, 4],
+                 [7, 1, 7, 4, 7], [7, 1, 7, 5, 7], [7, 4, 2, 2, 2], [7, 5, 7, 5, 7], [7, 5, 7, 4, 7]];
+    var c = cv.getContext('2d'), cell = cv.width / 64, xs = [3, 17, 35, 49], t = [Math.floor(h / 10), h % 10, Math.floor(m / 10), m % 10];
+    var led = function (x, y, col) { c.fillStyle = col; c.beginPath(); c.arc(x * cell + cell / 2, y * cell + cell / 2, cell * 0.4, 0, 6.283); c.fill(); };
+    c.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() || '#07090c';
+    c.fillRect(0, 0, cv.width, cv.height);
+    var ALIEN = ['#.#', '###', '#.#'];
+    t.forEach(function (d, i) {
+      CELLS[d].forEach(function (row, r) {
+        for (var k = 0; k < 3; k++) {
+          if (!(row & (1 << k))) { continue; }
+          var awake = i === 3 && r >= 3;
+          for (var y = 0; y < 3; y++) { for (var x = 0; x < 3; x++) { if (!awake || ALIEN[y][x] === '#') { led(xs[i] + 4 * k + x, 3 + 4 * r + y, '#ebebeb'); } } }
+        }
+      });
+    });
+    led(31, 9, '#ebebeb'); led(32, 9, '#ebebeb'); led(31, 10, '#ebebeb'); led(32, 10, '#ebebeb');
+    led(31, 15, '#ebebeb'); led(32, 15, '#ebebeb'); led(31, 16, '#ebebeb'); led(32, 16, '#ebebeb');
+    ['..#..', '.###.', '#####'].forEach(function (row, j) { for (var x = 0; x < 5; x++) { if (row[x] === '#') { led(56 + x, 29 + j, '#28e63c'); } } });
+    led(58, 25, '#ebebeb'); led(58, 26, '#ebebeb');
   }
 
   // ---- actions ---------------------------------------------------------------------------------------------
@@ -1179,7 +1268,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }).catch(function () { toast('The clock did not answer.'); });
   });
   $('#gifNow').addEventListener('click', function () {
-    api('/api/gif', '').then(function (r) { toast(r.playing ? 'The clock plays a GIF now.' : r.waits ? 'The GIF plays once the muncher’s scene is over.' : 'No GIF: one plays only over the face.'); }).catch(function () { toast('The clock did not answer.'); });
+    api('/api/gif', '').then(function (r) { toast(r.playing ? 'The clock plays a GIF now.' : r.busy ? 'Not now: the time’s change is near or the face plays a scene. Try again in a moment.' : 'No GIF: one plays only over the face.'); }).catch(function () { toast('The clock did not answer.'); });
   });
   $('#ssid').addEventListener('input', markNet);
   $('#wifiSave').addEventListener('click', function () {

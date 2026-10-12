@@ -260,6 +260,47 @@ The shortcuts are stored as codes that a later firmware never renumbers
 (`FACE_EVENTS` and `FACE_ACTIONS` in `src/input_map.h`, checked at build time),
 in a blob of their own (S3: NVS key `keys`, M4: the flash block at 0x78000).
 
+## Who takes the panel
+
+On the S3 everything that wants the panel follows one set of rules (concept doc,
+tab "Panel priorities"; decided by Peter on 2026-10-12). They came from a count:
+of 106 GIFs on the evening of 2026-10-11, 22 started within 2 s after the new time
+stood (an even spread gives 5) and 9 at :08 of the minute after an info round,
+because whatever waited took the panel the moment it was free.
+
+- **Nine levels**, highest first: the hotspot; the person at the clock (menu,
+  editor, banners, the gesture test, what an input asks for); alerts; the time's
+  change; messages; information (the info round, new cards); the faces' extras;
+  GIFs of their own accord; the plain face.
+- **The time's change is protected**, on every face, the hour's included:
+  anything optional ends 3 s before it starts (a GIF's whole loops counted) and
+  does not start while it runs. Alerts come at once, also over a change.
+- **Messages and information at a fixed place in the minute:** 3 s after the
+  change and before second :30; what comes later waits for the next minute, so
+  they show at times one can count on. A message waits for a GIF's end.
+- **Animations** - GIFs and the faces' extras of their own accord - take the
+  rest of the minute, and the whole minute when no information waits. They
+  need the plain face at rest for 10 s first, and a GIF a minute after info
+  cards and before an info round.
+- **Nothing optional waits:** a GIF or an extra that has no room when it is due
+  is dropped (`GIF: due, the panel not free for it - dropped`), and the next
+  random time is drawn; a random time that falls into the slot around a change
+  is drawn anew straight away. A GIF or a face scene asked for by an input
+  (button, gesture, knock, the web app) plays at once or not at all: during the
+  face's change or a scene it is dropped (`GIF: asked for during the face's
+  change or scene, dropped`), and so is one that would run into the next change.
+- **Extras** (the face section, **Extras**, shared by the faces that have them):
+  how often the Aliens' saucer, an alien shooting back and a waking block, and
+  the Muncher's fruit come - never, or about every 60, 30, 15, 10, 5 (the
+  default) or 2 minutes, at a random time from half to one and a half times
+  that.
+- **Quiet** (the GIF section): **quiet hours** from one hour to another, and a
+  **dark room** below a light level in lux (the light sensor's 10 s average) -
+  no GIFs and no extras of their own accord then. Both are off by default; what
+  an input asks for still plays.
+
+The settings for extras and quiet are a blob of their own (NVS key `deco`).
+
 ## GIF playback
 
 On the MatrixPortal S3 a GIF takes the panel in place of the face now and then,
@@ -272,10 +313,10 @@ loop is worked out from the file when the GIF starts, from its frame delays (a
 frame given less than 20 ms, or no delay at all, shows for 100 ms, as in browsers),
 and the frames follow the file's own timeline, so a frame drawn a few ms late does
 not stretch the loop. A GIF whose single loop runs longer than a minute is ended
-after a minute. A GIF comes up only
-over the plain face; while the menu, a banner or the hotspot is up it waits. Any
-button press ends it early and does nothing else; the hold that started it does
-not end it.
+after a minute. A GIF of its own accord comes only over the plain face, and when
+it is due it plays at once or not at all - it never waits (see [Who takes the
+panel](#who-takes-the-panel)). Any button press ends it early and does nothing
+else; the hold that started it does not end it.
 
 A GIF plays at its own size, centred, unscaled, and only where it fits the panel
 as it is held: 64x32 GIFs in landscape, 32x64 upright, 32x32 either way. Turning
@@ -548,9 +589,11 @@ Assistant as running text, and all the other information as **info cards**.
   fly-in, the Tetris blocks, the muncher's walk and hour show - and stood at
   rest. One that finds no free face within a minute is left out. A GIF of its
   own accord gives way: none starts when it would still play at the round's
-  minute or end less than a minute before it, and none comes within a minute
-  after the round. New cards wait for a GIF's end and for the muncher's change
-  of the time. A ticked input (see below) ends the cards on show.
+  minute or end less than a minute before it, and none within a minute after
+  info cards. New cards come at the minute's place for information - 3 s after
+  the time's change and before :30, else in the next minute - and wait for a
+  GIF's end ([Who takes the panel](#who-takes-the-panel)). Cards never run into
+  the next change. A ticked input (see below) ends the cards on show.
 - **A message:** its text (`title: text`) runs through the middle of the panel
   in the 5x7 font, white, from the right edge out at the left, twice, at about
   five characters a second; an urgent one (`"level": "alert"`) shows its icon
@@ -558,8 +601,10 @@ Assistant as running text, and all the other information as **info cards**.
   letters of code page 437, and °; other characters show as `?`. A message
   keeps 96 bytes, so two runs of the longest take about 40 s.
 - **When:** over the face. While the menu, an editor or another banner is up,
-  they wait until the face is back; an alert ends a GIF on show, a message lets
-  it play to its end. Several new ones come one after the other, alerts first,
+  they wait until the face is back. An alert comes at once - also over a
+  running change of the time - and ends a GIF on show; a message comes at the
+  minute's place for it, 3 s after the change and before :30 (else in the next
+  minute), and lets a GIF play to its end. Several new ones come one after the other, alerts first,
   each kind in the order it came; nothing else cuts them short - not a new
   alert or message, a GIF that is due, turning the clock, the web app - only
   their own end, a ticked input (the Inputs page: **closes**, every button
@@ -818,7 +863,7 @@ real change, build with `-D DST_TEST_UTC=<utc seconds>` in addition to
 ## Watchfaces
 
 The **watchface** setting on the config page switches between the clock faces:
-Classic on both boards, Tetris and Muncher on the S3. It previews live, so the
+Classic on both boards, Tetris, Muncher and Aliens on the S3. It previews live, so the
 choice can be judged on the panel before saving.
 
 **Classic** (default) shows `HH MM SS` with the six flying digits. This is the
@@ -1012,16 +1057,16 @@ minute begins. The console says when it was, against the clock's own second:
 `Muncher: the new time stands at :00.000`. It is stepped by the time since it started, so a screen that was on top
 for a while, or a loop held up by a request, does not put it behind; a time that
 moved without a change (set by hand, corrected by a sync) is walked right at once.
-A GIF waits while the muncher walks, or when its change starts within the GIF
-time set (*seconds per GIF*; not the GIF's own length, nor a margin for its last
-loop, so that a GIF asked for never seems to be ignored for long - a long last
-loop may overlap the start of a change): in a first test a GIF came up during a
-change and the new time showed only at :04.7, when it had ended. That goes for one asked for by an input
-too (*play random GIF*, *play last GIF again*, the web app's button): it plays
-once the scene is over, within a minute or not at all - the console says `GIF:
-waits for the muncher's scene`. Played at once, such a GIF covered the change to
-midnight on 2026-10-11 (most likely started by a knock, on *play last GIF
-again*; knocks are not logged).
+No GIF starts while the muncher walks, nor when its whole loops would not end
+3 s before the next change starts ([Who takes the panel](#who-takes-the-panel)):
+in a first test a GIF came up during a change and the new time showed only at
+:04.7, when it had ended. One asked for by an input (*play random GIF*, *play last
+GIF again*, the web app's button) plays at once or not at all: during a scene it
+is dropped (`GIF: asked for during the face's change or scene, dropped`). Played at
+once, such a GIF covered the change to midnight on 2026-10-11 (most likely started
+by a knock, on *play last GIF again*; knocks are not logged); kept for the scene's
+end, as from then to 2026-10-12, it played right after the time's change (Peter).
+The same goes for the Aliens face.
 
 **Change**, one of three: *Mixed* (the default) eats the whole old digit and
 walks the new one when one digit changes, and walks only the segments that differ
@@ -1048,7 +1093,9 @@ intermission - a ghost chases the muncher out to the left, and a giant muncher
 (13 × 13 px, over the corridor) chases the ghost, turned blue, back out to the
 right. About 9 s.
 
-**Bonus fruit**: after one minute change in five, on average, a fruit lies in the
+**Bonus fruit**: now and then, at the pace of the extras the faces share (the
+**Extras** slider, about every 5 min by default; none in quiet hours or a dark
+room), a fruit lies after a minute change in the
 corridor - a cherry, a strawberry, an orange or an apple, 7 × 7 px - still until
 the next change, whose muncher eats it on its way along (`Muncher: a bonus fruit
 eaten` on the console).
@@ -1073,7 +1120,7 @@ game, and is gone. Before, both fled to the left, and the muncher caught one at
 the very edge of the panel and, upright, none; then a ghost coming in from the
 right gave the scene away from its start; and a caught ghost ran off as a pair of
 eyes, which on the panel read as a lone dot flying through the corridor. A knock is not taken while a
-scene runs, for 1 s after one, or when its scene could not end 1.5 s before the
+scene runs, for 1 s after one, or when its scene could not end 3 s before the
 next change starts. However the ghosts stand, a scene ends at the latest 150
 steps after the muncher's walk, so no scene can hold up a change of the time.
 
@@ -1082,7 +1129,7 @@ are; `mst`, `mkn` (0 power pellet, 1 last digit again, 2 random, 3 ghosts win:
 the newest value went to the end, so a stored *random* stays random) and `mpace`
 in the web app's interface. Changing the pace shows a change of the minutes' ones
 (eaten and laid again); choosing another knock shows its scene; a new change
-style shows at the next change of the time. A preview waits until it can end 1.5 s
+style shows at the next change of the time. A preview waits until it can end 3 s
 before the next change starts, so it never holds one up, and the time on show is
 never wrong for it: the first previews showed the last minute's digits and walked
 them to this minute's, which at midnight set the clock back to 23:59 for a moment.
@@ -1092,6 +1139,70 @@ caught, away from the panel's edges), the ghosts winning, both with the same
 start as a change, step by step, a change with four ghosts, the hour show and a
 fruit eaten - ten seconds after start-up, says on the console whether each came
 out right, and where the knock's scene caught its ghosts.
+
+### Aliens
+
+**Aliens** (S3; after Space Invaders, with a plain name and pixel art of its own)
+shows `HH:MM` in blocks of 3 × 3 px with a gap, on a grid of 3 × 5 cells of
+4 × 4 px a digit - 12 × 20 px, the Tetris size - with a green cannon at the
+bottom. Upright the hours stand above the minutes and the cannon below them.
+Between changes the blocks stand still. The trial build of 2026-10-11 also had
+digits made of small aliens, of wide aliens and of solid cells; on the panel the
+digits of aliens could not be read as a time, so the blocks stayed (concept doc
+"Aliens: draft").
+
+**The minute change** is planned backwards from the minute, as the Muncher's, so
+the new time stands at :00: the blocks the change takes wake as aliens and march
+on the spot for 1.5 s - legs in two frames and a pixel to the right and to the
+left, 400 ms a step - so whoever looks sees them turn; an alien sways only where
+its row has room that way (an empty cell or the digit's edge before a block that
+stays), so one between two staying blocks stands still. Then the cannon drives
+under them and shoots them one by one, column by column from the bottom up, each
+hit an orange burst; the new formation marches down from above the panel in steps
+of a cell - behind the blocks that stay - lands, marches on the spot for 1.5 s as
+aliens and turns into blocks at :00; the cannon drives home. Each transformation
+has its moment, apart from what moves around it (Peter, 2026-10-11). **Change**
+(`ast`): *Whole digit* wakes and shoots every block of a changing digit and brings
+its whole new formation, *Only the difference* only the blocks the new digit does
+not have; *Mixed* (the default) takes the whole digit when one changes and the
+difference when several do.
+
+**The full hour** goes as a wave, whatever the Change setting: every block of all
+four digits wakes, the wave steps down a row, is shot away digit by digit, and the
+new time marches in. At midnight that takes about 38 s, the longest change.
+
+**Now and then**, at the pace of the extras the faces share (the **Extras** slider,
+about every 5 min by default) and at a random time outside the slot around the
+change, a scene leaves the time as it is: a red **saucer** crosses the lane above the digits and
+the cannon shoots it through a gap between two digits it can reach in time (upright
+the saucer flies slower, the panel being narrow and the shot's way long); or an
+**alien shoots back** - the lowest block of a column wakes, the cannon drives under
+it and, once it is there, the alien drops its bomb, which hits it; the wreck flickers, a new cannon blinks
+in at home and the alien turns back into its block; or, with **Waking blocks**
+(`anap`, on by default), a single block wakes as an alien for 3 s and turns back.
+Upright only the minutes shoot back, since the hours stand above them. One that has
+no room when it is due - the wave's minute, info cards waiting, a GIF just before -
+is dropped, not kept. **Knock** (`akn`): what a knock, or the face action "trigger watchface
+animation", plays - *Last digit again* (the minutes' ones shot and brought back),
+*Saucer*, *Aliens shoot back*, or *Random each time* (the default); a new value
+chosen in the web app plays it once, and choosing the face shows a change of the
+minutes' ones. None of them starts when it could not end 3 s before the next
+change; GIFs and info cards do not start into a scene.
+
+**Colours** (`acol`): white, as the arcade's overlay, or each row in its own colour
+(magenta, cyan, green). The settings blob of the trial build (revision 1, with a
+look and an idle setting) is read once: its change and colours are kept; a blob of
+revision 2 gets the knock's default.
+
+Each scene is a plan of actions on a timeline (`src/aliens.h`): what the face shows
+at any moment follows from the plan and the time alone, so it is drawn on whatever
+pass the loop has and is never behind. The settings are in a blob of their own (NVS
+key `aliens`). The debug build checks, on both layouts, every change of every digit
+both ways - no woken alien sways into a block that stays, the new formation stands
+a moment as aliens and then as the digit, the cannon home, within the minute - the
+change of all four at midnight, the wave at three full hours, the saucer from
+either side to each gap, and every alien that can shoot back: the shot meets the
+saucer, the bomb meets the cannon, the time stays.
 
 ## Animation timing
 

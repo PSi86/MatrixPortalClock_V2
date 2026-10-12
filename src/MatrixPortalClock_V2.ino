@@ -43,6 +43,15 @@ Todo Concept:
 #endif
 #include "muncher.h"           // the Muncher watchface's logic
 #endif
+#if WATCHFACE_ALIENS
+#if !WATCHFACE_MUNCHER
+#error "The Aliens watchface comes after the Muncher's number: WATCHFACE_MUNCHER has to be on as well"
+#endif
+#if !GIF_PLAYBACK
+#error "The Aliens watchface takes the panel by the rules that come with the GIF playback: GIF_PLAYBACK has to be on as well"
+#endif
+#include "aliens.h"            // the Aliens watchface's logic
+#endif
 
 #include <math.h>              // powf() for perceptual brightness fade
 
@@ -129,7 +138,7 @@ Adafruit_Protomatter matrix(
 struct Settings {
   uint16_t magic;        // validity marker
   uint8_t  settingsRev;  // layout revision, see SETTINGS_REV (was padding in rev 0)
-  uint8_t  watchface;    // WATCHFACE_CLASSIC, WATCHFACE_TETRIS_ID or WATCHFACE_MUNCHER_ID
+  uint8_t  watchface;    // WATCHFACE_CLASSIC, WATCHFACE_TETRIS_ID, WATCHFACE_MUNCHER_ID or WATCHFACE_ALIENS_ID
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
   uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
@@ -162,7 +171,10 @@ const uint16_t FLY_IN_MIN_MS = 100, FLY_IN_MAX_MS = 850;
 const uint8_t WATCHFACE_CLASSIC    = 0;  // six flying GFX-font digits, HH MM SS
 const uint8_t WATCHFACE_TETRIS_ID  = 1;  // HH:MM built from falling tetromino blocks
 const uint8_t WATCHFACE_MUNCHER_ID = 2;  // HH:MM in dots, eaten and laid anew by a muncher
-#if WATCHFACE_MUNCHER
+const uint8_t WATCHFACE_ALIENS_ID  = 3;  // HH:MM of aliens, shot and marching in anew
+#if WATCHFACE_ALIENS
+const uint8_t WATCHFACE_COUNT      = 4;
+#elif WATCHFACE_MUNCHER
 const uint8_t WATCHFACE_COUNT      = 3;
 #else
 const uint8_t WATCHFACE_COUNT      = 2;
@@ -343,6 +355,65 @@ bool          gifPackMapped = false;
 uint8_t      *gifPackCopy = nullptr;
 #endif
 
+/* ======================================================================
+   Who takes the panel, and when (concept doc, tab "Panel priorities";
+   decided by Peter 2026-10-12)
+   ----------------------------------------------------------------------
+   Nine levels, highest first: the hotspot; the person at the clock (the
+   menu, an editor, banners, the gesture test, what an input asks for);
+   alerts, at once; the time's change; messages; information (the info
+   round, new cards); the faces' extras; GIFs of their own accord; the
+   plain face.
+
+   The time's change - every face's, the hour's included - is protected:
+   whatever is optional ends PANEL_GUARD_BEFORE_MS before it starts.
+   Messages and information come at a fixed place in the minute,
+   PANEL_INFO_AFTER_MS after the change and before second
+   PANEL_INFO_HALF_S, so they show at times one can count on; what comes
+   later waits for the next minute. The rest of the minute is for
+   animations, the whole minute when no information waits. Nothing optional
+   waits for the panel: an animation or a request that cannot play when it
+   is due is dropped, and a random time that falls into the slot around a
+   change is drawn anew.
+   ====================================================================== */
+const unsigned long PANEL_GUARD_BEFORE_MS = 3000;   // optional things end this long before a change starts
+const unsigned long PANEL_INFO_AFTER_MS   = 3000;   // messages, cards, the info round: after a change's end
+const unsigned long PANEL_DECOR_REST_MS   = 10000;  // GIFs and extras of their own accord: the plain face this long first
+const unsigned long PANEL_EXTRA_MS        = 8000;   // the longest extra of a face, about
+const unsigned long TETRIS_KNOCK_MS       = 6000;   // a knock's break-up and build on the Tetris face, about
+const uint8_t       PANEL_INFO_HALF_S     = 30;     // messages and cards start before this second
+unsigned long faceChangeEndedAt = 0;   // the face's last change or scene ended
+unsigned long panelFaceSince    = 0;   // the face came back on top
+
+#if GIF_PLAYBACK
+#if !BAND_DATA
+#error "GIF playback follows the panel's rules, which need the info band's notices: BAND_DATA has to be on as well"
+#endif
+// Decoration - GIFs of their own accord and the faces' extras - and when it
+// rests: quiet hours, and a dark room by the light sensor. A blob of its
+// own (NVS key "deco").
+#define DECOR_SETTINGS_MAGIC 0xDEC0
+#define DECOR_SETTINGS_REV   1
+struct DecorSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  extras;      // how often the faces' extras come: 0 never, 1 rare ... DECOR_EXTRAS_MAX often
+  uint8_t  quietFrom;   // quiet hours from this hour ...
+  uint8_t  quietTo;     // ... to this one; the same hour twice: none
+  uint16_t darkLux;     // below this light no decoration; 0 = off
+};
+static_assert(sizeof(DecorSettings) == 8, "the stored blob keeps its size");
+const uint8_t DECOR_EXTRAS_MAX = 6;
+// The mean minutes between two extras for each step of the slider (0 = never).
+const uint8_t DECOR_EXTRAS_MINUTES[DECOR_EXTRAS_MAX + 1] = { 0, 60, 30, 15, 10, 5, 2 };
+// About every 5 min, as the Aliens' extras and the Muncher's fruit came before; no quiet.
+const DecorSettings DECOR_DEFAULTS = { DECOR_SETTINGS_MAGIC, DECOR_SETTINGS_REV, 5, 0, 0, 0 };
+DecorSettings decorSettings;
+SettingsStore<DecorSettings> decorStore;
+unsigned long extrasDueAt = 0;          // the next extra of a face; 0 = not drawn yet
+unsigned long infoCardsEndedAt = 0;     // a GIF keeps ROUND_GIF_GAP_MS after info cards
+#endif
+
 #if BAND_DATA
 // Info band data ---------------------------------------------------------------
 // The place the clock fetches weather and warnings for, and which of its
@@ -447,6 +518,7 @@ const unsigned long ROUND_LATEST_MS = 60000;
 char          cardLine[2][8];                       // the two lines, in the font's code page (CP437)
 bool          cardRuns = false;                     // no short form: the text runs (runText)
 unsigned long roundMinuteAt = 0;                    // millis() the round's minute began; 0 = no round waits
+bool          noticesPending = false;               // messages or new cards wait for the minute's place for them
 unsigned long faceRestAt = 0;                       // millis() since the face is at rest; 0 = it is not
 
 // A text running through: right to left in the 5x7 font, twice when it is
@@ -977,6 +1049,7 @@ BH1750FVI     lightMeter(BH1750FVI_DEFAULT_ADDRESS); // I2C address 0x23 (ADDR p
 bool          luxOK = false;     // true once the BH1750 was found on I2C
 unsigned long luxLast = 0;       // last light-sensor poll (1 Hz throttle)
 float         lastLux = -1.0f;   // most recent UNFILTERED lux reading (web UI), -1 = none yet
+float         luxAvg = -1.0f;    // its 10 s moving average, -1 = none yet (the dark room)
 // Moving average of the lux readings so brightness changes are gentle, not
 // jumpy. At the 1 Hz sampling rate a 10-sample window equals a 10 s average.
 const uint8_t LUX_AVG_SAMPLES = 10;
@@ -1327,6 +1400,7 @@ void setup(void) {
   loadUiSettings();
 #if GIF_PLAYBACK
   loadGifSettings();
+  loadDecorSettings();
   gifPackLoad();
   gifGammaInit();
   gifScheduleNext();
@@ -1483,6 +1557,10 @@ void loop(void) {
   static bool muncherTested = false;
   if (!muncherTested && millisNow > 10000) { muncherTested = true; muncherSelfTest(); }
 #endif
+#if WATCHFACE_ALIENS && defined(CLOCK_DEBUG)
+  static bool aliensTested = false;
+  if (!aliensTested && millisNow > 10000) { aliensTested = true; aliensSelfTest(); }
+#endif
 #if BAND_DATA && defined(CLOCK_DEBUG)
   static bool warningIconsTested = false;
   if (!warningIconsTested && millisNow > 10000) { warningIconsTested = true; warningIconSelfTest(); }
@@ -1534,6 +1612,9 @@ void loop(void) {
 #endif
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
   updateScreenTimeouts();
+#if GIF_PLAYBACK
+  panelWatch();         // when the face's change ends, for who takes the panel next
+#endif
 #if BAND_DATA
   noticesUpdate();      // a new alert or message comes up, before a GIF that is due
 #endif
@@ -1605,6 +1686,7 @@ void showScreen(Screen next) {
   if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
   // A face that was hidden is not stepped, so it catches up before it is drawn.
   if (!screenShowsFace(prev) && screenShowsFace(next)) { faceCatchUp(); }
+  if (next == SCREEN_FACE) { panelFaceSince = millisNow; }   // the plain face's rest starts over
 #if MENU_SLIDE
   // Between the list and an editor the picture slides; any other change clears
   // a slide that was asked for but never drawn (the editor closing straight
@@ -1720,6 +1802,9 @@ void updateApDisplay() {
   if (face == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
 #if WATCHFACE_MUNCHER
   if (face == WATCHFACE_MUNCHER_ID) { drawMuncherFace(); return; }
+#endif
+#if WATCHFACE_ALIENS
+  if (face == WATCHFACE_ALIENS_ID) { drawAliensFace(); return; }
 #endif
 #else
   activeWatchface();
@@ -1877,6 +1962,7 @@ void updateBrightness() {
       float sum = 0;
       for (uint8_t i = 0; i < luxHistCount; i++) { sum += luxHistory[i]; }
       float avgLux = sum / luxHistCount;
+      luxAvg = avgLux;
       autoBrightTarget = mapLuxToBrightness(avgLux);
       Serial.print("Lux "); Serial.print(lux); Serial.print(" avg "); Serial.print(avgLux);
       Serial.print(" -> sensor "); Serial.println(autoBrightTarget);
@@ -3586,7 +3672,7 @@ const uint8_t MUNCHER_KNOCK_REPLAY = 1;   // the minutes' ones eaten and laid ag
 const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
 const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
 const uint8_t MUNCHER_KNOCK_COUNT  = 4;
-const uint8_t MUNCHER_FRUIT_ONE_IN = 5;   // a bonus fruit after one minute change in this many
+const uint8_t MUNCHER_FRUIT_ONE_IN = 5;   // without the extras' shared pace: a bonus fruit after one minute change in this many
 // The LEDs of a pellet, in the digits and the corridor: one, or more to be
 // seen better from afar (Peter, 2026-10-11) - two side by side, which makes
 // the level strokes solid lines, two one above the other, which makes the
@@ -3606,7 +3692,7 @@ const uint8_t MUNCHER_AFTER_MINUTE  = 1;
 const uint8_t MUNCHER_AFTER_HOUR    = 2;
 const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
 const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
-const unsigned long MUNCHER_KNOCK_ROOM_MS = 1500;   // a knock's scene ends this long before a change starts
+const unsigned long MUNCHER_KNOCK_ROOM_MS = PANEL_GUARD_BEFORE_MS;   // a knock's scene ends this long before a change starts
 // The most steps what the web app asks to see can take: a change of the
 // minutes' ones, or a knock's scene.
 const long MUNCHER_PREVIEW_STEPS = 260;
@@ -3791,7 +3877,8 @@ void muncherIdle(const uint8_t now[4]) {
 }
 
 // A scene is over: what it leads to. After the change to a full hour the
-// hour show; after a minute change now and then a bonus fruit.
+// hour show; after a minute change now and then a bonus fruit, at the pace
+// of the extras the faces share, and none in quiet hours or a dark room.
 void muncherSceneEnded() {
   uint8_t after = muncherAfter;
   muncherAfter = MUNCHER_AFTER_NOTHING;
@@ -3802,18 +3889,16 @@ void muncherSceneEnded() {
     muncherStartAt = millisNow;
     muncherPlannedFor = 0;
     Serial.println("Muncher: the hour show");
-  } else if (after == MUNCHER_AFTER_MINUTE && random(MUNCHER_FRUIT_ONE_IN) == 0) {
-    muncherPlaceFruit();
+  } else if (after == MUNCHER_AFTER_MINUTE) {
+#if GIF_PLAYBACK
+    if (extrasDue()) {
+      extrasScheduleNext();
+      if (!decorQuiet()) { muncherPlaceFruit(); }
+    }
+#else
+    if (random(MUNCHER_FRUIT_ONE_IN) == 0) { muncherPlaceFruit(); }
+#endif
   }
-}
-
-// Whether the muncher is walking, or a planned change starts within `ms`: a
-// GIF that comes up of its own accord waits for it (gifUpdate()). A GIF
-// plays its whole loops, so `ms` has to cover a little more than its time.
-bool muncherWantsPanel(unsigned long ms) {
-  if (munch.mode != muncher::MODE_IDLE) { return true; }
-  if (!munch.legsPlanned() || muncherPlannedFor == 0) { return false; }
-  return (long)(muncherStartAt - millisNow) < (long)ms;
 }
 
 // A sprite of 5 x 5, its rows with the leftmost pixel in bit 4, drawn round
@@ -4097,6 +4182,419 @@ void muncherSelfTest() {
 #endif
 #endif  // WATCHFACE_MUNCHER
 
+#if WATCHFACE_ALIENS
+// The Aliens watchface (src/aliens.h, concept doc "Aliens: draft"). Its
+// settings are in a blob of their own (NVS "aliens"), as the Muncher's are.
+#define ALIENS_SETTINGS_MAGIC 0xA11E
+#define ALIENS_SETTINGS_REV   4   // 1 = the trial build with four looks, 2 = without them, 3 = adds knock, 4 = nap
+
+// The digits are blocks of 3 x 3 with a gap, and only the blocks a change
+// takes wake as aliens: digits of aliens could not be read as a time (Peter,
+// 2026-10-11, after small aliens, wide aliens and solid cells on the panel).
+// White aliens with a green cannon, as the arcade's overlay, or the rows in
+// colours of their own.
+const uint8_t ALIENS_COLOURS_ARCADE = 0;
+const uint8_t ALIENS_COLOURS_ROWS   = 1;
+const uint8_t ALIENS_COLOURS_COUNT  = 2;
+// What a knock, or the face action "trigger watchface animation", plays.
+const uint8_t ALIENS_KNOCK_REPLAY = 0;   // the minutes' ones shot and marching in again
+const uint8_t ALIENS_KNOCK_SAUCER = 1;   // a saucer, shot by the cannon
+const uint8_t ALIENS_KNOCK_BACK   = 2;   // an alien shoots back and hits the cannon
+const uint8_t ALIENS_KNOCK_RANDOM = 3;   // one of the others, drawn each time
+const uint8_t ALIENS_KNOCK_COUNT  = 4;
+// Not a knock's choice: a block waking for a moment, one of the extras that
+// come now and then at the pace the faces share (decorSettings.extras) when
+// its option is on (Peter, 2026-10-12).
+const uint8_t ALIENS_EXTRA_NAP = 4;
+const unsigned long ALIENS_KNOCK_ROOM_MS = PANEL_GUARD_BEFORE_MS;   // a scene ends this long before a change starts
+const unsigned long ALIENS_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
+const unsigned long ALIENS_PREVIEW_MS    = 15000;  // the longest a scene asked for takes: the minutes' ones shot and back
+
+struct AliensSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  style;     // aliens::STYLE_*: how a changing digit goes
+  uint8_t  colours;   // ALIENS_COLOURS_*
+  uint8_t  knock;     // rev 3: ALIENS_KNOCK_* (was a spare byte, 0)
+  uint8_t  nap;       // rev 4: 1 = a block wakes for a moment now and then (was a spare byte, 0)
+  uint8_t  spare[1];
+};
+static_assert(sizeof(AliensSettings) == 8, "the stored blob keeps its size");
+
+const AliensSettings ALIENS_DEFAULTS = {
+  ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, aliens::STYLE_MIXED, ALIENS_COLOURS_ARCADE, ALIENS_KNOCK_RANDOM, 1, { 0 }
+};
+
+AliensSettings aliensSettings;
+SettingsStore<AliensSettings> aliensStore;
+aliens::Face  alienFace;
+uint8_t       aliensRotation     = 0xFF;    // rotation the layout was built for
+unsigned long aliensStartAt      = 0;       // when the planned or running scene starts
+time_t        aliensPlannedFor   = 0;       // the minute the planned change is for; 0 = none
+uint32_t      aliensPlannedStand = 0;       // ms from its start until the new time stands
+bool          aliensLogStand     = false;   // the running scene is the time's change: log when it stands
+unsigned long aliensSceneEndedAt = 0;
+bool          aliensPreviewReq   = false;   // the web app asks to see a change
+bool          aliensKnockReq     = false;   // ... or the knock's scene
+uint32_t      aliensDrawnKey     = 0;       // what the panel shows, to repaint only on a change
+
+// The sprites, '#' lit; the alien in two frames, so it marches, and the hit
+// cannon's wreck in two, so it flickers.
+const char *const ALIEN_SMALL[2][3] = { { "#.#", "###", "#.#" }, { ".#.", "###", "#.#" } };
+const char *const ALIEN_CANNON[3]   = { "..#..", ".###.", "#####" };
+const char *const ALIEN_WRECK[2][3] = { { "#...#", ".#.#.", "#.#.#" }, { ".#.#.", "#...#", ".###." } };
+const char *const ALIEN_BURST[3]    = { "#.#", ".#.", "#.#" };
+const char *const ALIEN_SAUCER[3]   = { "..###..", ".#####.", "#.#.#.#" };
+const char *const ALIEN_SAUCER_BURST[2][3] = { { "#..#..#", ".#.#.#.", "#.#.#.#" }, { ".#.#.#.", "#.###.#", ".#...#." } };
+const uint8_t ALIEN_ROW_RGB[aliens::ROWS][3] = {   // the colourful rows: magenta, cyan, green
+  { 255, 60, 200 }, { 255, 60, 200 }, { 60, 220, 255 }, { 60, 220, 255 }, { 40, 230, 60 },
+};
+
+void aliensDigitsAt(time_t t, uint8_t d[4]) {
+  if (!clockIsSet()) {
+    for (uint8_t i = 0; i < 4; i++) { d[i] = aliens::NO_DIGIT; }
+    return;
+  }
+  uint8_t h = (uint8_t)clockHour(t), m = (uint8_t)clockMinute(t);
+  d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
+}
+
+// An alien that can shoot back, drawn at random: a digit and a column with
+// a block, the lowest of which drops the bomb. Returns the scene's length.
+uint32_t aliensPlanBack() {
+  uint8_t first = (uint8_t)random(4 * aliens::COLS);
+  for (uint8_t n = 0; n < 4 * aliens::COLS; n++) {
+    uint8_t o = (first + n) % (4 * aliens::COLS);
+    uint32_t len = alienFace.planBack(o / aliens::COLS, o % aliens::COLS);
+    if (len) { return len; }
+  }
+  return 0;
+}
+
+// A block that wakes for a moment, drawn at random among the lit ones.
+// Returns the scene's length.
+uint32_t aliensPlanNap() {
+  const uint8_t cells = aliens::COLS * aliens::ROWS;
+  uint8_t first = (uint8_t)random(4 * cells);
+  for (uint8_t n = 0; n < 4 * cells; n++) {
+    uint8_t o = (first + n) % (4 * cells);
+    uint32_t len = alienFace.planNap(o / cells, o % cells);
+    if (len) { return len; }
+  }
+  return 0;
+}
+
+// The extra of this time: a saucer, an alien shooting back, or - with the
+// option on - a block waking for a moment.
+uint8_t aliensExtraKind() {
+  uint8_t k = (uint8_t)random(aliensSettings.nap ? 3 : 2);
+  return k == 0 ? ALIENS_KNOCK_SAUCER : k == 1 ? ALIENS_KNOCK_BACK : ALIENS_EXTRA_NAP;
+}
+
+// A scene between changes - the minutes' ones shot and marching in again
+// (the time on show stays right), a saucer, an alien shooting back, a block
+// waking - for a knock, the web app, and now and then. Refused while a scene
+// runs, just after one, and when it could not end before the next change
+// starts: then it is dropped, not kept.
+bool aliensScene(uint8_t kind, const char *why) {
+  if (alienFace.running || alienFace.shown[0] == aliens::NO_DIGIT) { return false; }
+  if (millisNow - aliensSceneEndedAt < ALIENS_KNOCK_REST_MS) { return false; }
+  if (aliensPlannedFor == 0) { return false; }   // the next change is planned on the face's next pass
+  if (kind == ALIENS_KNOCK_RANDOM) {
+    const uint8_t KINDS[3] = { ALIENS_KNOCK_REPLAY, ALIENS_KNOCK_SAUCER, ALIENS_KNOCK_BACK };
+    kind = KINDS[random(3)];
+  }
+  unsigned long plannedStart = aliensStartAt;
+  uint32_t len;
+  const char *what;
+  if (kind == ALIENS_KNOCK_SAUCER) {
+    len = alienFace.planSaucer(random(2) == 0, (uint8_t)random(3));
+    what = "a saucer";
+  } else if (kind == ALIENS_KNOCK_BACK) {
+    len = aliensPlanBack();
+    what = "an alien shoots back";
+  } else if (kind == ALIENS_EXTRA_NAP) {
+    len = aliensPlanNap();
+    what = "a block wakes";
+  } else {
+    uint8_t same[4];
+    memcpy(same, alienFace.shown, 4);
+    len = alienFace.planChange(same, aliens::STYLE_ALL, 1 << 3) ? alienFace.endMs : 0;
+    what = "the minutes' ones again";
+  }
+  aliensPlannedFor = 0;                          // the change is planned anew afterwards
+  if (len == 0 || (long)(plannedStart - millisNow) < (long)(len + ALIENS_KNOCK_ROOM_MS)) { return false; }
+  aliensStartAt = millisNow;
+  aliensLogStand = false;
+  alienFace.start();
+  Serial.printf("Aliens: %s (%s)\n", what, why);
+  return true;
+}
+
+// The knock's scene, or the face action's.
+bool aliensKnock() { return aliensScene(aliensSettings.knock, "a knock"); }
+
+// Nothing moving: put a time right that moved on without a change, plan the
+// next change once a minute - backwards from the minute, worked out anew on
+// every pass from the second's beginning, as the Muncher's; to a full hour
+// the wave - and start it when its moment has come. In between, what the
+// web app asks for, and now and then an extra.
+void aliensIdle(const uint8_t now[4]) {
+  if (memcmp(alienFace.shown, now, 4) != 0) {
+    if (alienFace.shown[0] == aliens::NO_DIGIT || now[0] == aliens::NO_DIGIT) {
+      alienFace.show(now);               // dashes come and go without a fight
+      panelDirty = true;
+    } else if (alienFace.planChange(now, aliensSettings.style)) {
+      aliensStartAt = millisNow;
+      aliensLogStand = false;
+      alienFace.start();
+    }
+    aliensPlannedFor = 0;
+    return;
+  }
+  if (now[0] == aliens::NO_DIGIT) { return; }
+  uint8_t sec = (uint8_t)clockSecond(localTime);
+  time_t next = localTime - sec + 60;
+  if (aliensPlannedFor != next) {
+    uint8_t to[4];
+    aliensDigitsAt(next, to);
+    aliensPlannedStand = alienFace.planChange(to, aliensSettings.style, 0, clockMinute(next) == 0);
+    aliensPlannedFor = next;
+  }
+  unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
+  aliensStartAt = nextMinuteAt - aliensPlannedStand;
+  // What the web app asks to see waits until it can end before the next
+  // change starts, and for the rest after a scene, as with the Muncher. A
+  // scene tried returns either way: one refused has taken the face's plan,
+  // and the change is planned anew on the next pass, before its start is
+  // looked at - else the refused scene would start as the time's change.
+  long room = (long)(aliensStartAt - millisNow) - (long)ALIENS_KNOCK_ROOM_MS;
+  bool rested = millisNow - aliensSceneEndedAt >= ALIENS_KNOCK_REST_MS;
+  if (aliensPreviewReq && rested && room >= (long)ALIENS_PREVIEW_MS) {
+    aliensPreviewReq = false;
+    aliensScene(ALIENS_KNOCK_REPLAY, "the web app's preview");
+    return;
+  }
+  if (aliensKnockReq && rested && room >= (long)ALIENS_PREVIEW_MS) {
+    aliensKnockReq = false;
+    aliensScene(aliensSettings.knock, "the web app's knock");
+    return;
+  }
+  // An extra now and then, at the pace the faces share: now, or dropped when
+  // the panel is not free for it (decorFree()) - it does not wait.
+  if (extrasDue()) {
+    extrasScheduleNext();
+    if (rested && decorFree(PANEL_EXTRA_MS, false)) {
+      aliensScene(aliensExtraKind(), "now and then");
+      return;
+    }
+    Serial.println("Aliens: an extra due, the panel not free for it - dropped");
+  }
+  // Started at its planned moment even when that has passed (the face was
+  // away): from there, everything is where it ought to be by now.
+  if (aliensPlannedStand && (long)(millisNow - aliensStartAt) >= 0) {
+    aliensLogStand = true;
+    aliensPlannedFor = 0;
+    alienFace.start();
+    if (alienFace.scene == aliens::SCENE_WAVE) { Serial.println("Aliens: the hour's wave"); }
+  }
+}
+
+uint16_t aliensColour(uint8_t row) {
+  if (aliensSettings.colours == ALIENS_COLOURS_ROWS) {
+    return scaledColor(ALIEN_ROW_RGB[row][0], ALIEN_ROW_RGB[row][1], ALIEN_ROW_RGB[row][2]);
+  }
+  return scaledColor(235, 235, 235);
+}
+
+// A sprite's '#' pixels at (x, y); the panel clips what lies off it.
+void aliensArt(const char *const *rows, uint8_t n, int16_t x, int16_t y, uint16_t colour) {
+  for (uint8_t r = 0; r < n; r++) {
+    for (uint8_t c = 0; rows[r][c]; c++) {
+      if (rows[r][c] == '#') { matrix.drawPixel(x + c, y + r, colour); }
+    }
+  }
+}
+
+// A cell at (x, y): an alien in its march frame, or a block.
+void aliensCell(int16_t x, int16_t y, uint8_t r, uint8_t c, bool alien, uint8_t frame, uint16_t colour) {
+  if (alien) { aliensArt(ALIEN_SMALL[(frame + r + c) & 1], 3, x, y, colour); }
+  else       { matrix.fillRect(x, y, aliens::CELL - 1, aliens::CELL - 1, colour); }
+}
+
+// The panel at `sceneMs` into the running scene (0 between scenes); the
+// woken aliens step their legs and sway - the wave a row lower once it has
+// stepped down - the arriving ones only step.
+void aliensDraw(bool colonOn, uint32_t sceneMs) {
+  const aliens::Layout &L = alienFace.L;
+  uint8_t frame = aliens::Face::marchFrame(sceneMs);
+  matrix.fillScreen(0);
+  for (uint8_t i = 0; i < 4; i++) {
+    for (uint8_t k = 0; k < aliens::COLS * aliens::ROWS; k++) {
+      uint8_t r = k / aliens::COLS, c = k % aliens::COLS;
+      int16_t x = L.digitX[i] + aliens::CELL * c;
+      if (alienFace.cells[i] & (1 << k)) {
+        bool awake = alienFace.running && (alienFace.awake[i] & (1 << k));
+        int16_t dx = awake ? alienFace.sway(i, k, sceneMs) : 0;
+        int16_t dy = awake ? aliens::CELL * alienFace.drop : 0;
+        aliensCell(x + dx, L.digitY[i] + aliens::CELL * r + dy, r, c, awake, frame, aliensColour(r));
+      }
+      if (alienFace.arriving[i] & (1 << k)) {
+        // On the way down; behind a block that stays where it would cover one.
+        int8_t row = (int8_t)r + alienFace.arriveRow;
+        if (row >= 0 && (alienFace.cells[i] & (1 << (row * aliens::COLS + c)))) { continue; }
+        aliensCell(x, L.digitY[i] + aliens::CELL * row, r, c, true, frame, aliensColour(r));
+      }
+    }
+  }
+  uint16_t white = scaledColor(235, 235, 235), orange = scaledColor(255, 140, 0);
+  if (colonOn) {
+    for (uint8_t p = 0; p < 2; p++) { matrix.fillRect(L.colonX[p], L.colonY[p], 2, 2, white); }
+  }
+  if (alienFace.saucerOn) { aliensArt(ALIEN_SAUCER, 3, alienFace.saucerX, 0, scaledColor(255, 30, 60)); }
+  if (alienFace.cannonOn) { aliensArt(ALIEN_CANNON, 3, alienFace.cannonX, L.cannonY, scaledColor(40, 230, 60)); }
+  if (alienFace.wreckOn) {
+    aliensArt(ALIEN_WRECK[alienFace.wreckFrame], 3, alienFace.cannonX, L.cannonY,
+              alienFace.wreckFrame ? orange : scaledColor(40, 230, 60));
+  }
+  if (alienFace.shotOn) {
+    matrix.drawPixel(alienFace.shotX, alienFace.shotY, white);
+    matrix.drawPixel(alienFace.shotX, alienFace.shotY + 1, white);
+  }
+  if (alienFace.bombOn) {
+    uint16_t yellow = scaledColor(255, 230, 0);
+    matrix.drawPixel(alienFace.bombX, alienFace.bombY, yellow);
+    matrix.drawPixel(alienFace.bombX, alienFace.bombY + 1, yellow);
+  }
+  if (alienFace.burstOn && alienFace.burstWide) {   // the saucer's, flickering in two frames
+    uint8_t b = (uint8_t)((sceneMs / aliens::BLINK_STEP_MS) & 1);
+    aliensArt(ALIEN_SAUCER_BURST[b], 3, alienFace.burstX, alienFace.burstY, b ? scaledColor(255, 30, 60) : orange);
+  } else if (alienFace.burstOn) {
+    aliensArt(ALIEN_BURST, 3, alienFace.burstX, alienFace.burstY, orange);
+  }
+  drawStatusPixel();
+  drawHotspotMark();
+  drawNoticeMarker();
+  drawFeedbackIndicator();
+  matrix.show();
+  panelDirty = false;
+}
+
+// One pass of the watchface: it repaints only when what it shows has
+// changed (a step of a scene, the aliens' march, the colon's beat), as the
+// others. Between scenes the blocks stand still.
+void drawAliensFace() {
+  if (screenRotation != aliensRotation) {
+    aliensRotation = screenRotation;
+    alienFace.setLayout(screenIsLandscape() ? aliens::LANDSCAPE : aliens::PORTRAIT);
+    uint8_t now[4];
+    aliensDigitsAt(localTime, now);
+    alienFace.show(now);
+    aliensPlannedFor = 0;
+    panelDirty = true;
+  }
+  uint32_t sceneMs = 0;
+  if (alienFace.running) {
+    long since = (long)(millisNow - aliensStartAt);
+    if (since >= 0) {
+      sceneMs = (uint32_t)since;
+      alienFace.at(sceneMs);
+      if (aliensLogStand && sceneMs >= alienFace.standMs) {
+        // When the new time stood complete, against the clock's own second.
+        Serial.printf("Aliens: the new time stands at :%02d.%03lu\n", clockSecond(localTime),
+                      millisNow - secondStartedAt);
+        aliensLogStand = false;
+      }
+      if (!alienFace.running) { aliensSceneEndedAt = millisNow; panelDirty = true; }
+    }
+  }
+  if (!alienFace.running) {
+    uint8_t now[4];
+    aliensDigitsAt(localTime, now);
+    aliensIdle(now);
+  }
+  bool colonOn = (localTime % 2) == 0;
+  if (!alienFace.running) { sceneMs = 0; }
+  // What the picture depends on, folded into one number (FNV-1a).
+  uint32_t key = 2166136261u;
+  auto fold = [&key](uint32_t v) { for (uint8_t b = 0; b < 4; b++) { key = (key ^ (uint8_t)(v >> (8 * b))) * 16777619u; } };
+  const aliens::Face &f = alienFace;
+  fold(f.running); fold((uint16_t)f.cannonX | (uint32_t)f.cannonOn << 16 | (uint32_t)f.wreckOn << 17 | (uint32_t)f.wreckFrame << 18);
+  fold(f.shotOn ? (uint16_t)f.shotY : 0xFFFF); fold(f.bombOn ? (uint16_t)f.bombY : 0xFFFF);
+  fold(f.burstOn ? (uint16_t)f.burstX | (uint32_t)(uint16_t)f.burstY << 16 : 0xFFFFFFFF);
+  fold(f.saucerOn ? (uint16_t)f.saucerX : 0xFFFF); fold((uint8_t)f.arriveRow | (uint16_t)(uint8_t)f.drop << 8);
+  fold(f.burstWide ? sceneMs / aliens::BLINK_STEP_MS % 2 : 2);   // the saucer's burst flickers
+  for (uint8_t i = 0; i < 4; i++) { fold(f.cells[i]); fold(f.awake[i]); fold(f.arriving[i]); }
+  fold(colonOn); fold(sceneMs / aliens::MARCH_MS % 4);   // the march: the legs' frame and the sway
+  if (key == aliensDrawnKey && !panelDirty) { return; }
+  aliensDrawnKey = key;
+  aliensDraw(colonOn, sceneMs);
+}
+
+void loadAliensSettings() {
+  aliensStore.begin("aliens");
+  aliensStore.read(aliensSettings);
+  if (aliensSettings.magic != ALIENS_SETTINGS_MAGIC) {
+    aliensSettings = ALIENS_DEFAULTS;   // written with the next save
+  } else if (aliensSettings.rev < 2) {
+    // The trial build's bytes: look, style, idle, colours after the rev.
+    const uint8_t *b = (const uint8_t *)&aliensSettings;
+    AliensSettings was = ALIENS_DEFAULTS;
+    was.style = b[4];
+    was.colours = b[6];
+    aliensSettings = was;
+  } else if (aliensSettings.rev < 3) {
+    aliensSettings.knock = ALIENS_DEFAULTS.knock;
+    aliensSettings.nap = ALIENS_DEFAULTS.nap;
+  } else if (aliensSettings.rev < 4) {
+    aliensSettings.nap = ALIENS_DEFAULTS.nap;
+  }
+  if (aliensSettings.nap > 1) { aliensSettings.nap = 1; }
+  if (aliensSettings.style >= aliens::STYLE_COUNT)     { aliensSettings.style = aliens::STYLE_MIXED; }
+  if (aliensSettings.colours >= ALIENS_COLOURS_COUNT)  { aliensSettings.colours = ALIENS_COLOURS_ARCADE; }
+  if (aliensSettings.knock >= ALIENS_KNOCK_COUNT)      { aliensSettings.knock = ALIENS_DEFAULTS.knock; }
+}
+
+void saveAliensSettings() {
+  aliensSettings.magic = ALIENS_SETTINGS_MAGIC;
+  aliensSettings.rev   = ALIENS_SETTINGS_REV;
+  aliensStore.write(aliensSettings);
+}
+
+// The web app's Aliens controls, live or saved; the page's pv asks to see a
+// change (choosing the face in the picker sends it), a new knock its scene.
+void applyAliensParams(const String &q, bool live) {
+  String v;
+  uint8_t colours = aliensSettings.colours;
+  v = getParam(q, "ast");   if (v.length()) { aliensSettings.style = constrain(v.toInt(), 0, aliens::STYLE_COUNT - 1); }
+  v = getParam(q, "acol");  if (v.length()) { aliensSettings.colours = constrain(v.toInt(), 0, ALIENS_COLOURS_COUNT - 1); }
+  if (colours != aliensSettings.colours) { panelDirty = true; }   // the face redraws at once
+  v = getParam(q, "anap");  if (v.length()) { aliensSettings.nap = v.toInt() ? 1 : 0; }
+  v = getParam(q, "akn");
+  if (v.length()) {
+    uint8_t knock = constrain(v.toInt(), 0, ALIENS_KNOCK_COUNT - 1);
+    if (live && knock != aliensSettings.knock && settings.watchface == WATCHFACE_ALIENS_ID) { aliensKnockReq = true; }
+    aliensSettings.knock = knock;
+  }
+  if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_ALIENS_ID) { aliensPreviewReq = true; }
+}
+
+#if defined(CLOCK_DEBUG)
+void aliensSelfTest() {
+  aliens::Face f;
+  uint32_t longest = 0, longestScene = 0;
+  uint16_t failed = 0;
+  unsigned long t0 = millis();
+  bool ok = aliens::selfTest(f, longest, longestScene, failed);   // every change, the wave, the saucer, shooting back, a nap
+  Serial.printf("Aliens self-test: %s, longest change %lu ms, longest scene between changes %lu ms, %lu ms",
+                ok ? "all changes and scenes right" : "FAILED", (unsigned long)longest, (unsigned long)longestScene,
+                millis() - t0);
+  if (!ok) { Serial.printf(", first wrong: %u", failed); }
+  Serial.println();
+}
+#endif
+#endif  // WATCHFACE_ALIENS
+
 // Draw the current clock state to the panel. This is the expensive part (clears
 // the framebuffer, prints all six digits and pushes via matrix.show()). In the M4's
 // AP preview it is throttled to 5 fps while stepClockAnim() keeps the state moving,
@@ -4157,6 +4655,9 @@ uint8_t activeWatchface() {
 #if WATCHFACE_MUNCHER
   muncherRotation = 0xFF;          // a fresh layout, the time shown at once
 #endif
+#if WATCHFACE_ALIENS
+  aliensRotation = 0xFF;
+#endif
   panelDirty = true;               // the other face's picture is still on the panel
   return shown;
 }
@@ -4198,6 +4699,9 @@ void drawClock(void) {
   if (face == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
 #if WATCHFACE_MUNCHER
   if (face == WATCHFACE_MUNCHER_ID) { drawMuncherFace(); return; }
+#endif
+#if WATCHFACE_ALIENS
+  if (face == WATCHFACE_ALIENS_ID) { drawAliensFace(); return; }
 #endif
 #else
   activeWatchface();
@@ -4693,6 +5197,9 @@ void loadSettings() {
 #if WATCHFACE_MUNCHER
   loadMuncherSettings();
 #endif
+#if WATCHFACE_ALIENS
+  loadAliensSettings();
+#endif
   applySettings();
 }
 
@@ -5099,8 +5606,15 @@ void faceAnimationStart() {
 #if WATCHFACE_MUNCHER
   if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherKnock(); return; }
 #endif
+#if WATCHFACE_ALIENS
+  if (settings.watchface == WATCHFACE_ALIENS_ID) { aliensKnock(); return; }
+#endif
 #if WATCHFACE_TETRIS
   if (settings.watchface == WATCHFACE_TETRIS_ID) {
+#if GIF_PLAYBACK
+    // Not into the time's change: dropped, not kept (Peter, 2026-10-12).
+    if (!panelFitsBeforeChange(TETRIS_KNOCK_MS)) { return; }
+#endif
     if (knockEffectReady()) { shakeStartAll(); }
     return;
   }
@@ -6535,6 +7049,9 @@ void applyParams(const String &q) {
 #if WATCHFACE_MUNCHER
   applyMuncherParams(q, false);
 #endif
+#if WATCHFACE_ALIENS
+  applyAliensParams(q, false);
+#endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.flyInTime  = flyInUnits(v.toInt()); }   // ms
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
@@ -6659,6 +7176,9 @@ void applyLiveParams(const String &q) {
 #endif
 #if WATCHFACE_MUNCHER
   applyMuncherParams(q, true);
+#endif
+#if WATCHFACE_ALIENS
+  applyAliensParams(q, true);
 #endif
 }
 
@@ -7151,10 +7671,11 @@ void gifGammaInit() {
   for (int v = 0; v < 256; v++) { gifGamma[v] = (uint8_t)lroundf(powf(v / 255.0f, 2.2f) * 255.0f); }
 }
 
-// The next GIF of its own accord: at a random time between the two settings.
+// The next GIF of its own accord: at a random time between the two settings,
+// drawn anew when it falls into the slot around a change of the time.
 void gifScheduleNext() {
   uint32_t lo = gifSettings.minMinutes * 60000UL, hi = gifSettings.maxMinutes * 60000UL;
-  gifDueAt = millis() + lo + (hi > lo ? esp_random() % (hi - lo + 1) : 0);
+  gifDueAt = panelRandomAt(lo, hi, (unsigned long)gifSettings.seconds * 1000UL);
 }
 
 // All GIFs: the pack's, none without a pack.
@@ -7217,6 +7738,19 @@ bool gifStart(int16_t i) {
     gifPackClose();
     return false;
   }
+  gifLoopTime = gifLoopMs(data, size, gifFrames);
+  uint32_t playMs = gifSettings.seconds * 1000UL;
+  gifLoopsPlanned = (gifLoopTime > 0 && gifLoopTime <= playMs) ? (uint16_t)(playMs / gifLoopTime) : 1;
+  // Its whole loops end before the time's next change, or it does not start.
+  uint32_t lenMs = gifLoopTime > 0 ? min<uint32_t>((uint32_t)gifLoopsPlanned * gifLoopTime, GIF_PLAY_MAX_MS) : playMs;
+  if (!panelFitsBeforeChange(lenMs)) {
+    Serial.printf("GIF %s: its %lu ms would run into the time's change, dropped\n", name, (unsigned long)lenMs);
+    gifPlayer->decoder.close();
+    delete gifPlayer;
+    gifPlayer = nullptr;
+    gifPackClose();
+    return false;
+  }
   gifIndex = i;
   gifW = w;
   gifH = h;
@@ -7226,9 +7760,6 @@ bool gifStart(int16_t i) {
   gifRestartDue = false;
   gifLoops = 0;
   gifFrame = 0;
-  gifLoopTime = gifLoopMs(data, size, gifFrames);
-  uint32_t playMs = gifSettings.seconds * 1000UL;
-  gifLoopsPlanned = (gifLoopTime > 0 && gifLoopTime <= playMs) ? (uint16_t)(playMs / gifLoopTime) : 1;
   gifRotation = matrix.getRotation();
   gifShownAt = millisNow;
   gifNextFrameAt = millisNow;
@@ -7238,86 +7769,43 @@ bool gifStart(int16_t i) {
   return true;
 }
 
-#if WATCHFACE_MUNCHER
-// A GIF asked for by an input while the muncher walks, or just before its
-// change: it waits until the scene is over, then plays (gifUpdate()). An
-// input that started a GIF at once covered the change to midnight on
-// 2026-10-11 - very likely a knock, on Peter's "play last GIF again".
-const uint8_t GIF_ASKED_NONE = 0, GIF_ASKED_NEW = 1, GIF_ASKED_AGAIN = 2;
-const unsigned long GIF_ASKED_KEEP_MS = 60000;   // a wait longer than this drops it
-uint8_t       gifAsked   = GIF_ASKED_NONE;
-unsigned long gifAskedAt = 0;
-
-// Whether the muncher needs the panel within the GIF time set: no margin for
-// a GIF's last loop, nor its own length. A GIF that waits for a change about
-// to start explains itself when the change starts at once; one that waited
-// for seconds with nothing happening would look as if the button or the
-// sensor had not worked (Peter, 2026-10-11). A long last loop may overlap
-// the start of a change - there is no perfect lock.
-bool gifMuncherBusy() {
-  return settings.watchface == WATCHFACE_MUNCHER_ID &&
-         muncherWantsPanel((unsigned long)gifSettings.seconds * 1000UL);
+// What an input asks for plays now or not at all (Peter, 2026-10-12): not
+// during the face's change or a scene of it, and not when it would run into
+// the next change (gifStart()). A GIF kept for after a scene played right
+// after the time's change.
+bool gifRequestFits() {
+  if (faceTimeShown()) { return true; }
+  Serial.println("GIF: asked for during the face's change or scene, dropped");
+  return false;
 }
-
-bool gifWaitsForMuncher(uint8_t kind) {
-  if (!gifMuncherBusy()) { return false; }
-  if (gifAsked == GIF_ASKED_NONE) { Serial.println("GIF: waits for the muncher's scene"); }
-  gifAsked = kind;
-  gifAskedAt = millisNow;
-  return true;
-}
-#endif
 
 // A GIF now (FN_PLAY_GIF): on the face only, and only one that fits.
 void gifPlayNow() {
-  if (screen != SCREEN_FACE) { return; }
-#if WATCHFACE_MUNCHER
-  if (gifWaitsForMuncher(GIF_ASKED_NEW)) { return; }
-#endif
+  if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
   if (!gifStart(gifPick())) { gifScheduleNext(); }
 }
 
 // The last GIF shown once more (FN_GIF_AGAIN): on the face only; a random one
 // when none has played yet or the last no longer fits the panel as it is held.
 void gifPlayAgain() {
-  if (screen != SCREEN_FACE) { return; }
-#if WATCHFACE_MUNCHER
-  if (gifWaitsForMuncher(GIF_ASKED_AGAIN)) { return; }
-#endif
+  if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
   int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifPick();
   if (!gifStart(i)) { gifScheduleNext(); }
 }
 
-// A GIF of its own accord once it is due, over the plain face only: while
-// another screen is up it waits until the face is back.
+// A GIF of its own accord once it is due: now, or not at all when the panel
+// is not free for it (decorFree()) - it does not wait (Peter, 2026-10-12);
+// GIFs that waited all came at once when the wait ended, right after the
+// time's change.
 void gifUpdate() {
-  if (screen != SCREEN_FACE) { return; }
-#if WATCHFACE_MUNCHER
-  // One asked for while the muncher was busy, once it is not.
-  if (gifAsked != GIF_ASKED_NONE) {
-    if (millisNow - gifAskedAt > GIF_ASKED_KEEP_MS || settings.watchface != WATCHFACE_MUNCHER_ID) {
-      gifAsked = GIF_ASKED_NONE;
-    } else if (!gifMuncherBusy()) {
-      uint8_t kind = gifAsked;
-      gifAsked = GIF_ASKED_NONE;
-      if (kind == GIF_ASKED_AGAIN) { gifPlayAgain(); } else { gifPlayNow(); }
-      return;
-    }
-  }
-#endif
+  if (screen == SCREEN_GIF) { return; }   // one on show; the next is drawn at its end
   if (!gifSettings.randomOn || gifCount() == 0) { return; }
   if ((long)(millisNow - gifDueAt) < 0) { return; }
-#if BAND_DATA
-  // The info round goes by the clock's time: a GIF that would still play at
-  // its minute, or end less than ROUND_GIF_GAP_MS before it, waits for it.
-  if (roundMinuteAt != 0 || roundNextIn() < (unsigned long)gifSettings.seconds * 1000UL + ROUND_GIF_GAP_MS) { return; }
-#endif
-#if WATCHFACE_MUNCHER
-  // Nor into the muncher's change of the time (a GIF that came up during one
-  // on 2026-10-10 held the new time back by 4.7 s): it waits until the walk
-  // is over.
-  if (gifMuncherBusy()) { return; }
-#endif
+  if (screen != SCREEN_FACE || !decorFree((unsigned long)gifSettings.seconds * 1000UL, true)) {
+    Serial.println("GIF: due, the panel not free for it - dropped");
+    gifScheduleNext();
+    return;
+  }
   if (!gifStart(gifPick())) { gifScheduleNext(); }
 }
 
@@ -8060,6 +8548,9 @@ bool faceTimeShown() {
 #if WATCHFACE_MUNCHER
   if (settings.watchface == WATCHFACE_MUNCHER_ID) { return munch.mode == muncher::MODE_IDLE; }
 #endif
+#if WATCHFACE_ALIENS
+  if (settings.watchface == WATCHFACE_ALIENS_ID) { return !alienFace.running; }
+#endif
   return secondNow != 0 || millisNow - secondStartedAt >= (unsigned long)settings.flyInTime * 10UL;
 }
 
@@ -8096,13 +8587,14 @@ bool roundChoice(long minutes) {
 }
 
 // Cards for the information: all of it in the round, else what is new. They
-// wait for a face's scene (the muncher's change), as a GIF asked for does.
-// False when they wait.
+// end before the time's next change starts, and what is new comes at the
+// minute's place for it (infoSlotOpen()). False when they wait.
 bool infoCardsStart(bool round) {
   uint8_t order[BAND_ITEMS_MAX];
   uint8_t n = infoOrder(order, !round);
-#if WATCHFACE_MUNCHER
-  if (n && settings.watchface == WATCHFACE_MUNCHER_ID && muncherWantsPanel(CARD_MS * n)) { return false; }
+#if GIF_PLAYBACK
+  if (n && !panelFitsBeforeChange(CARD_MS * n)) { return false; }
+  if (n && !round && !infoSlotOpen(CARD_MS * n)) { return false; }
 #endif
   if (round) { roundMinuteAt = 0; }
   if (!n) { return true; }
@@ -8117,11 +8609,12 @@ bool infoCardsStart(bool round) {
   return true;
 }
 
-// After a round of cards: a GIF waits a while, so the two never follow each
-// other at once.
+// After a round of cards: no GIF for ROUND_GIF_GAP_MS (decorFree()), so the
+// two never follow each other at once. Moving the next GIF to the end of
+// that gap, as this did, made it come right after the next minute's change.
 void infoCardsEnded() {
 #if GIF_PLAYBACK
-  if ((long)(gifDueAt - millisNow) < (long)ROUND_GIF_GAP_MS) { gifDueAt = millisNow + ROUND_GIF_GAP_MS; }
+  infoCardsEndedAt = millisNow;
 #endif
 }
 
@@ -8168,22 +8661,219 @@ void noticesUpdate() {
     if (millisNow - noticeSeen[i].lastAt < NOTICE_FORGET_MS) { continue; }
     noticeSeen[i] = noticeSeen[--noticeSeenCount];
   }
+  noticesPending = false;
   if (noticeStepCount) { return; }                                // items on the panel
   if (screen != SCREEN_FACE && screen != SCREEN_GIF) { return; }  // waits for the face
   if (newAny) {
 #if GIF_PLAYBACK
-    if (screen == SCREEN_GIF) {
-      if (!newAlert) { return; }                                  // a message waits for the GIF's end
-      closeScreen();
+    // An alert at once, over everything but the person at the clock;
+    // messages at the minute's place for them, after a GIF's end.
+    if (!newAlert && (screen == SCREEN_GIF || !infoSlotOpen(noticeNewMs()))) {
+      noticesPending = true;
+      return;
     }
+    if (screen == SCREEN_GIF) { closeScreen(); }
 #endif
     noticeStepsForNew();
     noticeStart();
     return;
   }
   if (screen != SCREEN_FACE) { return; }                          // information waits for a GIF's end
-  if (newInfo || round) { infoCardsStart(round); }
+  if ((newInfo || round) && !infoCardsStart(round) && newInfo) { noticesPending = true; }
 }
+
+#if GIF_PLAYBACK
+// How long the notices not shown yet will take on the panel, about: an
+// alert's icon, an urgent message's icon before its text, each text running
+// through twice.
+unsigned long noticeNewMs() {
+  uint8_t order[BAND_ITEMS_MAX];
+  uint8_t n = noticeOrder(order, true);
+  unsigned long ms = 0;
+  for (uint8_t k = 0; k < n; k++) {
+    const BandItem &it = bandItems[order[k]];
+    if (it.level == LEVEL_ALERT) { ms += it.text[0] ? ICON_BEFORE_TEXT_MS : ALERT_BANNER_MS; }
+    if (it.text[0]) { ms += 2UL * (strlen(it.text) * 6UL + matrix.width()) * 1000UL / RUN_PX_PER_S; }
+  }
+  return ms;
+}
+
+/* ----------------------------------------------------------------------
+   Who takes the panel, and when: the rules (the constants at the top).
+   ---------------------------------------------------------------------- */
+
+// How long before the minute the face's change starts, about - for drawing
+// random times only; faceChangeIn() is what counts.
+unsigned long faceLeadMs() {
+#if WATCHFACE_ALIENS
+  if (settings.watchface == WATCHFACE_ALIENS_ID) { return aliensPlannedStand ? aliensPlannedStand : 15000UL; }
+#endif
+#if WATCHFACE_MUNCHER
+  if (settings.watchface == WATCHFACE_MUNCHER_ID) {
+    return muncherPlannedDone ? (unsigned long)muncherPlannedDone * muncherSettings.paceMs : 15000UL;
+  }
+#endif
+  return 0;
+}
+
+// How long the face's change goes on after the minute has begun, about: the
+// Tetris digits come apart and build anew, the others stand at :00.
+unsigned long faceTailMs() {
+  return settings.watchface == WATCHFACE_TETRIS_ID ? 6000UL : 1500UL;
+}
+
+// How long until the time's next change starts, in ms: 0 while the face's
+// change or a scene of it runs, ~0UL without a time. The Muncher and the
+// Aliens plan theirs backwards from the minute; until a plan is made, about
+// 15 s before it.
+unsigned long faceChangeIn() {
+  if (!clockIsSet()) { return ~0UL; }
+  if (!faceTimeShown()) { return 0; }
+  long toMinute = (long)(secondStartedAt + (60UL - secondNow) * 1000UL - millisNow);
+#if WATCHFACE_ALIENS
+  if (settings.watchface == WATCHFACE_ALIENS_ID) {
+    if (aliensPlannedFor && aliensPlannedStand) { long in = (long)(aliensStartAt - millisNow); return in > 0 ? (unsigned long)in : 0; }
+    toMinute -= 15000;
+  }
+#endif
+#if WATCHFACE_MUNCHER
+  if (settings.watchface == WATCHFACE_MUNCHER_ID) {
+    if (munch.legsPlanned() && muncherPlannedFor) { long in = (long)(muncherStartAt - millisNow); return in > 0 ? (unsigned long)in : 0; }
+    toMinute -= 15000;
+  }
+#endif
+  return toMinute > 0 ? (unsigned long)toMinute : 0;
+}
+
+// Whether something optional of `ms` ends PANEL_GUARD_BEFORE_MS before the
+// time's next change starts.
+bool panelFitsBeforeChange(unsigned long ms) {
+  unsigned long in = faceChangeIn();
+  return in == ~0UL || in >= ms + PANEL_GUARD_BEFORE_MS;
+}
+
+// On every pass: when the face's change or scene ends.
+void panelWatch() {
+  static bool shownBefore = true;
+  bool shown = faceTimeShown();
+  if (shown && !shownBefore) { faceChangeEndedAt = millisNow; }
+  shownBefore = shown;
+}
+
+// How long the plain face has been at rest: on top, its change or scene over.
+unsigned long panelRestMs() {
+  if (screen != SCREEN_FACE || !faceTimeShown()) { return 0; }
+  unsigned long since = (long)(faceChangeEndedAt - panelFaceSince) > 0 ? faceChangeEndedAt : panelFaceSince;
+  return millisNow - since;
+}
+
+// Quiet hours, or a dark room: no decoration.
+bool decorQuiet() {
+  const DecorSettings &d = decorSettings;
+  if (d.quietFrom != d.quietTo && clockIsSet()) {
+    uint8_t h = (uint8_t)clockHour(localTime);
+    bool in = d.quietFrom < d.quietTo ? (h >= d.quietFrom && h < d.quietTo) : (h >= d.quietFrom || h < d.quietTo);
+    if (in) { return true; }
+  }
+  return d.darkLux && luxAvg >= 0 && luxAvg < d.darkLux;
+}
+
+// Whether messages and new cards may come up now: the face's change over
+// PANEL_INFO_AFTER_MS ago, before second PANEL_INFO_HALF_S, and `ms` ending
+// before the next change starts. Else they wait for the next minute's place.
+bool infoSlotOpen(unsigned long ms) {
+  if (!faceTimeShown()) { return false; }
+  if (faceChangeEndedAt && millisNow - faceChangeEndedAt < PANEL_INFO_AFTER_MS) { return false; }
+  if (clockIsSet() && secondNow >= PANEL_INFO_HALF_S) { return false; }
+  return panelFitsBeforeChange(ms);
+}
+
+// Whether decoration of `ms` may start now, of its own accord: nothing
+// quiet, the plain face at rest PANEL_DECOR_REST_MS, ending before the next
+// change, not in the minute's first half while information waits, and a
+// GIF not within ROUND_GIF_GAP_MS of info cards. When it may not, it is
+// dropped.
+bool decorFree(unsigned long ms, bool gif) {
+  if (decorQuiet()) { return false; }
+  if (panelRestMs() < PANEL_DECOR_REST_MS) { return false; }
+  if (!panelFitsBeforeChange(ms)) { return false; }
+  if (secondNow < PANEL_INFO_HALF_S && (roundMinuteAt != 0 || noticesPending)) { return false; }
+  if (gif) {
+    if (infoCardsEndedAt && millisNow - infoCardsEndedAt < ROUND_GIF_GAP_MS) { return false; }
+    if (roundNextIn() < ms + ROUND_GIF_GAP_MS) { return false; }
+  }
+  return true;
+}
+
+// Whether the moment `at` (millis) falls into the slot around a change of
+// the time, for something of `ms`: from its length, the guard and the
+// face's lead before the minute until the change's tail and the rest after it.
+bool panelInChangeSlot(unsigned long at, unsigned long ms) {
+  unsigned long inMinute = (secondNow * 1000UL + (millisNow - secondStartedAt) + (at - millisNow)) % 60000UL;
+  unsigned long before = faceLeadMs() + PANEL_GUARD_BEFORE_MS + ms, after = faceTailMs() + PANEL_DECOR_REST_MS;
+  return inMinute + before >= 60000UL || inMinute < after;
+}
+
+// A random time `lo` to `hi` ms from now, for something of `ms`, drawn anew
+// while it falls into the slot around a change; when it keeps falling there
+// (the same minutes twice: every n minutes), moved to the slot's end.
+unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms) {
+  unsigned long at = millisNow + lo;
+  for (uint8_t n = 0; n < 8; n++) {
+    at = millisNow + lo + (hi > lo ? esp_random() % (hi - lo + 1) : 0);
+    if (!panelInChangeSlot(at, ms)) { return at; }
+  }
+  unsigned long inMinute = (secondNow * 1000UL + (millisNow - secondStartedAt) + (at - millisNow)) % 60000UL;
+  unsigned long after = faceTailMs() + PANEL_DECOR_REST_MS;
+  return at + (inMinute < after ? after - inMinute : 60000UL - inMinute + after);
+}
+
+// The faces' extras: the next at a random time around the slider's mean -
+// half of it to one and a half times it - outside the slot around a change.
+void extrasScheduleNext() {
+  uint8_t m = DECOR_EXTRAS_MINUTES[min<uint8_t>(decorSettings.extras, DECOR_EXTRAS_MAX)];
+  if (!m) { extrasDueAt = 0; return; }
+  unsigned long mean = m * 60000UL;
+  extrasDueAt = panelRandomAt(mean / 2, mean + mean / 2, PANEL_EXTRA_MS);
+  if (!extrasDueAt) { extrasDueAt = 1; }
+}
+
+// Whether an extra is due. Then it plays now or not at all: the face asks
+// decorFree() and calls extrasScheduleNext() either way.
+bool extrasDue() {
+  if (!decorSettings.extras) { return false; }
+  if (extrasDueAt == 0) { extrasScheduleNext(); return false; }
+  return (long)(millisNow - extrasDueAt) >= 0;
+}
+
+void loadDecorSettings() {
+  decorStore.begin("deco");
+  decorStore.read(decorSettings);
+  if (decorSettings.magic != DECOR_SETTINGS_MAGIC) { decorSettings = DECOR_DEFAULTS; }   // written with the next save
+  if (decorSettings.extras > DECOR_EXTRAS_MAX) { decorSettings.extras = DECOR_DEFAULTS.extras; }
+  if (decorSettings.quietFrom > 23) { decorSettings.quietFrom = 0; }
+  if (decorSettings.quietTo > 23)   { decorSettings.quietTo = 0; }
+}
+
+void saveDecorSettings() {
+  decorSettings.magic = DECOR_SETTINGS_MAGIC;
+  decorSettings.rev   = DECOR_SETTINGS_REV;
+  decorStore.write(decorSettings);
+}
+
+// The web app's extras and quiet; a new pace of the extras draws the next anew.
+void applyDecorParams(const String &q) {
+  String v;
+  v = getParam(q, "dxr");
+  if (v.length()) {
+    uint8_t x = constrain(v.toInt(), 0, DECOR_EXTRAS_MAX);
+    if (x != decorSettings.extras) { decorSettings.extras = x; extrasDueAt = 0; }
+  }
+  v = getParam(q, "dqf"); if (v.length()) { decorSettings.quietFrom = constrain(v.toInt(), 0, 23); }
+  v = getParam(q, "dqt"); if (v.length()) { decorSettings.quietTo = constrain(v.toInt(), 0, 23); }
+  v = getParam(q, "ddk"); if (v.length()) { decorSettings.darkLux = constrain(v.toInt(), 0, 60000); }
+}
+#endif
 
 // Whether a face event closes a notice on the panel (the Inputs page).
 bool noticeClosedBy(InputEvent ev) {
@@ -8838,6 +9528,12 @@ void apiState(Print &c) {
   s["mpace"] = muncherSettings.paceMs;
   s["mpel"] = muncherSettings.pellets;
 #endif
+#if WATCHFACE_ALIENS
+  s["ast"] = aliensSettings.style;
+  s["acol"] = aliensSettings.colours;
+  s["akn"] = aliensSettings.knock;
+  s["anap"] = aliensSettings.nap;
+#endif
   s["autob"] = settings.autoBright != 0;
   s["bright"] = settings.brightness;
   s["luxd"] = settings.luxDark;
@@ -8864,6 +9560,10 @@ void apiState(Print &c) {
   s["gifsec"] = gifSettings.seconds;
   s["gifbr"] = gifSettings.minBright;
   s["gifbx"] = gifSettings.brightTimes;   // tenths
+  s["dxr"] = decorSettings.extras;
+  s["dqf"] = decorSettings.quietFrom;
+  s["dqt"] = decorSettings.quietTo;
+  s["ddk"] = decorSettings.darkLux;
 #endif
 #if BAND_DATA
   char deg[16];
@@ -8941,10 +9641,35 @@ void apiState(Print &c) {
   mpel.add("One above the other");
   mpel.add("Solid");
 #endif
+#if WATCHFACE_ALIENS
+  JsonArray ast = lists["ast"].to<JsonArray>();       // by value: aliens::STYLE_*
+  ast.add("Mixed");
+  ast.add("Whole digit");
+  ast.add("Only the difference");
+  JsonArray acol = lists["acol"].to<JsonArray>();     // by value: ALIENS_COLOURS_*
+  acol.add("White");
+  acol.add("Coloured rows");
+  JsonArray akn = lists["akn"].to<JsonArray>();     // by value: ALIENS_KNOCK_*
+  akn.add("Last digit again");
+  akn.add("Saucer");
+  akn.add("Aliens shoot back");
+  akn.add("Random each time");
+  JsonArray anap = lists["anap"].to<JsonArray>();   // by value: 0 off, 1 on
+  anap.add("Off");
+  anap.add("Now and then");
+#endif
+#if GIF_PLAYBACK
+  JsonArray dxr = lists["dxr"].to<JsonArray>();   // by value: the extras' slider, DECOR_EXTRAS_MINUTES
+  for (uint8_t i = 0; i <= DECOR_EXTRAS_MAX; i++) {
+    uint8_t m = DECOR_EXTRAS_MINUTES[i];
+    dxr.add(m ? String("about every ") + m + " min" : String("never"));
+  }
+#endif
 
   JsonObject hw = d["hw"].to<JsonObject>();
   hw["tetris"] = WATCHFACE_TETRIS != 0;
   hw["muncher"] = WATCHFACE_MUNCHER != 0;
+  hw["aliens"] = WATCHFACE_ALIENS != 0;
   hw["accel"] = accelOK;
   hw["gesture"] = gestureOK;
   hw["gestureInt"] = GESTURE_INT >= 0;
@@ -9243,6 +9968,9 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
 #if WATCHFACE_MUNCHER
   saveMuncherSettings();
 #endif
+#if WATCHFACE_ALIENS
+  saveAliensSettings();
+#endif
   saveUiSettings();
   saveFaceKeys();
 #if BAND_DATA
@@ -9254,6 +9982,8 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
   applyGifParams(body);
   saveGifSettings();
   gifScheduleNext();          // the new times count from now
+  applyDecorParams(body);
+  saveDecorSettings();
 #endif
 #if BAND_DATA
   applyFeedParams(body);
@@ -9319,12 +10049,13 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
 #if GIF_PLAYBACK
   } else if (path == "/api/gif") {
     bool onFace = (screen == SCREEN_FACE);
+    // Not during the face's change or a scene of it, nor into the next change:
+    // then it is dropped, not kept (Peter, 2026-10-12).
+    bool busy = onFace && (!faceTimeShown() || !panelFitsBeforeChange((unsigned long)gifSettings.seconds * 1000UL));
     if (onFace) { gifPlayNow(); }
     JsonDocument d;
     d["playing"] = onFace && screen == SCREEN_GIF;
-#if WATCHFACE_MUNCHER
-    d["waits"] = gifAsked != GIF_ASKED_NONE;   // it plays once the muncher's scene is over
-#endif
+    d["busy"] = busy;
     sendJson(c, d);
 #endif
 #if BAND_DATA
