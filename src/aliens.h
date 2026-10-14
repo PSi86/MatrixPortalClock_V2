@@ -82,7 +82,14 @@ enum Scene : uint8_t { SCENE_CHANGE, SCENE_WAVE, SCENE_SAUCER, SCENE_BACK, SCENE
 // formation has landed, before it turns into blocks (Peter, 2026-10-11).
 const uint16_t MOVE_MS_PX = 25, SHOT_MS_PX = 10, BURST_MS = 240, PAUSE_MS = 120, STEP_MS = 300, MARCH_MS = 400;
 const uint16_t WAKE_MS = 1500;
-const uint16_t DROP_MS = 600;           // the wave stepped down a row, before the cannon moves
+// The full hour's wave is shot row by row from the bottom, and the cannon
+// drives on to its next alien as soon as a shot has hit, the burst still
+// showing, at about the arcade's pace; once WAVE_ROOM_ROWS rows below the
+// wave are empty, it steps down a row (Peter, 2026-10-14: it stepped down
+// at once, before a shot, and took long).
+const uint16_t WAVE_MOVE_MS_PX = 16, WAVE_AIM_MS = 80;
+const uint8_t  WAVE_ROOM_ROWS = 2;
+const uint16_t DROP_MS = 600;           // the wave stepped down a row, before the cannon moves on
 // The saucer: the cannon sees it, then drives to a gap it reaches in time;
 // the saucer is hit in its middle, in its row 1 (its lower row has a gap there).
 const uint16_t REACT_MS = 400, SAUCER_BURST_MS = 600;
@@ -104,11 +111,15 @@ enum Act : uint8_t { ACT_MOVE, ACT_SHOT, ACT_DROP, ACT_DESCEND, ACT_HOME };
 const uint8_t AT_SAUCER = 0xFF;  // a shot's digit when it is for the saucer
 struct Action {
   uint8_t  act, digit, cell;
+  int8_t   drop;       // ACT_DROP: the rows the wave stands lower from then on; ACT_SHOT: when it hits
   int16_t  x;          // ACT_MOVE, ACT_HOME, ACT_SHOT: where the cannon is
   uint32_t at, len;    // ms from the plan's start
-  uint16_t fly;        // ACT_SHOT: ms on its way up; the rest of len is the burst
+  uint16_t fly;        // ACT_SHOT: ms on its way up, then its burst; len ends with the burst, or
+                       // with the hit when the cannon drives on while the burst shows (the wave)
 };
-const uint8_t MAX_ACTIONS = 4 * 15 * 2 + 4;   // a move and a shot for every cell of four digits, the drop, the descent, home
+// A move and a shot for every cell of four digits, the wave's steps down
+// (upright it has ten rows), the descent, home.
+const uint8_t MAX_ACTIONS = 4 * 15 * 2 + 2 * ROWS + 2;
 
 class Face {
  public:
@@ -156,12 +167,36 @@ class Face {
   int16_t aimX(uint8_t i, uint8_t cell) const { return L.digitX[i] + CELL * (cell % COLS) - 1; }
   int16_t cellY(uint8_t i, uint8_t cell) const { return L.digitY[i] + CELL * (cell / COLS); }
 
+  // The panel's rows of cells, counted from the digits' top: upright the
+  // minutes' rows come after the hours' and a row between them.
+  int8_t panelRow(uint8_t i, uint8_t cell) const {
+    int16_t top = min(min(L.digitY[0], L.digitY[1]), min(L.digitY[2], L.digitY[3]));
+    return (int8_t)((cellY(i, cell) - top) / CELL);
+  }
+  int8_t lowestRow() const {
+    int8_t low = 0;
+    for (uint8_t i = 0; i < 4; i++) { low = max(low, panelRow(i, (ROWS - 1) * COLS)); }
+    return low;
+  }
+
+  // Whether a lit cell of any digit has its top left at (x, y): an alien
+  // coming down there is behind it (upright, the minutes' new formation
+  // comes down behind the hours).
+  bool blockAt(int16_t x, int16_t y) const {
+    for (uint8_t i = 0; i < 4; i++) {
+      int16_t dx = x - L.digitX[i], dy = y - L.digitY[i];
+      if (dx < 0 || dy < 0 || dx >= DIGIT_W || dy >= DIGIT_H || dx % CELL || dy % CELL) { continue; }
+      if (cells[i] & (1 << (dy / CELL * COLS + dx / CELL))) { return true; }
+    }
+    return false;
+  }
+
   // The way from `to` and the style: the cells each changing digit loses and
   // gains. Returns the time the new time stands at (ms), 0 when nothing
   // changes. `force` changes the digits in its bits even when they are the
   // same (a knock's replay, a preview). `wave`: the full hour's - every
-  // digit wakes whole, the wave steps down a row, is shot away and the new
-  // time marches in.
+  // digit wakes whole, the wave is shot away row by row from the bottom,
+  // stepping down as it thins out, and the new time marches in.
   uint32_t planChange(const uint8_t to[4], uint8_t style, uint8_t force = 0, bool wave = false) {
     begin(wave ? SCENE_WAVE : SCENE_CHANGE);
     if (wave) { style = STYLE_ALL; force = 0x0F; }
@@ -169,11 +204,7 @@ class Face {
     for (uint8_t i = 0; i < 4; i++) { if (to[i] != shown[i] || (force & (1 << i))) { changing++; } }
     if (changing == 0) { standMs = endMs = 0; return 0; }
     bool whole = style == STYLE_ALL || (style == STYLE_MIXED && changing == 1);
-    int8_t down = wave ? 1 : 0;
-    uint32_t t = 0;
-    bool woken = false;     // before the first shot, a moment to see the aliens woken
-    uint16_t anyGain = 0;
-    int16_t x = L.cannonHome;
+    uint16_t anyLose = 0, anyGain = 0;
     for (uint8_t i = 0; i < 4; i++) {
       target[i] = to[i];
       lose[i] = gain[i] = 0;
@@ -182,29 +213,21 @@ class Face {
       uint16_t from = cellsOf(shown[i]), into = cellsOf(to[i]);
       lose[i] = whole ? from : (uint16_t)(from & ~into);
       gain[i] = whole ? into : (uint16_t)(into & ~from);
+      // The way down to a new block is shot free: a block that stays above
+      // it in its column wakes and is shot as well, and comes back with the
+      // new formation - else the new alien would come down hidden behind it
+      // (Peter, 2026-10-14).
+      uint16_t way = above(gain[i]) & from & into;
+      lose[i] |= way;
+      gain[i] |= way;
+      anyLose |= lose[i];
       anyGain |= gain[i];
-      // Column by column from the left, each from the bottom up.
-      for (uint8_t c = 0; c < COLS; c++) {
-        for (int8_t r = ROWS - 1; r >= 0; r--) {
-          uint8_t k = (uint8_t)(r * COLS + c);
-          if (!(lose[i] & (1 << k))) { continue; }
-          if (!woken) {
-            t += WAKE_MS;
-            woken = true;
-            if (wave) { add(ACT_DROP, 0, 0, x, t, 0, 0); t += DROP_MS; }
-          }
-          int16_t ax = aimX(i, k);
-          if (ax != x) {
-            add(ACT_MOVE, i, k, ax, t, (uint32_t)abs(ax - x) * MOVE_MS_PX, 0);
-            t += plan[count - 1].len;
-            x = ax;
-          }
-          int16_t travel = (L.cannonY - 2) - (cellY(i, k) + CELL * down + 2);
-          uint16_t fly = (uint16_t)max<int16_t>(travel, 1) * SHOT_MS_PX;
-          add(ACT_SHOT, i, k, ax, t, (uint32_t)fly + BURST_MS, fly);
-          t += plan[count - 1].len + PAUSE_MS;
-        }
-      }
+    }
+    uint32_t t = 0;
+    int16_t x = L.cannonHome;
+    if (anyLose) {
+      t = WAKE_MS;          // before the first shot, a moment to see the aliens woken
+      x = wave ? sweep(t) : byColumns(t);
     }
     if (anyGain) {
       add(ACT_DESCEND, 0, 0, x, t, (uint32_t)(-ARRIVE_FROM) * STEP_MS, 0);
@@ -332,7 +355,7 @@ class Face {
           x = done ? a.x : (int16_t)(x + (int32_t)(a.x - x) * (int32_t)into / (int32_t)a.len);
           break;
         case ACT_DROP:
-          drop = 1;
+          drop = a.drop;
           break;
         case ACT_SHOT:
           if (into < a.fly) {        // on its way up
@@ -340,14 +363,14 @@ class Face {
             shotX = a.x + 2;
             shotY = (int16_t)(L.cannonY - 2 - (int32_t)into / SHOT_MS_PX);
           } else if (a.digit == AT_SAUCER) {
-            if (!done) { burstOn = burstWide = true; burstX = a.x + 2 - SAUCER_W / 2; burstY = 0; }
-          } else {                   // a hit: the cell goes, its burst stays a moment
+            if (into < (uint32_t)a.fly + SAUCER_BURST_MS) { burstOn = burstWide = true; burstX = a.x + 2 - SAUCER_W / 2; burstY = 0; }
+          } else {                   // a hit: the cell goes, its burst stays a moment where it was hit
             cells[a.digit] &= (uint16_t)~(1 << a.cell);
             awake[a.digit] &= (uint16_t)~(1 << a.cell);
-            if (!done) {
+            if (into < (uint32_t)a.fly + BURST_MS) {
               burstOn = true;
               burstX = L.digitX[a.digit] + CELL * (a.cell % COLS);
-              burstY = cellY(a.digit, a.cell) + CELL * drop;
+              burstY = cellY(a.digit, a.cell) + CELL * a.drop;
             }
           }
           break;
@@ -435,6 +458,100 @@ class Face {
     cannonOn = true;
   }
 
+  // The cells above the lowest of `cells` in each column.
+  static uint16_t above(uint16_t cells) {
+    uint16_t out = 0;
+    for (uint8_t c = 0; c < COLS; c++) {
+      uint16_t higher = 0;
+      for (uint8_t r = 0; r < ROWS; r++) {
+        uint16_t bit = (uint16_t)(1 << (r * COLS + c));
+        if (cells & bit) { out |= higher; }
+        higher |= bit;
+      }
+    }
+    return out;
+  }
+
+  // How long a shot flies from the muzzle up to cell k of digit i, standing `down` rows lower.
+  uint16_t flyMs(uint8_t i, uint8_t k, int8_t down) const {
+    int16_t travel = (L.cannonY - 2) - (cellY(i, k) + CELL * down + 2);
+    return (uint16_t)max<int16_t>(travel, 1) * SHOT_MS_PX;
+  }
+
+  // The cannon drives from x to ax from t on, msPx a pixel. Returns ax.
+  int16_t moveTo(int16_t ax, int16_t x, uint32_t &t, uint16_t msPx) {
+    if (ax != x) {
+      add(ACT_MOVE, 0, 0, ax, t, (uint32_t)abs(ax - x) * msPx, 0);
+      t += plan[count - 1].len;
+    }
+    return ax;
+  }
+
+  // A change's fight from t on: digit by digit, column by column from the
+  // left, each from the bottom up, the cannon waiting for each burst.
+  // Returns where the cannon ends.
+  int16_t byColumns(uint32_t &t) {
+    int16_t x = L.cannonHome;
+    for (uint8_t i = 0; i < 4; i++) {
+      for (uint8_t c = 0; c < COLS; c++) {
+        for (int8_t r = ROWS - 1; r >= 0; r--) {
+          uint8_t k = (uint8_t)(r * COLS + c);
+          if (!(lose[i] & (1 << k))) { continue; }
+          x = moveTo(aimX(i, k), x, t, MOVE_MS_PX);
+          uint16_t fly = flyMs(i, k, 0);
+          add(ACT_SHOT, i, k, x, t, (uint32_t)fly + BURST_MS, fly);
+          t += plan[count - 1].len + PAUSE_MS;
+        }
+      }
+    }
+    return x;
+  }
+
+  // The wave's fight from t on: the panel's rows from the bottom up -
+  // upright the minutes' first - each from its end nearer the cannon, which
+  // drives on as soon as its shot has hit. Once WAVE_ROOM_ROWS rows below
+  // the wave are empty it steps down a row, so it comes nearer as it thins
+  // out, but never further than a row above where the digits' lowest row
+  // stood. Returns where the cannon ends.
+  int16_t sweep(uint32_t &t) {
+    int16_t x = L.cannonHome;
+    int8_t bottom = lowestRow(), drop = 0;
+    for (int8_t row = bottom; row >= 0; row--) {
+      uint8_t n = 0, di[4 * COLS], dk[4 * COLS];
+      for (uint8_t i = 0; i < 4; i++) {
+        for (uint8_t k = 0; k < COLS * ROWS; k++) {
+          if ((lose[i] & (1 << k)) && panelRow(i, k) == row) { di[n] = i; dk[n] = k; n++; }
+        }
+      }
+      if (n == 0) { continue; }
+      while (row + drop + WAVE_ROOM_ROWS <= bottom) {
+        // Once the last burst below is over, on the next beat of the march.
+        t = (t + BURST_MS + MARCH_MS - 1) / MARCH_MS * MARCH_MS;
+        drop++;
+        add(ACT_DROP, 0, 0, x, t, 0, 0, drop);
+        t += DROP_MS;
+      }
+      for (uint8_t a = 1; a < n; a++) {   // by where the cannon aims, from the left
+        for (uint8_t b = a; b > 0 && aimX(di[b], dk[b]) < aimX(di[b - 1], dk[b - 1]); b--) {
+          uint8_t si = di[b], sk = dk[b];
+          di[b] = di[b - 1]; dk[b] = dk[b - 1];
+          di[b - 1] = si; dk[b - 1] = sk;
+        }
+      }
+      bool fromRight = abs(aimX(di[n - 1], dk[n - 1]) - x) < abs(aimX(di[0], dk[0]) - x);
+      for (uint8_t m = 0; m < n; m++) {
+        uint8_t o = fromRight ? n - 1 - m : m;
+        x = moveTo(aimX(di[o], dk[o]), x, t, WAVE_MOVE_MS_PX);
+        t += WAVE_AIM_MS;
+        uint16_t fly = flyMs(di[o], dk[o], drop);
+        add(ACT_SHOT, di[o], dk[o], x, t, fly, fly, drop);
+        t += fly;
+      }
+    }
+    t += BURST_MS + PAUSE_MS;   // the last burst seen, before the new formation comes
+    return x;
+  }
+
   void finish() {
     for (uint8_t i = 0; i < 4; i++) {
       shown[i] = target[i];
@@ -447,9 +564,9 @@ class Face {
     running = false;
   }
 
-  void add(uint8_t act, uint8_t digit, uint8_t cell, int16_t x, uint32_t at, uint32_t len, uint16_t fly) {
+  void add(uint8_t act, uint8_t digit, uint8_t cell, int16_t x, uint32_t at, uint32_t len, uint16_t fly, int8_t drop = 0) {
     if (count >= MAX_ACTIONS) { return; }
-    plan[count++] = { act, digit, cell, x, at, len, fly };
+    plan[count++] = { act, digit, cell, drop, x, at, len, fly };
   }
 };
 
@@ -470,18 +587,53 @@ inline bool swayFits(Face &f, uint8_t i, uint32_t from, uint32_t to) {
   return true;
 }
 
+// Whether every alien coming down is in sight: none behind a block of its
+// own digit (upright, the minutes' formation still comes down behind the
+// hours above them).
+inline bool arrivalSeen(const Face &f) {
+  for (uint8_t i = 0; i < 4; i++) {
+    for (uint8_t k = 0; k < COLS * ROWS; k++) {
+      if (!(f.arriving[i] & (1 << k))) { continue; }
+      int8_t row = (int8_t)(k / COLS) + f.arriveRow;
+      if (row >= 0 && (f.cells[i] & (1 << (row * COLS + k % COLS)))) { return false; }
+    }
+  }
+  return true;
+}
+
+// Whether a shot on its way up (after at(ms)) is clear of every lit cell,
+// awake or a block, where it is drawn: it hits the lowest alien of its
+// column and flies through nothing.
+inline bool shotClear(const Face &f, uint32_t ms) {
+  if (!f.shotOn) { return true; }
+  const int16_t S = CELL - 1;   // a cell's lit size
+  for (uint8_t i = 0; i < 4; i++) {
+    for (uint8_t k = 0; k < COLS * ROWS; k++) {
+      if (!(f.cells[i] & (1 << k))) { continue; }
+      bool awake = f.awake[i] & (1 << k);
+      int16_t x = f.L.digitX[i] + CELL * (k % COLS) + (awake ? f.sway(i, k, ms) : 0);
+      int16_t y = f.cellY(i, k) + (awake ? CELL * f.drop : 0);
+      if (f.shotX >= x && f.shotX < x + S && f.shotY < y + S && f.shotY + 2 > y) { return false; }
+    }
+  }
+  return true;
+}
+
 // The debug build's check, on both layouts. Every change of every digit,
-// both ways: its woken aliens sway rightly, the new formation stands a
-// moment as aliens and then as the new digit, the cannon home, within the
-// minute. The full hour's wave, the saucer from either side to every gap
-// it can be shot at, and every alien that can shoot back: the shot meets
-// the saucer, the bomb meets the cannon, the time stays; every block that
-// wakes for a moment sways rightly and is a block again. Returns false and
-// the first case that went wrong (from * 10 + to, + 1000 for the
-// difference; 3000 + the wave's case, 4000 + the saucer's, 5000 + digit *
-// 100 + digit's value * 10 + column for shooting back, 7000 + value * 15 +
-// cell for a block waking; + 10000 upright); `longest` is the longest
-// change to stand, `longestScene` the longest scene between changes.
+// both ways: its woken aliens sway rightly, no new alien comes down hidden
+// behind a block, a whole digit's shots fly through nothing, the new
+// formation stands a moment as aliens and then as the new digit, the
+// cannon home, within the minute. The full hour's wave: shot row by row
+// from the bottom, through nothing, stepping down only with rows empty
+// below it. The saucer from either side to every gap it can be shot at,
+// and every alien that can shoot back: the shot meets the saucer, the bomb
+// meets the cannon, the time stays; every block that wakes for a moment
+// sways rightly and is a block again. Returns false and the first case
+// that went wrong (from * 10 + to, + 1000 for the difference; 3000 + the
+// wave's case, 4000 + the saucer's, 5000 + digit * 100 + digit's value *
+// 10 + column for shooting back, 7000 + value * 15 + cell for a block
+// waking; + 10000 upright); `longest` is the longest change to stand,
+// `longestScene` the longest scene between changes.
 inline bool selfTest(Face &f, uint32_t &longest, uint32_t &longestScene, uint16_t &failed) {
   longest = longestScene = 0;
   const Layout *layouts[2] = { &LANDSCAPE, &PORTRAIT };
@@ -492,14 +644,20 @@ inline bool selfTest(Face &f, uint32_t &longest, uint32_t &longestScene, uint16_
       for (uint8_t a = 0; a < 10; a++) {
         for (uint8_t b = 0; b < 10; b++) {
           uint8_t from[4] = { 1, 2, 3, a }, to[4] = { 1, 2, 3, b };
+          // At least these land as aliens; the difference also the blocks
+          // that stood in their way.
           uint16_t into = cellsOf(b), gain = style == STYLE_ALL ? into : (uint16_t)(into & ~cellsOf(a));
           f.show(from);
           uint32_t stand = f.planChange(to, style, 1 << 3);
           f.start();     // at(0): woken, waiting
           bool ok = swayFits(f, 3, 0, WAKE_MS);
+          for (uint32_t ms = 0; ms < stand && ok; ms += 2 * SHOT_MS_PX) {
+            f.at(ms);
+            ok = arrivalSeen(f) && (style != STYLE_ALL || shotClear(f, ms));
+          }
           if (gain) {    // landed: aliens for a moment, swaying rightly
             f.at(stand - 1);
-            ok = ok && f.cells[3] == into && f.awake[3] == gain && f.arriving[3] == 0;
+            ok = ok && f.cells[3] == into && (f.awake[3] & gain) == gain && !(f.awake[3] & ~into) && f.arriving[3] == 0;
             ok = ok && swayFits(f, 3, stand - WAKE_MS, stand);
           }
           f.at(stand);   // the new time stands
@@ -517,14 +675,31 @@ inline bool selfTest(Face &f, uint32_t &longest, uint32_t &longestScene, uint16_
     uint32_t stand = f.planChange(midnight, STYLE_ALL);
     if (stand > longest) { longest = stand; }
     if (f.endMs >= 60000) { failed = (uint16_t)(9999 - l); return false; }
-    // The full hour's wave: everything shot from a row lower, the new time standing.
+    // The full hour's wave: all of it woken, then shot row by row from the
+    // bottom, every shot through nothing; it steps down a row only once
+    // WAVE_ROOM_ROWS rows below it are empty, and does step down; the new
+    // time standing.
     const uint8_t WAVES[3][2][4] = { { { 2, 3, 5, 9 }, { 0, 0, 0, 0 } }, { { 1, 2, 5, 9 }, { 1, 3, 0, 0 } }, { { 0, 9, 5, 9 }, { 1, 0, 0, 0 } } };
+    int8_t bottom = f.lowestRow();
     for (uint8_t w = 0; w < 3; w++) {
       f.show(WAVES[w][0]);
       uint32_t s = f.planChange(WAVES[w][1], STYLE_MIXED, 0, true);
       f.start();
-      f.at(WAKE_MS + DROP_MS);
-      bool ok = f.drop == 1 && f.awake[0] == cellsOf(WAVES[w][0][0]);
+      f.at(WAKE_MS - 1);
+      bool ok = f.drop == 0 && !f.shotOn;
+      for (uint8_t i = 0; i < 4; i++) { ok = ok && f.awake[i] == cellsOf(WAVES[w][0][i]); }
+      int8_t deepest = 0;
+      for (uint32_t ms = 0; ms < s && ok; ms += 2 * SHOT_MS_PX) {
+        f.at(ms);
+        ok = shotClear(f, ms) && arrivalSeen(f);
+        int8_t low = -1;   // the lowest awake alien's row, where it stood
+        for (uint8_t i = 0; i < 4; i++) {
+          for (uint8_t k = 0; k < COLS * ROWS; k++) { if (f.awake[i] & (1 << k)) { low = max(low, f.panelRow(i, k)); } }
+        }
+        if (low >= 0 && f.drop > 0) { ok = ok && low + f.drop - 1 + WAVE_ROOM_ROWS <= bottom; }
+        deepest = max(deepest, f.drop);
+      }
+      ok = ok && deepest > 0;
       f.at(s - 1);
       ok = ok && f.drop == 0;
       for (uint8_t i = 0; i < 4; i++) { ok = ok && f.awake[i] == cellsOf(WAVES[w][1][i]); }

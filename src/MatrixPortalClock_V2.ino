@@ -4423,7 +4423,7 @@ void aliensCell(int16_t x, int16_t y, uint8_t r, uint8_t c, bool alien, uint8_t 
 }
 
 // The panel at `sceneMs` into the running scene (0 between scenes); the
-// woken aliens step their legs and sway - the wave a row lower once it has
+// woken aliens step their legs and sway - the wave lower by the rows it has
 // stepped down - the arriving ones only step.
 void aliensDraw(bool colonOn, uint32_t sceneMs) {
   const aliens::Layout &L = alienFace.L;
@@ -4441,9 +4441,9 @@ void aliensDraw(bool colonOn, uint32_t sceneMs) {
       }
       if (alienFace.arriving[i] & (1 << k)) {
         // On the way down; behind a block that stays where it would cover one.
-        int8_t row = (int8_t)r + alienFace.arriveRow;
-        if (row >= 0 && (alienFace.cells[i] & (1 << (row * aliens::COLS + c)))) { continue; }
-        aliensCell(x, L.digitY[i] + aliens::CELL * row, r, c, true, frame, aliensColour(r));
+        int16_t y = L.digitY[i] + aliens::CELL * ((int8_t)r + alienFace.arriveRow);
+        if (alienFace.blockAt(x, y)) { continue; }
+        aliensCell(x, y, r, c, true, frame, aliensColour(r));
       }
     }
   }
