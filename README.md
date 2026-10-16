@@ -1172,13 +1172,16 @@ minutes' new formation still comes down behind the hours above them.
 
 **The full hour** goes as a wave, whatever the Change setting: every block of all
 four digits wakes; the cannon shoots the wave row by row from the bottom (upright
-the minutes' rows first), sweeping to and fro at about the arcade's pace and
-driving on to the next alien as soon as its shot has hit, the burst still showing.
-Once two rows below the wave are empty it steps down a row, on the beat of its
-march after the last burst - so it comes nearer as it thins out, but never further
-than a row above where the digits' lowest row stood (Peter, 2026-10-14: it had
-stepped down at once, before a shot). Then the new time marches in. That takes
-about 20 s (upright about 29 s).
+the minutes' rows first), sweeping to and fro at about the arcade's pace. It keeps
+a beat of its own, a shot every 250 ms: it drives on to the next alien as soon as
+it has fired and fires on the next beat at which it stands there and its last shot
+has hit, so a long way costs it a beat. Once two rows below the wave are empty the
+wave steps down a row on the next beat of its march, a row a beat, while the cannon
+fires on - so it comes nearer as it thins out, but never further than a row above
+where the digits' lowest row stood; a shot on its way meets its alien where it
+stands, and a burst goes down with the wave (Peter, 2026-10-14: it had stepped down
+at once, before a shot; 2026-10-16: the cannon waited for every step down). Then
+the new time marches in. That takes about 17 s, upright as well.
 
 **Now and then**, at the pace of the extras the faces share (the **Extras** slider,
 about every 5 min by default) and at a random time outside the slot around the
@@ -1210,8 +1213,9 @@ key `aliens`). The debug build checks, on both layouts, every change of every di
 both ways - no woken alien sways into a block that stays, no new alien comes down
 behind a block, a whole digit's shots fly through nothing, the new formation stands
 a moment as aliens and then as the digit, the cannon home, within the minute - the
-change of all four at midnight, the wave at three full hours (shots through
-nothing, a step down only with two rows empty below, and at least one), the saucer
+change of all four at midnight, the wave at every full hour (shots through nothing
+meeting their aliens where they stand, the cannon on its beat, one or two beats
+apart, a step down only with two rows empty below, and at least one), the saucer
 from either side to each gap, and every alien that can shoot back: the shot meets
 the saucer, the bomb meets the cannon, the time stays.
 

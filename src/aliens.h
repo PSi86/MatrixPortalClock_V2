@@ -16,6 +16,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <string.h>
 
 namespace aliens {
 
@@ -82,14 +83,16 @@ enum Scene : uint8_t { SCENE_CHANGE, SCENE_WAVE, SCENE_SAUCER, SCENE_BACK, SCENE
 // formation has landed, before it turns into blocks (Peter, 2026-10-11).
 const uint16_t MOVE_MS_PX = 25, SHOT_MS_PX = 10, BURST_MS = 240, PAUSE_MS = 120, STEP_MS = 300, MARCH_MS = 400;
 const uint16_t WAKE_MS = 1500;
-// The full hour's wave is shot row by row from the bottom, and the cannon
-// drives on to its next alien as soon as a shot has hit, the burst still
-// showing, at about the arcade's pace; once WAVE_ROOM_ROWS rows below the
-// wave are empty, it steps down a row (Peter, 2026-10-14: it stepped down
-// at once, before a shot, and took long).
-const uint16_t WAVE_MOVE_MS_PX = 16, WAVE_AIM_MS = 80;
+// The full hour's wave is shot row by row from the bottom, the cannon at
+// about the arcade's pace, firing on a beat of its own (WAVE_FIRE_MS):
+// it drives on as soon as it has fired and stands at least WAVE_AIM_MS
+// before the next shot. Once WAVE_ROOM_ROWS rows below the wave are
+// empty, the wave steps down a row on the beat of its march, and the
+// cannon fires on as it does (Peter, 2026-10-14: it stepped down at once,
+// before a shot, and took long; 2026-10-16: the cannon waited for every
+// step down).
+const uint16_t WAVE_MOVE_MS_PX = 16, WAVE_AIM_MS = 80, WAVE_FIRE_MS = 250;
 const uint8_t  WAVE_ROOM_ROWS = 2;
-const uint16_t DROP_MS = 600;           // the wave stepped down a row, before the cannon moves on
 // The saucer: the cannon sees it, then drives to a gap it reaches in time;
 // the saucer is hit in its middle, in its row 1 (its lower row has a gap there).
 const uint16_t REACT_MS = 400, SAUCER_BURST_MS = 600;
@@ -111,11 +114,11 @@ enum Act : uint8_t { ACT_MOVE, ACT_SHOT, ACT_DROP, ACT_DESCEND, ACT_HOME };
 const uint8_t AT_SAUCER = 0xFF;  // a shot's digit when it is for the saucer
 struct Action {
   uint8_t  act, digit, cell;
-  int8_t   drop;       // ACT_DROP: the rows the wave stands lower from then on; ACT_SHOT: when it hits
+  int8_t   drop;       // ACT_DROP: the rows the wave stands lower from then on
   int16_t  x;          // ACT_MOVE, ACT_HOME, ACT_SHOT: where the cannon is
-  uint32_t at, len;    // ms from the plan's start
+  uint32_t at, len;    // ms from the plan's start; the plan is kept in the order of `at`
   uint16_t fly;        // ACT_SHOT: ms on its way up, then its burst; len ends with the burst, or
-                       // with the hit when the cannon drives on while the burst shows (the wave)
+                       // with the hit when the cannon has driven on already (the wave)
 };
 // A move and a shot for every cell of four digits, the wave's steps down
 // (upright it has ten rows), the descent, home.
@@ -196,7 +199,8 @@ class Face {
   // changes. `force` changes the digits in its bits even when they are the
   // same (a knock's replay, a preview). `wave`: the full hour's - every
   // digit wakes whole, the wave is shot away row by row from the bottom,
-  // stepping down as it thins out, and the new time marches in.
+  // stepping down as it thins out while the cannon fires on, and the new
+  // time marches in.
   uint32_t planChange(const uint8_t to[4], uint8_t style, uint8_t force = 0, bool wave = false) {
     begin(wave ? SCENE_WAVE : SCENE_CHANGE);
     if (wave) { style = STYLE_ALL; force = 0x0F; }
@@ -230,13 +234,15 @@ class Face {
       x = wave ? sweep(t) : byColumns(t);
     }
     if (anyGain) {
-      add(ACT_DESCEND, 0, 0, x, t, (uint32_t)(-ARRIVE_FROM) * STEP_MS, 0);
-      t += plan[count - 1].len;
+      uint32_t len = (uint32_t)(-ARRIVE_FROM) * STEP_MS;
+      add(ACT_DESCEND, 0, 0, x, t, len, 0);
+      t += len;
       t += WAKE_MS;         // landed as aliens: a moment before they turn into blocks
     }
     standMs = t;
-    add(ACT_HOME, 0, 0, L.cannonHome, t, (uint32_t)abs(L.cannonHome - x) * MOVE_MS_PX, 0);
-    endMs = t + plan[count - 1].len;
+    uint32_t home = (uint32_t)abs(L.cannonHome - x) * MOVE_MS_PX;
+    add(ACT_HOME, 0, 0, L.cannonHome, t, home, 0);
+    endMs = t + home;
     return standMs;
   }
 
@@ -344,6 +350,8 @@ class Face {
     arriveRow = ARRIVE_FROM;
     drop = 0;
     int16_t x = startX;
+    // Every action begun by now, in the order they begin; in the wave the
+    // cannon drives on while its shot flies and the wave steps down.
     for (uint8_t n = 0; n < count; n++) {
       const Action &a = plan[n];
       if (ms < a.at) { break; }
@@ -370,7 +378,7 @@ class Face {
             if (into < (uint32_t)a.fly + BURST_MS) {
               burstOn = true;
               burstX = L.digitX[a.digit] + CELL * (a.cell % COLS);
-              burstY = cellY(a.digit, a.cell) + CELL * a.drop;
+              burstY = cellY(a.digit, a.cell);   // the wave's rows lower added below
             }
           }
           break;
@@ -387,8 +395,11 @@ class Face {
           }
           break;
       }
-      if (!done) { break; }
     }
+    // An alien's burst goes down with the wave when it steps down (it has
+    // the place of a shot alien in the formation), so it never stands on
+    // one coming down.
+    if (burstOn && !burstWide) { burstY += CELL * drop; }
     cannonX = x;
     if (scene == SCENE_SAUCER && ms < saucerHitAt) {
       saucerOn = true;
@@ -481,10 +492,26 @@ class Face {
   // The cannon drives from x to ax from t on, msPx a pixel. Returns ax.
   int16_t moveTo(int16_t ax, int16_t x, uint32_t &t, uint16_t msPx) {
     if (ax != x) {
-      add(ACT_MOVE, 0, 0, ax, t, (uint32_t)abs(ax - x) * msPx, 0);
-      t += plan[count - 1].len;
+      uint32_t len = (uint32_t)abs(ax - x) * msPx;
+      add(ACT_MOVE, 0, 0, ax, t, len, 0);
+      t += len;
     }
     return ax;
+  }
+
+  // When a shot fired at `fire` meets the alien in cell k of digit i, with
+  // the wave stepping down a row at each of the `steps` times in `stepAt`:
+  // it meets the alien where it stands then, or the alien comes down onto
+  // it.
+  uint32_t meet(uint32_t fire, uint8_t i, uint8_t k, const uint32_t *stepAt, uint8_t steps) const {
+    uint8_t j = 0;                   // the rows the wave stands lower
+    while (j < steps && stepAt[j] <= fire) { j++; }
+    uint32_t from = fire;
+    for (;; j++) {
+      uint32_t h = max(from, fire + flyMs(i, k, (int8_t)j));
+      if (j >= steps || h < stepAt[j]) { return h; }
+      from = stepAt[j];
+    }
   }
 
   // A change's fight from t on: digit by digit, column by column from the
@@ -508,14 +535,23 @@ class Face {
   }
 
   // The wave's fight from t on: the panel's rows from the bottom up -
-  // upright the minutes' first - each from its end nearer the cannon, which
-  // drives on as soon as its shot has hit. Once WAVE_ROOM_ROWS rows below
-  // the wave are empty it steps down a row, so it comes nearer as it thins
-  // out, but never further than a row above where the digits' lowest row
-  // stood. Returns where the cannon ends.
+  // upright the minutes' first - each from its end nearer the cannon. The
+  // cannon keeps its own beat: it drives on to its next alien as soon as it
+  // has fired, and fires on the first beat at which it stands there aimed
+  // and its last shot has hit - a long way costs it a beat, the wave never
+  // does. The wave keeps the beat of its march: once WAVE_ROOM_ROWS rows
+  // below it are empty it steps down a row on the march's next beat, a row
+  // a beat, so it comes nearer as it thins out, but never further than a
+  // row above where the digits' lowest row stood. A step down is in the
+  // plan only while an alien is left to see it. Returns where the cannon
+  // ends.
   int16_t sweep(uint32_t &t) {
     int16_t x = L.cannonHome;
     int8_t bottom = lowestRow(), drop = 0;
+    uint32_t stepAt[2 * ROWS];
+    uint8_t steps = 0, planned = 0;   // steps down due, and of them in the plan
+    uint32_t drive = t, fired = 0, hit = t;
+    bool first = true;
     for (int8_t row = bottom; row >= 0; row--) {
       uint8_t n = 0, di[4 * COLS], dk[4 * COLS];
       for (uint8_t i = 0; i < 4; i++) {
@@ -524,12 +560,11 @@ class Face {
         }
       }
       if (n == 0) { continue; }
-      while (row + drop + WAVE_ROOM_ROWS <= bottom) {
-        // Once the last burst below is over, on the next beat of the march.
-        t = (t + BURST_MS + MARCH_MS - 1) / MARCH_MS * MARCH_MS;
+      while (row + drop + WAVE_ROOM_ROWS <= bottom && steps < 2 * ROWS) {
+        // After the hit that made room, a beat after the step before.
+        uint32_t after = steps ? max(hit, stepAt[steps - 1] + MARCH_MS) : hit;
+        stepAt[steps++] = (after + MARCH_MS - 1) / MARCH_MS * MARCH_MS;
         drop++;
-        add(ACT_DROP, 0, 0, x, t, 0, 0, drop);
-        t += DROP_MS;
       }
       for (uint8_t a = 1; a < n; a++) {   // by where the cannon aims, from the left
         for (uint8_t b = a; b > 0 && aimX(di[b], dk[b]) < aimX(di[b - 1], dk[b - 1]); b--) {
@@ -541,14 +576,20 @@ class Face {
       bool fromRight = abs(aimX(di[n - 1], dk[n - 1]) - x) < abs(aimX(di[0], dk[0]) - x);
       for (uint8_t m = 0; m < n; m++) {
         uint8_t o = fromRight ? n - 1 - m : m;
-        x = moveTo(aimX(di[o], dk[o]), x, t, WAVE_MOVE_MS_PX);
-        t += WAVE_AIM_MS;
-        uint16_t fly = flyMs(di[o], dk[o], drop);
-        add(ACT_SHOT, di[o], dk[o], x, t, fly, fly, drop);
-        t += fly;
+        uint32_t ready = drive;
+        x = moveTo(aimX(di[o], dk[o]), x, ready, WAVE_MOVE_MS_PX);
+        ready = max(ready + WAVE_AIM_MS, hit);
+        uint32_t fire = first ? ready : fired + (ready - fired + WAVE_FIRE_MS - 1) / WAVE_FIRE_MS * WAVE_FIRE_MS;
+        first = false;
+        hit = meet(fire, di[o], dk[o], stepAt, steps);
+        for (; planned < steps && stepAt[planned] <= hit; planned++) {   // this alien is there to step down
+          add(ACT_DROP, 0, 0, 0, stepAt[planned], 0, 0, (int8_t)(planned + 1));
+        }
+        add(ACT_SHOT, di[o], dk[o], x, fire, hit - fire, (uint16_t)(hit - fire));
+        fired = drive = fire;
       }
     }
-    t += BURST_MS + PAUSE_MS;   // the last burst seen, before the new formation comes
+    t = hit + BURST_MS + PAUSE_MS;   // the last burst seen, before the new formation comes
     return x;
   }
 
@@ -564,9 +605,12 @@ class Face {
     running = false;
   }
 
+  // Into the plan in the order of `at`, after those that begin at the same time.
   void add(uint8_t act, uint8_t digit, uint8_t cell, int16_t x, uint32_t at, uint32_t len, uint16_t fly, int8_t drop = 0) {
     if (count >= MAX_ACTIONS) { return; }
-    plan[count++] = { act, digit, cell, drop, x, at, len, fly };
+    uint8_t n = count++;
+    for (; n > 0 && plan[n - 1].at > at; n--) { plan[n] = plan[n - 1]; }
+    plan[n] = { act, digit, cell, drop, x, at, len, fly };
   }
 };
 
@@ -675,36 +719,71 @@ inline bool selfTest(Face &f, uint32_t &longest, uint32_t &longestScene, uint16_
     uint32_t stand = f.planChange(midnight, STYLE_ALL);
     if (stand > longest) { longest = stand; }
     if (f.endMs >= 60000) { failed = (uint16_t)(9999 - l); return false; }
-    // The full hour's wave: all of it woken, then shot row by row from the
-    // bottom, every shot through nothing; it steps down a row only once
+    // Every full hour's wave, from hh-1:59 to hh:00: all of it woken, then
+    // shot row by row from the bottom, every shot through nothing and
+    // meeting its alien where it stands - just above the shot, or come down
+    // onto it; the cannon fires on its beat, one or two beats after its last
+    // shot, whenever the wave steps down; the wave steps down a row only once
     // WAVE_ROOM_ROWS rows below it are empty, and does step down; the new
     // time standing.
-    const uint8_t WAVES[3][2][4] = { { { 2, 3, 5, 9 }, { 0, 0, 0, 0 } }, { { 1, 2, 5, 9 }, { 1, 3, 0, 0 } }, { { 0, 9, 5, 9 }, { 1, 0, 0, 0 } } };
     int8_t bottom = f.lowestRow();
-    for (uint8_t w = 0; w < 3; w++) {
-      f.show(WAVES[w][0]);
-      uint32_t s = f.planChange(WAVES[w][1], STYLE_MIXED, 0, true);
+    const uint32_t STEP = 2 * SHOT_MS_PX;
+    for (uint8_t w = 0; w < 24; w++) {
+      uint8_t was = (uint8_t)((w + 23) % 24);
+      const uint8_t from[4] = { (uint8_t)(was / 10), (uint8_t)(was % 10), 5, 9 }, to[4] = { (uint8_t)(w / 10), (uint8_t)(w % 10), 0, 0 };
+      f.show(from);
+      uint32_t s = f.planChange(to, STYLE_MIXED, 0, true);
       f.start();
       f.at(WAKE_MS - 1);
       bool ok = f.drop == 0 && !f.shotOn;
-      for (uint8_t i = 0; i < 4; i++) { ok = ok && f.awake[i] == cellsOf(WAVES[w][0][i]); }
-      int8_t deepest = 0;
-      for (uint32_t ms = 0; ms < s && ok; ms += 2 * SHOT_MS_PX) {
+      for (uint8_t i = 0; i < 4; i++) { ok = ok && f.awake[i] == cellsOf(from[i]); }
+      int8_t deepest = 0, dropWas = 0;
+      uint16_t awakeWas[4];
+      memcpy(awakeWas, f.awake, sizeof awakeWas);
+      bool shotWas = false;
+      int16_t shotXWas = 0, shotYWas = 0;
+      uint32_t fired = 0;
+      uint16_t shots = 0;
+      for (uint32_t ms = WAKE_MS; ms < s && ok; ms += STEP) {
         f.at(ms);
         ok = shotClear(f, ms) && arrivalSeen(f);
+        for (uint8_t i = 0; i < 4; i++) {
+          uint16_t hit = awakeWas[i] & (uint16_t)~f.awake[i];
+          for (uint8_t k = 0; k < COLS * ROWS; k++) {
+            if (!(hit & (1 << k))) { continue; }
+            int16_t foot = f.cellY(i, k) + CELL * dropWas + CELL - 2;   // the alien's lowest pixel, a step ago
+            ok = ok && shotWas && shotXWas == f.aimX(i, k) + 2 && shotYWas > foot &&
+                 shotYWas <= foot + (int16_t)(STEP / SHOT_MS_PX) + CELL;
+          }
+        }
+        if (f.shotOn) {    // when it left the muzzle, to within SHOT_MS_PX
+          uint32_t fire = ms - (uint32_t)(f.L.cannonY - 2 - f.shotY) * SHOT_MS_PX;
+          if (!shotWas || fire >= fired + WAVE_FIRE_MS / 2) {
+            if (shots++) {
+              uint32_t gap = fire - fired, beats = (gap + WAVE_FIRE_MS / 2) / WAVE_FIRE_MS;
+              ok = ok && beats >= 1 && beats <= 2 && abs((int32_t)gap - (int32_t)(beats * WAVE_FIRE_MS)) <= SHOT_MS_PX;
+            }
+            fired = fire;
+          }
+        }
         int8_t low = -1;   // the lowest awake alien's row, where it stood
         for (uint8_t i = 0; i < 4; i++) {
           for (uint8_t k = 0; k < COLS * ROWS; k++) { if (f.awake[i] & (1 << k)) { low = max(low, f.panelRow(i, k)); } }
         }
         if (low >= 0 && f.drop > 0) { ok = ok && low + f.drop - 1 + WAVE_ROOM_ROWS <= bottom; }
         deepest = max(deepest, f.drop);
+        memcpy(awakeWas, f.awake, sizeof awakeWas);
+        dropWas = f.drop;
+        shotWas = f.shotOn;
+        shotXWas = f.shotX;
+        shotYWas = f.shotY;
       }
       ok = ok && deepest > 0;
       f.at(s - 1);
       ok = ok && f.drop == 0;
-      for (uint8_t i = 0; i < 4; i++) { ok = ok && f.awake[i] == cellsOf(WAVES[w][1][i]); }
+      for (uint8_t i = 0; i < 4; i++) { ok = ok && f.awake[i] == cellsOf(to[i]); }
       f.at(s);
-      for (uint8_t i = 0; i < 4; i++) { ok = ok && f.cells[i] == cellsOf(WAVES[w][1][i]) && f.awake[i] == 0; }
+      for (uint8_t i = 0; i < 4; i++) { ok = ok && f.cells[i] == cellsOf(to[i]) && f.awake[i] == 0; }
       f.at(f.endMs);
       ok = ok && !f.running && f.cannonX == f.L.cannonHome && f.endMs < 60000;
       if (s > longest) { longest = s; }
