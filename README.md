@@ -1159,17 +1159,29 @@ its row has room that way (an empty cell or the digit's edge before a block that
 stays), so one between two staying blocks stands still. Then the cannon drives
 under them and shoots them one by one, column by column from the bottom up, each
 hit an orange burst; the new formation marches down from above the panel in steps
-of a cell - behind the blocks that stay - lands, marches on the spot for 1.5 s as
-aliens and turns into blocks at :00; the cannon drives home. Each transformation
-has its moment, apart from what moves around it (Peter, 2026-10-11). **Change**
-(`ast`): *Whole digit* wakes and shoots every block of a changing digit and brings
-its whole new formation, *Only the difference* only the blocks the new digit does
-not have; *Mixed* (the default) takes the whole digit when one changes and the
-difference when several do.
+of a cell, lands, marches on the spot for 1.5 s as aliens and turns into blocks at
+:00; the cannon drives home. Each transformation has its moment, apart from what
+moves around it (Peter, 2026-10-11). **Change** (`ast`): *Whole digit* wakes and
+shoots every block of a changing digit and brings its whole new formation, *Only
+the difference* only the blocks the new digit does not have - and a block that
+stays but stands above a new one in its column: its way down is shot free, so
+every new alien is seen coming down instead of behind a block (Peter, 2026-10-14);
+such a block comes back with the new formation. *Mixed* (the default) takes the
+whole digit when one changes and the difference when several do. Upright, the
+minutes' new formation still comes down behind the hours above them.
 
 **The full hour** goes as a wave, whatever the Change setting: every block of all
-four digits wakes, the wave steps down a row, is shot away digit by digit, and the
-new time marches in. At midnight that takes about 38 s, the longest change.
+four digits wakes; the cannon shoots the wave row by row from the bottom (upright
+the minutes' rows first), sweeping to and fro at about the arcade's pace. It keeps
+a beat of its own, a shot every 250 ms: it drives on to the next alien as soon as
+it has fired and fires on the next beat at which it stands there and its last shot
+has hit, so a long way costs it a beat. Once two rows below the wave are empty the
+wave steps down a row on the next beat of its march, a row a beat, while the cannon
+fires on - so it comes nearer as it thins out, but never further than a row above
+where the digits' lowest row stood; a shot on its way meets its alien where it
+stands, and a burst goes down with the wave (Peter, 2026-10-14: it had stepped down
+at once, before a shot; 2026-10-16: the cannon waited for every step down). Then
+the new time marches in. That takes about 17 s, upright as well.
 
 **Now and then**, at the pace of the extras the faces share (the **Extras** slider,
 about every 5 min by default) and at a random time outside the slot around the
@@ -1198,11 +1210,14 @@ Each scene is a plan of actions on a timeline (`src/aliens.h`): what the face sh
 at any moment follows from the plan and the time alone, so it is drawn on whatever
 pass the loop has and is never behind. The settings are in a blob of their own (NVS
 key `aliens`). The debug build checks, on both layouts, every change of every digit
-both ways - no woken alien sways into a block that stays, the new formation stands
+both ways - no woken alien sways into a block that stays, no new alien comes down
+behind a block, a whole digit's shots fly through nothing, the new formation stands
 a moment as aliens and then as the digit, the cannon home, within the minute - the
-change of all four at midnight, the wave at three full hours, the saucer from
-either side to each gap, and every alien that can shoot back: the shot meets the
-saucer, the bomb meets the cannon, the time stays.
+change of all four at midnight, the wave at every full hour (shots through nothing
+meeting their aliens where they stand, the cannon on its beat, one or two beats
+apart, a step down only with two rows empty below, and at least one), the saucer
+from either side to each gap, and every alien that can shoot back: the shot meets
+the saucer, the bomb meets the cannon, the time stays.
 
 ## Animation timing
 
