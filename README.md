@@ -682,5 +682,68 @@ S3 rounds (8 MHz asked gives 10 MHz on the bus).
 then 30 each with the panel running at drive strength 0 to 3.
 
 GIFs come from the same build step as the clock's (up to 1500 KB, for walls up to
-256x128). With a `gif_dirs.local` in place the spike's firmware holds those
-private GIFs too, so it must not be published either.
+256x128): the test images in `tools/wallclock/test_gifs/`, not the repository's
+examples (`custom_gif_repo = no`, `custom_gif_dirs` in the env). With a
+`gif_dirs.local` in place the spike's firmware holds those private GIFs too, so it
+must not be published either.
+
+### Panel test and calibration tool (2026-10-17)
+
+With six 64x64 panels as wall clock L (3x2) the spike became a tool to set up and
+judge panels. What came out of the test (placement, colour steps from the driver's
+shortened bit planes, currents, tearing, the offset at the panels' middle when the
+eyes follow motion, gamma at the dark end, a white balance for dark greys) is in the
+concept doc, section *Wall clock hardware*, "Panel test with six panels".
+
+On the GIF screen a test image stays until the BOOT button (or `gif next`) moves
+on. The test images (`tools/wallclock/make_test_gifs.py`, all 192x128):
+
+| Image | For |
+|---|---|
+| `raw_grey_match` | dark greys (raw 2, 4, 8, 16), each with 100 % down to 45 % blue: the neutral one per level |
+| `colour_chart` | 12 hues at full, half and quarter value, 12 greys 255 down to 4 |
+| `raw_steps_dark` | red, green, blue, white in 16 steps 0-30, raw: where each colour starts, the darkest steps |
+| `steps_16` | the same in 16 steps 0-255: each colour's brightness curve |
+| `steps_dark` | 16 steps 0-60 through the gamma modes |
+| `bars_slow`, `motion_bars` | a bar at 20 LEDs a second; bars at 100 LEDs a second and a turning line: tearing, judder |
+| `aliens_l_wave` | the Aliens face's hour wave three times the size, the band under it free |
+| `ramps_scroll` | ramps of 64 steps per colour moving across: the colour steps in motion |
+
+A GIF named `raw_...` is shown with its exact values; the others go through the
+gamma mode in force.
+
+Console commands added for the test (beside those above):
+
+| Command | Does |
+|---|---|
+| `fill <n> <r> <g> <b>`, `fill <n> ramp`, `fill off` | one chain panel lit in one colour, or the ramps on it alone; never more than one panel, so a supply sized for a dark wall is safe at full brightness |
+| `gifs`, `gif <n\|next\|prev\|auto\|hold>` | list the test images, show one |
+| `gamma <0..4>` | GIF values to the panel: 0 raw, 1 gamma 2.2 (as the clock), 2 gamma 2.2 with nothing lit below 1, 3 sRGB curve, 4 gamma 2.2 with ordered dithering |
+| `bar <LEDs a second\|off>` | a white bar crossing the wall, only the changed columns written (as the clock writes): about 0.5 ms a step instead of 48 ms for a full frame, smooth up to hundreds of steps a second |
+| `flipwait <1..5>` | refresh periods to wait after a flip before drawing (double buffer only) |
+
+A short press of BOOT with the brightness above 64 sets it to 32 first, as the
+next image may be bright. With nobody reading the USB console the spike no longer
+stalls (`Serial.setTxTimeoutMs(0)`).
+
+Tools in `tools/wallclock/` (Python of PlatformIO's own environment, which has
+pyserial: `~/.platformio/penv/Scripts/python.exe`):
+
+- `panel_remote.py`: a web page on the PC, http://127.0.0.1:8766, to switch test
+  images, gamma modes, brightness, the bar, screens, refresh and buffer without
+  typing; it builds its buttons from the board's `gifs` and allows a brightness
+  above 64 only with a dark image, the bar or a black wall. It holds the board's
+  port while it runs.
+- `bench.py`: sets driver configurations in turn (`8:0:20:120` = 8 bits, single
+  buffer, 20 MHz asked, minimum refresh 120 Hz) and prints refresh, bus clock,
+  memory, full-frame draw time and the planes weighted by light time; `--cmd`,
+  `--read`, `--wifi` for the rest.
+- `make_test_gifs.py`: makes the test images.
+
+Both talk only to the board with USB serial 38:44:BE:CC:64:14 (change `SERIAL_NO`
+for another board) and open it with DTR and RTS low: raised, RTS resets the chip.
+
+At the bench: a panel supply whose output floats (here 88 V AC against the board's
+GND through its interference capacitor) discharges through whichever HUB75 contact
+touches first. Connect the supply's minus to the board's GND first, switch the
+supply on, then plug the ribbon cable; set the picture black before flashing.

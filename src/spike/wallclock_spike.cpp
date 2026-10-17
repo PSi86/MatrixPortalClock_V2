@@ -43,6 +43,13 @@
    (namespace "wcspike") and the driver's take effect after a restart, which
    the command does itself. Three starts in a row that do not get past the
    panel start bring the defaults back.
+
+   Panel test and calibration (2026-10-17, six panels as wall clock L): on
+   screen 5 the test images of tools/wallclock/ stay until BOOT or "gif"
+   moves on; "fill" lights one panel only, "gamma" picks how GIF values reach
+   the panel, "bar" moves a bar writing only the changed columns, "flipwait"
+   tunes the double buffer. tools/wallclock/panel_remote.py is a web page on
+   the PC for all of it; README, "Panel test and calibration tool".
    ------------------------------------------------------------------------- */
 #include <Arduino.h>
 #include <Wire.h>
@@ -82,7 +89,7 @@ const uint8_t  PROBE_COUNT = 30;
 const uint16_t PROBE_TIMEOUT_MS = 2000;
 
 const unsigned long HOLD_MS = 600;           // BOOT held this long: next brightness
-const unsigned long GIF_SHOW_MS = 10000;     // each GIF this long
+const unsigned long GIF_SHOW_MS = 20000;     // each GIF this long (the wall's test GIFs run up to 20 s)
 const unsigned long STABLE_MS = 10000;       // running this long counts as a good start
 const uint8_t BRIGHT_STEPS[] = { 4, 8, 16, 32, 64, 128 };
 
@@ -247,9 +254,14 @@ bool panelStart() {
 
 // Before drawing into the back buffer: the frame on show before the last
 // flip may still be going out (the S3 flips without waiting for the frame end).
+// flipWait refresh periods (console "flipwait", not kept): with double buffering
+// on L a sharp offset showed at every panel's middle in motion (2026-10-17);
+// if the switch comes a refresh later than reckoned, waiting longer removes it.
+uint8_t flipWait = 1;
+
 void beginFrame() {
   if (!s.doubleBuf) { return; }
-  uint32_t period = refreshPeriodUs() + 500;
+  uint32_t period = refreshPeriodUs() * flipWait + 500;
   while (micros() - flippedAt < period) { delayMicroseconds(100); }
 }
 
@@ -421,6 +433,14 @@ const char *SCREEN_NAMES[] = { "chain", "layout", "ramps", "motion", "gifs", "in
 uint8_t screen = SCR_CHAIN;
 unsigned long screenDrawnAt = 0;
 
+// Console "fill": one chain panel lit all over in one colour, the others dark - for dead LEDs,
+// the panels' colours one after the other and the current of one panel. Only ever one panel, so
+// the supply never has the whole wall lit (Peter, 2026-10-17); not kept over a restart, and any
+// screen change ends it.
+int8_t fillPanel = -1;
+uint8_t fillRgb[3] = { 0, 0, 0 };
+bool fillRamp = false;   // "fill <n> ramp": the Ramps screen's bands on that panel alone
+
 const uint8_t PANEL_COLOURS[MAX_PANELS][3] = {
   { 255, 255, 255 }, { 255, 200, 0 }, { 0, 200, 255 }, { 255, 0, 255 },
   { 120, 255, 0 }, { 255, 120, 0 }, { 0, 120, 255 }, { 200, 120, 255 } };
@@ -530,7 +550,43 @@ uint8_t *gifCanvas = nullptr;
 int16_t gifW = 0, gifH = 0, gifIndex = -1;
 unsigned long gifStartedAt = 0, gifNextFrameAt = 0;
 bool gifRestartDue = false;
-uint8_t gifGamma[256];
+// Test images (2026-10-17): a GIF stays until the BOOT button or the console ("gif") moves on,
+// unless "gif auto" lets them change every GIF_SHOW_MS.
+bool gifAuto = false;
+// How GIF values become panel values ("gamma <0..4>"): with gamma 2.2 at 8 bits everything below
+// about 16 of 255 comes out 0, so the dark end loses its steps (2026-10-17). The modes to compare:
+//   0 raw values, 1 gamma 2.2 (as the clock), 2 gamma 2.2 but nothing lit comes out 0,
+//   3 the sRGB curve (a linear foot at the dark end), 4 gamma 2.2 with ordered dithering
+//   (a 4 x 4 Bayer pattern spreads the fraction over neighbouring LEDs).
+// A GIF whose name starts with "raw_" is always shown raw: test images of exact panel values.
+const char *GAMMA_NAMES[] = { "raw values", "gamma 2.2 (as the clock)", "gamma 2.2, nothing lit below 1",
+                              "sRGB curve", "gamma 2.2 with ordered dithering" };
+const uint8_t GAMMA_MODES = 5;
+uint8_t gammaMode = 1;
+uint8_t gammaTable[4][256];   // modes 0..3
+uint16_t gamma16[256];        // gamma 2.2 in 1/256 steps, for the dithering
+const uint8_t BAYER4[4][4] = { { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 } };
+bool gifRaw = false;          // the GIF on show is a raw_ test image
+
+void buildGammaTables() {
+  for (int v = 0; v < 256; v++) {
+    float x = v / 255.0f, lin22 = powf(x, 2.2f);
+    float srgb = x <= 0.04045f ? x / 12.92f : powf((x + 0.055f) / 1.055f, 2.4f);
+    gammaTable[0][v] = v;
+    gammaTable[1][v] = (uint8_t)lroundf(lin22 * 255.0f);
+    gammaTable[2][v] = (uint8_t)max<long>(v ? 1 : 0, lroundf(lin22 * 255.0f));
+    gammaTable[3][v] = (uint8_t)lroundf(srgb * 255.0f);
+    gamma16[v] = (uint16_t)lroundf(lin22 * 255.0f * 256.0f);
+  }
+}
+
+// One GIF value as it goes to the panel at wall position x, y.
+inline uint8_t gifLevel(uint8_t v, int16_t x, int16_t y) {
+  if (gifRaw) { return v; }
+  if (gammaMode < 4) { return gammaTable[gammaMode][v]; }
+  uint32_t out = (gamma16[v] + (BAYER4[y & 3][x & 3] * 16 + 8)) >> 8;   // the fraction against the pattern
+  return out > 255 ? 255 : (uint8_t)out;
+}
 struct GifArea { int16_t x, y, w, h; uint8_t disposal; bool valid; };
 GifArea gifPrev;
 
@@ -579,6 +635,7 @@ bool gifNext() {
       continue;
     }
     gifIndex = i;
+    gifRaw = !strncmp(g.name, "raw_", 4);
     gifW = g.width;
     gifH = g.height;
     gifPrev.valid = false;
@@ -600,7 +657,7 @@ void gifRender() {
       int16_t gx = x - x0, gy = y - y0;
       if (gx >= 0 && gy >= 0 && gx < gifW && gy < gifH) {
         const uint8_t *c = &gifCanvas[(gy * gifW + gx) * 3];
-        r = gifGamma[c[0]]; g = gifGamma[c[1]]; b = gifGamma[c[2]];
+        r = gifLevel(c[0], x, y); g = gifLevel(c[1], x, y); b = gifLevel(c[2], x, y);
       }
       wall->rgb(x, y, r, g, b);
     }
@@ -608,8 +665,15 @@ void gifRender() {
   present();
 }
 
+// GIF i (from 0) next: its predecessor as the last one shown.
+void gifSelect(int16_t i) {
+  gifIndex = (int16_t)((i - 1 + BUILT_IN_GIF_COUNT) % BUILT_IN_GIF_COUNT);
+  gifStop();
+  screenDrawnAt = 0;
+}
+
 void drawGif() {
-  if (!gif || millis() - gifStartedAt >= GIF_SHOW_MS) {
+  if (!gif || (gifAuto && millis() - gifStartedAt >= GIF_SHOW_MS)) {
     if (!gifNext()) {
       if (screenDrawnAt == 0) {
         beginFrame();
@@ -645,9 +709,70 @@ void drawGif() {
   gifRender();
 }
 
+// In the driver's own coordinates: chain panel fillPanel lit, all else dark. As a ramp, the Ramps
+// screen's five bands across that panel alone (0..255 over its 64 columns, the last band 0..32),
+// so it can be seen at full brightness without the whole wall lit.
+void drawFill() {
+  dma->clearScreen();
+  int16_t x0 = fillPanel * PANEL;
+  for (int16_t y = 0; y < PANEL; y++) {
+    uint8_t band = y * 5 / PANEL;
+    for (int16_t x = 0; x < PANEL; x++) {
+      if (!fillRamp) { dma->drawPixelRGB888(x0 + x, y, fillRgb[0], fillRgb[1], fillRgb[2]); continue; }
+      uint8_t v = x * 255 / (PANEL - 1), dark = x * 32 / (PANEL - 1);
+      uint8_t r = band == 0 || band == 3 ? v : 0, g = band == 1 || band == 3 ? v : 0, b = band == 2 || band == 3 ? v : 0;
+      if (band == 4) { r = g = b = dark; }
+      dma->drawPixelRGB888(x0 + x, y, r, g, b);
+    }
+  }
+}
+
+// Console "bar": a white bar crossing the wall, written as the clock writes - only the columns that
+// change, so a step costs two columns (about 0.5 ms) instead of a full frame (48 ms) and the bar can
+// move one LED at a time at 60 steps a second and more. Single buffer only; any screen ends it.
+uint16_t barSpeed = 0;          // LEDs a second, 0 = off
+int16_t barPos = -1000;         // the bar's left column as drawn
+unsigned long barStartedAt = 0; // micros()
+uint32_t barSteps = 0, barUs = 0;
+unsigned long barReportAt = 0;
+const int16_t BAR_W = 6;
+
+void barColumn(int16_t x, uint8_t v) {
+  for (int16_t y = 0; y < wall->height(); y++) { wall->rgb(x, y, v, v, v); }
+}
+
+void drawBar() {
+  int16_t w = wall->width();
+  int16_t pos = (int16_t)(((uint64_t)(micros() - barStartedAt) * barSpeed / 1000000ULL) % (w + BAR_W)) - BAR_W;
+  if (pos != barPos) {
+    uint32_t t0 = micros();
+    for (int16_t x = barPos; x < barPos + BAR_W; x++) {
+      if (x >= 0 && x < w && (x < pos || x >= pos + BAR_W)) { barColumn(x, 0); }
+    }
+    for (int16_t x = pos; x < pos + BAR_W; x++) {
+      if (x >= 0 && x < w && (x < barPos || x >= barPos + BAR_W)) { barColumn(x, 255); }
+    }
+    barUs += micros() - t0;
+    barSteps++;
+    barPos = pos;
+  }
+  unsigned long now = millis();
+  if (now - barReportAt >= 2000) {
+    Serial.printf("Bar: %lu steps a second, %lu us a step\n", (unsigned long)(barSteps * 1000UL / (now - barReportAt)),
+                  (unsigned long)(barSteps ? barUs / barSteps : 0));
+    barSteps = barUs = 0;
+    barReportAt = now;
+  }
+}
+
 // Static screens draw once (Info again every 2 s); Motion and GIFs every pass.
 void drawScreen(bool fresh) {
   if (!panelOk) { return; }
+  if (barSpeed) { drawBar(); return; }
+  if (fillPanel >= 0) {
+    if (fresh) { beginFrame(); drawFill(); present(); screenDrawnAt = millis(); }
+    return;
+  }
   switch (screen) {
     case SCR_MOTION: drawMotion(); return;
     case SCR_GIF:    drawGif(); return;
@@ -666,6 +791,8 @@ void drawScreen(bool fresh) {
 }
 
 void showScreen(uint8_t n) {
+  fillPanel = -1;
+  barSpeed = 0;
   if (screen == SCR_GIF && n != SCR_GIF) { gifStop(); gifIndex = -1; }
   screen = n % SCR_COUNT;
   prefs.putUChar("screen", screen);
@@ -744,6 +871,18 @@ void printHelp() {
     "  drive <0..3>                 GPIO drive strength of the HUB75 pins\n"
     "  bright <0..255>              brightness\n"
     "  screen <1..6>                chain, layout, ramps, motion, gifs, info\n"
+    "  fill <n> <r> <g> <b>         only chain panel n lit, in that colour (0..255 each), the others\n"
+    "                               dark; never more than one panel. 'fill off' or a screen ends it\n"
+    "  fill <n> ramp                the Ramps screen's bands on chain panel n alone\n"
+    "  flipwait <1..5>              refresh periods to wait after a flip before drawing (double buffer)\n"
+    "  gifs                         list the built-in GIFs (the test images)\n"
+    "  gif <n|next|prev|auto|hold>  on the GIF screen: that GIF (from 1), the next or previous, or\n"
+    "                               change every 20 s / stay (the default; BOOT shows the next)\n"
+    "  gamma <0..4>                 GIF values to the panel: 0 raw, 1 gamma 2.2 (as the clock), 2 gamma 2.2\n"
+    "                               with nothing lit below 1, 3 sRGB curve, 4 gamma 2.2 dithered\n"
+    "                               (GIFs named raw_... always raw)\n"
+    "  bar <LEDs a second|off>      a white bar 6 LEDs wide crossing the wall, only the changed columns\n"
+    "                               written, as the clock writes (single buffer only)\n"
     "  wifi                         WiFi test after a restart (needs src/arduino_secrets.h)\n"
     "  i2c                          scan both I2C buses\n"
     "  defaults                     all settings back\n"
@@ -830,6 +969,64 @@ void runCommand(char *line) {
   }
   else if (!strcmp(cmd, "bright") && a1 && v >= 0 && v <= 255) { setBrightness(v); }
   else if (!strcmp(cmd, "screen") && a1 && v >= 1 && v <= SCR_COUNT) { showScreen(v - 1); }
+  else if (!strcmp(cmd, "gif") && a1) {
+    if (!strcmp(a1, "auto") || !strcmp(a1, "hold")) {
+      gifAuto = a1[0] == 'a';
+      gifStartedAt = millis();
+      Serial.printf("GIFs: %s\n", gifAuto ? "change every 20 s" : "stay until BOOT or 'gif next'");
+      return;
+    }
+    long n = !strcmp(a1, "next") ? gifIndex + 2 : !strcmp(a1, "prev") ? gifIndex : v;
+    if (n < 1 || n > BUILT_IN_GIF_COUNT) { n = (n + BUILT_IN_GIF_COUNT - 1) % BUILT_IN_GIF_COUNT + 1; }
+    if (screen != SCR_GIF || fillPanel >= 0 || barSpeed) { showScreen(SCR_GIF); }
+    gifSelect((int16_t)(n - 1));
+  }
+  else if (!strcmp(cmd, "gifs")) {          // the list a remote control builds its buttons from
+    for (uint16_t i = 0; i < BUILT_IN_GIF_COUNT; i++) {
+      const BuiltInGif &g = BUILT_IN_GIFS[i];
+      Serial.printf("GIF list %u: %s %ux%u %lu\n", i + 1, g.name, g.width, g.height, (unsigned long)g.size);
+    }
+  }
+  else if (!strcmp(cmd, "gamma") && a1 && v >= 0 && v < GAMMA_MODES) {
+    gammaMode = (uint8_t)v;
+    Serial.printf("GIF gamma %ld: %s\n", v, GAMMA_NAMES[gammaMode]);
+  }
+  else if (!strcmp(cmd, "bar") && a1 && !strcmp(a1, "off")) { showScreen(screen); }
+  else if (!strcmp(cmd, "bar") && a1 && v >= 1 && v <= 1000) {
+    if (s.doubleBuf) { Serial.println("Bar: needs the single buffer ('double 0')"); return; }
+    fillPanel = -1;
+    barSpeed = (uint16_t)v;
+    barPos = -1000;
+    barStartedAt = micros();
+    barSteps = barUs = 0;
+    barReportAt = millis();
+    dma->clearScreen();
+    Serial.printf("Bar: %ld LEDs a second, only the changed columns written\n", v);
+  }
+  else if (!strcmp(cmd, "flipwait") && a1 && v >= 1 && v <= 5) {
+    flipWait = (uint8_t)v;
+    Serial.printf("Flip wait: %u refresh periods (%lu us)\n", flipWait, (unsigned long)(refreshPeriodUs() * flipWait + 500));
+  }
+  else if (!strcmp(cmd, "fill") && a1 && !strcmp(a1, "off")) { showScreen(screen); }
+  else if (!strcmp(cmd, "fill") && a1 && a2 && !strcmp(a2, "ramp")) {
+    if (v < 1 || v > panelCount()) { Serial.println("Fill: <n 1..panels> ramp"); return; }
+    fillPanel = (int8_t)(v - 1);
+    fillRamp = true;
+    Serial.printf("Fill: only chain panel %ld lit, the ramps, brightness %u\n", v, s.brightness);
+    drawScreen(true);
+  }
+  else if (!strcmp(cmd, "fill") && a1 && a2 && a3 && a4) {
+    long r = strtol(a2, nullptr, 10), g = strtol(a3, nullptr, 10), b = strtol(a4, nullptr, 10);
+    if (v < 1 || v > panelCount() || r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
+      Serial.println("Fill: <n 1..panels> <r> <g> <b>, each 0..255; 'fill off' ends it");
+      return;
+    }
+    fillPanel = (int8_t)(v - 1);
+    fillRamp = false;
+    fillRgb[0] = r; fillRgb[1] = g; fillRgb[2] = b;
+    Serial.printf("Fill: only chain panel %ld lit, RGB %ld %ld %ld, brightness %u\n", v, r, g, b, s.brightness);
+    drawScreen(true);
+  }
   else if (!strcmp(cmd, "wifi")) { prefs.putBool("wifitest", true); restartBlank(); }
   else if (!strcmp(cmd, "i2c")) { scanI2c(); }
   else if (!strcmp(cmd, "defaults")) { settingsDefaults(); settingsSave(); restartBlank(); }
@@ -864,13 +1061,24 @@ void pollButton() {
   }
   if (!now && down) {
     down = false;
-    if (!held && millis() - downAt >= 30) { showScreen(screen + 1); }
+    if (!held && millis() - downAt >= 30) {
+      // On the GIF screen the button steps through the GIFs (the test images), else the screens.
+      // Above 64 the brightness was set for a dark test image; the next one may be bright and the
+      // supply should never see the wall lit like that (Peter, 2026-10-17): back to 32 first.
+      if (s.brightness > 64) { setBrightness(32); }
+      if (barSpeed) { showScreen(screen); }                                  // ends the bar
+      else if (screen == SCR_GIF && fillPanel < 0) { gifSelect(gifIndex + 1); }
+      else { showScreen(screen + 1); }
+    }
   }
 }
 
 // --- Setup and loop -------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
+  // With nobody reading the USB console a full send buffer made every print wait for its timeout,
+  // stalling the screens for seconds (2026-10-17); the clock does the same.
+  Serial.setTxTimeoutMs(0);
   for (int i = 0; i < 30 && !Serial; i++) { delay(100); }   // give the USB console a moment
   pinMode(PIN_BOOT, INPUT_PULLUP);
   Serial.printf("\nWall clock spike. Reset reason: %s\n", resetReasonName(esp_reset_reason()));
@@ -887,7 +1095,7 @@ void setup() {
   prefs.putUChar("boots", boots + 1);
   buildCells();
   screen = prefs.getUChar("screen", SCR_CHAIN) % SCR_COUNT;
-  for (int v = 0; v < 256; v++) { gifGamma[v] = (uint8_t)lroundf(powf(v / 255.0f, 2.2f) * 255.0f); }
+  buildGammaTables();
 
   Wire.begin(PIN_SDA_BOARD, PIN_SCL_BOARD, 100000);
   wireExt.begin(PIN_SDA_EXT, PIN_SCL_EXT, 100000);

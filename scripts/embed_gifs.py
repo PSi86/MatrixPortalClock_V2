@@ -1,11 +1,13 @@
 # PlatformIO pre-build script: builds the GIFs that fit the panel into the
 # firmware, for the clock's GIF playback.
 #
-# Sources: every .gif in gifs/ (the repository's examples, always taken) and in
-# the folders listed in gif_dirs.local, one per line (git ignores that file, so
-# private GIFs stay out of the repository). An exclude.txt in such a folder or
-# its parent names files to leave out, one per line; a line matches the end of
-# a file's path.
+# Sources: every .gif in gifs/ (the repository's examples, always taken unless
+# the env sets custom_gif_repo = no), in the folders an env names in
+# custom_gif_dirs (relative to the project, one per line: the wall clock spike's
+# test images) and in the folders listed in gif_dirs.local, one per line (git
+# ignores that file, so private GIFs stay out of the repository). An exclude.txt
+# in such a folder or its parent names files to leave out, one per line; a line
+# matches the end of a file's path.
 #
 # A GIF fits when it is no larger than the panel either way round
 # (custom_gif_panel, e.g. 64x32): the clock draws it centred and unscaled, in
@@ -52,10 +54,11 @@ def exclusions(folder):
 
 
 def local_dirs():
+    dirs = [os.path.join(PROJECT_DIR, d.strip()) for d in env.GetProjectOption("custom_gif_dirs", "").splitlines()
+            if d.strip()]
     path = os.path.join(PROJECT_DIR, "gif_dirs.local")
     if not os.path.isfile(path):
-        return []
-    dirs = []
+        return dirs
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -97,7 +100,8 @@ def build():
         return len(data)
 
     total = 0
-    for path in gifs_in(os.path.join(PROJECT_DIR, "gifs")):
+    repo = env.GetProjectOption("custom_gif_repo", "yes").strip().lower() != "no"
+    for path in gifs_in(os.path.join(PROJECT_DIR, "gifs")) if repo else []:
         size = gif_size(path)
         if size and fits(size):
             total += take(path, size)
