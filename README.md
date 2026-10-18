@@ -1,25 +1,28 @@
 # MatrixPortalClock V2
 
 LED matrix clock with animated digits for the **Adafruit MatrixPortal S3** (ESP32-S3)
-and the **Adafruit MatrixPortal M4** (SAMD51 + WiFiNINA).
+and the **Adafruit MatrixPortal M4** (SAMD51 + WiFiNINA), and as a wall clock on the
+**Waveshare ESP32-S3-RGB-Matrix** board with six 64x64 panels.
 Fetches the time from the local network via NTP and offers a WiFi configuration mode.
 
 ## Hardware targets
 
-One code base, two boards. `src/board_hal.h` holds everything that differs between
+One code base, three boards. `src/board_hal.h` holds everything that differs between
 them - matrix and button pins, the WiFi/NTP calls, the settings storage and the
 reset instruction - so the sketch itself is board independent.
 
-| | MatrixPortal S3 | MatrixPortal M4 |
-|---|---|---|
-| PlatformIO env | `adafruit_matrixportal_s3` (default) | `adafruit_matrix_portal_m4` |
-| MCU | ESP32-S3, 8 MB flash | SAMD51, 512 KB flash |
-| Arduino core | Arduino-ESP32 3.3.11 on ESP-IDF 5.5 (pioarduino platform) | Adafruit SAMD (`atmelsam` 8.3.0) |
-| WiFi | on-chip | WiFiNINA co-processor over SPI |
-| NTP | lwIP SNTP client | the NINA firmware's own SNTP |
-| Settings stored in | NVS partition (0x9000) | flash block at 0x7E000 |
-| Buttons | UP GPIO6 (`BUTTON_UP`), DOWN GPIO7 (`BUTTON_DOWN`) | UP D2, DOWN D3 |
-| Upload | esptool over the chip's USB-Serial-JTAG, no buttons | UF2 bootloader (double reset) |
+| | MatrixPortal S3 | MatrixPortal M4 | Wall clock |
+|---|---|---|---|
+| PlatformIO env | `adafruit_matrixportal_s3` (default) | `adafruit_matrix_portal_m4` | `waveshare_wallclock` |
+| Board | Adafruit MatrixPortal S3 | Adafruit MatrixPortal M4 | Waveshare ESP32-S3-RGB-Matrix |
+| MCU | ESP32-S3, 8 MB flash | SAMD51, 512 KB flash | ESP32-S3 (WROOM-2-N32R16V), 32 MB flash, 16 MB PSRAM |
+| Panel | one 64x32 | one 64x32 | six 64x64, 192x128 (three across, two down) |
+| Arduino core | Arduino-ESP32 3.3.11 on ESP-IDF 5.5 (pioarduino platform) | Adafruit SAMD (`atmelsam` 8.3.0) | as the S3 |
+| WiFi | on-chip | WiFiNINA co-processor over SPI | on-chip |
+| NTP | lwIP SNTP client | the NINA firmware's own SNTP | as the S3 |
+| Settings stored in | NVS partition (0x9000) | flash block at 0x7E000 | NVS partition (0x9000) |
+| Buttons | UP GPIO6 (`BUTTON_UP`), DOWN GPIO7 (`BUTTON_DOWN`) | UP D2, DOWN D3 | none (the web app; gestures later) |
+| Upload | esptool over the chip's USB-Serial-JTAG, no buttons | UF2 bootloader (double reset) | as the S3 |
 
 The S3 was added because the M4's WiFiNINA link kept causing WiFi trouble; on the S3
 the radio sits on the main MCU, which also lets the AP config page preview the clock at
@@ -28,6 +31,46 @@ BH1750 light sensor are identical on both boards.
 
 **Caution on the S3:** `D2` is the matrix clock line, not the UP button - the M4's
 button pin cannot be carried over.
+
+### Wall clock
+
+The Waveshare ESP32-S3-RGB-Matrix drives six 64x64 panels in one chain, three
+across and two down: the board feeds the bottom right panel, the chain runs left
+along the bottom row and back right along the top row, whose panels hang upside
+down. The clock draws its 64x32 picture as everywhere else and shows it three
+times the size in the top 192x96; the 192x32 below is the info band (see
+[The info band on the wall clock](#the-info-band-on-the-wall-clock)). GIFs play
+in the wall's own 192x128 LEDs.
+
+- **Panel driver:** ESP32-HUB75-MatrixPanel-DMA 3.0.15 as a copy of its own in
+  `lib/hub75-dma-wall` (what it adds is listed in its README): one 8-bit buffer
+  of 192 KB in PSRAM - in internal RAM it left too little for the WiFi - at
+  16 MHz on the panel bus (160 Hz); the clock writes only what changed and
+  writes those rows back from the CPU's cache to the PSRAM. The output's DMA
+  channel runs first among the GDMA channels, and a watch starts the output
+  again should it stop.
+- **Power:** the brightness is capped at 230 for a 7.5 A supply. Measured on its
+  5 V side: the wall dark 555 mA, one panel white 564-567 mA more at brightness
+  160 and 451 mA at 128, so the whole wall white would draw about 6 A at 255 and
+  5.4 A at 230.
+- **Flash:** two app slots of 3 MB, 26,496 KB for the GIF pack from 0x610000
+  (`partitions_wallclock.csv`). GIFs above the first 16 MB of the flash are read
+  into PSRAM instead of mapped, since the core maps only 16 MB.
+- **Inputs:** none fitted yet; the clock is set up in the web app, which is on
+  the home network from the start (on clocks without buttons). The hotspot opens
+  by itself when no home WiFi is stored, and stays open; and when a stored one
+  has not joined for 2 minutes, for 5 minutes, after which the clock tries the
+  WiFi again. The I2C sensors (DS3231, BH1750, PAJ7620) go on IO45/IO46 (SDA,
+  SCL) and are not tried on this board yet.
+- **Console** (USB, 115200 baud, DTR and RTS low): `black` switches the panels
+  dark until the next start - before every upload, since the ROM bootloader
+  leaves the last row pair lit at full duty; `test <panel> <brightness>` and
+  `test off` a panel in white to measure the current; `bus <divider>` the panel
+  bus' clock; `lan on|off` the web app on the home network; for the panel
+  output and the fetches `fetch`, `prio <0-5>`, `gdma`, `crypto [ext]`,
+  `tlsmem int|ext`, and `status test` for the band's clock status.
+- **Wiring rules** from the bench: the panels' supply minus to the board's GND
+  first, the supply on before the ribbon cable goes in.
 
 ## Features
 
@@ -83,9 +126,13 @@ button pin cannot be carried over.
 - **Gesture sensor (optional):** with a PAJ7620U2 on the I2C bus, swipes and
   push work the menu next to the buttons, or instead of them (see
   [Gesture sensor](#gesture-sensor-paj7620u2))
-- **Info band data** (S3): the weather and the DWD weather warnings for a place,
-  fetched over HTTPS, for the info band of the wall clock; for now listed on the
-  config page and the console (see [Info band data](#info-band-data))
+- **Info band data** (S3, wall clock): the weather, the air quality and the DWD
+  weather warnings for a place, fetched over HTTPS, and what Home Assistant
+  sends (see [Info band data](#info-band-data))
+- **Info band** (wall clock): the 192x32 below the face shows the items one
+  after the other with their icons, and what the clock works out itself - the
+  date, sunrise and sunset, the moon, the clock change, its own status (see
+  [The info band on the wall clock](#the-info-band-on-the-wall-clock))
 - **Alerts, messages and info** (S3): a weather warning from `moderate` on, or
   an item from Home Assistant marked as an alert, comes up once as a banner
   with its icon, large and in colour; a message from Home Assistant runs
@@ -149,6 +196,16 @@ button pin cannot be carried over.
    ```
    pio run -e adafruit_matrix_portal_m4 -t upload
    ```
+
+   For the **wall clock**, switch the panels dark first (console `black`, see
+   [Wall clock](#wall-clock)), then upload as on the S3; esptool resets the
+   board by itself:
+   ```
+   pio run -e waveshare_wallclock -t upload --upload-port <port>
+   ```
+   `waveshare_wallclock_debug` is the same with the debug output (frame and
+   memory statistics, the self-tests at start-up). The GIF pack goes on as on
+   the S3, from the GIF gallery or with `-t uploadgifs` (192x128 GIFs at most).
 
 3. NTP on the S3 uses `pool.ntp.org` / `time.nist.gov`. If the clock has no internet
    access, point it at a server on the LAN (e.g. a Fritz!Box) by adding to the
@@ -414,10 +471,12 @@ deflated one into PSRAM with the inflate in the chip's ROM before it plays.
 
 ## Info band data
 
-The wall clock's face will have an info band below it. Its data is fetched on
-the MatrixPortal S3 already, so the data side can be tried out before the
-wall clock exists: until the band is drawn, the config page's section
-**Info band data** and the console list what was fetched.
+The wall clock shows these items in its info band below the face (see
+[The info band on the wall clock](#the-info-band-on-the-wall-clock)); the
+MatrixPortal S3, which has no room for a band, shows them over its face (see
+[Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel-s3)).
+The web app's section **Info** lists what the clock knows, and the console what
+was fetched.
 
 The clock fetches only a few key-free sources that are likely to last, and
 everything else is to come through Home Assistant:
@@ -425,11 +484,12 @@ everything else is to come through Home Assistant:
 | Source | What it gives | How often |
 |---|---|---|
 | [Open-Meteo](https://open-meteo.com) | temperature, weather (with how heavy rain or snow is, from the weather code), the day's high and low, chance of rain, UV index from 3; when rain starts or stops within the next 4 hours | every 30 min |
+| [Open-Meteo air quality](https://open-meteo.com/en/docs/air-quality-api) | the European Air Quality Index for the place, worldwide (the CAMS forecasts): good, fair, moderate, poor, very poor, extremely poor, with its value; the icon a leaf in the band's colour | every hour |
 | [Bright Sky](https://brightsky.dev) | the DWD's weather warnings for the place, the most severe first (up to four): `minor` as information, from `moderate` on as an alert; each with its level and the icon of its event (wind, thunder, rain, snow, frost or black ice, heat, fog; the warning triangle for any other) | every 10 min |
 
-Weather data by Open-Meteo.com (CC BY 4.0); the warnings are the Deutscher
-Wetterdienst's, through Bright Sky, under the DWD's terms of use. Neither needs a
-key.
+Weather data by Open-Meteo.com (CC BY 4.0); air quality: CAMS ENSEMBLE data
+provider, through Open-Meteo.com; the warnings are the Deutscher Wetterdienst's,
+through Bright Sky, under the DWD's terms of use. None needs a key.
 
 The place is typed on the config page as latitude and longitude in degrees, from
 a map; nothing is fetched before. Changing it drops what was fetched for the
@@ -474,7 +534,7 @@ Setting it up:
 1. In Home Assistant, install the **Mosquitto broker** add-on, add a Home
    Assistant user for the clock, and set up the MQTT integration if Home
    Assistant does not offer it by itself.
-2. On the clock's page, section **Info band data**, card **Home Assistant**:
+2. On the clock's page, section **Info**, card **Home Assistant**:
    the broker's address (`homeassistant.local` or its IP), port 1883, that user
    and its password, the switch on, **Save Home Assistant link**. The link needs
    a stored home WiFi and **continuous network access** (Home WiFi section);
@@ -496,7 +556,7 @@ the card shows its topics.
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
-`thunder`, `warning`, `wind`, `frost`, `heat`. The optional fields change how
+`thunder`, `warning`, `wind`, `frost`, `heat`, `calendar`, `air`. The optional fields change how
 the icon looks:
 
 - `severity`: a warning's level, as the DWD names them - `minor`, `moderate`,
@@ -514,7 +574,11 @@ card on the 64x32 clock: two lines with `|` between them, up to six
 characters each (five upright), such as `"31°|feels"`; a first line of three
 characters or fewer is drawn at double size. The card shows it, when the item
 is new, in the round and on **show notifications**; the band and the web app
-show `text`. Without `short`, the card runs `text` beside the icon. An item for the band, from an automation:
+show `text`. Without `short`, the card runs `text` beside the icon. In `text`,
+` | ` (a bar with a space either side) sets its parts apart: the band breaks its
+two lines there and leaves the bar out at the break (see
+[The info band on the wall clock](#the-info-band-on-the-wall-clock)). An item for
+the band, from an automation:
 
 ```yaml
 action: mqtt.publish
@@ -522,9 +586,213 @@ data:
   topic: mpclock/06c16c/item/waste
   retain: true
   payload: >-
-    {"text": "Paper bin tomorrow", "icon": "warning",
+    {"text": "Paper bin | tomorrow morning", "icon": "warning",
      "until": {{ (now() + timedelta(hours=12)).timestamp() | int }}}
 ```
+
+### Example: public holidays
+
+The clock has no holiday rules of its own: they differ from country to
+country and from region to region. Home Assistant's
+[Holiday](https://www.home-assistant.io/integrations/holiday/) integration knows
+them, offline, and an automation hands today's or tomorrow's to the clock as an
+item - in the band on the wall clock, as a card on the 64x32 clock.
+
+1. In Home Assistant, **Settings → Devices & services → Add integration →
+   Holiday**: the country, and the state or region where the clock hangs (for
+   Germany the federal state; some holidays exist only there). It makes a
+   calendar entity; note its entity ID (the integration's entity list shows it).
+2. On the clock: the Home Assistant link as above, nothing else. Its card shows
+   the clock's topics; `06c16c` below stands for the end of your clock's name.
+3. In Home Assistant, a new automation (**Settings → Automations & scenes →
+   Create automation → Edit in YAML**), with your calendar's entity ID and your
+   clock's topic in its first lines:
+
+```yaml
+alias: "Matrix Clock: public holiday"
+description: "Today's or tomorrow's public holiday as an item on the clock"
+triggers:
+  - trigger: time
+    at: "00:01:00"
+  - trigger: homeassistant
+    event: start
+variables:
+  holidays: calendar.germany           # your Holiday calendar's entity ID
+  topic: mpclock/06c16c/item/holiday   # your clock's id in place of 06c16c
+actions:
+  - action: calendar.get_events
+    target:
+      entity_id: "{{ holidays }}"
+    data:
+      start_date_time: "{{ today_at('00:00') }}"
+      duration:
+        hours: 48
+    response_variable: found
+  - variables:
+      events: "{{ found[holidays].events }}"
+      name_today: >-
+        {{ events | selectattr('start', 'match', now().date() | string)
+                  | map(attribute='summary') | first | default('') }}
+      name_tomorrow: >-
+        {{ events | selectattr('start', 'match', (now() + timedelta(days=1)).date() | string)
+                  | map(attribute='summary') | first | default('') }}
+  - if:
+      - condition: template
+        value_template: "{{ name_today != '' or name_tomorrow != '' }}"
+    then:
+      - action: mqtt.publish
+        data:
+          topic: "{{ topic }}"
+          retain: true
+          payload: >-
+            {{ {"text": ("Public holiday today | " ~ name_today) if name_today
+                        else ("Public holiday tomorrow | " ~ name_tomorrow),
+                "icon": "calendar",
+                "until": (today_at('00:00') + timedelta(days=1)).timestamp() | int} | to_json }}
+    else:
+      - action: mqtt.publish
+        data:
+          topic: "{{ topic }}"
+          retain: true
+          payload: ""
+```
+
+It runs a minute after midnight and when Home Assistant starts. A holiday today
+comes as "Public holiday today | …", else one tomorrow as "Public holiday
+tomorrow | …", until midnight; on the band the text breaks at the bar. A
+day before none, the empty payload takes the item away. The holiday's name is in
+the language Home Assistant gives it; the words before it can be your own
+(umlauts are fine, see the font below).
+
+### Example: civil protection warnings (NINA)
+
+Germany's warnings of the Federal Office of Civil Protection (Bundesamt für
+Bevölkerungsschutz und Katastrophenhilfe) come through Home Assistant's
+[NINA](https://www.home-assistant.io/integrations/nina/) integration.
+
+1. In Home Assistant, **Settings → Devices & services → Add integration →
+   NINA**: the city or district, and how many warnings to fetch at most. It
+   checks every 5 minutes and makes one binary sensor per warning slot, on
+   while a warning fills it.
+2. On the clock: the Home Assistant link, nothing else.
+3. The automation, with your slots' entity IDs in its trigger and in `slots`,
+   and your clock's id:
+
+```yaml
+alias: "Matrix Clock: NINA warnings"
+description: "The NINA warnings for the place as items on the clock"
+mode: queued
+triggers:
+  - trigger: state
+    entity_id:                               # your NINA warning slots
+      - binary_sensor.stuttgart_warning_1
+      - binary_sensor.stuttgart_warning_2
+      - binary_sensor.stuttgart_warning_3
+  - trigger: homeassistant
+    event: start
+variables:
+  clock: mpclock/06c16c                      # your clock's id in place of 06c16c
+  slots:                                     # the same slots as above
+    - binary_sensor.stuttgart_warning_1
+    - binary_sensor.stuttgart_warning_2
+    - binary_sensor.stuttgart_warning_3
+actions:
+  - repeat:
+      for_each: "{{ slots }}"
+      sequence:
+        - action: nina.get_details             # null for a slot without a warning
+          target:
+            entity_id: "{{ repeat.item }}"
+          response_variable: nina
+        - variables:
+            topic: "{{ clock }}/item/nina{{ repeat.index }}"
+            w: "{{ (nina or {}).get(repeat.item) }}"
+        - if:
+            - condition: template
+              value_template: >-
+                {{ w is mapping and not (w.id | default('')).startswith('dwd.') }}
+          then:
+            - action: mqtt.publish
+              data:
+                topic: "{{ topic }}"
+                retain: true
+                payload: >-
+                  {{ {"text": w.headline,
+                      "icon": "warning",
+                      "level": "alert" if (w.severity | lower) in ['moderate', 'severe', 'extreme'] else "info",
+                      "severity": w.severity | lower,
+                      "until": as_timestamp(w.expires, 0) | int if w.expires
+                               else (now() + timedelta(hours=6)).timestamp() | int} | to_json }}
+          else:
+            - action: mqtt.publish
+              data:
+                topic: "{{ topic }}"
+                retain: true
+                payload: ""
+```
+
+Each slot becomes an item `nina1`, `nina2` …: the warning's headline (in German,
+as NINA writes it), the warning triangle in the colour of its level - from
+`moderate` on as an alert, which comes up as a banner - until the warning
+expires, 6 hours when it gives no end. A slot that empties takes its item away.
+NINA passes on the DWD's weather warnings too, whose IDs start with `dwd.` (as in
+the integration's example); the clock fetches those itself, so the automation
+leaves them out. Drop the `startswith` part to have them twice.
+
+### Example: breaking news (tagesschau)
+
+The tagesschau app's homepage marks a breaking news item (`breakingNews`). Home
+Assistant reads it with a [RESTful sensor](https://www.home-assistant.io/integrations/rest/),
+in `configuration.yaml`:
+
+```yaml
+rest:
+  - resource: https://www.tagesschau.de/api2u/homepage/
+    scan_interval: 300     # every 5 minutes; the API allows at most 60 calls an hour
+    timeout: 30            # the homepage is about 600 KB
+    sensor:
+      - name: "tagesschau breaking news"
+        unique_id: tagesschau_breaking_news
+        value_template: >-
+          {{ value_json.news | selectattr('breakingNews') | map(attribute='title')
+             | first | default('none') | truncate(250) }}
+```
+
+The sensor holds the headline of the breaking news item, `none` while there is
+none. An automation hands it to the clock as an alert:
+
+```yaml
+alias: "Matrix Clock: breaking news"
+triggers:
+  - trigger: state
+    entity_id: sensor.tagesschau_breaking_news
+variables:
+  topic: mpclock/06c16c/item/news            # your clock's id in place of 06c16c
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ trigger.to_state.state not in ['none', 'unknown', 'unavailable', ''] }}"
+    then:
+      - action: mqtt.publish
+        data:
+          topic: "{{ topic }}"
+          retain: true
+          payload: >-
+            {{ {"text": "Breaking news | " ~ trigger.to_state.state,
+                "icon": "warning", "level": "alert",
+                "until": (now() + timedelta(hours=2)).timestamp() | int} | to_json }}
+    else:
+      - action: mqtt.publish
+        data:
+          topic: "{{ topic }}"
+          retain: true
+          payload: ""
+```
+
+A new breaking news item comes up as an alert - its banner over the face, then
+first in the band - for two hours, or until the homepage no longer marks it. The
+tagesschau's content is for private, non-commercial use only; its API's terms
+allow no more than 60 calls an hour.
 
 A message goes to the **Message** entity (`notify.send_message`), or as JSON to
 the message topic. It is an item for its seconds, an hour unless it says; the
@@ -594,7 +862,7 @@ Assistant as running text, and all the other information as **info cards**.
   the time's change and before :30, else in the next minute - and wait for a
   GIF's end ([Who takes the panel](#who-takes-the-panel)). Cards never run into
   the next change. A ticked input (see below) ends the cards on show.
-- **A message:** its text (`title: text`) runs through the middle of the panel
+- **A message:** its text (`title | text`) runs through the middle of the panel
   in the 5x7 font, white, from the right edge out at the left, twice, at about
   five characters a second; an urgent one (`"level": "alert"`) shows its icon
   for 3 s first and runs in red. The font has ä ö ü ß, é è à ç ñ and the other
@@ -637,8 +905,68 @@ to three parts, and each part a role whose colour the clock picks when it draws
 it: the sun yellow with orange rays, the moon pale yellow, a cloud white (grey
 over rain, snow and thunder), rain blue, snow white, the bolt yellow, wind light
 blue, a thermometer white with blue (frost) or red (heat), the warning triangle
-in its level's colour with a white mark. Drizzle, rain and snow have a light
-and a heavy picture beside the usual one (see `intensity` above).
+in its level's colour with a white mark, the calendar white with a red head.
+Drizzle, rain and snow have a light and a heavy picture beside the usual one
+(see `intensity` above).
+
+## The info band on the wall clock
+
+The wall clock (192x128) shows its 64x32 face three times the size in the top
+192x96 and uses the 192x32 below as the info band: one item after the other,
+its icon on the left and its text in two lines of the 5x7 font beside it, up to
+26 characters each.
+
+- **Order:** the alerts first, then the messages, each in the order they came,
+  then the information as on the 64x32 clock's cards (DWD warnings, rain soon,
+  the weather, the air quality, Home Assistant's items), then the clock's own,
+  worked out on the clock once a minute without the internet:
+  - **the clock's status**, only while its status pixel is red: a new home WiFi
+    that does not join ("Home WiFi does not join" / its name), or a time sync
+    that keeps failing ("Time sync is failing" / "last good 18 Oct 03:00"),
+    beside the warning sign in yellow;
+  - **the clock change**, from 24 hours before until 12 hours after it, when
+    daylight saving is set to auto: "Clocks go back 1 h" / "tonight at 3:00"
+    (the time on the clock before it), then "Clocks went back 1 h" / "last
+    night";
+  - **the date**: "Sunday 18 October 2026" / "week 42" (the ISO week), with the
+    calendar icon;
+  - **sunrise and sunset** at the place set for the weather, today's and after
+    sunset tomorrow's, "Midnight sun" or "Polar night" when there is none -
+    after NOAA's solar calculator, within a minute of published tables;
+  - **the moon**: its phase and how much of it is lit, and the next full or new
+    moon, whichever comes first ("First quarter | 53% lit" / "Full moon Mon 26 Oct"),
+    from its longitude, within about half an hour (`src/sky.h`).
+- **Turns:** each stands 6 s, one that runs through as long as that takes.
+- **Lines** (one rule for every text in the band, Peter's of 2026-10-18): a
+  text's parts are set apart by ` | ` - the clock's own, those it puts together
+  from a source's fields (the weather "10°C overcast | 10/8°C | rain 100%", the
+  warnings, the air quality "Air quality fair | index 32") and Home Assistant's
+  (a message's title and text, and what an item's `text` sets apart so). A text
+  that fits one line stands in one, bars and all. Else it breaks at the first
+  bar after which the rest fits the second line, and that bar is left out
+  ("10°C overcast" / "10/8°C | rain 100%"); else between words, a bar at the
+  break left out too. One that fits neither runs through once beside the icon,
+  at five characters a second. On the panel a bar shows as a middle dot - the
+  5x7 font draws `|` broken in the middle, like a colon - here and in the
+  64x32 clock's running texts; the texts themselves, the web app and Home
+  Assistant keep the bar, which every keyboard has.
+- **Alerts:** in their level's colour, framed when **Frame round an alert** is
+  on. A new alert takes the band at once and still comes up once as its banner
+  over the face, as on the 64x32 clock.
+- **Messages:** a new one takes the band at once, for twice its time (its text
+  runs through twice); its text no longer runs over the face. An urgent one's
+  icon comes over the face first.
+- **No cards, no info round:** the band shows the information all the time; the
+  web app has no info round for this clock. **Show notifications** brings the
+  alerts and messages over the face as on the 64x32 clock and starts the band
+  again at its first item.
+- **Covered and dark:** a GIF covers the band as it covers the face; it comes
+  back after the GIF. The band is dark while the hotspot is open and until the
+  clock has its time.
+
+The band is drawn in `bandUpdate()` at the end of the sketch into a picture of
+its own and written onto the wall by `PanelCanvas::showBand()` in
+`src/board_hal.h`, which writes only what changed.
 
 ## Web app and the home network (S3)
 

@@ -85,6 +85,13 @@ class JsonDocument;                    // named by prototypes generated from thi
 class JsonObject;
 #endif
 
+#if BOARD_WAVESHARE_WALL
+#include <mbedtls/sha256.h>    // the console's "crypto" test of the panel output beside the crypto DMA
+#include <mbedtls/aes.h>
+#include <soc/gdma_struct.h>   // and its "gdma": the DMA channels' peripherals and priorities
+#include <esp_timer.h>
+#endif
+
 #if BAND_DATA
 #include "band_data.h"         // the info band's items and the sources the clock fetches
 #include "item_icons.h"        // their icons, for the band and the alert banners
@@ -92,6 +99,14 @@ class JsonObject;
 struct FeedResult;                     // named by prototypes generated from this sketch
 struct BandItem;
 struct NoticeStep;
+#endif
+// The wall clock shows the items in its band below the face (bandUpdate());
+// the 64x32 clocks have no room for one and show them over the face.
+#define BAND_ON_PANEL (BAND_DATA && BOARD_WAVESHARE_WALL)
+struct BandTurn;                       // named by prototypes generated from this sketch
+struct BandLocal;
+#if BAND_ON_PANEL
+#include "sky.h"               // sunrise, sunset and the moon's phase for the band
 #endif
 
 #if HA_LINK
@@ -297,7 +312,11 @@ GifSettings gifSettings;
 SettingsStore<GifSettings> gifStore;
 
 // GIF playback state (the section "GIF playback" at the end of the sketch).
+#if BOARD_WAVESHARE_WALL
+const int     GIF_CANVAS_MAX = WALL_W * WALL_H;   // GIFs play in the wall's own LEDs, up to 192x128
+#else
 const int     GIF_CANVAS_MAX = 64 * 32;      // pixels of the largest GIF that fits the 64x32 panel either way round
+#endif
 // The decoder and the canvas only while a GIF plays: 30 KB of RAM the rest of
 // the time, the hotspot's time included, has better uses.
 struct GifPlayer { AnimatedGIF decoder; uint8_t canvas[GIF_CANVAS_MAX * 3]; };
@@ -349,10 +368,16 @@ GifPackState  gifPackState = GIF_PACK_NONE;
 const esp_partition_t *gifPackPart = nullptr;
 GifPackEntry *gifPack = nullptr;             // the index, in PSRAM when there is some
 uint16_t      gifPackCount = 0;
-// The pack GIF on show: its bytes mapped from flash, or inflated into PSRAM.
+// The pack GIF on show: its bytes mapped from flash, or read or inflated into PSRAM.
 esp_partition_mmap_handle_t gifPackMap;
 bool          gifPackMapped = false;
 uint8_t      *gifPackCopy = nullptr;
+// The core's cache maps flash only below 16 MB (24-bit addresses; it was
+// built without CONFIG_BOOTLOADER_CACHE_32BIT_ADDR_OCTAL_FLASH). The wall
+// clock's pack reaches up to 32 MB: GIFs above the line are read instead of
+// mapped, which the flash driver does at any address (2026-10-18: three GIFs
+// read back from above 16 MB had their CRCs).
+const uint32_t GIF_PACK_MAP_LIMIT = 0x1000000;
 #endif
 
 /* ======================================================================
@@ -433,7 +458,7 @@ struct FeedSettings {
 };
 static_assert(sizeof(FeedSettings) == 16, "FeedSettings keeps the size stored blobs have");
 const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
-                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS)), 0, 0, 0, 1, 15, 0 };
+                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS) | (1 << FEED_AIR)), 0, 0, 0, 1, 15, 0 };
 // The info round's choices, in minutes (0 = never): each divides the hour.
 const uint8_t ROUND_CHOICES[] = { 0, 5, 10, 15, 20, 30, 60 };
 FeedSettings feedSettings;
@@ -452,6 +477,9 @@ struct FeedRun {
 FeedRun       feedRuns[FEED_COUNT];
 bool          feedTaskOK = false;        // the fetch task is running
 bool          feedBusy = false;          // a job is with it
+#if BOARD_WAVESHARE_WALL
+unsigned long feedSentAt = 0;            // millis() the last job was handed to it (wallOutputWatch())
+#endif
 unsigned long feedWantedAt = 0;          // millis() the station was asked for
 char          feedPlace[32] = "";        // the warnings' place, as the DWD names it
 const unsigned long FEED_STATION_MS = 60UL * 1000UL;       // the longest wait for the station
@@ -500,6 +528,37 @@ uint8_t    noticeStepCount = 0;   // 0: none on the panel
 uint8_t    noticeStepAt = 0;      // the step on the panel
 unsigned long noticeStepMs = 0;   // how long it stays
 bool       noticeCardsRound = false;   // the steps on the panel are cards of their own accord: an input ends them
+
+#if BAND_ON_PANEL
+// The wall clock's info band (bandUpdate()): the turn on show - an item by
+// source and tag, or one of the clock's own: the clock change, the date, the
+// sun and the moon - and the picture it draws into.
+GFXcanvas16 bandPicture(WALL_W, WALL_BAND_H);
+enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON };
+const uint8_t BAND_LOCAL_FIRST = TURN_STATUS, BAND_LOCAL_COUNT = 5;   // the clock's own, in their order
+struct BandTurn { uint8_t kind, feed; uint32_t tag; };
+// The clock's own turns as they stand, worked out once a minute (bandLocalUpdate()).
+struct BandLocal { bool on; uint8_t icon, severity; char text[64]; };   // its parts set apart by " | " (bandWrap())
+unsigned long bandStatusTestAt = 0;   // millis() the console showed the clock status as a test; 0 = none
+BandLocal bandLocal[BAND_LOCAL_COUNT];
+bool bandLocalDone = false;
+const unsigned long BAND_TURN_MS = 6000;
+const int16_t BAND_ICON_X = 4, BAND_ICON_Y = (WALL_BAND_H - ICON_SIZE) / 2;
+const int16_t BAND_TEXT_X = 32, BAND_TEXT_X_BARE = 4;   // beside an icon, and without one
+const int16_t BAND_LINE_Y[2] = { 6, 19 }, BAND_MID_Y = (WALL_BAND_H - 7) / 2;
+BandTurn bandTurn = { TURN_NONE, 0, 0 };   // the item on show
+BandTurn bandWant = { TURN_NONE, 0, 0 };   // one that takes the band at once (a new notice)
+uint8_t  bandWantRuns = 1;
+unsigned long bandTurnAt = 0;              // millis() it came; 0 = the next one is due
+unsigned long bandTurnMs = BAND_TURN_MS;   // how long it stays
+uint8_t  bandTurnRuns = 1;                 // how often its text runs through (or stands BAND_TURN_MS)
+uint32_t bandTurnLook = 0;                 // what it showed (bandLook()), to see it change
+char     bandLine[2][32];                  // its two lines in the font's code page (CP437), or
+char     bandRunText[sizeof(BandItem::text)];   // its text running through, when they cannot hold it
+uint16_t bandRunWidth = 0;
+int16_t  bandRunLastX = INT16_MIN;
+bool     bandHidden = false;               // dark while the hotspot has the panel
+#endif
 
 // An info card: the item's icon, and beside it (below it, upright) its short
 // form in two lines - a first line of three characters or fewer at double
@@ -705,12 +764,14 @@ struct Button {
   InputFunction holding;      // what its hold event started, running until it is let go
 };
 
+#if BOARD_BUTTON_COUNT
 Button buttons[] = {
   { UP_BUTTON_PIN,   EV_UP_SHORT,   EV_UP_2X,   EV_UP_3X,   EV_UP_HOLD,   EV_UP_HOLD_REPEAT,
     BTN_RELEASED, 0, 0, 0, 0, 0, FN_NONE },
   { DOWN_BUTTON_PIN, EV_DOWN_SHORT, EV_DOWN_2X, EV_DOWN_3X, EV_DOWN_HOLD, EV_DOWN_HOLD_REPEAT,
     BTN_RELEASED, 0, 0, 0, 0, 0, FN_NONE },
 };
+#endif
 
 // Gesture sensor -----------------------------------------------------------
 // A PAJ7620U2 on the I2C bus (0x73), optional, found at boot or not at all. It
@@ -878,6 +939,22 @@ bool dstAutoActive = false;           // DST_AUTO: whether summer time is in eff
 #define AP_SSID "MatrixClock"
 #define AP_PASS "clock1234"   // must be >= 8 characters
 bool        apActive = false;
+#if BOARD_BUTTON_COUNT == 0
+// A clock without buttons whose gesture sensor was not found has no input to
+// open the hotspot with. It needs the hotspot only when it cannot reach its
+// home WiFi (Peter, 2026-10-18, in place of the 5 minutes after every
+// power-up of 2026-10-04); otherwise the web app on the home network, on
+// from the start on such a clock (loadLanSettings()), is its way in:
+// - no home WiFi stored: the hotspot opens at the start and stays open;
+// - the stored one does not connect for AP_FALLBACK_MS: the hotspot opens for
+//   AP_AUTO_OPEN_MS, closes then unless a phone is on it, and the clock tries
+//   its WiFi again.
+const unsigned long AP_FALLBACK_MS  = 2UL * 60UL * 1000UL;
+const unsigned long AP_AUTO_OPEN_MS = 5UL * 60UL * 1000UL;
+unsigned long apAutoCloseAt = 0;       // millis() it closes itself; 0 = it does not
+unsigned long apAutoCheckLast = 0;
+unsigned long joinTroubleSince = 0;    // millis() the station started failing to connect; 0 = it does not
+#endif
 unsigned long apStatusLast = 0;        // last time the AP connection status was polled
 unsigned long apNoStationSince = 0;    // preview: since when no phone is connected; 0 = one is
 const unsigned long AP_NO_STATION_MS = 5000;   // then the info screen comes back
@@ -1034,10 +1111,10 @@ bool    accelOK = false;          // true once the LIS3DH was found on I2C
 //   the device rotation; the hotspot info screen is landscape however the panel
 //   is held, so the two differ while it is up.
 const uint8_t ROTATION_NONE = 0xFF;   // sensorRotation(): the sensor cannot tell
-uint8_t deviceRotation = 3;       // 3 = portrait, today's default
-uint8_t screenRotation = 3;
+uint8_t deviceRotation = BOARD_DEFAULT_ROTATION;   // MatrixPortal: 3 = portrait; wall clock: 0
+uint8_t screenRotation = BOARD_DEFAULT_ROTATION;
 unsigned long orientLast = 0;     // last accelerometer poll (throttle)
-uint8_t orientCandidate = 3;      // debounce: rotation the sensor currently favours
+uint8_t orientCandidate = BOARD_DEFAULT_ROTATION;   // debounce: rotation the sensor currently favours
 uint8_t orientStable = 0;         // consecutive polls the candidate has held
 const unsigned long ORIENT_POLL_MS = 250; // ~4 Hz orientation polling
 const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persist
@@ -1392,10 +1469,14 @@ void setup(void) {
   prevBootStage = boardBootStageRead();
   boardBootStageWrite(BOOT_STAGE_START);
 
+#if BOARD_BUTTON_COUNT
   pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
   pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
+#endif
+#if BOARD_HAS_FEEDBACK_LED
   pinMode(FEEDBACK_LED_PIN, OUTPUT);
   digitalWrite(FEEDBACK_LED_PIN, LOW);
+#endif
   loadSettings(); // pulls brightness/colors/animation/tz from flash (or writes defaults)
   loadUiSettings();
 #if GIF_PLAYBACK
@@ -1419,7 +1500,9 @@ void setup(void) {
   // Onboard LIS3DH accelerometer -> automatic screen rotation. If it is not
   // found the clock simply stays in the default portrait orientation.
   Wire.begin();
+#if BOARD_HAS_ACCEL
   accelOK = lis.begin(ACCEL_I2C_ADDR); // onboard, non-standard address on both boards
+#endif
   if (accelOK) {
     lis.setRange(LIS3DH_RANGE_2_G);
     // 100 Hz, not 10: a knock lasts about as long as one 10 Hz sample, so at
@@ -1430,7 +1513,11 @@ void setup(void) {
     shakeSensorBegin();   // let the sensor itself watch for a knock
 #endif
   } else {
+#if BOARD_HAS_ACCEL
     Serial.println("LIS3DH not found - orientation locked to portrait");
+#else
+    Serial.println("No LIS3DH on this board - the clock stays in landscape");
+#endif
   }
 
   // External BH1750 ambient light sensor -> auto-brightness. Shares the I2C bus
@@ -1460,11 +1547,14 @@ void setup(void) {
 #endif
 
   // Initialize matrix...
-  matrix.setRotation(3); //1
+  matrix.setRotation(BOARD_DEFAULT_ROTATION);
   matrix.setTextWrap(false);      // Allow text off edge
 #if PANEL_DRIVER_DMA
   bool matrixOk = matrix.begin();
   Serial.println(matrixOk ? "Panel driver started" : "Panel driver FAILED");
+#if defined(CLOCK_DEBUG)
+  debugMemoryLog();
+#endif
   matrix.setBrightness(panelBrightness());     // the canvas colours are shares of it
 #else
   ProtomatterStatus matrixstatus = matrix.begin();
@@ -1472,7 +1562,7 @@ void setup(void) {
   Serial.println((int)matrixstatus);
   bool matrixOk = (matrixstatus == PROTOMATTER_OK);
 #endif
-  matrix.setRotation(3); //1
+  matrix.setRotation(BOARD_DEFAULT_ROTATION);
   if(!matrixOk) {
     // DO NOT CONTINUE if matrix setup encountered an error. The delay keeps the
     // ESP32's task watchdog fed so the board reports the error instead of
@@ -1507,17 +1597,27 @@ void setup(void) {
   // button held through the start has done its job with that: held on, it
   // would otherwise count as a hold once the loop runs - and holding UP on
   // the hotspot screen closes it again.
+#if BOARD_BUTTON_COUNT
   for (Button &b : buttons) {
     if (digitalRead(b.pin) == LOW) { b.phase = BTN_SPENT; }
   }
   if (digitalRead(UP_BUTTON_PIN) == LOW) {
     handleInput(EV_UP_AT_BOOT, 1);
   }
+#endif
   // The same for a hand held over the gesture sensor - the only way on a clock
   // without buttons.
   if (!apActive && gestureHeldAtBoot()) {
     handleInput(EV_APPROACH_AT_BOOT, 1);
   }
+#if BOARD_BUTTON_COUNT == 0
+  // No buttons and no gesture sensor, and no home WiFi to join: the hotspot is
+  // the only way to set the clock up, so it opens and stays open.
+  if (!apActive && !gestureOK && !wifiStored()) {
+    startAPMode();
+    Serial.println("No input fitted and no home WiFi stored: the hotspot stays open");
+  }
+#endif
 
   // Start joining the home WiFi, without waiting for it: the clock comes up at
   // once and the join and the first sync run in the loop (SYNC_JOINING). The
@@ -1552,6 +1652,11 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
+#if BOARD_WAVESHARE_WALL
+  wallConsole();  // "black" on the USB console before a flash, test pictures
+  wallOutputWatch();
+  if (matrix.testing()) { delay(5); return; }   // a test picture stands: the clock draws nothing
+#endif
 #if WATCHFACE_MUNCHER && defined(CLOCK_DEBUG)
   // Ten seconds in, so the console has come back after a restart.
   static bool muncherTested = false;
@@ -1563,7 +1668,14 @@ void loop(void) {
 #endif
 #if BAND_DATA && defined(CLOCK_DEBUG)
   static bool warningIconsTested = false;
-  if (!warningIconsTested && millisNow > 10000) { warningIconsTested = true; warningIconSelfTest(); }
+  if (!warningIconsTested && millisNow > 10000) {
+    warningIconsTested = true;
+    warningIconSelfTest();
+    feedRetrySelfTest();
+#if BAND_ON_PANEL
+    bandSelfTest();
+#endif
+  }
 #endif
   if (minuteTrigger) { panelDirty = true; }   // whatever shows the time has to follow it
   if (secondTrigger && secondNow == 30) { rtcFollow(); }   // half way through every minute
@@ -1573,6 +1685,7 @@ void loop(void) {
 #if defined(CLOCK_DEBUG)
   static bool dstTested = false;
   if (!dstTested && millisNow > 10000) { dstTested = true; dstSelfTest(); }
+  debugMemoryLog();
 #endif
   updateInput();  // buttons -> events -> whatever the profile maps them to on this screen
 
@@ -1581,6 +1694,10 @@ void loop(void) {
     uint32_t apT0 = micros();
 #endif
     apWatchdog();      // re-create the AP if the ESP32 silently rebooted
+#if BOARD_BUTTON_COUNT == 0
+    apAutoClose();     // the hotspot that opened by itself, once its time is up
+    if (!apActive) { return; }
+#endif
     handleAP();        // captive-portal DNS + web UI + live settings updates
 #if defined(CLOCK_DEBUG)
     uint32_t apT1 = micros();
@@ -1588,6 +1705,9 @@ void loop(void) {
     updateOrientation();// the info screen and the preview follow the panel as well
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
+#if BAND_ON_PANEL
+    bandHide();        // no band beside the hotspot's screens
+#endif
 #if defined(CLOCK_DEBUG)
     apLoopStats(apT1 - apT0, micros() - apT1);
 #endif
@@ -1595,6 +1715,10 @@ void loop(void) {
   }
 
   stationUpdate();      // the home WiFi while the sync, the info band or the web app needs it
+#if BOARD_BUTTON_COUNT == 0
+  apFallback();         // no input to open the hotspot with: it opens when the WiFi fails
+  if (apActive) { return; }
+#endif
 #if WEBUI_APP
   lanUpdate();          // the web app on the home network
 #endif
@@ -1638,6 +1762,9 @@ void loop(void) {
     case SCREEN_GESTURE_TEST: gestureTestUpdate(); if (panelDirty) { drawGestureTest(); } break;
     default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
   }
+#if BAND_ON_PANEL
+  bandUpdate();         // the wall's info band below the face
+#endif
 }
 
 /* ======================================================================
@@ -2684,6 +2811,20 @@ void placeFlight(uint8_t i, uint16_t iters) {
 // over (with double buffering it waits for the next panel refresh).
 struct FrameStats { uint32_t frames, drawSum, drawMax, showSum, showMax, since; };
 FrameStats frameStats = {};
+
+// Debug build only: the RAM every 30 s - internal free, its lowest since the
+// start and its largest free block, and the free PSRAM. The panel driver's
+// buffer, the WiFi and the TLS sessions all want internal RAM.
+void debugMemoryLog() {
+  static unsigned long last = 0;
+  if (last != 0 && millisNow - last < 30000) { return; }
+  last = millisNow ? millisNow : 1;
+  Serial.printf("RAM: internal free %u, lowest %u, largest block %u; PSRAM free %u\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
 
 // Debug build only: the loop while the hotspot is up, printed every 2 s - how
 // often it ran, how long the web side (handleAP) and the panel side (preview)
@@ -5430,7 +5571,8 @@ int8_t faceEventIndex(InputEvent ev) {
 }
 
 // Whether the source of a face event was found: the buttons always, the knock
-// with the accelerometer, the gestures with the gesture sensor.
+// with the accelerometer, the gestures with the gesture sensor. (The wall clock
+// has no buttons.)
 bool faceEventFitted(InputEvent ev) {
   // The knock is sensed by the Tetris face's code (updateShake()), so a board
   // without it - the M4 - has no knock, accelerometer or not.
@@ -5438,7 +5580,11 @@ bool faceEventFitted(InputEvent ev) {
   if (ev == EV_WAVE) { return false; }   // not read: too unreliable (updateGestures())
   if (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) { return false; }   // left out (gestureLeftOut())
   if (isGestureEvent(ev)) { return gestureOK; }
+#if BOARD_BUTTON_COUNT
   return true;
+#else
+  return false;   // what is left are the buttons' events, and this board has none
+#endif
 }
 
 // Whether an action can sit on a face event of this clock.
@@ -5476,7 +5622,17 @@ bool faceKeysReachMenu(const uint8_t *codes) {
   for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
     if (faceEventFitted(FACE_EVENTS[i].event) && FACE_ACTIONS[codes[i]].function == FN_OPEN_MENU) { return true; }
   }
+#if BOARD_BUTTON_COUNT == 0
+  // A clock without buttons whose gesture sensor was not found has no input
+  // at all: no shortcut can open its menu, and the web app is its way to the
+  // settings. Its shortcuts are kept for when the sensor is there.
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+    if (faceEventFitted(FACE_EVENTS[i].event)) { return false; }
+  }
+  return true;
+#else
   return false;
+#endif
 }
 
 // At start-up, once the sensors have been looked for.
@@ -5749,15 +5905,18 @@ uint8_t burstSteps(const Button &b) {
 
 // Whether any button is down right now.
 bool anyButtonDown() {
+#if BOARD_BUTTON_COUNT
   for (const Button &b : buttons) {
     if (b.phase == BTN_PRESSED || b.phase == BTN_HELD || b.phase == BTN_SPENT) { return true; }
   }
+#endif
   return false;
 }
 
 // Once per loop: read every button, run what its events map to, keep a hold
 // function going while its button stays down, and drive the press indicator.
 void updateInput() {
+#if BOARD_BUTTON_COUNT
   for (Button &b : buttons) {
     ButtonPhase before = b.phase;
     InputEvent ev = stepButton(b);
@@ -5767,6 +5926,7 @@ void updateInput() {
     if (b.phase == BTN_HELD) { holdStep(b.holding); }
     if (before == BTN_HELD && b.phase != BTN_HELD) { holdEnd(b.holding); b.holding = FN_NONE; }
   }
+#endif
   updateGestures();
   updateFeedbackLed();
 }
@@ -6404,7 +6564,9 @@ void updateFeedbackLed() {
   bool lit = feedbackLit();
   if (lit != fbLit) {
     fbLit = lit;
+#if BOARD_HAS_FEEDBACK_LED
     digitalWrite(FEEDBACK_LED_PIN, lit ? HIGH : LOW);
+#endif
 #if BUTTON_FEEDBACK_ON_MATRIX
     panelDirty = true;   // the matrix shows the same square, so the panel has to follow
 #endif
@@ -6554,6 +6716,9 @@ void stopAPMode() {
   if (!apActive) { return; }
   Serial.println("Stopping config AP...");
   apActive = false;
+#if BOARD_BUTTON_COUNT == 0
+  apAutoCloseAt = 0;
+#endif
   dnsUdp.stop();
   apServer.end(); // release the listening socket (a fresh begin() would leak one)
   netApEnd(); // drop the softAP
@@ -6572,6 +6737,238 @@ void stopAPMode() {
   }
   setScreen(SCREEN_FACE); // back to the normal clock, in the current orientation
 }
+
+#if BOARD_WAVESHARE_WALL
+// The wall clock's USB console, which has no buttons to reach the hotspot with
+// once it runs:
+// - "black" switches the panels dark until the next start. A flash resets the
+//   chip in the middle of a refresh, and with nobody driving the panels the row
+//   pair they show then may stay lit at full duty while it runs (bench rule of
+//   2026-10-17: the picture black before every flash).
+// - "lan on" / "lan off" switch the web app on the home network, as its
+//   switch on the hotspot's page does (with the password set there).
+// - "test <panel> <brightness>" shows a test picture to measure the panels'
+//   current with: that panel (1-3 the top row from the left, 4-6 the bottom
+//   row; 0 none) in the clock's white at that brightness, the rest dark. The
+//   clock stands still meanwhile; "test off" gives the wall back.
+// - "bus <divider>" sets the panel bus to 160 MHz / divider while it runs,
+//   to judge faster clocks than the driver's 13.3 MHz by eye.
+// - "fetch" makes every source of the info band due now (weather, warnings
+//   over HTTPS), to watch the panel output while they are fetched.
+// - "prio <0-5>" sets the panel output's DMA channel priority among the
+//   GDMA channels (PANEL_DMA_PRIORITY from the start), until the next start.
+// - "gdma" lists every GDMA channel's peripheral, priority and weight.
+// - "crypto" times SHA-256 and AES-128 over blocks in internal RAM, as TLS
+//   hands them to the crypto engine; "crypto ext" the same over blocks in
+//   PSRAM (wallCryptoTest()).
+// - "tlsmem int" / "tlsmem ext": mbedTLS's memory from internal RAM first
+//   (from the start) or from PSRAM first, as the MatrixPortal S3 takes it
+//   (feedTlsCalloc()), until the next start.
+// - "status test" shows the band's clock status for BAND_STATUS_TEST_MS as if
+//   the time sync were failing.
+void wallConsole() {
+  static char line[16];
+  static uint8_t len = 0;
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c != '\n' && c != '\r') {
+      if (len < sizeof(line) - 1) { line[len++] = c; }
+      continue;
+    }
+    line[len] = '\0';
+    if (strcmp(line, "black") == 0) {
+      matrix.holdDark();
+      Serial.println("Panels dark until the next start");
+    }
+    unsigned panel = 0, bright = 0, div = 0, prio = 0;
+    if (strcmp(line, "test off") == 0) {
+      matrix.endTestPicture();
+      matrix.setBrightness(panelBrightness());
+      panelDirty = true;
+      Serial.println("Test picture off");
+    } else if (sscanf(line, "test %u %u", &panel, &bright) == 2 && panel <= 6 && bright <= 255) {
+      matrix.testPicture((uint8_t)panel, (uint8_t)bright);
+      Serial.printf("Test picture: panel %u white at brightness %u (the cap is %u), the rest dark\n",
+                    panel, bright, (unsigned)PANEL_BRIGHT_CAP);
+    } else if (sscanf(line, "bus %u", &div) == 1 && div >= 8 && div <= 32) {
+      matrix.setBusDivider((uint8_t)div);
+      Serial.printf("Panel bus: 160 MHz / %u = %u kHz, refresh %lu Hz\n", div, 160000U / div,
+                    (unsigned long)matrix.refreshRate());
+    } else if (sscanf(line, "prio %u", &prio) == 1 && prio <= 5) {
+      bool ok = matrix.setDmaPriority((uint8_t)prio);
+      Serial.printf("Panel output: DMA priority %u %s\n", prio, ok ? "set" : "NOT set");
+    } else if (strcmp(line, "gdma") == 0) {
+      wallGdmaList();
+    } else if (strcmp(line, "crypto") == 0 || strcmp(line, "crypto ext") == 0) {
+      wallCryptoTest(line[6] != '\0');
+    }
+#if BAND_DATA
+    if (strcmp(line, "status test") == 0) {
+      bandStatusTestAt = millisNow ? millisNow : 1;
+      bandLocalDone = false;   // worked out anew at once
+      Serial.println("Band: the clock status for 2 min, as if the time sync were failing");
+    }
+    bool tlsInt = strcmp(line, "tlsmem int") == 0;
+    if (tlsInt || strcmp(line, "tlsmem ext") == 0) {
+      feedTlsInternal() = tlsInt;
+      Serial.printf("TLS memory: %s first\n", tlsInt ? "internal RAM" : "PSRAM");
+    }
+#endif
+#if BAND_DATA
+    if (strcmp(line, "fetch") == 0) {
+      for (uint8_t f = 0; f < FEED_COUNT; f++) { feedRuns[f].dueAt = millisNow; }
+      Serial.println("Info band: every source due now");
+    }
+#endif
+#if WEBUI_APP
+    bool lanOn = strcmp(line, "lan on") == 0;
+    if (lanOn || strcmp(line, "lan off") == 0) {
+      lanSettings.on = lanOn ? 1 : 0;
+      saveLanSettings();
+      lanWantRadio();
+      Serial.printf("Web app on the home network: %s\n", lanOn ? "on" : "off");
+    }
+#endif
+    len = 0;
+  }
+}
+
+// The panel output stops for good when the DMA cannot read the frame buffer
+// out of PSRAM fast enough: the clock runs on and the wall stays dark (bus at
+// 20 MHz, 2026-10-18; the same day twice at the start of a weather fetch).
+// Watched on every pass: once it has stopped it is logged, with what the
+// fetch task was doing, and started again (at most every 50 ms). Only after
+// it has been seen running: should the flag read 0 all along, that says so
+// once and nothing is restarted.
+uint32_t wallOutputStops = 0;   // since the start
+void wallOutputWatch() {
+  uint32_t &stops = wallOutputStops;
+  static bool seenRunning = false, toldNever = false;
+  static unsigned long restartedAt = 0;
+  if (matrix.outputRunning()) { seenRunning = true; return; }
+  if (!seenRunning) {
+    if (!toldNever && millisNow > 15000) {
+      toldNever = true;
+      Serial.println("Panel output: never seen running - the watch does nothing");
+    }
+    return;
+  }
+  if (restartedAt != 0 && millisNow - restartedAt < 50) { return; }
+  restartedAt = millisNow ? millisNow : 1;
+  stops++;
+  if (stops <= 20 || stops % 100 == 0) {
+#if BAND_DATA
+    if (feedBusy) {
+      Serial.printf("Panel output stopped (%lu since the start), a fetch running for %lu ms; started again\n",
+                    (unsigned long)stops, millisNow - feedSentAt);
+    } else {
+      Serial.printf("Panel output stopped (%lu since the start), no fetch running (the last %lu ms ago); started again\n",
+                    (unsigned long)stops, millisNow - feedSentAt);
+    }
+#else
+    Serial.printf("Panel output stopped (%lu since the start); started again\n", (unsigned long)stops);
+#endif
+  }
+  matrix.restartOutput();
+}
+
+// Console "gdma": the five GDMA channels both ways - the peripheral each is
+// connected to, its priority and weight - and whether the priorities count
+// at all. Shows whom the panel output (LCD_CAM, out) shares the DMA with.
+void wallGdmaList() {
+  static const char *const PERI[] = { "SPI2", "SPI3", "UHCI0", "I2S0", "I2S1", "LCD_CAM", "AES", "SHA",
+                                      "ADC_DAC", "RMT" };
+  for (uint8_t i = 0; i < 5; i++) {
+    unsigned o = GDMA.channel[i].out.peri_sel.sel, n = GDMA.channel[i].in.peri_sel.sel;
+    Serial.printf("GDMA %u: out %-7s priority %u weight %2u, L2 FIFO code %u | in %-7s priority %u weight %2u\n", i,
+                  o < 10 ? PERI[o] : "-", (unsigned)GDMA.channel[i].out.pri.tx_pri,
+                  (unsigned)GDMA.channel[i].out.weight.tx_weight, (unsigned)GDMA.sram_size[i].out.out_size,
+                  n < 10 ? PERI[n] : "-", (unsigned)GDMA.channel[i].in.pri.rx_pri,
+                  (unsigned)GDMA.channel[i].in.weight.rx_weight);
+  }
+  Serial.printf("GDMA: priority arbitration %s\n", GDMA.misc_conf.arb_pri_dis ? "OFF" : "on");
+}
+
+// Console "crypto": what the crypto engine does during a TLS handshake, on
+// its own - SHA-256 and AES-128-CTR, ten times over 16 KB each, in internal
+// RAM (the TLS buffers are there, CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC; the
+// ESP32-S3 feeds both engines by GDMA) or, with external, in PSRAM (where
+// larger application buffers go). Prints how long each took and how often
+// the panel output stopped meanwhile (watched between the blocks), so the DMA
+// priority can be judged on both sides: the panel's output and the crypto's
+// speed. On 2026-10-18 internal blocks stopped the output not once, even at
+// priority 0, while real handshakes did.
+void wallCryptoTest(bool external) {
+  const size_t N = 16384;
+  const uint8_t ROUNDS = 10;
+  uint32_t caps = external ? MALLOC_CAP_SPIRAM : (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+  uint8_t *in = (uint8_t *)heap_caps_aligned_alloc(64, N, caps);   // whole cache lines
+  uint8_t *out = (uint8_t *)heap_caps_aligned_alloc(64, N, caps);
+  if (!in || !out) {
+    heap_caps_free(in);
+    heap_caps_free(out);
+    Serial.println("Crypto test: not enough RAM");
+    return;
+  }
+  for (size_t i = 0; i < N; i++) { in[i] = (uint8_t)(i * 7); }
+  uint32_t stopsBefore = wallOutputStops;
+  uint8_t digest[32];
+  int64_t t0 = esp_timer_get_time();
+  for (uint8_t r = 0; r < ROUNDS; r++) {
+    mbedtls_sha256(in, N, digest, 0);
+    wallOutputWatch();
+  }
+  int64_t t1 = esp_timer_get_time();
+  static const uint8_t KEY[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_enc(&aes, KEY, 128);
+  for (uint8_t r = 0; r < ROUNDS; r++) {
+    size_t off = 0;
+    uint8_t nonce[16] = {}, block[16];
+    mbedtls_aes_crypt_ctr(&aes, N, &off, nonce, block, in, out);
+    wallOutputWatch();
+  }
+  int64_t t2 = esp_timer_get_time();
+  mbedtls_aes_free(&aes);
+  heap_caps_free(in);
+  heap_caps_free(out);
+  double mb = (double)N * ROUNDS / 1e6;
+  Serial.printf("Crypto test (%s): SHA-256 %lu us (%.2f MB/s), AES-128-CTR %lu us (%.2f MB/s), %u x 16 KB each; "
+                "panel output stopped %lu times meanwhile\n", external ? "PSRAM" : "internal RAM",
+                (unsigned long)(t1 - t0), mb / ((t1 - t0) / 1e6), (unsigned long)(t2 - t1), mb / ((t2 - t1) / 1e6),
+                (unsigned)ROUNDS, (unsigned long)(wallOutputStops - stopsBefore));
+  wallGdmaList();   // the crypto engines' channels, should they be given back after use
+}
+#endif
+
+#if BOARD_BUTTON_COUNT == 0
+// A clock without inputs whose stored WiFi has not connected for
+// AP_FALLBACK_MS opens the hotspot for a while (apAutoClose()). Not while the
+// station is off because nobody needs it, nor while it is connected.
+void apFallback() {
+  if (gestureOK || apActive || !wifiStored() || stationState != STA_JOINING) { joinTroubleSince = 0; return; }
+  if (joinTroubleSince == 0) { joinTroubleSince = millisNow ? millisNow : 1; return; }
+  if (millisNow - joinTroubleSince < AP_FALLBACK_MS) { return; }
+  joinTroubleSince = 0;
+  Serial.println("The home WiFi does not connect: the hotspot opens for 5 minutes");
+  startAPMode();
+  apAutoCloseAt = millis() + AP_AUTO_OPEN_MS;
+  if (apAutoCloseAt == 0) { apAutoCloseAt = 1; }
+}
+
+// Closes the hotspot that opened for want of the home WiFi (apFallback())
+// once its time is up and no phone is connected to it; a phone on it keeps it
+// open. One that opened for want of any WiFi stored stays.
+void apAutoClose() {
+  if (apAutoCloseAt == 0 || (long)(millisNow - apAutoCloseAt) < 0) { return; }
+  if (millisNow - apAutoCheckLast < 1000) { return; }
+  apAutoCheckLast = millisNow;
+  if (netApHasStation()) { return; }
+  Serial.println("Hotspot: its time after the start is over");
+  stopAPMode();
+}
+#endif
 
 // Re-create the AP when the radio dropped it: the M4's NINA firmware can crash
 // and reboot under captive-portal probe load, and after its reboot the SSID
@@ -7685,7 +8082,11 @@ int16_t gifCount() {
 
 bool gifFits(int16_t i) {
   uint16_t w = gifPack[i].width, h = gifPack[i].height;
+#if BOARD_WAVESHARE_WALL
+  return w <= WALL_W && h <= WALL_H;   // the wall's LEDs, not the clock's 64x32 picture
+#else
   return w <= matrix.width() && h <= matrix.height() && (int32_t)w * h <= GIF_CANVAS_MAX;
+#endif
 }
 
 // A random GIF that fits the panel as it is held, not the last one shown while
@@ -7835,6 +8236,46 @@ void gifDispose() {
   }
 }
 
+#if BOARD_WAVESHARE_WALL
+// The canvas onto the wall in its own LEDs, centred, the rest dark, through
+// the gamma table and the panel's table for the brightness; the wall writes
+// only what changed since the frame before (PanelCanvas::wallRow()).
+void gifRender() {
+  int16_t x0 = (WALL_W - gifW) / 2, y0 = (WALL_H - gifH) / 2;
+  static uint8_t row[WALL_W * 3];
+  static const uint8_t dark[WALL_W * 3] = {};
+  memset(row, 0, sizeof(row));   // left and right of the GIF stays dark
+  matrix.waitForBackBuffer();
+#if defined(CLOCK_DEBUG)
+  // Debug build: how long a frame takes onto the wall, every 2 s while GIFs play.
+  static uint32_t frames = 0, sumUs = 0, maxUs = 0, since = 0;
+  uint32_t t0 = micros();
+#endif
+  for (int16_t y = 0; y < WALL_H; y++) {
+    int16_t gy = y - y0;
+    if (gy < 0 || gy >= gifH) { matrix.wallRow(y, dark); continue; }
+    const uint8_t *c = &gifPlayer->canvas[gy * gifW * 3];
+    uint8_t *o = row + x0 * 3;
+    for (int16_t gx = 0; gx < gifW; gx++, c += 3, o += 3) {
+      o[0] = matrix.panelValue(0, gifGamma[c[0]]);
+      o[1] = matrix.panelValue(1, gifGamma[c[1]]);
+      o[2] = matrix.panelValue(2, gifGamma[c[2]]);
+    }
+    matrix.wallRow(y, row);
+  }
+  matrix.endWallFrame();
+#if defined(CLOCK_DEBUG)
+  uint32_t us = micros() - t0;
+  frames++; sumUs += us; if (us > maxUs) { maxUs = us; }
+  if (millis() - since >= 2000) {
+    Serial.printf("GIF onto the wall: %lu frames, avg %lu max %lu us\n", (unsigned long)frames,
+                  (unsigned long)(sumUs / frames), (unsigned long)maxUs);
+    frames = sumUs = maxUs = 0;
+    since = millis();
+  }
+#endif
+}
+#else
 // The canvas onto the panel, centred, the rest dark, through the gamma table
 // and the panel's table for the brightness.
 void gifRender() {
@@ -7860,6 +8301,7 @@ void gifRender() {
   matrix.flip();
   matrix.forgetHeld();
 }
+#endif
 
 // The GIF screen: the next frame when it is due. Turning the panel ends it,
 // since the GIF no longer stands upright, or may no longer fit.
@@ -7996,21 +8438,63 @@ void gifPackLoad() {
                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 }
 
+// Whether pack GIF e lies where the cache can map it (GIF_PACK_MAP_LIMIT).
+bool gifPackMappable(const GifPackEntry &e) {
+  return (uint64_t)gifPackPart->address + e.offset + e.size <= GIF_PACK_MAP_LIMIT;
+}
+
+// Whether the bytes of pack GIF e still have their CRC: mapped, or read a
+// piece at a time where the cache does not reach.
+bool gifPackCrcOk(const GifPackEntry &e) {
+  if (gifPackMappable(e)) {
+    const void *mapped = nullptr;
+    esp_partition_mmap_handle_t map;
+    if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &map) != ESP_OK) {
+      return false;
+    }
+    bool ok = esp_rom_crc32_le(0, (const uint8_t *)mapped, e.size) == e.crc;
+    esp_partition_munmap(map);
+    return ok;
+  }
+  static uint8_t piece[4096];
+  uint32_t crc = 0;
+  for (uint32_t at = 0; at < e.size; at += sizeof(piece)) {
+    uint32_t n = min<uint32_t>(sizeof(piece), e.size - at);
+    if (esp_partition_read(gifPackPart, e.offset + at, piece, n) != ESP_OK) { return false; }
+    crc = esp_rom_crc32_le(crc, piece, n);
+  }
+  return crc == e.crc;
+}
+
 // The bytes of pack GIF e for the decoder; false when they cannot be had.
 bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size) {
-  const void *mapped = nullptr;
-  if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &gifPackMap) != ESP_OK) {
-    Serial.printf("GIF %s: cannot map it\n", e.name);
-    return false;
+  const uint8_t *stored = nullptr;
+  uint8_t *read = nullptr;   // the stored bytes, read into PSRAM above GIF_PACK_MAP_LIMIT
+  if (gifPackMappable(e)) {
+    const void *mapped = nullptr;
+    if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &gifPackMap) != ESP_OK) {
+      Serial.printf("GIF %s: cannot map it\n", e.name);
+      return false;
+    }
+    gifPackMapped = true;
+    stored = (const uint8_t *)mapped;
+  } else {
+    read = (uint8_t *)heap_caps_malloc(e.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!read || esp_partition_read(gifPackPart, e.offset, read, e.size) != ESP_OK) {
+      Serial.printf("GIF %s: cannot read it\n", e.name);
+      free(read);
+      return false;
+    }
+    stored = read;
   }
-  gifPackMapped = true;
-  const uint8_t *stored = (const uint8_t *)mapped;
   if (esp_rom_crc32_le(0, stored, e.size) != e.crc) {
     Serial.printf("GIF %s: damaged in the pack\n", e.name);
+    free(read);
     gifPackClose();
     return false;
   }
   if (e.codec == GIF_PACK_STORED) {
+    if (read) { gifPackCopy = read; }   // freed by gifPackClose()
     data = stored;
     size = e.size;
     return true;
@@ -8035,8 +8519,11 @@ bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size) {
     Serial.printf("GIF %s: no PSRAM to inflate it\n", e.name);
   }
   free(inflator);
-  esp_partition_munmap(gifPackMap);   // the stored bytes are done with
-  gifPackMapped = false;
+  if (gifPackMapped) {   // the stored bytes are done with
+    esp_partition_munmap(gifPackMap);
+    gifPackMapped = false;
+  }
+  free(read);
   if (!ok) {
     gifPackClose();
     return false;
@@ -8066,7 +8553,8 @@ void gifPackClose() {
 
    A source due wants the station (RADIO_FEEDS), and its fetch goes to the
    task once the station is up; sources due within FEED_GATHER_MS come along
-   while the radio is on anyway. Then the radio goes off again unless the
+   while the radio is on anyway, except one whose last fetch failed: that one
+   waits out its back-off. Then the radio goes off again unless the
    sync still needs it (stationUpdate()).
    ---------------------------------------------------------------------- */
 
@@ -8086,8 +8574,8 @@ void loadFeedSettings() {
     char lat[16], lon[16];
     feedDegrees(lat, sizeof(lat), feedSettings.lat);
     feedDegrees(lon, sizeof(lon), feedSettings.lon);
-    Serial.printf("Info band: weather %s, warnings %s, for %s, %s\n", feedOn(FEED_WEATHER) ? "on" : "off",
-                  feedOn(FEED_WARNINGS) ? "on" : "off", lat, lon);
+    Serial.printf("Info band: weather %s, warnings %s, air quality %s, for %s, %s\n", feedOn(FEED_WEATHER) ? "on" : "off",
+                  feedOn(FEED_WARNINGS) ? "on" : "off", feedOn(FEED_AIR) ? "on" : "off", lat, lon);
   }
 }
 
@@ -8107,11 +8595,15 @@ bool feedsReady() {
   return feedTaskOK && feedSettings.located && wifiStored() && clockIsSet();
 }
 
-// Whether source f is on and due within `early` ms.
+// Whether source f is on and due within `early` ms. One whose last fetch
+// failed waits out its back-off (feedFailed()), never coming along early:
+// with the radio on for its retry it would otherwise be fetched again at
+// once (an HTTP 503 three times within a second, 2026-10-18).
 bool feedDueWithin(uint8_t f, unsigned long early) {
 #if WEBUI_APP
   if (FEEDS[f].needsAlways && !lanSettings.on) { return false; }   // needs continuous network access
 #endif
+  if (feedRuns[f].failures) { early = 0; }
   return feedOn(f) && (long)(millisNow + early - feedRuns[f].dueAt) >= 0;
 }
 
@@ -8238,8 +8730,11 @@ bool isNotice(const BandItem &it) {
 }
 
 // How this clock shows an item, for the web app's list: the 64x32 clock has
-// no band.
+// no band, the wall clock has one.
 const char *itemShowsHere(const BandItem &it) {
+#if BAND_ON_PANEL
+  return it.level == LEVEL_ALERT ? "banner, then in the band" : "in the band";
+#endif
   if (isMessage(it))            { return it.level == LEVEL_ALERT ? "banner, then running text" : "running text"; }
   if (it.level == LEVEL_ALERT)  { return "banner"; }
   return "card";
@@ -8288,11 +8783,13 @@ bool infoIsNew(const BandItem &it) {
 }
 
 // The information's order on the panel, the band's: DWD warnings first, then
-// rain soon, the weather, then Home Assistant's items in the order they came.
+// rain soon, the weather, the air quality, then Home Assistant's items in the
+// order they came.
 uint8_t infoRank(const BandItem &it) {
   if (it.feed == FEED_WARNINGS) { return 0; }
   if (it.feed == FEED_WEATHER)  { return strcmp(it.key, "rain") == 0 ? 1 : 2; }
-  return 3;
+  if (it.feed == FEED_AIR)      { return 3; }
+  return 4;
 }
 
 // The information in that order, as positions in bandItems; only what is new
@@ -8397,6 +8894,17 @@ void textToCp437(char *dst, const char *src, size_t size) {
   dst[n] = '\0';
 }
 
+// On the panel a text's separator is the font's middle dot: " | " sets its
+// parts apart (bandWrap()), but the 5x7 font draws '|' broken in the middle,
+// like a colon (Peter, 2026-10-18). The texts keep their '|', which every
+// keyboard has; only what the panel shows changes.
+const char PANEL_SEPARATOR = (char)0xF9;   // CP437's middle dot, 2x2 at mid height
+void panelSeparators(char *s) {
+  for (; *s; s++) {
+    if (*s == '|') { *s = PANEL_SEPARATOR; }
+  }
+}
+
 // Puts step i on the panel; false when its item has gone meanwhile. An icon
 // stands ALERT_BANNER_MS, or ICON_BEFORE_TEXT_MS when the notice's text comes
 // next; a text runs through noticeRuns times; a card stands CARD_MS, or as
@@ -8411,6 +8919,7 @@ bool noticeStepShow(uint8_t i) {
     cardRuns = it.shortText[0] == '\0';
     if (cardRuns) {
       textToCp437(runText, it.text, sizeof(runText));
+      panelSeparators(runText);
       runWidth = (uint16_t)(strlen(runText) * 6);
       runLastX = INT16_MIN;
       CardLayout L = cardLayout();
@@ -8435,6 +8944,7 @@ bool noticeStepShow(uint8_t i) {
     Serial.printf("Notice: %s, icon %s\n", it.key, ITEM_ICON_NAMES[bannerLook.icon]);
   } else {
     textToCp437(runText, it.text, sizeof(runText));
+    panelSeparators(runText);
     runWidth = (uint16_t)(strlen(runText) * 6);   // 5 px a character and 1 between
     bool alert = it.level == LEVEL_ALERT;
     runR = alert ? ALERT_R : 255; runG = alert ? ALERT_G : 255; runB = alert ? ALERT_B : 255;
@@ -8473,12 +8983,22 @@ void noticeAdvance(bool nextNotice) {
 // message's icon and then its text, a message's text. Alerts that are not
 // messages and share an icon share one banner, so two warnings that came
 // together do not bring the same banner twice; it shows the most severe.
+//
+// On the wall clock the texts go into the band instead, which takes the
+// first of these notices at once, a message's text running through twice;
+// the alerts' icons still come up over the face.
 void noticeStepsForNew() {
   uint8_t order[BAND_ITEMS_MAX];
   uint8_t n = noticeOrder(order, true);
   noticeStepCount = 0;
   noticeRuns = 2;
   noticeCardsRound = false;
+#if BAND_ON_PANEL
+  if (n) {
+    bandWant = { TURN_ITEM, bandItems[order[0]].feed, bandItems[order[0]].tag };
+    bandWantRuns = isMessage(bandItems[order[0]]) ? 2 : 1;
+  }
+#endif
   for (uint8_t k = 0; k < n; k++) {
     const BandItem &it = bandItems[order[k]];
     noticeSeenAdd(it);
@@ -8497,7 +9017,9 @@ void noticeStepsForNew() {
       continue;
     }
     if (alert)      { noticeAddStep(it, PHASE_ICON); }
+#if !BAND_ON_PANEL
     if (it.text[0]) { noticeAddStep(it, PHASE_TEXT); }
+#endif
   }
 }
 
@@ -8507,7 +9029,9 @@ void noticeStepsForNew() {
 // alert colour, a message's text, each text running through once - whoever
 // asked is looking from the start - and an info card alone: the text is for
 // what is urgent (Peter, 2026-10-11). Over the face only; "nothing to show"
-// when there is nothing. Returns how many items it shows.
+// when there is nothing. Returns how many items it shows. On the wall
+// clock the information is in the band, which starts again at its first
+// item; the notices come over the face as here.
 uint8_t noticesShowAgain() {
   if (screen != SCREEN_FACE) { return 0; }
   uint8_t order[BAND_ITEMS_MAX];
@@ -8522,13 +9046,17 @@ uint8_t noticesShowAgain() {
     if (it.text[0])              { noticeAddStep(it, PHASE_TEXT); }
   }
   uint8_t m = infoOrder(order, false);
+#if BAND_ON_PANEL
+  bandRestart();
+#else
   for (uint8_t k = 0; k < m; k++) {
     const BandItem &it = bandItems[order[k]];
     noticeSeenAdd(it);
     noticeAddStep(it, PHASE_CARD);
   }
+#endif
   Serial.printf("Notifications: %u notices, %u information\n", n, m);
-  if (!noticeStart()) {
+  if (!noticeStart() && m == 0) {
     showBanner("nothing", "to show", 110, 110, 110);
     return 0;
   }
@@ -8555,8 +9083,12 @@ bool faceTimeShown() {
 }
 
 // On every pass: a round's minute begins, and whether its round starts now -
-// the face at rest, with nothing over it, for ROUND_AFTER_FACE_MS.
+// the face at rest, with nothing over it, for ROUND_AFTER_FACE_MS. None on
+// the wall clock, whose band shows the information all the time.
 bool infoRoundReady() {
+#if BAND_ON_PANEL
+  return false;
+#endif
   if (minuteTrigger && feedSettings.roundMinutes && minuteNow % feedSettings.roundMinutes == 0) {
     roundMinuteAt = secondStartedAt;
     faceRestAt = 0;
@@ -8667,8 +9199,13 @@ void noticesUpdate() {
   if (newAny) {
 #if GIF_PLAYBACK
     // An alert at once, over everything but the person at the clock;
-    // messages at the minute's place for them, after a GIF's end.
+    // messages at the minute's place for them, after a GIF's end - on the
+    // wall clock they go into the band, which does not cover the face.
+#if BAND_ON_PANEL
+    if (!newAlert && screen == SCREEN_GIF) {
+#else
     if (!newAlert && (screen == SCREEN_GIF || !infoSlotOpen(noticeNewMs()))) {
+#endif
       noticesPending = true;
       return;
     }
@@ -8678,6 +9215,9 @@ void noticesUpdate() {
     noticeStart();
     return;
   }
+#if BAND_ON_PANEL
+  return;                                                         // the information takes turns in the band
+#endif
   if (screen != SCREEN_FACE) { return; }                          // information waits for a GIF's end
   if ((newInfo || round) && !infoCardsStart(round) && newInfo) { noticesPending = true; }
 }
@@ -8926,6 +9466,17 @@ IconRgb levelRgb(uint8_t severity) {
   }
 }
 
+// The air quality's band (airBand()), 0 good to 5 extremely poor, on the
+// clock's own scale: green through yellow and orange to red and violet, as
+// the warning levels go - not the European Environment Agency's colours,
+// whose pages give none (looked for on 2026-10-18).
+IconRgb airRgb(uint8_t band) {
+  static const IconRgb BANDS[] = {
+    { 0, 210, 70 }, { 150, 220, 0 }, { 255, 220, 0 }, { 255, 130, 0 }, { 255, 0, 0 }, { 170, 0, 255 },
+  };
+  return BANDS[band < 6 ? band : 5];
+}
+
 IconRgb chanceRgb(IconRgb c, uint8_t chance) {
   if (chance > 100) { return c; }   // CHANCE_UNKNOWN
   const IconRgb grey = { 70, 72, 82 };
@@ -8952,12 +9503,15 @@ IconRgb roleRgb(uint8_t role, const IconLook &look) {
     case ROLE_HOT:       return { 255, 20, 0 };
     case ROLE_WAVES:     return { 255, 110, 0 };
     case ROLE_FLAKE:     return { 120, 210, 255 };
+    case ROLE_PAGE:      return { 230, 30, 30 };
+    case ROLE_AIR:       return airRgb(look.severity);
     default:             return { 0, 0, 0 };
   }
 }
 
-// An icon at (x, y), its top left corner, each part in its colour.
-void drawItemIcon(int16_t x, int16_t y, const IconLook &look) {
+// An icon at (x, y), its top left corner, each part in its colour: on the
+// panel's canvas, or into another picture (the wall's band).
+void drawItemIconOn(Adafruit_GFX &g, int16_t x, int16_t y, const IconLook &look) {
   const IconBits &pic = iconPicture(look.icon, look.intensity);
   uint16_t colour[3];
   for (uint8_t p = 0; p < 3; p++) {
@@ -8969,10 +9523,12 @@ void drawItemIcon(int16_t x, int16_t y, const IconLook &look) {
     for (uint8_t c = 0; c < ICON_SIZE; c++) {
       uint8_t bit = ICON_SIZE - 1 - c;
       uint8_t part = (uint8_t)((((hi >> bit) & 1u) << 1) | ((lo >> bit) & 1u));
-      if (part) { matrix.drawPixel(x + c, y + r, colour[part - 1]); }
+      if (part) { g.drawPixel(x + c, y + r, colour[part - 1]); }
     }
   }
 }
+
+void drawItemIcon(int16_t x, int16_t y, const IconLook &look) { drawItemIconOn(matrix, x, y, look); }
 
 #if defined(CLOCK_DEBUG)
 // At start-up: the icon each DWD event gets (feedWarningIcon()). The first
@@ -9118,6 +9674,553 @@ void drawRunBanner() {
   panelDirty = false;
 }
 
+#if BAND_ON_PANEL
+/* ----------------------------------------------------------------------
+   The info band on the wall clock: the 192x32 below the face (concept doc,
+   section "Info band"). It shows what the clock knows, one item after the
+   other, each with its icon and its text in two lines of the 5x7 font beside
+   it (the mock-up of 2026-10-05): the alerts first, then the messages, each
+   in the order they came, then the information in its order (infoOrder()),
+   then the date. An item stands BAND_TURN_MS, or, when its text does not fit
+   the two lines, as long as the text takes to run through once. An alert is
+   in its level's colour, framed when the frames are on. A new alert or
+   message takes the band at once, a message's text twice (bandWant); the
+   alert's banner comes over the face as on the 64x32 clock. Show
+   notifications starts the band again at its first item. A GIF covers the
+   band as it covers the face; the hotspot leaves it dark. Its state is with
+   the notices' (bandTurn).
+   ---------------------------------------------------------------------- */
+
+// The item a turn shows; -1 for the date, or when the item has gone.
+int8_t bandItemOf(const BandTurn &t) {
+  if (t.kind != TURN_ITEM) { return -1; }
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    if (bandItems[i].feed == t.feed && bandItems[i].tag == t.tag) { return (int8_t)i; }
+  }
+  return -1;
+}
+
+bool bandTurnSame(const BandTurn &a, const BandTurn &b) {
+  return a.kind == b.kind && a.feed == b.feed && a.tag == b.tag;
+}
+
+// One of the clock's own turns; nullptr for an item's.
+BandLocal *bandLocalOf(const BandTurn &t) {
+  if (t.kind < BAND_LOCAL_FIRST || t.kind >= BAND_LOCAL_FIRST + BAND_LOCAL_COUNT) { return nullptr; }
+  return &bandLocal[t.kind - BAND_LOCAL_FIRST];
+}
+
+// Every turn in the band's order; returns how many.
+uint8_t bandTurnList(BandTurn *t) {
+  uint8_t order[BAND_ITEMS_MAX], n = 0;
+  uint8_t k = noticeOrder(order, false);   // alerts, then messages
+  for (uint8_t i = 0; i < k; i++) { t[n++] = { TURN_ITEM, bandItems[order[i]].feed, bandItems[order[i]].tag }; }
+  k = infoOrder(order, false);
+  for (uint8_t i = 0; i < k; i++) { t[n++] = { TURN_ITEM, bandItems[order[i]].feed, bandItems[order[i]].tag }; }
+  for (uint8_t i = 0; i < BAND_LOCAL_COUNT; i++) {
+    if (bandLocal[i].on) { t[n++] = { (uint8_t)(BAND_LOCAL_FIRST + i), 0, 0 }; }
+  }
+  return n;
+}
+
+// The icon an item has in the band: an alert's own or the warning sign, any
+// other item's own or none.
+uint8_t bandIconOf(const BandItem &it) {
+  if (it.level == LEVEL_ALERT) { return noticeIcon(it); }
+  return it.icon < ICON_COUNT ? it.icon : ICON_NONE;
+}
+
+// Where a turn's text starts: beside its icon, or at the left without one.
+int16_t bandTextX(const BandTurn &t) {
+  if (const BandLocal *own = bandLocalOf(t)) { return own->icon != ICON_NONE ? BAND_TEXT_X : BAND_TEXT_X_BARE; }
+  int8_t i = bandItemOf(t);
+  return (i >= 0 && bandIconOf(bandItems[i]) != ICON_NONE) ? BAND_TEXT_X : BAND_TEXT_X_BARE;
+}
+
+// What a turn shows, as a number, so the band sees its item change (a new
+// temperature, a warning that got worse) or its own lines (the day turns).
+uint32_t bandLook(const BandTurn &t) {
+  if (BandLocal *l = bandLocalOf(t)) { return itemTag(l->text) ^ l->icon; }
+  int8_t i = bandItemOf(t);
+  if (i < 0) { return 0; }
+  const BandItem &it = bandItems[i];
+  uint32_t h = itemTag(it.text);
+  const uint8_t parts[] = { it.icon, it.level, it.severity, it.intensity, it.chance };
+  for (uint8_t p : parts) { h = (h ^ p) * 16777619u; }
+  return h;
+}
+
+// The parts of a text in the band are set apart by " | " (Peter, 2026-10-18,
+// for every text there: the clock's own, the sources' it puts together, and
+// Home Assistant's). A text in two lines of up to `chars` characters: in one
+// when it fits, " | " and all; else broken at the first " | " after which the
+// rest fits the second line, the separator left out there ("10°C overcast" /
+// "10/8°C | rain 100%"); else between words, a separator at the break left
+// out too. False when none of that fits: the text runs through instead.
+bool bandWrap(const char *s, uint8_t chars, char lines[2][32]) {
+  lines[0][0] = lines[1][0] = '\0';
+  while (*s == ' ') { s++; }
+  if (strlen(s) <= chars) {
+    strlcpy(lines[0], s, sizeof(lines[0]));
+    return true;
+  }
+  for (const char *p = strstr(s, " | "); p && p - s <= chars; p = strstr(p + 1, " | ")) {
+    if (strlen(p + 3) > chars) { continue; }
+    memcpy(lines[0], s, (size_t)(p - s));
+    lines[0][p - s] = '\0';
+    strlcpy(lines[1], p + 3, sizeof(lines[1]));
+    return true;
+  }
+  int cut = -1;
+  for (int i = chars; i > 0 && cut < 0; i--) { if (s[i] == ' ') { cut = i; } }
+  if (cut < 0) { return false; }   // a word longer than a line
+  int end = cut;                   // the first line without a separator, and the spaces, at its end
+  while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == '|')) { end--; }
+  const char *rest = s + cut;
+  while (*rest == ' ' || *rest == '|') { rest++; }   // nor at the second's start
+  if (strlen(rest) > chars) { return false; }
+  memcpy(lines[0], s, (size_t)end);
+  lines[0][end] = '\0';
+  strlcpy(lines[1], rest, sizeof(lines[1]));
+  return true;
+}
+
+// The ISO 8601 week of a date: the week with the year's first Thursday is 1.
+// yday and wday as struct tm has them (0 = 1 January, 0 = Sunday).
+int isoWeek(int year, int yday, int wday) {
+  auto weeks = [](int y) {   // 53 when the year starts on a Thursday, or a leap year on a Wednesday
+    auto p = [](int v) { return (v + v / 4 - v / 100 + v / 400) % 7; };
+    return 52 + ((p(y) == 4 || p(y - 1) == 3) ? 1 : 0);
+  };
+  int isoDay = wday == 0 ? 7 : wday;
+  int week = (yday + 1 - isoDay + 10) / 7;
+  if (week < 1) { return weeks(year - 1); }
+  if (week > weeks(year)) { return 1; }
+  return week;
+}
+
+const char *const BAND_DAYS[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+const char *const BAND_MONTHS[] = { "January", "February", "March", "April", "May", "June", "July",
+                                    "August", "September", "October", "November", "December" };
+
+// The date in the clock's language: "Sunday 18 October" and "2026, week 42".
+void bandDateLines(BandLocal &l) {
+  l.on = clockIsSet();
+  l.icon = ICON_CALENDAR;
+  struct tm t;
+  gmtime_r(&localTime, &t);
+  snprintf(l.text, sizeof(l.text), "%s %d %s %d | week %d", BAND_DAYS[t.tm_wday], t.tm_mday, BAND_MONTHS[t.tm_mon],
+           t.tm_year + 1900, isoWeek(t.tm_year + 1900, t.tm_yday, t.tm_wday));
+}
+
+// The change of the clocks nearest to `now` under a daylight saving rule
+// (POSIX TZ), between 12 hours before and 24 hours after it: its UTC
+// instant, and whether the clocks go forward. False when there is none, or
+// no rule (a zone without daylight saving, or it set by hand).
+bool clockShiftNear(const char *rule, time_t now, time_t &at, bool &forward) {
+  if (!rule) { return false; }
+  const time_t BEFORE = 12L * 3600L, AHEAD = 24L * 3600L;
+  bool was = dstActiveAt(rule, now - BEFORE), is = dstActiveAt(rule, now), will = dstActiveAt(rule, now + AHEAD);
+  time_t lo, hi;
+  bool loState;
+  if (was != is)       { lo = now - BEFORE; hi = now; loState = was; }
+  else if (is != will) { lo = now; hi = now + AHEAD; loState = is; }
+  else                 { return false; }
+  while (hi - lo > 60) {   // the change is on a whole minute: found to within one
+    time_t mid = lo + (hi - lo) / 2;
+    if (dstActiveAt(rule, mid) == loState) { lo = mid; } else { hi = mid; }
+  }
+  at = hi - hi % 60;
+  forward = !loState;      // into summer time
+  return true;
+}
+
+// The clock change, from 24 hours before until 12 hours after it: "Clocks go
+// back 1 h" / "tonight at 3:00", the wall time before the change; afterwards
+// "Clocks went back 1 h" / "last night".
+void bandShiftLines(BandLocal &l) {
+  time_t at;
+  bool forward;
+  const char *rule = settings.dst == DST_AUTO ? tzRule(settings.tzOffset) : nullptr;
+  l.on = clockIsSet() && clockShiftNear(rule, clockNow(), at, forward);
+  if (!l.on) { return; }
+  l.icon = ICON_CALENDAR;
+  time_t before = at + (time_t)settings.tzOffset + (forward ? 0 : 3600);   // the wall time it happens at
+  int hour = (int)(before % 86400 / 3600), minute = (int)(before % 3600 / 60);
+  bool coming = at > clockNow();
+  int n = snprintf(l.text, sizeof(l.text), "Clocks %s %s 1 h | ", coming ? "go" : "went", forward ? "forward" : "back");
+  char *rest = l.text + n;
+  size_t room = sizeof(l.text) - (size_t)n;
+  if (!coming && hour < 6) {
+    strlcpy(rest, "last night", room);
+  } else if (!coming) {
+    snprintf(rest, room, "at %d:%02d", hour, minute);
+  } else {
+    const char *when = hour < 6 ? "tonight" : (before / 86400 == localTime / 86400 ? "today" : "tomorrow");
+    snprintf(rest, room, "%s at %d:%02d", when, hour, minute);
+  }
+}
+
+// "07:42" from minutes after local midnight.
+void bandHhmm(char *buf, size_t size, double minutes) {
+  long m = lround(minutes) % 1440;
+  if (m < 0) { m += 1440; }
+  snprintf(buf, size, "%02ld:%02ld", m / 60, m % 60);
+}
+
+// Sunrise and sunset at the place set for the weather (sky.h): today's, and
+// after today's sunset tomorrow's; the midnight sun and the polar night in
+// words. Without a place, none.
+void bandSunLines(BandLocal &l) {
+  l.on = clockIsSet() && feedSettings.located;
+  if (!l.on) { return; }
+  l.icon = ICON_CLEAR_DAY;
+  double lat = feedSettings.lat / 1e6, lon = feedSettings.lon / 1e6, off = tzTotalOffset() / 60.0;
+  long day = (long)(localTime / 86400);
+  double rise, set;
+  uint8_t kind = sky::sunEvent(day, lat, lon, true, rise);
+  sky::sunEvent(day, lat, lon, false, set);
+  bool tomorrow = kind == sky::SUN_RISES_AND_SETS && (double)(localTime % 86400) / 60.0 >= set + off;
+  if (tomorrow) {
+    kind = sky::sunEvent(day + 1, lat, lon, true, rise);
+    sky::sunEvent(day + 1, lat, lon, false, set);
+  }
+  if (kind == sky::SUN_UP_ALL_DAY) {
+    strlcpy(l.text, "Midnight sun | no sunset today", sizeof(l.text));
+    return;
+  }
+  if (kind == sky::SUN_DOWN_ALL_DAY) {
+    l.icon = ICON_CLEAR_NIGHT;
+    strlcpy(l.text, "Polar night | no sunrise today", sizeof(l.text));
+    return;
+  }
+  char r[8], s[8];
+  bandHhmm(r, sizeof(r), rise + off);
+  bandHhmm(s, sizeof(s), set + off);
+  snprintf(l.text, sizeof(l.text), "Sunrise %s%s | Sunset %s%s", tomorrow ? "tomorrow " : "", r, tomorrow ? "tomorrow " : "", s);
+}
+
+// The moon's phase and how much of it is lit, and the next full or new moon,
+// whichever comes first: "Waxing gibbous, 78%" / "Full moon Mon 26 Oct".
+void bandMoonLines(BandLocal &l) {
+  l.on = clockIsSet();
+  if (!l.on) { return; }
+  l.icon = ICON_CLEAR_NIGHT;
+  double now = (double)clockNow(), e = sky::moonElongation(now);
+  int n = snprintf(l.text, sizeof(l.text), "%s | %d%% lit | ", sky::moonPhaseName(e), sky::moonLit(e));
+  l.text[0] = (char)toupper((unsigned char)l.text[0]);
+  double full = sky::moonNext(now, true), fresh = sky::moonNext(now, false);
+  bool isFull = full < fresh;
+  time_t at = (time_t)(isFull ? full : fresh) + (time_t)tzTotalOffset();
+  struct tm t;
+  gmtime_r(&at, &t);
+  snprintf(l.text + n, sizeof(l.text) - (size_t)n, "%s moon %.3s %d %.3s", isFull ? "Full" : "New", BAND_DAYS[t.tm_wday], t.tm_mday,
+           BAND_MONTHS[t.tm_mon]);
+}
+
+// The clock's trouble in words while the status pixel is red (syncOverdue()):
+// a new home WiFi that does not join, "Home WiFi does not join:" and its
+// name, or a time sync that keeps failing, "Time sync is failing" and when
+// the last good one was. The warning sign in yellow, the first of the
+// clock's own turns. Nothing while all is well.
+const unsigned long BAND_STATUS_TEST_MS = 2UL * 60UL * 1000UL;   // the console's "status test"
+void bandStatusLines(BandLocal &l) {
+  bool test = bandStatusTestAt && millisNow - bandStatusTestAt < BAND_STATUS_TEST_MS;
+  l.on = clockIsSet() && (syncOverdue() || test);
+  if (!l.on) { return; }
+  l.icon = ICON_WARNING;
+  l.severity = 1;
+  if (wifiStored() && !wifiCreds.verified && joinOutcome == JOIN_FAILED) {
+    snprintf(l.text, sizeof(l.text), "Home WiFi does not join | %s", wifiCreds.ssid);
+    return;
+  }
+  if (ntpSyncedAt == 0) {
+    strlcpy(l.text, "Time sync is failing | no good sync yet", sizeof(l.text));
+    return;
+  }
+  time_t at = ntpSyncedAt + (time_t)tzTotalOffset();
+  struct tm t;
+  gmtime_r(&at, &t);
+  snprintf(l.text, sizeof(l.text), "Time sync is failing | last good %d %.3s %02d:%02d", t.tm_mday, BAND_MONTHS[t.tm_mon],
+           t.tm_hour, t.tm_min);
+}
+
+// The clock's own turns anew: once a minute, and when the clock gets its time.
+void bandLocalUpdate() {
+  static bool wasSet = false;
+  if (bandLocalDone && !minuteTrigger && clockIsSet() == wasSet) { return; }
+  bandLocalDone = true;
+  wasSet = clockIsSet();
+  bandStatusLines(bandLocal[TURN_STATUS - BAND_LOCAL_FIRST]);
+  bandShiftLines(bandLocal[TURN_SHIFT - BAND_LOCAL_FIRST]);
+  bandDateLines(bandLocal[TURN_DATE - BAND_LOCAL_FIRST]);
+  bandSunLines(bandLocal[TURN_SUN - BAND_LOCAL_FIRST]);
+  bandMoonLines(bandLocal[TURN_MOON - BAND_LOCAL_FIRST]);
+}
+
+// The band's picture as the turn stands, onto the wall.
+void bandDraw() {
+  GFXcanvas16 &b = bandPicture;
+  b.fillScreen(0);
+  int8_t i = bandItemOf(bandTurn);
+  const BandLocal *own = bandLocalOf(bandTurn);
+  if (bandTurn.kind == TURN_NONE || (bandTurn.kind == TURN_ITEM && i < 0) || (own && !own->on)) {
+    matrix.showBand(b.getBuffer());
+    return;
+  }
+  IconLook look = { own ? own->icon : (uint8_t)ICON_NONE, own ? own->severity : (uint8_t)0, INTENSITY_NONE, CHANCE_UNKNOWN };
+  uint16_t ink = scaledColorVisible(235, 235, 235);
+  bool frame = false;
+  if (i >= 0) {
+    const BandItem &it = bandItems[i];
+    look = { bandIconOf(it), it.severity, it.intensity, it.chance };
+    if (it.level == LEVEL_ALERT) {
+      IconRgb c = levelRgb(it.severity);
+      ink = scaledColorVisible(c.r, c.g, c.b);
+      frame = feedSettings.frames;
+    }
+  }
+  int16_t tx = look.icon != ICON_NONE ? BAND_TEXT_X : BAND_TEXT_X_BARE;
+  b.setFont();          // the built-in 5x7 font, code page 437
+  b.setTextSize(1);
+  b.setTextWrap(false);
+  b.cp437(true);
+  b.setTextColor(ink);
+  if (bandRunText[0]) {
+    uint32_t moved = (uint32_t)(millisNow - bandTurnAt) * RUN_PX_PER_S / 1000UL;
+    uint32_t pass = bandRunWidth + (WALL_W - tx);
+    int16_t x = moved >= bandTurnRuns * pass ? -(int16_t)bandRunWidth : WALL_W - (int16_t)(moved % pass);
+    bandRunLastX = x;
+    b.setCursor(x, BAND_MID_Y);
+    b.print(bandRunText);
+    b.fillRect(0, 0, tx, WALL_BAND_H, 0);   // it runs in and out beside the icon
+  } else if (bandLine[1][0]) {
+    b.setCursor(tx, BAND_LINE_Y[0]);
+    b.print(bandLine[0]);
+    b.setCursor(tx, BAND_LINE_Y[1]);
+    b.print(bandLine[1]);
+  } else {
+    b.setCursor(tx, BAND_MID_Y);
+    b.print(bandLine[0]);
+  }
+  b.cp437(false);
+  if (look.icon != ICON_NONE) { drawItemIconOn(b, BAND_ICON_X, BAND_ICON_Y, look); }
+  if (frame) { b.drawRect(0, 0, WALL_W, WALL_BAND_H, ink); }
+  matrix.showBand(b.getBuffer());
+}
+
+// Puts a turn on the band, its text running through `runs` times - or, when
+// it fits the two lines, standing `runs` x BAND_TURN_MS.
+void bandStart(const BandTurn &t, uint8_t runs) {
+  bandTurn     = t;
+  bandTurnAt   = millisNow ? millisNow : 1;
+  bandTurnRuns = runs;
+  bandTurnLook = bandLook(t);
+  bandTurnMs   = BAND_TURN_MS * runs;
+  bandRunText[0] = '\0';
+  bandRunLastX = INT16_MIN;
+  int8_t i = bandItemOf(t);
+  const BandLocal *own = bandLocalOf(t);
+  const char *src = own ? own->text : i >= 0 ? bandItems[i].text : nullptr;
+  if (src) {
+    char text[sizeof(BandItem::text)];
+    textToCp437(text, src, sizeof(text));
+    int16_t tx = bandTextX(t);
+    if (!bandWrap(text, (uint8_t)((WALL_W - tx - 2) / 6), bandLine)) {
+      strlcpy(bandRunText, text, sizeof(bandRunText));
+      bandRunWidth = (uint16_t)(strlen(bandRunText) * 6);   // 5 px a character and 1 between
+      unsigned long ms = (unsigned long)runs * (bandRunWidth + (WALL_W - tx)) * 1000UL / RUN_PX_PER_S;
+      bandTurnMs = max(ms, BAND_TURN_MS);
+    }
+    panelSeparators(bandLine[0]);   // broken where the bars are; shown as dots
+    panelSeparators(bandLine[1]);
+    panelSeparators(bandRunText);
+  }
+  bandDraw();
+}
+
+// The turn after the one on show, in the band's order; the first when that
+// one has gone. Nothing to show: the band dark, and a look again later.
+void bandNext() {
+  BandTurn list[BAND_ITEMS_MAX + BAND_LOCAL_COUNT];
+  uint8_t n = bandTurnList(list);
+  if (n == 0) {
+    bandTurn   = { TURN_NONE, 0, 0 };
+    bandTurnAt = millisNow ? millisNow : 1;
+    bandTurnMs = BAND_TURN_MS;
+    bandDraw();
+    return;
+  }
+  uint8_t next = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    if (bandTurnSame(list[i], bandTurn)) { next = (uint8_t)((i + 1) % n); break; }
+  }
+  bandStart(list[next], 1);
+}
+
+// Show notifications: the band again from its first item.
+void bandRestart() {
+  bandTurn   = { TURN_NONE, 0, 0 };
+  bandTurnAt = 0;
+}
+
+// On every pass outside the hotspot.
+void bandUpdate() {
+  bandLocalUpdate();
+  if (screen == SCREEN_GIF) { return; }   // a GIF has the whole wall
+  bandHidden = false;
+  if (bandWant.kind != TURN_NONE) {
+    BandTurn w = bandWant;
+    bandWant.kind = TURN_NONE;
+    if (bandItemOf(w) >= 0) {
+      bandStart(w, bandWantRuns);
+      return;
+    }
+  }
+  const BandLocal *own = bandLocalOf(bandTurn);
+  bool gone = (bandTurn.kind == TURN_ITEM && bandItemOf(bandTurn) < 0) || (own && !own->on);
+  if (bandTurnAt == 0 || millisNow - bandTurnAt >= bandTurnMs || gone) {
+    bandNext();
+    return;
+  }
+  if (bandTurn.kind != TURN_NONE && bandLook(bandTurn) != bandTurnLook) {   // its item changed, or the day
+    bandStart(bandTurn, bandTurnRuns);
+    return;
+  }
+  if (bandRunText[0]) {
+    int16_t tx = bandTextX(bandTurn);
+    uint32_t moved = (uint32_t)(millisNow - bandTurnAt) * RUN_PX_PER_S / 1000UL;
+    uint32_t pass = bandRunWidth + (WALL_W - tx);
+    int16_t x = moved >= bandTurnRuns * pass ? -(int16_t)bandRunWidth : WALL_W - (int16_t)(moved % pass);
+    if (x != bandRunLastX) { bandDraw(); return; }
+  }
+  if (matrix.bandStale()) { bandDraw(); }   // a GIF, a test picture or a new brightness wrote over it
+}
+
+#if defined(CLOCK_DEBUG)
+// At start-up: the ISO weeks of dates around the turn of the year (2026 has
+// 53 weeks, 2020 too), and how texts break into the band's two lines.
+void bandSelfTest() {
+  struct Week { int y, m, d, week; };
+  static const Week WEEKS[] = {
+    { 2026, 1, 1, 1 }, { 2026, 10, 18, 42 }, { 2026, 10, 19, 43 }, { 2026, 12, 31, 53 }, { 2027, 1, 1, 53 },
+    { 2027, 1, 4, 1 }, { 2024, 12, 30, 1 }, { 2021, 1, 3, 53 }, { 2025, 12, 29, 1 },
+  };
+  uint8_t wrong = 0;
+  for (const Week &w : WEEKS) {
+    time_t t = (time_t)daysFromCivil(w.y, (unsigned)w.m, (unsigned)w.d) * 86400;
+    struct tm v;
+    gmtime_r(&t, &v);
+    int got = isoWeek(v.tm_year + 1900, v.tm_yday, v.tm_wday);
+    if (got != w.week) { wrong++; Serial.printf("Band: %d-%02d-%02d is week %d, not %d\n", w.y, w.m, w.d, got, w.week); }
+  }
+  struct Wrap { const char *text; bool fits; const char *first, *second; };
+  static const Wrap WRAPS[] = {
+    { "10\xF8" "C overcast, 10/8\xF8" "C, rain 100%", true, "10\xF8" "C overcast, 10/8\xF8" "C,", "rain 100%" },
+    { "Rain from 15:15", true, "Rain from 15:15", "" },
+    { "abcdefghijklmnopqrstuvwxyz", true, "abcdefghijklmnopqrstuvwxyz", "" },
+    { "abcdefghijklmnopqrstuvwxyz0", false, "", "" },
+    { "One two three four five six seven eight nine ten eleven", false, "", "" },
+    // The parts set apart by " | " (Peter, 2026-10-18): broken at the first
+    // after which the rest fits, the separator left out at the break.
+    { "10\xF8" "C overcast | 10/8\xF8" "C | rain 100% | UV 3", true, "10\xF8" "C overcast", "10/8\xF8" "C | rain 100% | UV 3" },
+    { "First quarter | 53% lit | Full moon Mon 26 Oct", true, "First quarter | 53% lit", "Full moon Mon 26 Oct" },
+    { "Sunday 18 October 2026 | week 42", true, "Sunday 18 October 2026", "week 42" },
+    { "Air quality fair | index 32", true, "Air quality fair", "index 32" },
+    { "fair | index 32", true, "fair | index 32", "" },
+    { "Public holiday today | All Saints' Day", true, "Public holiday today", "All Saints' Day" },
+    { "One two three | four five six seven eight nine", true, "One two three | four five", "six seven eight nine" },
+    { "Wednesday 30 September 2026 | week 40", true, "Wednesday 30 September", "2026 | week 40" },
+    { "aaaaaaaaaaaaaaaaaaaa | bbbbbbbbbbbbbbbbbbbbbbbb", true, "aaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbb" },
+    { "aaaaaaaaaaaaaaaaaaaaaaa bbbb | ccc", true, "aaaaaaaaaaaaaaaaaaaaaaa", "bbbb | ccc" },
+  };
+  for (const Wrap &w : WRAPS) {
+    char lines[2][32];
+    bool fits = bandWrap(w.text, 26, lines);
+    if (fits != w.fits || (fits && (strcmp(lines[0], w.first) != 0 || strcmp(lines[1], w.second) != 0))) {
+      wrong++;
+      Serial.printf("Band: \"%s\" gave %s \"%s\" / \"%s\"\n", w.text, fits ? "two lines" : "no fit", lines[0], lines[1]);
+    }
+  }
+  // Sunrise and sunset as sunrise-and-sunset.com gave them on 2026-10-18,
+  // to within 2 minutes; Tromsø's polar night and midnight sun.
+  struct Sun { int y, m, d; double lat, lon; int off; int rise, set; uint8_t kind; };
+  static const Sun SUNS[] = {
+    { 2026, 10, 18, 48.7758, 9.1829, 120, 7 * 60 + 48, 18 * 60 + 27, sky::SUN_RISES_AND_SETS },   // Stuttgart
+    { 2026, 10, 18, 52.5200, 13.4050, 120, 7 * 60 + 37, 18 * 60 + 4, sky::SUN_RISES_AND_SETS },   // Berlin
+    { 2026, 10, 25, 52.5200, 13.4050, 60, 6 * 60 + 50, 16 * 60 + 49, sky::SUN_RISES_AND_SETS },   // Berlin, CET
+    { 2026, 12, 21, 69.6500, 18.9600, 60, 0, 0, sky::SUN_DOWN_ALL_DAY },                            // Tromsø
+    { 2026, 6, 21, 69.6500, 18.9600, 120, 0, 0, sky::SUN_UP_ALL_DAY },
+  };
+  for (const Sun &s : SUNS) {
+    long day = daysFromCivil(s.y, (unsigned)s.m, (unsigned)s.d);
+    double rise, set;
+    uint8_t kind = sky::sunEvent(day, s.lat, s.lon, true, rise);
+    sky::sunEvent(day, s.lat, s.lon, false, set);
+    bool ok = kind == s.kind && (kind != sky::SUN_RISES_AND_SETS ||
+                                 (fabs(rise + s.off - s.rise) <= 2.0 && fabs(set + s.off - s.set) <= 2.0));
+    if (!ok) {
+      wrong++;
+      Serial.printf("Band: sun on %d-%02d-%02d at %.2f, %.2f gave kind %u, %.1f and %.1f min, not %d and %d\n", s.y, s.m,
+                    s.d, s.lat, s.lon, (unsigned)kind, rise + s.off, set + s.off, s.rise, s.set);
+    }
+  }
+  // The moon's phases in October 2026 as moongiant.com gave them, to within
+  // 2 degrees (4 hours); the next full and new moon to within 2 hours.
+  struct Moon { const char *at; double elongation; };
+  static const Moon MOONS[] = {
+    { "2026-10-03 13:25", 270 }, { "2026-10-10 15:50", 0 }, { "2026-10-18 16:12", 90 }, { "2026-10-26 04:11", 180 },
+  };
+  auto utcOf = [](const char *s) {
+    int y, mo, d, h, mi;
+    sscanf(s, "%d-%d-%d %d:%d", &y, &mo, &d, &h, &mi);
+    return (double)daysFromCivil(y, (unsigned)mo, (unsigned)d) * 86400.0 + h * 3600.0 + mi * 60.0;
+  };
+  for (const Moon &m : MOONS) {
+    double e = sky::moonElongation(utcOf(m.at));
+    double off = fmod(e - m.elongation + 540.0, 360.0) - 180.0;
+    if (fabs(off) > 2.0) { wrong++; Serial.printf("Band: the moon at %s is %.2f degrees ahead, not %.0f\n", m.at, e, m.elongation); }
+  }
+  double from = utcOf("2026-10-14 00:00");
+  double full = sky::moonNext(from, true), fresh = sky::moonNext(from, false);
+  if (fabs(full - utcOf("2026-10-26 04:11")) > 7200.0 || fabs(fresh - utcOf("2026-11-09 07:02")) > 7200.0) {
+    wrong++;
+    Serial.printf("Band: next full moon %.0f, new moon %.0f s off\n", full - utcOf("2026-10-26 04:11"),
+                  fresh - utcOf("2026-11-09 07:02"));
+  }
+  // The clock changes of central Europe (01:00 UTC on the last Sunday of
+  // March and October), seen from before, after and between them.
+  struct Shift { const char *now; bool found; const char *at; bool forward; };
+  static const Shift SHIFTS[] = {
+    { "2026-10-24 12:00", true, "2026-10-25 01:00", false }, { "2026-10-25 06:00", true, "2026-10-25 01:00", false },
+    { "2026-03-28 12:00", true, "2026-03-29 01:00", true },  { "2026-10-20 12:00", false, "", false },
+    { "2026-10-25 14:00", false, "", false },
+  };
+  for (const Shift &s : SHIFTS) {
+    time_t at = 0;
+    bool forward = false;
+    bool found = clockShiftNear(tzRule(3600), (time_t)utcOf(s.now), at, forward);
+    if (found != s.found || (found && (at != (time_t)utcOf(s.at) || forward != s.forward))) {
+      wrong++;
+      Serial.printf("Band: clock change from %s gave %d at %ld, forward %d\n", s.now, found, (long)at, forward);
+    }
+  }
+  unsigned cases = sizeof(WEEKS) / sizeof(WEEKS[0]) + sizeof(WRAPS) / sizeof(WRAPS[0]) + sizeof(SUNS) / sizeof(SUNS[0]) +
+                   sizeof(MOONS) / sizeof(MOONS[0]) + 1 + sizeof(SHIFTS) / sizeof(SHIFTS[0]);
+  Serial.printf("Band self-test: %s, %u cases\n", wrong ? "FAILED" : "all right", cases);
+}
+#endif
+
+// While the hotspot has the panel: the band dark, once; it starts again after.
+void bandHide() {
+  if (bandHidden) { return; }
+  bandHidden = true;
+  bandRestart();
+  bandPicture.fillScreen(0);
+  matrix.showBand(bandPicture.getBuffer());
+}
+#endif
+
 // A fetch that did not work: again after 1, 2, 4 ... minutes, never later
 // than the source's own interval. Its items stay until they run out.
 void feedFailed(uint8_t f, const char *why) {
@@ -9129,6 +10232,38 @@ void feedFailed(uint8_t f, const char *why) {
   strlcpy(r.error, why, sizeof(r.error));
   Serial.printf("Info band: %s failed (%s), again in %lu min\n", FEEDS[f].name, r.error, wait / 60000UL);
 }
+
+#if defined(CLOCK_DEBUG)
+// At start-up: a source whose fetch failed waits out its back-off, also while
+// the radio is on for the others (feedsUpdate() takes the sources due within
+// FEED_GATHER_MS along); one without a failure still comes along early. On
+// 2026-10-18 an HTTP 503 was fetched three times within a second. Leaves the
+// source as it found it.
+void feedRetrySelfTest() {
+  int8_t f = -1;
+  for (uint8_t i = 0; i < FEED_COUNT && f < 0; i++) {
+    unsigned long due = feedRuns[i].dueAt;
+    feedRuns[i].dueAt = millisNow;
+    if (feedDueWithin(i, 0)) { f = (int8_t)i; }   // on, and fetched on this clock at all
+    feedRuns[i].dueAt = due;
+  }
+  if (f < 0) {
+    Serial.println("Feed retry self-test: skipped, no source on");
+    return;
+  }
+  FeedRun saved = feedRuns[f];
+  feedRuns[f].failures = 0;
+  feedFailed(f, "self-test");                      // due again FEED_RETRY_MS from now
+  bool waits = !feedDueWithin(f, FEED_GATHER_MS);
+  feedRuns[f].failures = 0;                        // the same wait without a failure
+  bool gathers = feedDueWithin(f, FEED_GATHER_MS);
+  feedRuns[f] = saved;
+  Serial.printf("Feed retry self-test: %s (%s: a failed one %s, one without a failure %s)\n",
+                waits && gathers ? "all right" : "FAILED", FEEDS[f].name,
+                waits ? "waits out its back-off" : "is fetched again at once",
+                gathers ? "comes along early" : "does not come along");
+}
+#endif
 
 // A result back from the fetch task.
 void feedApply(const FeedResult &res) {
@@ -9188,7 +10323,12 @@ void feedsUpdate() {
     return;
   }
   FeedJob job = { (uint8_t)f, feedSettings.lat, feedSettings.lon, clockNow(), (int32_t)tzTotalOffset() };
-  if (xQueueSend(feedJobs(), &job, 0) == pdTRUE) { feedBusy = true; }
+  if (xQueueSend(feedJobs(), &job, 0) == pdTRUE) {
+    feedBusy = true;
+#if BOARD_WAVESHARE_WALL
+    feedSentAt = millisNow;
+#endif
+  }
 }
 
 // "52.52", "-13,405" or "48" in millionths of a degree, up to `limit` degrees
@@ -9225,6 +10365,7 @@ void applyFeedParams(const String &q) {
   uint8_t on = 0;
   if (getParam(q, "feedw") == "on") { on |= (uint8_t)(1 << FEED_WEATHER); }   // checkboxes: absent when unticked
   if (getParam(q, "feeda") == "on") { on |= (uint8_t)(1 << FEED_WARNINGS); }
+  if (getParam(q, "feedq") == "on") { on |= (uint8_t)(1 << FEED_AIR); }
   feedSettings.on = on;
   feedSettings.frames = getParam(q, "afr") == "on" ? 1 : 0;
   String iround = getParam(q, "iround");
@@ -9504,10 +10645,10 @@ void apiState(Print &c) {
   JsonDocument d;
   d["mode"] = apActive ? "ap" : "lan";
   d["fw"] = FW_VERSION;
-  d["board"] = "MatrixPortal S3";
+  d["board"] = BOARD_NAME;
   JsonArray panel = d["panel"].to<JsonArray>();
-  panel.add(64);
-  panel.add(32);
+  panel.add(BOARD_PANEL_W);
+  panel.add(BOARD_PANEL_H);
 
   JsonObject s = d["settings"].to<JsonObject>();
   s["wf"] = settings.watchface;
@@ -9573,8 +10714,13 @@ void apiState(Print &c) {
   s["lon"] = feedSettings.located ? deg : "";
   s["feedw"] = feedOn(FEED_WEATHER);
   s["feeda"] = feedOn(FEED_WARNINGS);
+  s["feedq"] = feedOn(FEED_AIR);
   s["afr"] = feedSettings.frames != 0;
+#if BAND_ON_PANEL
+  d["band"] = true;       // the information takes turns in the band: no info round
+#else
   s["iround"] = feedSettings.roundMinutes;
+#endif
 #endif
   s["ssid"] = wifiCreds.ssid;
 
@@ -9853,15 +10999,7 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   // Every GIF's bytes against its CRC, as each is checked again before it plays.
   uint16_t damaged = 0;
   for (uint16_t n = 0; n < gifPackCount; n++) {
-    const GifPackEntry &e = gifPack[n];
-    const void *mapped = nullptr;
-    esp_partition_mmap_handle_t map;
-    if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &map) != ESP_OK) {
-      damaged++;
-      continue;
-    }
-    if (esp_rom_crc32_le(0, (const uint8_t *)mapped, e.size) != e.crc) { damaged++; }
-    esp_partition_munmap(map);
+    if (!gifPackCrcOk(gifPack[n])) { damaged++; }
   }
   gifScheduleNext();
   unsigned long ms = millis() - started;
@@ -10097,7 +11235,13 @@ void loadLanSettings() {
   // (decided by Peter, 2026-10-08). The page says while it is still that one.
   if (!lanSettings.hasPassword) {
     lanSetPassword(AP_PASS);
+#if BOARD_BUTTON_COUNT == 0
+    // A clock without buttons (the wall clock) is set up on the home network:
+    // without its gesture sensor that is its only way in (Peter, 2026-10-18).
+    lanSettings.on = 1;
+#else
     lanSettings.on = 0;
+#endif
     saveLanSettings();
   }
   lanWantRadio();
@@ -10285,7 +11429,7 @@ void haBuildAnnounce() {
   JsonDocument dev;
   dev["identifiers"][0] = netHostname();
   dev["name"] = String("Matrix Clock ") + id;
-  dev["model"] = "MatrixPortal S3";
+  dev["model"] = BOARD_NAME;
   dev["sw_version"] = FW_VERSION;
   dev["configuration_url"] = String("http://") + netHostname() + ".local/";
 
@@ -10574,7 +11718,7 @@ void haMessage(const char *payload, uint16_t len) {
   if (!text[0] && !title[0]) { Serial.println("Home Assistant: an empty message"); return; }
   long seconds = constrain(doc["seconds"] | (long)HA_MESSAGE_S, 5L, 3600L);
   char line[HA_PAYLOAD_MAX + 1];
-  if (title[0] && text[0]) { snprintf(line, sizeof(line), "%s: %s", title, text); }
+  if (title[0] && text[0]) { snprintf(line, sizeof(line), "%s | %s", title, text); }   // the band's separator
   else                     { strlcpy(line, text[0] ? text : title, sizeof(line)); }
   BandItem it = {};
   int8_t oldest = -1;   // the place to take when none is free: the oldest message, an urgent one only when all are

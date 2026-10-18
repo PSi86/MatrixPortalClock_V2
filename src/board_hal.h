@@ -1,8 +1,10 @@
 /* ----------------------------------------------------------------------
-   Hardware abstraction for the two supported clock boards:
+   Hardware abstraction for the supported clock boards:
 
      Adafruit MatrixPortal M4   SAMD51 + WiFiNINA (ESP32 co-processor over SPI)
      Adafruit MatrixPortal S3   ESP32-S3, WiFi on the main MCU
+     Waveshare ESP32-S3-RGB-Matrix, the wall clock: ESP32-S3 with six 64x64
+                                panels as one 192x128 wall
 
    Everything that genuinely differs between them lives here: matrix and button
    pins, the WiFi / NTP calls, the settings storage backend and the reset
@@ -18,11 +20,35 @@
 #if defined(ARDUINO_ADAFRUIT_MATRIXPORTAL_ESP32S3)
   #define BOARD_MATRIXPORTAL_S3 1
   #define BOARD_MATRIXPORTAL_M4 0
+  #define BOARD_WAVESHARE_WALL  0
+#elif defined(ARDUINO_WAVESHARE_ESP32S3_RGB_MATRIX)
+  #define BOARD_MATRIXPORTAL_S3 0
+  #define BOARD_MATRIXPORTAL_M4 0
+  #define BOARD_WAVESHARE_WALL  1
 #elif defined(_VARIANT_MATRIXPORTAL_M4_)
   #define BOARD_MATRIXPORTAL_S3 0
   #define BOARD_MATRIXPORTAL_M4 1
+  #define BOARD_WAVESHARE_WALL  0
 #else
-  #error "Unsupported board - build env:adafruit_matrixportal_s3 or env:adafruit_matrix_portal_m4"
+  #error "Unsupported board - build env:adafruit_matrixportal_s3, env:waveshare_wallclock or env:adafruit_matrix_portal_m4"
+#endif
+// The MatrixPortal S3 and the wall clock run the same ESP32-S3 code: WiFi,
+// settings, console, panel driver. Only their pins and panels differ.
+#define BOARD_ESP32S3 (BOARD_MATRIXPORTAL_S3 || BOARD_WAVESHARE_WALL)
+
+// The board and its panel in LEDs, as the web app and Home Assistant name them.
+#if BOARD_WAVESHARE_WALL
+  #define BOARD_NAME "Waveshare ESP32-S3-RGB-Matrix"
+  #define BOARD_PANEL_W 192
+  #define BOARD_PANEL_H 128
+#elif BOARD_MATRIXPORTAL_S3
+  #define BOARD_NAME "MatrixPortal S3"
+  #define BOARD_PANEL_W 64
+  #define BOARD_PANEL_H 32
+#else
+  #define BOARD_NAME "MatrixPortal M4"
+  #define BOARD_PANEL_W 64
+  #define BOARD_PANEL_H 32
 #endif
 
 /* ======================================================================
@@ -44,6 +70,23 @@
   // pull-up on the S3; pressing pulls the input low, hence INPUT_PULLUP.
   #define UP_BUTTON_PIN     PIN_BUTTON_UP     // GPIO6
   #define DOWN_BUTTON_PIN   PIN_BUTTON_DOWN   // GPIO7
+  #define BOARD_BUTTON_COUNT 2
+
+#elif BOARD_WAVESHARE_WALL
+
+  // HUB75 pins of the Waveshare ESP32-S3-RGB-Matrix, from Waveshare's example
+  // code (esp32s3-default-pins.hpp) and board support package (config.h),
+  // checked against the schematic; the wall clock spike drove six 64x64 panels
+  // with them (2026-10-16/17). The 64x64 panels need the E line.
+  #define MATRIX_RGB_PINS   {4, 5, 6, 7, 15, 16}
+  #define MATRIX_ADDR_PINS  {18, 8, 3, 42, 9}
+  #define MATRIX_CLOCK_PIN  41
+  #define MATRIX_LATCH_PIN  40
+  #define MATRIX_OE_PIN     2
+
+  // No buttons to operate it: the board has RESET and BOOT only, and no GPIO is
+  // left for UP and DOWN. Its input is the gesture sensor (decided 2026-10-05).
+  #define BOARD_BUTTON_COUNT 0
 
 #else // BOARD_MATRIXPORTAL_M4
 
@@ -56,14 +99,30 @@
   // UP button = D2, DOWN button = D3, both active LOW (INPUT_PULLUP).
   #define UP_BUTTON_PIN     2
   #define DOWN_BUTTON_PIN   3
+  #define BOARD_BUTTON_COUNT 2
 
 #endif
 
-// Button feedback LED: the red user LED on D13, same pin on both boards.
-#define FEEDBACK_LED_PIN LED_BUILTIN
+#if BOARD_WAVESHARE_WALL
+  // No user LED on the wall clock board.
+  #define BOARD_HAS_FEEDBACK_LED 0
+  // No LIS3DH: the board's own motion sensor is a QMI8658, not used yet, and
+  // the wall clock hangs in landscape (decided 2026-10-18).
+  #define BOARD_HAS_ACCEL 0
+  // The rotation the clock draws in without an accelerometer: landscape.
+  #define BOARD_DEFAULT_ROTATION 0
+#else
+  // Button feedback LED: the red user LED on D13, same pin on both boards.
+  #define BOARD_HAS_FEEDBACK_LED 1
+  #define FEEDBACK_LED_PIN LED_BUILTIN
+  #define BOARD_HAS_ACCEL 1
+  // Without an accelerometer the MatrixPortals stay in portrait.
+  #define BOARD_DEFAULT_ROTATION 3
+#endif
 
 // Onboard LIS3DH accelerometer: same part and same (non-standard) I2C address
-// on both boards. Wire.begin() picks up each variant's default SDA/SCL.
+// on both MatrixPortals. Wire.begin() picks up each variant's default SDA/SCL,
+// on the wall clock the GPIO header's IO45/IO46 (its own variant).
 #define ACCEL_I2C_ADDR 0x19
 
 // Gesture sensor (PAJ7620U2, optional, I2C 0x73, e.g. on STEMMA QT): its INT
@@ -90,14 +149,20 @@
 /* ======================================================================
    Frame pacing, and the clock preview while a config-AP client is connected
    ====================================================================== */
-#if BOARD_MATRIXPORTAL_S3
+#if BOARD_ESP32S3
   // Panel driver: ESP32-HUB75-MatrixPanel-DMA (PanelCanvas below), 8 bits per
   // colour, dimmed through the OE time. Protomatter, which the S3 used before,
   // draws into RGB565 and dims by scaling the colours, which costs levels.
   #define PANEL_DRIVER_DMA 1
+#if BOARD_WAVESHARE_WALL
+  // The refresh rate of the wall's six panels at 8 bits with the bus at 16 MHz
+  // (show() reckons it from the driver at the start), and the rate the pacing assumes.
+  #define PANEL_HZ_TYPICAL 160
+#else
   // The refresh rate the driver calculates for the 64x32 panel at 8 bits, and
   // the rate the pacing below assumes.
   #define PANEL_HZ_TYPICAL 200
+#endif
   // Drawing and handing over a frame takes a few ms on the S3, less than one
   // panel refresh. So the loop runs in step with the panel: show() waits out a
   // refresh period after the previous frame, and the animation moves one pixel
@@ -131,11 +196,17 @@
   #define WEBUI_APP 1
   // The link to Home Assistant over MQTT (src/ha_link.h).
   #define HA_LINK 1
+#if BOARD_WAVESHARE_WALL
+  // No LIS3DH, so no INT1 line: the knock code is built but never runs
+  // (accelOK stays false).
+  #define ACCEL_INT_PIN -1
+#else
   // The accelerometer's INT1 line. Not in Adafruit's pinout page - taken from
   // the board schematic (Adafruit-MatrixPortal-S3-PCB, "Adafruit MatrixPortal
   // S3.sch"), where the net list has U4 (the LIS3DH) pin INT1 on the net INT
   // together with U3.IO15, U3 being the ESP32-S3. INT2 is on no net at all.
   #define ACCEL_INT_PIN 15
+#endif
 #else
   // Panel driver: Protomatter, five bit planes.
   #define PANEL_DRIVER_DMA 0
@@ -194,6 +265,44 @@
 #include <Adafruit_GFX.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 
+#if BOARD_WAVESHARE_WALL
+#include <soc/lcd_cam_struct.h>   // the bus clock the driver really set
+
+// The wall: six 64x64 panels in one chain, three across and two down. The
+// board feeds the bottom right panel, the chain runs left along the bottom
+// row and back right along the top row, whose panels hang upside down
+// (Peter's cabling, confirmed on the panels 2026-10-17). The driver holds
+// the chain as one row of 384 x 64 LEDs: the top row of the wall in its
+// first 192, turned round, the bottom row in the second 192 (wallLine()).
+const int16_t WALL_W = 192, WALL_H = 128;
+const uint8_t WALL_PANEL = 64;           // a panel's edge in LEDs
+const uint8_t WALL_CHAIN = 6;
+// The clock's 64x32 picture goes onto the wall three times its size, at the
+// top; the 192x32 below it is the info band's (concept doc, wall clock B).
+const uint8_t WALL_SCALE = 3;
+const int16_t WALL_CANVAS_X = 0, WALL_CANVAS_Y = 0;
+const int16_t WALL_BAND_Y = 96, WALL_BAND_H = 32;   // the band's rows, below the canvas (showBand())
+// The panels' supply gives 7.5 A at most (Peter, 2026-10-18). Measured on its
+// 5 V side the same day (bus at 16 MHz, buffer in PSRAM): the wall dark 555 mA,
+// one panel in white 564-567 mA more at brightness 160 and 451 mA at 128, so
+// the current goes with the brightness and the whole wall white would draw
+// about 3.9 A at 160 and 6.0 A at 255. Capped at 230: about 5.4 A at most,
+// 72 % of the supply. Brightness is light here (show() turns it into values).
+const uint8_t PANEL_BRIGHT_CAP = 230;
+// The output's DMA channel priority, 0 (as allocated) to 5 (the ESP32-S3's
+// highest), set in begin().
+const uint8_t PANEL_DMA_PRIORITY = 5;
+// The driver's frame buffer is in PSRAM (SPIRAM_DMA_BUFFER, set by the wall
+// clock's envs; the driver is the copy in lib/hub75-dma-wall). At 8 bits one
+// buffer for the six panels takes 192 KB: in internal RAM that left 56 KB
+// beside it, the hotspot then crashed in the WiFi driver and the home WiFi
+// did not join (2026-10-18). In PSRAM the driver holds the bus at 13.3 MHz,
+// in this build at 16 MHz (160 Hz, PSRAM_LCD_DIV_NUM), and every change has
+// to go from the CPU's cache to the PSRAM before the DMA reads it: show()
+// writes the rows it touched back at the end.
+// The light of each bit plane is reckoned from how the driver shows them
+// (reckonPlaneLight()), not measured yet.
+#else
 // Light of each bit plane at the full OE time, per colour (red, green, blue),
 // out of 65535 for the value 255: fitted to the BH1750 readings of 2026-10-07
 // (17 values per colour on the MatrixPortal S3's 64x32 panel). Bits that give
@@ -205,6 +314,7 @@ const uint16_t PANEL_BIT_LIGHT[3][8] = {
   {     1,   185,   680,  3324,  5260,  8956, 16563, 30566 },   // green
   {     1,    22,   390,  3051,  5175,  8773, 16702, 31421 },   // blue
 };
+#endif
 const uint8_t PANEL_BRIGHT_FLOOR = 13;   // brightness 1..13 all give 13/255, about 5 %
 const uint8_t PANEL_OE_FULL = 255;       // the driver's brightness, kept at full
 
@@ -216,6 +326,30 @@ class PanelCanvas : public GFXcanvas16 {
   bool begin() {
     const uint8_t rgb[] = MATRIX_RGB_PINS;
     const uint8_t addr[] = MATRIX_ADDR_PINS;
+#if BOARD_WAVESHARE_WALL
+    HUB75_I2S_CFG::i2s_pins pins = {
+      (int8_t)rgb[0], (int8_t)rgb[1], (int8_t)rgb[2], (int8_t)rgb[3], (int8_t)rgb[4], (int8_t)rgb[5],
+      (int8_t)addr[0], (int8_t)addr[1], (int8_t)addr[2], (int8_t)addr[3], (int8_t)addr[4],
+      MATRIX_LATCH_PIN, MATRIX_OE_PIN, MATRIX_CLOCK_PIN };
+    // As the wall clock spike ran the six panels on the bench (2026-10-16/17).
+    HUB75_I2S_CFG cfg(WALL_PANEL, WALL_PANEL, WALL_CHAIN, pins);
+    // One buffer: the picture changes while the panels show it; the clock
+    // writes only what changed, which takes a fraction of a refresh.
+    cfg.double_buff = false;
+    // 160 MHz / 7 = 22.9 MHz on the bus with the buffer in internal RAM; with
+    // it in PSRAM the driver sets its own (PSRAM_LCD_DIV_NUM: 16 MHz).
+    cfg.i2sspeed = HUB75_I2S_CFG::HZ_20M;
+    cfg.driver = HUB75_I2S_CFG::FM6126A;    // how Waveshare's example starts its panels
+    cfg.latch_blanking = 2;
+    cfg.clkphase = false;
+    cfg.min_refresh_rate = 120;
+    _held[0] = (uint16_t *)calloc((size_t)WIDTH * HEIGHT, sizeof(uint16_t));
+    if (!_held[0]) { return false; }
+    // Without it native pictures are written whole every frame (wallRow()).
+    _shown = (uint8_t *)heap_caps_malloc((size_t)WALL_W * WALL_H * 3, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // And without this the band (showBand()).
+    _bandHeld = (uint16_t *)heap_caps_malloc((size_t)WALL_W * WALL_BAND_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
     HUB75_I2S_CFG::i2s_pins pins = {
       (int8_t)rgb[0], (int8_t)rgb[1], (int8_t)rgb[2], (int8_t)rgb[3], (int8_t)rgb[4], (int8_t)rgb[5],
       (int8_t)addr[0], (int8_t)addr[1], (int8_t)addr[2], (int8_t)addr[3],
@@ -231,10 +365,24 @@ class PanelCanvas : public GFXcanvas16 {
     _held[0] = (uint16_t *)calloc((size_t)WIDTH * HEIGHT, sizeof(uint16_t));
     _held[1] = (uint16_t *)calloc((size_t)WIDTH * HEIGHT, sizeof(uint16_t));
     if (!_held[0] || !_held[1]) { return false; }
+#endif
     forgetHeld();   // whatever the driver's buffers start with, the first shows write all
+#if !BOARD_WAVESHARE_WALL
     buildLight();
+#endif
     _dma = new MatrixPanel_I2S_DMA(cfg);
     if (!_dma->begin()) { return false; }
+#if BOARD_WAVESHARE_WALL
+    reckonPlaneLight();   // from the planes the driver has just chosen
+    buildLight();
+    // The output's DMA channel first among the GDMA channels. It shares them
+    // with the crypto engine (AES), all at priority 0 as allocated, and lost
+    // out to it during TLS handshakes: the output stopped, a row flashed
+    // bright until wallOutputWatch() restarted it. Measured 2026-10-18 at
+    // 16 MHz, weather + warnings fetched six times each way: 20 stops at
+    // priority 0, 1 at 5; the crypto engine as fast at 5 as at 0.
+    if (!_dma->setDmaPriority(PANEL_DMA_PRIORITY)) { Serial.println("Panel: DMA priority NOT set"); }
+#endif
     _dma->setBrightness8(0);   // dark until the sketch sets a brightness
     // The driver clocks the panel bus without a pause and sets its pins to the
     // strongest drive; those edges disturb the WiFi. Measured on the
@@ -243,11 +391,26 @@ class PanelCanvas : public GFXcanvas16 {
     // at drive strength 0. The level shifters between the S3 and the panel are
     // all these pins drive, so the weakest strength is enough.
     for (uint8_t i = 0; i < 6; i++) { gpio_set_drive_capability((gpio_num_t)rgb[i], GPIO_DRIVE_CAP_0); }
+#if BOARD_WAVESHARE_WALL
+    for (uint8_t i = 0; i < 5; i++) { gpio_set_drive_capability((gpio_num_t)addr[i], GPIO_DRIVE_CAP_0); }
+#else
     for (uint8_t i = 0; i < (HEIGHT > 32 ? 5 : 4); i++) { gpio_set_drive_capability((gpio_num_t)addr[i], GPIO_DRIVE_CAP_0); }
+#endif
     gpio_set_drive_capability((gpio_num_t)MATRIX_CLOCK_PIN, GPIO_DRIVE_CAP_0);
     gpio_set_drive_capability((gpio_num_t)MATRIX_LATCH_PIN, GPIO_DRIVE_CAP_0);
     gpio_set_drive_capability((gpio_num_t)MATRIX_OE_PIN, GPIO_DRIVE_CAP_0);
     if (_dma->calculated_refresh_rate > 0) { _rate = _dma->calculated_refresh_rate; }
+#if BOARD_WAVESHARE_WALL
+    // The driver reckons its rate with the clock in its settings (the one
+    // asked for, or 8 MHz with its buffer in PSRAM), while the bus runs at
+    // 160 MHz divided by the whole number it set: 147 Hz in its figure at
+    // 20 MHz asked, 169 Hz measured on the panels' E line.
+    uint32_t div = LCD_CAM.lcd_clock.lcd_clkm_div_num;
+    uint32_t reckoned = (uint32_t)_dma->getCfg().i2sspeed;
+    if (div > 0 && reckoned > 0) { _rate = (uint32_t)((uint64_t)_rate * (160000000UL / div) / reckoned); }
+    Serial.printf("Panel: bus %lu kHz, refresh %lu Hz\n", (unsigned long)(160000UL / (div ? div : 1)),
+                  (unsigned long)_rate);
+#endif
     _periodUs = 1000000UL / _rate;
     _countFrom = micros();
     _instance = this;
@@ -270,6 +433,195 @@ class PanelCanvas : public GFXcanvas16 {
     p->_dma->setBrightness8(0);
   }
 
+#if BOARD_WAVESHARE_WALL
+  // The canvas onto the wall, each canvas pixel as a WALL_SCALE x WALL_SCALE
+  // block. The driver has one buffer, which the panels show while it is
+  // written; waiting out a refresh period since the last show() keeps the loop
+  // in step with the refresh, as on the MatrixPortal. Only the pixels that
+  // changed since then are written, a run of neighbours at a time, and the
+  // rows they are in then go from the CPU's cache to the PSRAM the DMA reads.
+  void show() {
+    if (!_dma) { return; }
+    waitForBackBuffer();
+    if (_testing) { flip(); return; }   // a test picture stands (testPicture())
+#if defined(CLOCK_DEBUG)
+    uint32_t pushStart = micros(), pushed = 0;
+#endif
+    if (_native) { endNative(); }
+    const uint16_t *src = getBuffer();
+    uint16_t *held = _held[0];
+    static uint8_t run[WALL_W * 3];   // one wall row of the run, red green blue
+    for (int16_t y = 0; y < HEIGHT; y++) {
+      int16_t x = 0;
+      while (x < WIDTH) {
+        int i = y * WIDTH + x;
+        if (src[i] == held[i] && !_stale[0]) { x++; continue; }
+        int16_t from = x;
+        uint8_t *o = run;
+        while (x < WIDTH && (src[y * WIDTH + x] != held[y * WIDTH + x] || _stale[0])) {
+          uint16_t c = src[y * WIDTH + x];
+          uint8_t r = c >> 11, g = (c >> 5) & 0x3F, b = c & 0x1F;
+          uint8_t rv = _lut[0][(r << 3) | (r >> 2)], gv = _lut[1][(g << 2) | (g >> 4)], bv = _lut[2][(b << 3) | (b >> 2)];
+          for (uint8_t k = 0; k < WALL_SCALE; k++) { *o++ = rv; *o++ = gv; *o++ = bv; }
+          held[y * WIDTH + x] = c;
+          x++;
+#if defined(CLOCK_DEBUG)
+          pushed++;
+#endif
+        }
+        int16_t wx = WALL_CANVAS_X + from * WALL_SCALE, n = (x - from) * WALL_SCALE;
+        for (uint8_t k = 0; k < WALL_SCALE; k++) { wallSpan(wx, WALL_CANVAS_Y + y * WALL_SCALE + k, n, run); }
+      }
+    }
+    _stale[0] = false;
+    _shownValid = false;   // the canvas wrote over what a native picture left
+    writeBackRows();
+#if defined(CLOCK_DEBUG)
+    debugShow(micros() - pushStart, pushed);
+#endif
+    flip();
+  }
+
+  // The driver's rows written since writeBackRows() last ran go from the CPU's
+  // cache to the PSRAM, one row (both panel halves, all bit planes) at a time.
+  void writeBackRows() {
+    for (uint8_t row = 0; _touched != 0 && row < 32; row++) {
+      if (_touched & (1UL << row)) { _dma->writeBackRow(row); _touched &= ~(1UL << row); }
+    }
+  }
+
+  // Wall row y from wall column x to the right: n pixels at driver values (3
+  // bytes a pixel). In the driver's row of 384 the top row of the wall comes
+  // first, turned round (wall x 0..191 is 191..0, wall y 0..63 is 63..0), then
+  // the bottom row as it is (wall x 0..191 is 192..383, wall y 64..127 is 0..63).
+  void wallSpan(int16_t x, int16_t y, int16_t n, const uint8_t *rgb) {
+    bool top = y < WALL_PANEL;
+    int16_t dx = top ? WALL_W - x - n : WALL_W + x;
+    int16_t dy = top ? WALL_PANEL - 1 - y : y - WALL_PANEL;
+    _dma->writeRowRGB(dx, dy, n, rgb, top);
+    _touched |= 1UL << (dy % (WALL_PANEL / 2));   // a driver row holds panel rows y and y + 32
+  }
+
+  // n LEDs of wall row y from wall column x in one colour (driver values).
+  void wallLine(int16_t x, int16_t y, int16_t n, uint8_t r, uint8_t g, uint8_t b) {
+    int16_t dx = (y < WALL_PANEL) ? WALL_W - x - n : WALL_W + x;
+    int16_t dy = (y < WALL_PANEL) ? WALL_PANEL - 1 - y : y - WALL_PANEL;
+    _dma->drawFastHLine(dx, dy, n, r, g, b);
+    _touched |= 1UL << (dy % (WALL_PANEL / 2));
+  }
+
+  // Pictures in the wall's own LEDs (GIFs; the info band later), one whole
+  // wall row at a time at driver values, then endWallFrame(). Only what
+  // changed since the last such frame is written, as long as nothing else
+  // wrote over it. The next show() gives the wall back to the canvas and
+  // darkens the rows below it.
+  void wallRow(int16_t y, const uint8_t *rgb) {
+    if (!_dma || y < 0 || y >= WALL_H) { return; }
+    _native = true;
+    uint8_t *shown = _shown ? _shown + (size_t)y * WALL_W * 3 : nullptr;
+    if (!shown || !_shownValid) {
+      wallSpan(0, y, WALL_W, rgb);
+      if (shown) { memcpy(shown, rgb, WALL_W * 3); }
+      return;
+    }
+    int16_t x = 0;
+    while (x < WALL_W) {
+      if (memcmp(rgb + 3 * x, shown + 3 * x, 3) == 0) { x++; continue; }
+      int16_t from = x;
+      while (x < WALL_W && memcmp(rgb + 3 * x, shown + 3 * x, 3) != 0) { x++; }
+      wallSpan(from, y, x - from, rgb + 3 * from);
+      memcpy(shown + 3 * from, rgb + 3 * from, (size_t)(x - from) * 3);
+    }
+  }
+  void endWallFrame() {
+    writeBackRows();
+    _shownValid = _shown != nullptr;
+    flip();
+    forgetHeld();   // the canvas is no longer what the wall shows
+  }
+
+  // After a native picture: the rows below the canvas dark again (the canvas
+  // rows are written whole, forgetHeld()), until showBand() fills the band's.
+  void endNative() {
+    static uint8_t dark[WALL_W * 3] = {};
+    for (int16_t y = WALL_CANVAS_Y + HEIGHT * WALL_SCALE; y < WALL_H; y++) { wallSpan(0, y, WALL_W, dark); }
+    _native = false;
+    _shownValid = false;
+    _bandStale = true;
+  }
+
+  // The info band in the wall's own LEDs below the canvas: a picture of
+  // WALL_W x WALL_BAND_H in canvas colours, turned into driver values through
+  // the same tables as the canvas. Only what changed since the last call is
+  // written, a run of neighbours at a time - all of it after anything else
+  // wrote over its rows (a GIF, a test picture, another brightness). Nothing
+  // while a GIF or a test picture holds the wall.
+  void showBand(const uint16_t *src) {
+    if (!_dma || _testing || _native || !src) { _bandStale = true; return; }
+    static uint8_t run[WALL_W * 3];
+    for (int16_t y = 0; y < WALL_BAND_H; y++) {
+      const uint16_t *s = src + y * WALL_W;
+      uint16_t *held = _bandHeld ? _bandHeld + y * WALL_W : nullptr;
+      int16_t x = 0;
+      while (x < WALL_W) {
+        if (held && !_bandStale && s[x] == held[x]) { x++; continue; }
+        int16_t from = x;
+        uint8_t *o = run;
+        while (x < WALL_W && (!held || _bandStale || s[x] != held[x])) {
+          uint16_t c = s[x];
+          uint8_t r = c >> 11, g = (c >> 5) & 0x3F, b = c & 0x1F;
+          *o++ = _lut[0][(r << 3) | (r >> 2)];
+          *o++ = _lut[1][(g << 2) | (g >> 4)];
+          *o++ = _lut[2][(b << 3) | (b >> 2)];
+          if (held) { held[x] = c; }
+          x++;
+        }
+        wallSpan(from, WALL_BAND_Y + y, x - from, run);
+      }
+    }
+    _bandStale = false;
+    writeBackRows();
+  }
+  bool bandStale() const { return _bandStale; }
+  // The light of each bit plane, out of 65535 for the value 255, reckoned from
+  // how the driver (3.0.15) shows them: each plane once at the start of a
+  // row, then the planes above its lsbMsbTransition() again 2^(i - t - 1)
+  // times. The panel lights the data of one pass while the next pass shifts
+  // in, for that pass's OE time, which the driver shortens for the first
+  // planes (setBrightnessOE(): 1/2^rightshift of a pass). Reckoned so for the
+  // MatrixPortal S3's settings this matches its BH1750 table (planes 4-7 within
+  // 6 %), and for the wall at 169 Hz it gives the colour steps at every multiple
+  // of 32 that the ramps showed on the bench (2026-10-17).
+  void reckonPlaneLight() {
+    const int depth = 8;
+    const int t = _dma->lsbMsbTransition();
+    uint8_t seq[160];
+    int n = 0;
+    for (int i = 0; i < depth; i++) { seq[n++] = (uint8_t)i; }
+    for (int i = t + 1; i < depth; i++) {
+      for (int k = 0; k < (1 << (i - t - 1)) && n < (int)sizeof(seq); k++) { seq[n++] = (uint8_t)i; }
+    }
+    float light[depth] = {};
+    float total = 0;
+    for (int j = 0; j < n; j++) {
+      int shown = seq[(j + n - 1) % n];   // the data latched at the end of the pass before
+      int bitplane = (2 * depth - seq[j]) % depth;
+      int rightshift = bitplane - ((depth - t - 1) >> 1) - 2;
+      float part = 1.0f / (float)(1 << (rightshift > 0 ? rightshift : 0));
+      light[shown] += part;
+      total += part;
+    }
+    uint32_t sum = 0;
+    for (int i = 0; i < depth; i++) {
+      _planeLight[i] = (uint16_t)lroundf(light[i] * 65535.0f / total);
+      sum += _planeLight[i];
+    }
+    _planeLight[depth - 1] += (uint16_t)(65535 - sum);   // rounding: 255 gives exactly 65535
+    Serial.printf("Panel: planes 0..%d shown once each; light per plane %u %u %u %u %u %u %u %u\n", t,
+                  _planeLight[0], _planeLight[1], _planeLight[2], _planeLight[3],
+                  _planeLight[4], _planeLight[5], _planeLight[6], _planeLight[7]);
+  }
+#else
   // The canvas onto the panel. The buffer it writes into was on the panel
   // until the last flip, and the driver only switches buffers at the end of a
   // refresh, so it first waits out one refresh period since that flip. That
@@ -307,10 +659,16 @@ class PanelCanvas : public GFXcanvas16 {
 #endif
     flip();
   }
+#endif
 
   // After a picture was drawn straight into the driver (driver() below), the
   // copies no longer tell what its buffers hold: the next shows write all.
-  void forgetHeld() { _stale[0] = _stale[1] = true; }
+  void forgetHeld() {
+    _stale[0] = _stale[1] = true;
+#if BOARD_WAVESHARE_WALL
+    _bandStale = true;   // and the band's next showBand()
+#endif
+  }
 
   // Brightness of the whole panel, 0..255: 0 switches it dark (through the OE
   // time), anything else sets the light the colour values give (see above),
@@ -318,11 +676,17 @@ class PanelCanvas : public GFXcanvas16 {
   // the next shows write every pixel.
   void setBrightness(uint8_t b) {
     if (!_dma) { return; }
+#if BOARD_WAVESHARE_WALL
+    if (_heldDark) { return; }
+#endif
     if (b == 0) {
       if (_bright != 0) { _dma->setBrightness8(0); _bright = 0; }
       return;
     }
     if (b < PANEL_BRIGHT_FLOOR) { b = PANEL_BRIGHT_FLOOR; }
+#if BOARD_WAVESHARE_WALL
+    if (b > PANEL_BRIGHT_CAP) { b = PANEL_BRIGHT_CAP; }
+#endif
     if (b == _bright) { return; }
     if (_bright == 0) { _dma->setBrightness8(PANEL_OE_FULL); }
     _bright = b;
@@ -370,18 +734,85 @@ class PanelCanvas : public GFXcanvas16 {
     if (rest >= 1000) { delay(rest / 1000); }   // lets the WiFi tasks run meanwhile
     delayMicroseconds(rest % 1000);
   }
+#if BOARD_WAVESHARE_WALL
+  // One buffer: nothing to switch, only the time the frame went out.
+  void flip() { _flippedAt = micros(); }
+
+  // The panels dark (through the OE time) until the next start, whatever
+  // brightness the clock asks for afterwards: before a flash.
+  void holdDark() {
+    if (!_dma) { return; }
+    _dma->setBrightness8(0);
+    _bright = 0;
+    _heldDark = true;
+  }
+
+  // A test picture to measure the panels' current with: wall panel n lit in
+  // the clock's white at brightness b (capped as always), everything else
+  // dark; n counts the top row 1-3 from the left, then the bottom row 4-6, and
+  // 0 leaves the whole wall dark. show() writes nothing while it stands;
+  // endTestPicture() gives the wall back to the clock.
+  void testPicture(uint8_t n, uint8_t b) {
+    if (!_dma) { return; }
+    _testing = true;
+    _shownValid = false;
+    setBrightness(b);
+    int16_t px = (n >= 1 && n <= 6) ? ((n - 1) % 3) * WALL_PANEL : -1;
+    int16_t py = (n >= 1 && n <= 6) ? ((n - 1) / 3) * WALL_PANEL : -1;
+    for (int16_t y = 0; y < WALL_H; y++) {
+      wallLine(0, y, WALL_W, 0, 0, 0);
+      if (px >= 0 && y >= py && y < py + WALL_PANEL) {
+        wallLine(px, y, WALL_PANEL, _lut[0][255], _lut[1][255], _lut[2][255]);
+      }
+    }
+    writeBackRows();
+  }
+  void endTestPicture() {
+    if (!_testing) { return; }
+    _testing = false;
+    for (int16_t y = 0; y < WALL_H; y++) { wallLine(0, y, WALL_W, 0, 0, 0); }
+    forgetHeld();   // the next show() and showBand() write the whole picture again
+  }
+  bool testing() const { return _testing; }
+
+  // Test of the bus clock (console "bus"): 160 MHz divided by div, set while
+  // the driver runs (with its buffer in PSRAM it sets PSRAM_LCD_DIV_NUM). The
+  // refresh and the loop's pace follow it. For a look at the panels only; a
+  // restart brings the driver's clock back.
+  void setBusDivider(uint8_t div) {
+    if (!_dma || div < 8 || div > 32) { return; }
+    uint32_t old = LCD_CAM.lcd_clock.lcd_clkm_div_num;
+    LCD_CAM.lcd_clock.lcd_clkm_div_num = div;
+    LCD_CAM.lcd_user.lcd_update = 1;
+    if (old > 0) { _rate = _rate * old / div; }
+    _periodUs = 1000000UL / _rate;
+  }
+  uint32_t refreshRate() const { return _rate; }
+  // Whether the driver still sends the buffer to the panels, and a fresh start
+  // of that once it has stopped (wallOutputWatch() in the sketch).
+  bool outputRunning() const { return !_dma || _dma->outputRunning(); }
+  void restartOutput() { if (_dma) { _dma->restartOutput(); } }
+  // Test (console "prio"): the output's DMA channel priority, 0 to 5.
+  bool setDmaPriority(uint8_t priority) { return _dma && _dma->setDmaPriority(priority); }
+#else
   void flip() { _dma->flipDMABuffer(); _flippedAt = micros(); _back ^= 1; }
+#endif
 
  private:
-  // The light of every value per colour (out of 65535, from PANEL_BIT_LIGHT)
-  // and the values sorted by it, the smaller value first among equals.
+  // The light of every value per colour (out of 65535, from PANEL_BIT_LIGHT;
+  // on the wall from reckonPlaneLight()) and the values sorted by it, the
+  // smaller value first among equals.
   void buildLight() {
     for (uint8_t c = 0; c < 3; c++) {
       uint16_t *light = _light[c];
       uint8_t *order = _order[c];
       for (uint16_t v = 0; v < 256; v++) {
         uint32_t sum = 0;
+#if BOARD_WAVESHARE_WALL
+        for (uint8_t bit = 0; bit < 8; bit++) { if ((v >> bit) & 1) { sum += _planeLight[bit]; } }
+#else
         for (uint8_t bit = 0; bit < 8; bit++) { if ((v >> bit) & 1) { sum += PANEL_BIT_LIGHT[c][bit]; } }
+#endif
         light[v] = (uint16_t)sum;
         order[v] = (uint8_t)v;
       }
@@ -453,6 +884,17 @@ class PanelCanvas : public GFXcanvas16 {
   bool      _stale[2] = { true, true };
   uint8_t   _back = 0;
   uint8_t   _bright = 0;          // 0 = dark
+#if BOARD_WAVESHARE_WALL
+  bool      _heldDark = false;    // holdDark(): dark until the next start
+  bool      _testing = false;     // testPicture() stands
+  bool      _native = false;      // wallRow() drew since the last show()
+  uint8_t  *_shown = nullptr;     // what wallRow() left on the wall, 3 bytes an LED (PSRAM)
+  bool      _shownValid = false;  // ... and nothing wrote over it since
+  uint32_t  _touched = 0;         // driver rows written since the last writeBackRows(), a bit each
+  uint16_t  _planeLight[8] = {};  // reckonPlaneLight()
+  uint16_t *_bandHeld = nullptr;  // what showBand() left in the band's rows, canvas colours (PSRAM)
+  bool      _bandStale = true;    // ... and something wrote over them since
+#endif
   uint16_t  _light[3][256];
   uint8_t   _order[3][256];
   uint8_t   _lut[3][256] = {};    // canvas value -> driver value, per colour
@@ -473,7 +915,7 @@ class PanelCanvas : public GFXcanvas16 {
        array *inside* the image, which every upload overwrites - that was why
        all settings reset to defaults on each flash.
    ====================================================================== */
-#if BOARD_MATRIXPORTAL_S3
+#if BOARD_ESP32S3
 
 #include <Preferences.h>
 
@@ -589,7 +1031,7 @@ inline void boardSerialBegin(unsigned long baud) {
   for (unsigned long t0 = millis(); !Serial && millis() - t0 < BOOT_WAIT_FOR_SERIAL_MS; ) { delay(10); }
   Serial.setDebugOutput(true);
   Serial.printf("boot: serial attached after %lu ms\n", millis());
-#if BOARD_MATRIXPORTAL_S3
+#if BOARD_ESP32S3
   // Why did the previous run end? (1 power-on, 2 reset pin, 3 software,
   // 4 panic, 5 int. watchdog, 6 task watchdog, 7 other watchdog, 9 brownout)
   Serial.printf("boot: reset reason %d\n", (int)esp_reset_reason());
@@ -600,7 +1042,7 @@ inline void boardSerialBegin(unsigned long baud) {
   while (millis() < 3000) { delay(10); }
 #endif
   Serial.flush();
-#elif BOARD_MATRIXPORTAL_S3 && ARDUINO_USB_CDC_ON_BOOT
+#elif BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT
   // The S3 console is native USB CDC. Without this, every write blocks for up
   // to 100 ms whenever the port is enumerated but nothing is reading it, which
   // would stutter the animation as soon as the clock is plugged into a PC.
@@ -631,7 +1073,7 @@ inline void boardSerialBegin(unsigned long baud) {
 // normal power-up, "BUTTON" the reset button; "BROWN" (supply voltage dipped),
 // "PANIC" (crash) and the watchdogs point at a real problem.
 inline const char *boardResetReasonText() {
-#if BOARD_MATRIXPORTAL_S3
+#if BOARD_ESP32S3
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:  return "POWER";
     case ESP_RST_EXT:      return "BUTTON";
@@ -666,7 +1108,7 @@ inline const char *boardResetReasonText() {
 // a value left behind therefore names the step the previous run died in.
 // M4: no breadcrumb, its settings block is a single fixed struct.
 inline void boardBootStageWrite(uint8_t stage) {
-#if BOARD_MATRIXPORTAL_S3
+#if BOARD_ESP32S3
   Preferences p;
   if (p.begin("matrixclock", false)) { p.putUChar("bootstage", stage); p.end(); }
 #else
@@ -675,7 +1117,7 @@ inline void boardBootStageWrite(uint8_t stage) {
 }
 
 inline uint8_t boardBootStageRead() {
-#if BOARD_MATRIXPORTAL_S3
+#if BOARD_ESP32S3
   Preferences p;
   if (!p.begin("matrixclock", true)) { return 0; }
   uint8_t stage = p.getUChar("bootstage", 0);
@@ -696,7 +1138,7 @@ inline bool boardResetWasNormal() {
    Reboot
    ====================================================================== */
 inline void boardReset() {
-#if BOARD_MATRIXPORTAL_S3
+#if BOARD_ESP32S3
   ESP.restart();
 #else
   NVIC_SystemReset();
@@ -713,7 +1155,7 @@ inline void boardReset() {
    keeps running across a radio power cycle, so it would happily hand back a
    day-old, drifted value instead of a new reading.)
    ====================================================================== */
-#if BOARD_MATRIXPORTAL_S3
+#if BOARD_ESP32S3
 
 #include <WiFi.h>
 #include <WiFiUdp.h>

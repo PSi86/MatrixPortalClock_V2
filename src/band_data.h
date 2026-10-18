@@ -30,13 +30,13 @@ enum ItemLevel : uint8_t { LEVEL_INFO, LEVEL_ALERT };
 enum ItemIcon : uint8_t {
   ICON_NONE, ICON_CLEAR_DAY, ICON_CLEAR_NIGHT, ICON_PARTLY_DAY, ICON_PARTLY_NIGHT, ICON_CLOUDY,
   ICON_FOG, ICON_DRIZZLE, ICON_RAIN, ICON_SNOW, ICON_THUNDER, ICON_WARNING,
-  ICON_WIND, ICON_FROST, ICON_HEAT, ICON_COUNT
+  ICON_WIND, ICON_FROST, ICON_HEAT, ICON_CALENDAR, ICON_AIR, ICON_COUNT
 };
 
 // The icons by name, as Home Assistant gives them, in ItemIcon's order.
 const char *const ITEM_ICON_NAMES[ICON_COUNT] = {
   "", "clear-day", "clear-night", "partly-day", "partly-night", "cloudy",
-  "fog", "drizzle", "rain", "snow", "thunder", "warning", "wind", "frost", "heat",
+  "fog", "drizzle", "rain", "snow", "thunder", "warning", "wind", "frost", "heat", "calendar", "air",
 };
 
 // How heavy rain or snow is (BandItem::intensity); its icon shows it by the
@@ -75,7 +75,7 @@ inline uint8_t itemIconByName(const char *name) {
 }
 
 // The sources the clock fetches itself.
-enum FeedId : uint8_t { FEED_WEATHER, FEED_WARNINGS, FEED_COUNT };
+enum FeedId : uint8_t { FEED_WEATHER, FEED_WARNINGS, FEED_AIR, FEED_COUNT };
 
 // One thing the band can show. Its text is UTF-8 as the source wrote it; an
 // item past `until` is not shown any more, so the band never passes off an
@@ -110,6 +110,7 @@ struct FeedInfo { const char *name; uint32_t intervalMs; uint32_t staleS; bool n
 const FeedInfo FEEDS[FEED_COUNT] = {
   { "weather",  30UL * 60UL * 1000UL, 90UL * 60UL, false },
   { "warnings", 10UL * 60UL * 1000UL, 30UL * 60UL, false },
+  { "air",      60UL * 60UL * 1000UL, 180UL * 60UL, false },   // the forecast's values are hourly
 };
 
 // ---- Between the loop and the fetch task ------------------------------------
@@ -353,18 +354,19 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
   if (!isDay && icon == ICON_CLEAR_DAY)  { icon = ICON_CLEAR_NIGHT; }
   if (!isDay && icon == ICON_PARTLY_DAY) { icon = ICON_PARTLY_NIGHT; }
 
-  // "16°C mainly clear, 22/11°C, rain 40%, UV 5": the rain chance only when
-  // there is one, the UV index only from 3 (moderate) on.
+  // "16°C mainly clear | 22/11°C | rain 40% | UV 5", its parts set apart as in
+  // every band text: the rain chance only when there is one, the UV index
+  // only from 3 (moderate) on.
   char text[96];
   int n = snprintf(text, sizeof(text), "%ld\xC2\xB0" "C %s", lroundf(cur["temperature_2m"].as<float>()), what);
   if (!day["temperature_2m_max"][0].isNull() && n > 0 && n < (int)sizeof(text)) {
-    n += snprintf(text + n, sizeof(text) - n, ", %ld/%ld\xC2\xB0" "C", lroundf(day["temperature_2m_max"][0].as<float>()),
+    n += snprintf(text + n, sizeof(text) - n, " | %ld/%ld\xC2\xB0" "C", lroundf(day["temperature_2m_max"][0].as<float>()),
                   lroundf(day["temperature_2m_min"][0].as<float>()));
   }
   int rainChance = day["precipitation_probability_max"][0] | 0;
-  if (rainChance > 0 && n > 0 && n < (int)sizeof(text)) { n += snprintf(text + n, sizeof(text) - n, ", rain %d%%", rainChance); }
+  if (rainChance > 0 && n > 0 && n < (int)sizeof(text)) { n += snprintf(text + n, sizeof(text) - n, " | rain %d%%", rainChance); }
   long uv = lroundf(day["uv_index_max"][0] | 0.0f);
-  if (uv >= 3 && n > 0 && n < (int)sizeof(text)) { snprintf(text + n, sizeof(text) - n, ", UV %ld", uv); }
+  if (uv >= 3 && n > 0 && n < (int)sizeof(text)) { snprintf(text + n, sizeof(text) - n, " | UV %ld", uv); }
   time_t stale = job.now + FEEDS[FEED_WEATHER].staleS;
   // The card: the temperature, and the day's high and low below it.
   char card[16];
@@ -447,11 +449,11 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
     const char *headline = al["headline_en"] | "Weather warning";
     if (onset > job.now) {
       feedWhen(when, sizeof(when), onset, job);
-      snprintf(text, sizeof(text), "%s from %s", headline, when);
+      snprintf(text, sizeof(text), "%s | from %s", headline, when);
       feedCardWhen(card, sizeof(card), "from", onset, job);
     } else if (expires != 0) {
       feedWhen(when, sizeof(when), expires, job);
-      snprintf(text, sizeof(text), "%s until %s", headline, when);
+      snprintf(text, sizeof(text), "%s | until %s", headline, when);
       feedCardWhen(card, sizeof(card), "until", expires, job);
     } else {
       strlcpy(text, headline, sizeof(text));
@@ -466,6 +468,45 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
     feedItem(r, key, text, feedWarningIcon(al["event_en"].as<const char *>()), level,
              expires != 0 ? min(expires, stale) : stale, tag, severity, INTENSITY_NONE, card);
   }
+}
+
+// ---- Air quality: Open-Meteo ----------------------------------------------------
+// https://open-meteo.com/en/docs/air-quality-api - no key, the same terms as the
+// forecast; from the CAMS global and European forecasts, worldwide (attribution:
+// CAMS ENSEMBLE data provider, and Open-Meteo). Read 2026-10-18. The European
+// Air Quality Index, the highest of its pollutants' indices: 0-20 good, 20-40
+// fair, 40-60 moderate, 60-80 poor, 80-100 very poor, above 100 extremely poor.
+
+const char *const AIR_BAND_NAMES[] = { "good", "fair", "moderate", "poor", "very poor", "extremely poor" };
+
+// The band of an index, 0 (good) to 5 (extremely poor): BandItem::severity of
+// the air quality, which colours its icon.
+inline uint8_t airBand(long eaqi) {
+  return eaqi < 20 ? 0 : eaqi < 40 ? 1 : eaqi < 60 ? 2 : eaqi < 80 ? 3 : eaqi <= 100 ? 4 : 5;
+}
+
+inline void feedAir(const FeedJob &job, FeedResult &r) {
+  char lat[16], lon[16], url[200];
+  feedDegrees(lat, sizeof(lat), job.lat);
+  feedDegrees(lon, sizeof(lon), job.lon);
+  snprintf(url, sizeof(url),
+           "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=%s&longitude=%s"
+           "&current=european_aqi&timeformat=unixtime", lat, lon);
+  JsonDocument filter, doc;
+  filter["current"]["european_aqi"] = true;
+  if (!feedGet(url, filter, doc, r)) { return; }
+  if (doc["current"]["european_aqi"].isNull()) {
+    r.status = FEED_ERR_JSON;
+    strlcpy(r.error, "no air quality index in the answer", sizeof(r.error));
+    return;
+  }
+  long eaqi = lroundf(doc["current"]["european_aqi"].as<float>());
+  uint8_t band = airBand(eaqi);
+  char text[64], card[16];
+  snprintf(text, sizeof(text), "Air quality %s | index %ld", AIR_BAND_NAMES[band], eaqi);
+  snprintf(card, sizeof(card), "%ld|AQI", eaqi);   // the card: the index large, "AQI" below it
+  feedItem(r, "air", text, ICON_AIR, LEVEL_INFO, job.now + FEEDS[FEED_AIR].staleS, itemTag("air"), band,
+           INTENSITY_NONE, card);
 }
 
 // ---- The fetch task -----------------------------------------------------------
@@ -486,6 +527,7 @@ inline void feedRun(const FeedJob &job, FeedResult &r) {
   switch (job.feed) {
     case FEED_WEATHER:  feedWeather(job, r);  break;
     case FEED_WARNINGS: feedWarnings(job, r); break;
+    case FEED_AIR:      feedAir(job, r);      break;
     default:            strlcpy(r.error, "unknown source", sizeof(r.error)); break;
   }
   r.ms        = millis() - t0;
@@ -509,7 +551,26 @@ inline void feedTask(void *) {
 // the Home Assistant link need too: on 2026-10-09 a fetch at start-up with
 // the link on left only 18 KB of it free. PSRAM is what the core's own
 // CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC would use.
+//
+// Not on the wall clock: its panel driver reads the frame buffer out of
+// PSRAM by DMA, and the crypto engine's DMA on TLS data in PSRAM made that
+// output stop, a row flashing bright (2026-10-18). Its internal RAM is ample
+// with the frame buffer in PSRAM (about 195 KB free), so mbedTLS's memory is
+// taken from there first; feedTlsInternal() = false (console "tlsmem ext")
+// brings back PSRAM first, to compare.
+#if BOARD_WAVESHARE_WALL
+inline bool &feedTlsInternal() {
+  static bool internalFirst = true;
+  return internalFirst;
+}
+#endif
 inline void *feedTlsCalloc(size_t n, size_t size) {
+#if BOARD_WAVESHARE_WALL
+  if (feedTlsInternal()) {
+    void *p = heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
+#endif
   void *p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
@@ -517,16 +578,20 @@ inline void feedTlsFree(void *p) { heap_caps_free(p); }
 
 // Starts the fetch task, on core 0 beside the WiFi so the loop on core 1
 // keeps drawing during a fetch, with its stack in PSRAM when there is some
-// (it never touches the flash). false when there was no RAM for it.
+// (it never touches the flash) - on the wall clock in internal RAM, since
+// the crypto engine works on buffers on it too (see feedTlsCalloc()). false
+// when there was no RAM for it.
 inline bool feedBegin() {
   if (feedJobs()) { return true; }
   mbedtls_platform_set_calloc_free(feedTlsCalloc, feedTlsFree);   // before any TLS
   feedJobs()    = xQueueCreate(1, sizeof(FeedJob));
   feedResults() = xQueueCreate(1, sizeof(FeedResult));
   if (!feedJobs() || !feedResults()) { return false; }
+#if !BOARD_WAVESHARE_WALL
   if (xTaskCreatePinnedToCoreWithCaps(feedTask, "feeds", FEED_TASK_STACK, nullptr, 1, nullptr, 0,
                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS) {
     return true;
   }
+#endif
   return xTaskCreatePinnedToCore(feedTask, "feeds", FEED_TASK_STACK, nullptr, 1, nullptr, 0) == pdPASS;
 }
