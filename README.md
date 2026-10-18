@@ -1,25 +1,28 @@
 # MatrixPortalClock V2
 
 LED matrix clock with animated digits for the **Adafruit MatrixPortal S3** (ESP32-S3)
-and the **Adafruit MatrixPortal M4** (SAMD51 + WiFiNINA).
+and the **Adafruit MatrixPortal M4** (SAMD51 + WiFiNINA), and as a wall clock on the
+**Waveshare ESP32-S3-RGB-Matrix** board with six 64x64 panels.
 Fetches the time from the local network via NTP and offers a WiFi configuration mode.
 
 ## Hardware targets
 
-One code base, two boards. `src/board_hal.h` holds everything that differs between
+One code base, three boards. `src/board_hal.h` holds everything that differs between
 them - matrix and button pins, the WiFi/NTP calls, the settings storage and the
 reset instruction - so the sketch itself is board independent.
 
-| | MatrixPortal S3 | MatrixPortal M4 |
-|---|---|---|
-| PlatformIO env | `adafruit_matrixportal_s3` (default) | `adafruit_matrix_portal_m4` |
-| MCU | ESP32-S3, 8 MB flash | SAMD51, 512 KB flash |
-| Arduino core | Arduino-ESP32 3.3.11 on ESP-IDF 5.5 (pioarduino platform) | Adafruit SAMD (`atmelsam` 8.3.0) |
-| WiFi | on-chip | WiFiNINA co-processor over SPI |
-| NTP | lwIP SNTP client | the NINA firmware's own SNTP |
-| Settings stored in | NVS partition (0x9000) | flash block at 0x7E000 |
-| Buttons | UP GPIO6 (`BUTTON_UP`), DOWN GPIO7 (`BUTTON_DOWN`) | UP D2, DOWN D3 |
-| Upload | esptool over the chip's USB-Serial-JTAG, no buttons | UF2 bootloader (double reset) |
+| | MatrixPortal S3 | MatrixPortal M4 | Wall clock |
+|---|---|---|---|
+| PlatformIO env | `adafruit_matrixportal_s3` (default) | `adafruit_matrix_portal_m4` | `waveshare_wallclock` |
+| Board | Adafruit MatrixPortal S3 | Adafruit MatrixPortal M4 | Waveshare ESP32-S3-RGB-Matrix |
+| MCU | ESP32-S3, 8 MB flash | SAMD51, 512 KB flash | ESP32-S3 (WROOM-2-N32R16V), 32 MB flash, 16 MB PSRAM |
+| Panel | one 64x32 | one 64x32 | six 64x64, 192x128 (three across, two down) |
+| Arduino core | Arduino-ESP32 3.3.11 on ESP-IDF 5.5 (pioarduino platform) | Adafruit SAMD (`atmelsam` 8.3.0) | as the S3 |
+| WiFi | on-chip | WiFiNINA co-processor over SPI | on-chip |
+| NTP | lwIP SNTP client | the NINA firmware's own SNTP | as the S3 |
+| Settings stored in | NVS partition (0x9000) | flash block at 0x7E000 | NVS partition (0x9000) |
+| Buttons | UP GPIO6 (`BUTTON_UP`), DOWN GPIO7 (`BUTTON_DOWN`) | UP D2, DOWN D3 | none (the web app; gestures later) |
+| Upload | esptool over the chip's USB-Serial-JTAG, no buttons | UF2 bootloader (double reset) | as the S3 |
 
 The S3 was added because the M4's WiFiNINA link kept causing WiFi trouble; on the S3
 the radio sits on the main MCU, which also lets the AP config page preview the clock at
@@ -28,6 +31,46 @@ BH1750 light sensor are identical on both boards.
 
 **Caution on the S3:** `D2` is the matrix clock line, not the UP button - the M4's
 button pin cannot be carried over.
+
+### Wall clock
+
+The Waveshare ESP32-S3-RGB-Matrix drives six 64x64 panels in one chain, three
+across and two down: the board feeds the bottom right panel, the chain runs left
+along the bottom row and back right along the top row, whose panels hang upside
+down. The clock draws its 64x32 picture as everywhere else and shows it three
+times the size in the top 192x96; the 192x32 below is the info band (see
+[The info band on the wall clock](#the-info-band-on-the-wall-clock)). GIFs play
+in the wall's own 192x128 LEDs.
+
+- **Panel driver:** ESP32-HUB75-MatrixPanel-DMA 3.0.15 as a copy of its own in
+  `lib/hub75-dma-wall` (what it adds is listed in its README): one 8-bit buffer
+  of 192 KB in PSRAM - in internal RAM it left too little for the WiFi - at
+  16 MHz on the panel bus (160 Hz); the clock writes only what changed and
+  writes those rows back from the CPU's cache to the PSRAM. The output's DMA
+  channel runs first among the GDMA channels, and a watch starts the output
+  again should it stop.
+- **Power:** the brightness is capped at 230 for a 7.5 A supply. Measured on its
+  5 V side: the wall dark 555 mA, one panel white 564-567 mA more at brightness
+  160 and 451 mA at 128, so the whole wall white would draw about 6 A at 255 and
+  5.4 A at 230.
+- **Flash:** two app slots of 3 MB, 26,496 KB for the GIF pack from 0x610000
+  (`partitions_wallclock.csv`). GIFs above the first 16 MB of the flash are read
+  into PSRAM instead of mapped, since the core maps only 16 MB.
+- **Inputs:** none fitted yet; the clock is set up in the web app, which is on
+  the home network from the start (on clocks without buttons). The hotspot opens
+  by itself when no home WiFi is stored, and stays open; and when a stored one
+  has not joined for 2 minutes, for 5 minutes, after which the clock tries the
+  WiFi again. The I2C sensors (DS3231, BH1750, PAJ7620) go on IO45/IO46 (SDA,
+  SCL) and are not tried on this board yet.
+- **Console** (USB, 115200 baud, DTR and RTS low): `black` switches the panels
+  dark until the next start - before every upload, since the ROM bootloader
+  leaves the last row pair lit at full duty; `test <panel> <brightness>` and
+  `test off` a panel in white to measure the current; `bus <divider>` the panel
+  bus' clock; `lan on|off` the web app on the home network; for the panel
+  output and the fetches `fetch`, `prio <0-5>`, `gdma`, `crypto [ext]`,
+  `tlsmem int|ext`, and `status test` for the band's clock status.
+- **Wiring rules** from the bench: the panels' supply minus to the board's GND
+  first, the supply on before the ribbon cable goes in.
 
 ## Features
 
@@ -83,9 +126,13 @@ button pin cannot be carried over.
 - **Gesture sensor (optional):** with a PAJ7620U2 on the I2C bus, swipes and
   push work the menu next to the buttons, or instead of them (see
   [Gesture sensor](#gesture-sensor-paj7620u2))
-- **Info band data** (S3): the weather and the DWD weather warnings for a place,
-  fetched over HTTPS, for the info band of the wall clock; for now listed on the
-  config page and the console (see [Info band data](#info-band-data))
+- **Info band data** (S3, wall clock): the weather, the air quality and the DWD
+  weather warnings for a place, fetched over HTTPS, and what Home Assistant
+  sends (see [Info band data](#info-band-data))
+- **Info band** (wall clock): the 192x32 below the face shows the items one
+  after the other with their icons, and what the clock works out itself - the
+  date, sunrise and sunset, the moon, the clock change, its own status (see
+  [The info band on the wall clock](#the-info-band-on-the-wall-clock))
 - **Alerts, messages and info** (S3): a weather warning from `moderate` on, or
   an item from Home Assistant marked as an alert, comes up once as a banner
   with its icon, large and in colour; a message from Home Assistant runs
@@ -149,6 +196,16 @@ button pin cannot be carried over.
    ```
    pio run -e adafruit_matrix_portal_m4 -t upload
    ```
+
+   For the **wall clock**, switch the panels dark first (console `black`, see
+   [Wall clock](#wall-clock)), then upload as on the S3; esptool resets the
+   board by itself:
+   ```
+   pio run -e waveshare_wallclock -t upload --upload-port <port>
+   ```
+   `waveshare_wallclock_debug` is the same with the debug output (frame and
+   memory statistics, the self-tests at start-up). The GIF pack goes on as on
+   the S3, from the GIF gallery or with `-t uploadgifs` (192x128 GIFs at most).
 
 3. NTP on the S3 uses `pool.ntp.org` / `time.nist.gov`. If the clock has no internet
    access, point it at a server on the LAN (e.g. a Fritz!Box) by adding to the

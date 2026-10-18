@@ -6761,9 +6761,6 @@ void stopAPMode() {
 // - "crypto" times SHA-256 and AES-128 over blocks in internal RAM, as TLS
 //   hands them to the crypto engine; "crypto ext" the same over blocks in
 //   PSRAM (wallCryptoTest()).
-// - "extmem <bytes>" sets the size from which malloc() takes PSRAM (4096 from
-//   the start, CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL), until the next start: is
-//   it a buffer from malloc() that puts TLS data out of internal RAM?
 // - "tlsmem int" / "tlsmem ext": mbedTLS's memory from internal RAM first
 //   (from the start) or from PSRAM first, as the MatrixPortal S3 takes it
 //   (feedTlsCalloc()), until the next start.
@@ -6804,10 +6801,6 @@ void wallConsole() {
       wallGdmaList();
     } else if (strcmp(line, "crypto") == 0 || strcmp(line, "crypto ext") == 0) {
       wallCryptoTest(line[6] != '\0');
-    } else if (sscanf(line, "extmem %u", &prio) == 1 && prio <= 262144) {
-      heap_caps_malloc_extmem_enable(prio);
-      Serial.printf("RAM: malloc() takes PSRAM from %u bytes on; internal free %u\n", prio,
-                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
 #if BAND_DATA
     if (strcmp(line, "status test") == 0) {
