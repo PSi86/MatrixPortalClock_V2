@@ -856,8 +856,20 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
 
 - **Order:** the alerts first, then the messages, each in the order they came,
   then the information as on the 64x32 clock's cards (DWD warnings, rain soon,
-  the weather, Home Assistant's items), then the date ("Sunday 18 October",
-  "2026, week 42", the ISO week) with the calendar icon.
+  the weather, Home Assistant's items), then the clock's own, worked out on the
+  clock once a minute without the internet:
+  - **the clock change**, from 24 hours before until 12 hours after it, when
+    daylight saving is set to auto: "Clocks go back 1 h" / "tonight at 3:00"
+    (the time on the clock before it), then "Clocks went back 1 h" / "last
+    night";
+  - **the date**: "Sunday 18 October" / "2026, week 42" (the ISO week), with the
+    calendar icon;
+  - **sunrise and sunset** at the place set for the weather, today's and after
+    sunset tomorrow's, "Midnight sun" or "Polar night" when there is none -
+    after NOAA's solar calculator, within a minute of published tables;
+  - **the moon**: its phase and how much of it is lit, and the next full or new
+    moon, whichever comes first ("First quarter, 53%" / "Full moon Mon 26 Oct"),
+    from its longitude, within about half an hour (`src/sky.h`).
 - **Turns:** each stands 6 s. A text breaks between words, after a colon when
   the rest fits the second line; one that does not fit two lines runs through
   once beside the icon, at five characters a second.

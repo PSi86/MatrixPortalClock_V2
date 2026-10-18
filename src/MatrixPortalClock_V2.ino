@@ -104,6 +104,10 @@ struct NoticeStep;
 // the 64x32 clocks have no room for one and show them over the face.
 #define BAND_ON_PANEL (BAND_DATA && BOARD_WAVESHARE_WALL)
 struct BandTurn;                       // named by prototypes generated from this sketch
+struct BandLocal;
+#if BAND_ON_PANEL
+#include "sky.h"               // sunrise, sunset and the moon's phase for the band
+#endif
 
 #if HA_LINK
 #if !(BAND_DATA && WEBUI_APP)
@@ -527,10 +531,16 @@ bool       noticeCardsRound = false;   // the steps on the panel are cards of th
 
 #if BAND_ON_PANEL
 // The wall clock's info band (bandUpdate()): the turn on show - an item by
-// source and tag, or the date - and the picture it draws into.
+// source and tag, or one of the clock's own: the clock change, the date, the
+// sun and the moon - and the picture it draws into.
 GFXcanvas16 bandPicture(WALL_W, WALL_BAND_H);
-enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_DATE };
+enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON };
+const uint8_t BAND_LOCAL_FIRST = TURN_SHIFT, BAND_LOCAL_COUNT = 4;   // the clock's own, in their order
 struct BandTurn { uint8_t kind, feed; uint32_t tag; };
+// The clock's own turns as they stand, worked out once a minute (bandLocalUpdate()).
+struct BandLocal { bool on; uint8_t icon; char line[2][32]; };
+BandLocal bandLocal[BAND_LOCAL_COUNT];
+bool bandLocalDone = false;
 const unsigned long BAND_TURN_MS = 6000;
 const int16_t BAND_ICON_X = 4, BAND_ICON_Y = (WALL_BAND_H - ICON_SIZE) / 2;
 const int16_t BAND_TEXT_X = 32, BAND_TEXT_X_BARE = 4;   // beside an icon, and without one
@@ -9666,6 +9676,12 @@ bool bandTurnSame(const BandTurn &a, const BandTurn &b) {
   return a.kind == b.kind && a.feed == b.feed && a.tag == b.tag;
 }
 
+// One of the clock's own turns; nullptr for an item's.
+BandLocal *bandLocalOf(const BandTurn &t) {
+  if (t.kind < BAND_LOCAL_FIRST || t.kind >= BAND_LOCAL_FIRST + BAND_LOCAL_COUNT) { return nullptr; }
+  return &bandLocal[t.kind - BAND_LOCAL_FIRST];
+}
+
 // Every turn in the band's order; returns how many.
 uint8_t bandTurnList(BandTurn *t) {
   uint8_t order[BAND_ITEMS_MAX], n = 0;
@@ -9673,7 +9689,9 @@ uint8_t bandTurnList(BandTurn *t) {
   for (uint8_t i = 0; i < k; i++) { t[n++] = { TURN_ITEM, bandItems[order[i]].feed, bandItems[order[i]].tag }; }
   k = infoOrder(order, false);
   for (uint8_t i = 0; i < k; i++) { t[n++] = { TURN_ITEM, bandItems[order[i]].feed, bandItems[order[i]].tag }; }
-  if (clockIsSet()) { t[n++] = { TURN_DATE, 0, 0 }; }
+  for (uint8_t i = 0; i < BAND_LOCAL_COUNT; i++) {
+    if (bandLocal[i].on) { t[n++] = { (uint8_t)(BAND_LOCAL_FIRST + i), 0, 0 }; }
+  }
   return n;
 }
 
@@ -9685,9 +9703,9 @@ uint8_t bandIconOf(const BandItem &it) {
 }
 
 // What a turn shows, as a number, so the band sees its item change (a new
-// temperature, a warning that got worse) or the day turn.
+// temperature, a warning that got worse) or its own lines (the day turns).
 uint32_t bandLook(const BandTurn &t) {
-  if (t.kind == TURN_DATE) { return (uint32_t)(localTime / 86400); }
+  if (BandLocal *l = bandLocalOf(t)) { return itemTag(l->line[1], itemTag(l->line[0])) ^ l->icon; }
   int8_t i = bandItemOf(t);
   if (i < 0) { return 0; }
   const BandItem &it = bandItems[i];
@@ -9740,16 +9758,136 @@ int isoWeek(int year, int yday, int wday) {
   return week;
 }
 
+const char *const BAND_DAYS[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+const char *const BAND_MONTHS[] = { "January", "February", "March", "April", "May", "June", "July",
+                                    "August", "September", "October", "November", "December" };
+
 // The date in the clock's language: "Sunday 18 October" and "2026, week 42".
-void bandDateLines() {
-  static const char *const DAYS[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-  static const char *const MONTHS[] = { "January", "February", "March", "April", "May", "June", "July",
-                                        "August", "September", "October", "November", "December" };
+void bandDateLines(BandLocal &l) {
+  l.on = clockIsSet();
+  l.icon = ICON_CALENDAR;
   struct tm t;
   gmtime_r(&localTime, &t);
-  snprintf(bandLine[0], sizeof(bandLine[0]), "%s %d %s", DAYS[t.tm_wday], t.tm_mday, MONTHS[t.tm_mon]);
-  snprintf(bandLine[1], sizeof(bandLine[1]), "%d, week %d", t.tm_year + 1900,
-           isoWeek(t.tm_year + 1900, t.tm_yday, t.tm_wday));
+  snprintf(l.line[0], sizeof(l.line[0]), "%s %d %s", BAND_DAYS[t.tm_wday], t.tm_mday, BAND_MONTHS[t.tm_mon]);
+  snprintf(l.line[1], sizeof(l.line[1]), "%d, week %d", t.tm_year + 1900, isoWeek(t.tm_year + 1900, t.tm_yday, t.tm_wday));
+}
+
+// The change of the clocks nearest to `now` under a daylight saving rule
+// (POSIX TZ), between 12 hours before and 24 hours after it: its UTC
+// instant, and whether the clocks go forward. False when there is none, or
+// no rule (a zone without daylight saving, or it set by hand).
+bool clockShiftNear(const char *rule, time_t now, time_t &at, bool &forward) {
+  if (!rule) { return false; }
+  const time_t BEFORE = 12L * 3600L, AHEAD = 24L * 3600L;
+  bool was = dstActiveAt(rule, now - BEFORE), is = dstActiveAt(rule, now), will = dstActiveAt(rule, now + AHEAD);
+  time_t lo, hi;
+  bool loState;
+  if (was != is)       { lo = now - BEFORE; hi = now; loState = was; }
+  else if (is != will) { lo = now; hi = now + AHEAD; loState = is; }
+  else                 { return false; }
+  while (hi - lo > 60) {   // the change is on a whole minute: found to within one
+    time_t mid = lo + (hi - lo) / 2;
+    if (dstActiveAt(rule, mid) == loState) { lo = mid; } else { hi = mid; }
+  }
+  at = hi - hi % 60;
+  forward = !loState;      // into summer time
+  return true;
+}
+
+// The clock change, from 24 hours before until 12 hours after it: "Clocks go
+// back 1 h" / "tonight at 3:00", the wall time before the change; afterwards
+// "Clocks went back 1 h" / "last night".
+void bandShiftLines(BandLocal &l) {
+  time_t at;
+  bool forward;
+  const char *rule = settings.dst == DST_AUTO ? tzRule(settings.tzOffset) : nullptr;
+  l.on = clockIsSet() && clockShiftNear(rule, clockNow(), at, forward);
+  if (!l.on) { return; }
+  l.icon = ICON_CALENDAR;
+  time_t before = at + (time_t)settings.tzOffset + (forward ? 0 : 3600);   // the wall time it happens at
+  int hour = (int)(before % 86400 / 3600), minute = (int)(before % 3600 / 60);
+  bool coming = at > clockNow();
+  snprintf(l.line[0], sizeof(l.line[0]), "Clocks %s %s 1 h", coming ? "go" : "went", forward ? "forward" : "back");
+  if (!coming && hour < 6) {
+    strlcpy(l.line[1], "last night", sizeof(l.line[1]));
+  } else if (!coming) {
+    snprintf(l.line[1], sizeof(l.line[1]), "at %d:%02d", hour, minute);
+  } else {
+    const char *when = hour < 6 ? "tonight" : (before / 86400 == localTime / 86400 ? "today" : "tomorrow");
+    snprintf(l.line[1], sizeof(l.line[1]), "%s at %d:%02d", when, hour, minute);
+  }
+}
+
+// "07:42" from minutes after local midnight.
+void bandHhmm(char *buf, size_t size, double minutes) {
+  long m = lround(minutes) % 1440;
+  if (m < 0) { m += 1440; }
+  snprintf(buf, size, "%02ld:%02ld", m / 60, m % 60);
+}
+
+// Sunrise and sunset at the place set for the weather (sky.h): today's, and
+// after today's sunset tomorrow's; the midnight sun and the polar night in
+// words. Without a place, none.
+void bandSunLines(BandLocal &l) {
+  l.on = clockIsSet() && feedSettings.located;
+  if (!l.on) { return; }
+  l.icon = ICON_CLEAR_DAY;
+  double lat = feedSettings.lat / 1e6, lon = feedSettings.lon / 1e6, off = tzTotalOffset() / 60.0;
+  long day = (long)(localTime / 86400);
+  double rise, set;
+  uint8_t kind = sky::sunEvent(day, lat, lon, true, rise);
+  sky::sunEvent(day, lat, lon, false, set);
+  bool tomorrow = kind == sky::SUN_RISES_AND_SETS && (double)(localTime % 86400) / 60.0 >= set + off;
+  if (tomorrow) {
+    kind = sky::sunEvent(day + 1, lat, lon, true, rise);
+    sky::sunEvent(day + 1, lat, lon, false, set);
+  }
+  if (kind == sky::SUN_UP_ALL_DAY) {
+    strlcpy(l.line[0], "Midnight sun:", sizeof(l.line[0]));
+    strlcpy(l.line[1], "no sunset today", sizeof(l.line[1]));
+    return;
+  }
+  if (kind == sky::SUN_DOWN_ALL_DAY) {
+    l.icon = ICON_CLEAR_NIGHT;
+    strlcpy(l.line[0], "Polar night:", sizeof(l.line[0]));
+    strlcpy(l.line[1], "no sunrise today", sizeof(l.line[1]));
+    return;
+  }
+  char r[8], s[8];
+  bandHhmm(r, sizeof(r), rise + off);
+  bandHhmm(s, sizeof(s), set + off);
+  snprintf(l.line[0], sizeof(l.line[0]), "Sunrise %s%s", tomorrow ? "tomorrow " : "", r);
+  snprintf(l.line[1], sizeof(l.line[1]), "Sunset %s%s", tomorrow ? "tomorrow " : "", s);
+}
+
+// The moon's phase and how much of it is lit, and the next full or new moon,
+// whichever comes first: "Waxing gibbous, 78%" / "Full moon Mon 26 Oct".
+void bandMoonLines(BandLocal &l) {
+  l.on = clockIsSet();
+  if (!l.on) { return; }
+  l.icon = ICON_CLEAR_NIGHT;
+  double now = (double)clockNow(), e = sky::moonElongation(now);
+  snprintf(l.line[0], sizeof(l.line[0]), "%s, %d%%", sky::moonPhaseName(e), sky::moonLit(e));
+  l.line[0][0] = (char)toupper((unsigned char)l.line[0][0]);
+  double full = sky::moonNext(now, true), fresh = sky::moonNext(now, false);
+  bool isFull = full < fresh;
+  time_t at = (time_t)(isFull ? full : fresh) + (time_t)tzTotalOffset();
+  struct tm t;
+  gmtime_r(&at, &t);
+  snprintf(l.line[1], sizeof(l.line[1]), "%s moon %.3s %d %.3s", isFull ? "Full" : "New", BAND_DAYS[t.tm_wday], t.tm_mday,
+           BAND_MONTHS[t.tm_mon]);
+}
+
+// The clock's own turns anew: once a minute, and when the clock gets its time.
+void bandLocalUpdate() {
+  static bool wasSet = false;
+  if (bandLocalDone && !minuteTrigger && clockIsSet() == wasSet) { return; }
+  bandLocalDone = true;
+  wasSet = clockIsSet();
+  bandShiftLines(bandLocal[TURN_SHIFT - BAND_LOCAL_FIRST]);
+  bandDateLines(bandLocal[TURN_DATE - BAND_LOCAL_FIRST]);
+  bandSunLines(bandLocal[TURN_SUN - BAND_LOCAL_FIRST]);
+  bandMoonLines(bandLocal[TURN_MOON - BAND_LOCAL_FIRST]);
 }
 
 // The band's picture as the turn stands, onto the wall.
@@ -9757,11 +9895,12 @@ void bandDraw() {
   GFXcanvas16 &b = bandPicture;
   b.fillScreen(0);
   int8_t i = bandItemOf(bandTurn);
-  if (bandTurn.kind == TURN_NONE || (bandTurn.kind == TURN_ITEM && i < 0)) {
+  const BandLocal *own = bandLocalOf(bandTurn);
+  if (bandTurn.kind == TURN_NONE || (bandTurn.kind == TURN_ITEM && i < 0) || (own && !own->on)) {
     matrix.showBand(b.getBuffer());
     return;
   }
-  IconLook look = { ICON_CALENDAR, 0, INTENSITY_NONE, CHANCE_UNKNOWN };
+  IconLook look = { own ? own->icon : (uint8_t)ICON_NONE, 0, INTENSITY_NONE, CHANCE_UNKNOWN };
   uint16_t ink = scaledColorVisible(235, 235, 235);
   bool frame = false;
   if (i >= 0) {
@@ -9813,8 +9952,8 @@ void bandStart(const BandTurn &t, uint8_t runs) {
   bandRunText[0] = '\0';
   bandRunLastX = INT16_MIN;
   int8_t i = bandItemOf(t);
-  if (t.kind == TURN_DATE) {
-    bandDateLines();
+  if (const BandLocal *own = bandLocalOf(t)) {
+    memcpy(bandLine, own->line, sizeof(bandLine));
   } else if (i >= 0) {
     const BandItem &it = bandItems[i];
     char text[sizeof(it.text)];
@@ -9833,7 +9972,7 @@ void bandStart(const BandTurn &t, uint8_t runs) {
 // The turn after the one on show, in the band's order; the first when that
 // one has gone. Nothing to show: the band dark, and a look again later.
 void bandNext() {
-  BandTurn list[BAND_ITEMS_MAX + 1];
+  BandTurn list[BAND_ITEMS_MAX + BAND_LOCAL_COUNT];
   uint8_t n = bandTurnList(list);
   if (n == 0) {
     bandTurn   = { TURN_NONE, 0, 0 };
@@ -9857,6 +9996,7 @@ void bandRestart() {
 
 // On every pass outside the hotspot.
 void bandUpdate() {
+  bandLocalUpdate();
   if (screen == SCREEN_GIF) { return; }   // a GIF has the whole wall
   bandHidden = false;
   if (bandWant.kind != TURN_NONE) {
@@ -9867,7 +10007,8 @@ void bandUpdate() {
       return;
     }
   }
-  bool gone = bandTurn.kind == TURN_ITEM && bandItemOf(bandTurn) < 0;
+  const BandLocal *own = bandLocalOf(bandTurn);
+  bool gone = (bandTurn.kind == TURN_ITEM && bandItemOf(bandTurn) < 0) || (own && !own->on);
   if (bandTurnAt == 0 || millisNow - bandTurnAt >= bandTurnMs || gone) {
     bandNext();
     return;
@@ -9921,8 +10062,72 @@ void bandSelfTest() {
       Serial.printf("Band: \"%s\" gave %s \"%s\" / \"%s\"\n", w.text, fits ? "two lines" : "no fit", lines[0], lines[1]);
     }
   }
-  Serial.printf("Band self-test: %s, %u cases\n", wrong ? "FAILED" : "all right",
-                (unsigned)(sizeof(WEEKS) / sizeof(WEEKS[0]) + sizeof(WRAPS) / sizeof(WRAPS[0])));
+  // Sunrise and sunset as sunrise-and-sunset.com gave them on 2026-10-18,
+  // to within 2 minutes; Tromsø's polar night and midnight sun.
+  struct Sun { int y, m, d; double lat, lon; int off; int rise, set; uint8_t kind; };
+  static const Sun SUNS[] = {
+    { 2026, 10, 18, 48.7758, 9.1829, 120, 7 * 60 + 48, 18 * 60 + 27, sky::SUN_RISES_AND_SETS },   // Stuttgart
+    { 2026, 10, 18, 52.5200, 13.4050, 120, 7 * 60 + 37, 18 * 60 + 4, sky::SUN_RISES_AND_SETS },   // Berlin
+    { 2026, 10, 25, 52.5200, 13.4050, 60, 6 * 60 + 50, 16 * 60 + 49, sky::SUN_RISES_AND_SETS },   // Berlin, CET
+    { 2026, 12, 21, 69.6500, 18.9600, 60, 0, 0, sky::SUN_DOWN_ALL_DAY },                            // Tromsø
+    { 2026, 6, 21, 69.6500, 18.9600, 120, 0, 0, sky::SUN_UP_ALL_DAY },
+  };
+  for (const Sun &s : SUNS) {
+    long day = daysFromCivil(s.y, (unsigned)s.m, (unsigned)s.d);
+    double rise, set;
+    uint8_t kind = sky::sunEvent(day, s.lat, s.lon, true, rise);
+    sky::sunEvent(day, s.lat, s.lon, false, set);
+    bool ok = kind == s.kind && (kind != sky::SUN_RISES_AND_SETS ||
+                                 (fabs(rise + s.off - s.rise) <= 2.0 && fabs(set + s.off - s.set) <= 2.0));
+    if (!ok) {
+      wrong++;
+      Serial.printf("Band: sun on %d-%02d-%02d at %.2f, %.2f gave kind %u, %.1f and %.1f min, not %d and %d\n", s.y, s.m,
+                    s.d, s.lat, s.lon, (unsigned)kind, rise + s.off, set + s.off, s.rise, s.set);
+    }
+  }
+  // The moon's phases in October 2026 as moongiant.com gave them, to within
+  // 2 degrees (4 hours); the next full and new moon to within 2 hours.
+  struct Moon { const char *at; double elongation; };
+  static const Moon MOONS[] = {
+    { "2026-10-03 13:25", 270 }, { "2026-10-10 15:50", 0 }, { "2026-10-18 16:12", 90 }, { "2026-10-26 04:11", 180 },
+  };
+  auto utcOf = [](const char *s) {
+    int y, mo, d, h, mi;
+    sscanf(s, "%d-%d-%d %d:%d", &y, &mo, &d, &h, &mi);
+    return (double)daysFromCivil(y, (unsigned)mo, (unsigned)d) * 86400.0 + h * 3600.0 + mi * 60.0;
+  };
+  for (const Moon &m : MOONS) {
+    double e = sky::moonElongation(utcOf(m.at));
+    double off = fmod(e - m.elongation + 540.0, 360.0) - 180.0;
+    if (fabs(off) > 2.0) { wrong++; Serial.printf("Band: the moon at %s is %.2f degrees ahead, not %.0f\n", m.at, e, m.elongation); }
+  }
+  double from = utcOf("2026-10-14 00:00");
+  double full = sky::moonNext(from, true), fresh = sky::moonNext(from, false);
+  if (fabs(full - utcOf("2026-10-26 04:11")) > 7200.0 || fabs(fresh - utcOf("2026-11-09 07:02")) > 7200.0) {
+    wrong++;
+    Serial.printf("Band: next full moon %.0f, new moon %.0f s off\n", full - utcOf("2026-10-26 04:11"),
+                  fresh - utcOf("2026-11-09 07:02"));
+  }
+  // The clock changes of central Europe (01:00 UTC on the last Sunday of
+  // March and October), seen from before, after and between them.
+  struct Shift { const char *now; bool found; const char *at; bool forward; };
+  static const Shift SHIFTS[] = {
+    { "2026-10-24 12:00", true, "2026-10-25 01:00", false }, { "2026-10-25 06:00", true, "2026-10-25 01:00", false },
+    { "2026-03-28 12:00", true, "2026-03-29 01:00", true },  { "2026-10-20 12:00", false, "", false },
+    { "2026-10-25 14:00", false, "", false },
+  };
+  for (const Shift &s : SHIFTS) {
+    time_t at = 0;
+    bool forward = false;
+    bool found = clockShiftNear(tzRule(3600), (time_t)utcOf(s.now), at, forward);
+    if (found != s.found || (found && (at != (time_t)utcOf(s.at) || forward != s.forward))) {
+      wrong++;
+      Serial.printf("Band: clock change from %s gave %d at %ld, forward %d\n", s.now, found, (long)at, forward);
+    }
+  }
+  unsigned cases = sizeof(WEEKS) / sizeof(WEEKS[0]) + sizeof(WRAPS) / sizeof(WRAPS[0]) + sizeof(SUNS) / sizeof(SUNS[0]) +
+                   sizeof(MOONS) / sizeof(MOONS[0]) + 1 + sizeof(SHIFTS) / sizeof(SHIFTS[0]);
+  Serial.printf("Band self-test: %s, %u cases\n", wrong ? "FAILED" : "all right", cases);
 }
 #endif
 
