@@ -30,13 +30,13 @@ enum ItemLevel : uint8_t { LEVEL_INFO, LEVEL_ALERT };
 enum ItemIcon : uint8_t {
   ICON_NONE, ICON_CLEAR_DAY, ICON_CLEAR_NIGHT, ICON_PARTLY_DAY, ICON_PARTLY_NIGHT, ICON_CLOUDY,
   ICON_FOG, ICON_DRIZZLE, ICON_RAIN, ICON_SNOW, ICON_THUNDER, ICON_WARNING,
-  ICON_WIND, ICON_FROST, ICON_HEAT, ICON_CALENDAR, ICON_COUNT
+  ICON_WIND, ICON_FROST, ICON_HEAT, ICON_CALENDAR, ICON_AIR, ICON_COUNT
 };
 
 // The icons by name, as Home Assistant gives them, in ItemIcon's order.
 const char *const ITEM_ICON_NAMES[ICON_COUNT] = {
   "", "clear-day", "clear-night", "partly-day", "partly-night", "cloudy",
-  "fog", "drizzle", "rain", "snow", "thunder", "warning", "wind", "frost", "heat", "calendar",
+  "fog", "drizzle", "rain", "snow", "thunder", "warning", "wind", "frost", "heat", "calendar", "air",
 };
 
 // How heavy rain or snow is (BandItem::intensity); its icon shows it by the
@@ -75,7 +75,7 @@ inline uint8_t itemIconByName(const char *name) {
 }
 
 // The sources the clock fetches itself.
-enum FeedId : uint8_t { FEED_WEATHER, FEED_WARNINGS, FEED_COUNT };
+enum FeedId : uint8_t { FEED_WEATHER, FEED_WARNINGS, FEED_AIR, FEED_COUNT };
 
 // One thing the band can show. Its text is UTF-8 as the source wrote it; an
 // item past `until` is not shown any more, so the band never passes off an
@@ -110,6 +110,7 @@ struct FeedInfo { const char *name; uint32_t intervalMs; uint32_t staleS; bool n
 const FeedInfo FEEDS[FEED_COUNT] = {
   { "weather",  30UL * 60UL * 1000UL, 90UL * 60UL, false },
   { "warnings", 10UL * 60UL * 1000UL, 30UL * 60UL, false },
+  { "air",      60UL * 60UL * 1000UL, 180UL * 60UL, false },   // the forecast's values are hourly
 };
 
 // ---- Between the loop and the fetch task ------------------------------------
@@ -468,6 +469,45 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
   }
 }
 
+// ---- Air quality: Open-Meteo ----------------------------------------------------
+// https://open-meteo.com/en/docs/air-quality-api - no key, the same terms as the
+// forecast; from the CAMS global and European forecasts, worldwide (attribution:
+// CAMS ENSEMBLE data provider, and Open-Meteo). Read 2026-10-18. The European
+// Air Quality Index, the highest of its pollutants' indices: 0-20 good, 20-40
+// fair, 40-60 moderate, 60-80 poor, 80-100 very poor, above 100 extremely poor.
+
+const char *const AIR_BAND_NAMES[] = { "good", "fair", "moderate", "poor", "very poor", "extremely poor" };
+
+// The band of an index, 0 (good) to 5 (extremely poor): BandItem::severity of
+// the air quality, which colours its icon.
+inline uint8_t airBand(long eaqi) {
+  return eaqi < 20 ? 0 : eaqi < 40 ? 1 : eaqi < 60 ? 2 : eaqi < 80 ? 3 : eaqi <= 100 ? 4 : 5;
+}
+
+inline void feedAir(const FeedJob &job, FeedResult &r) {
+  char lat[16], lon[16], url[200];
+  feedDegrees(lat, sizeof(lat), job.lat);
+  feedDegrees(lon, sizeof(lon), job.lon);
+  snprintf(url, sizeof(url),
+           "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=%s&longitude=%s"
+           "&current=european_aqi&timeformat=unixtime", lat, lon);
+  JsonDocument filter, doc;
+  filter["current"]["european_aqi"] = true;
+  if (!feedGet(url, filter, doc, r)) { return; }
+  if (doc["current"]["european_aqi"].isNull()) {
+    r.status = FEED_ERR_JSON;
+    strlcpy(r.error, "no air quality index in the answer", sizeof(r.error));
+    return;
+  }
+  long eaqi = lroundf(doc["current"]["european_aqi"].as<float>());
+  uint8_t band = airBand(eaqi);
+  char text[64], card[16];
+  snprintf(text, sizeof(text), "Air quality: %s, index %ld", AIR_BAND_NAMES[band], eaqi);
+  snprintf(card, sizeof(card), "%ld|AQI", eaqi);   // the card: the index large, "AQI" below it
+  feedItem(r, "air", text, ICON_AIR, LEVEL_INFO, job.now + FEEDS[FEED_AIR].staleS, itemTag("air"), band,
+           INTENSITY_NONE, card);
+}
+
 // ---- The fetch task -----------------------------------------------------------
 
 // The task's ends: one job and one result at a time.
@@ -486,6 +526,7 @@ inline void feedRun(const FeedJob &job, FeedResult &r) {
   switch (job.feed) {
     case FEED_WEATHER:  feedWeather(job, r);  break;
     case FEED_WARNINGS: feedWarnings(job, r); break;
+    case FEED_AIR:      feedAir(job, r);      break;
     default:            strlcpy(r.error, "unknown source", sizeof(r.error)); break;
   }
   r.ms        = millis() - t0;

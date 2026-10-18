@@ -427,11 +427,12 @@ everything else is to come through Home Assistant:
 | Source | What it gives | How often |
 |---|---|---|
 | [Open-Meteo](https://open-meteo.com) | temperature, weather (with how heavy rain or snow is, from the weather code), the day's high and low, chance of rain, UV index from 3; when rain starts or stops within the next 4 hours | every 30 min |
+| [Open-Meteo air quality](https://open-meteo.com/en/docs/air-quality-api) | the European Air Quality Index for the place, worldwide (the CAMS forecasts): good, fair, moderate, poor, very poor, extremely poor, with its value; the icon a leaf in the band's colour | every hour |
 | [Bright Sky](https://brightsky.dev) | the DWD's weather warnings for the place, the most severe first (up to four): `minor` as information, from `moderate` on as an alert; each with its level and the icon of its event (wind, thunder, rain, snow, frost or black ice, heat, fog; the warning triangle for any other) | every 10 min |
 
-Weather data by Open-Meteo.com (CC BY 4.0); the warnings are the Deutscher
-Wetterdienst's, through Bright Sky, under the DWD's terms of use. Neither needs a
-key.
+Weather data by Open-Meteo.com (CC BY 4.0); air quality: CAMS ENSEMBLE data
+provider, through Open-Meteo.com; the warnings are the Deutscher Wetterdienst's,
+through Bright Sky, under the DWD's terms of use. None needs a key.
 
 The place is typed on the config page as latitude and longitude in degrees, from
 a map; nothing is fetched before. Changing it drops what was fetched for the
@@ -498,7 +499,7 @@ the card shows its topics.
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
-`thunder`, `warning`, `wind`, `frost`, `heat`, `calendar`. The optional fields change how
+`thunder`, `warning`, `wind`, `frost`, `heat`, `calendar`, `air`. The optional fields change how
 the icon looks:
 
 - `severity`: a warning's level, as the DWD names them - `minor`, `moderate`,
@@ -856,8 +857,12 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
 
 - **Order:** the alerts first, then the messages, each in the order they came,
   then the information as on the 64x32 clock's cards (DWD warnings, rain soon,
-  the weather, Home Assistant's items), then the clock's own, worked out on the
-  clock once a minute without the internet:
+  the weather, the air quality, Home Assistant's items), then the clock's own,
+  worked out on the clock once a minute without the internet:
+  - **the clock's status**, only while its status pixel is red: a new home WiFi
+    that does not join ("Home WiFi does not join:" and its name), or a time
+    sync that keeps failing ("Time sync is failing" / "last good 18 Oct 03:00"),
+    beside the warning sign in yellow;
   - **the clock change**, from 24 hours before until 12 hours after it, when
     daylight saving is set to auto: "Clocks go back 1 h" / "tonight at 3:00"
     (the time on the clock before it), then "Clocks went back 1 h" / "last

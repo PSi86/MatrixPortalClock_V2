@@ -27,7 +27,7 @@ const uint8_t ICON_SIZE = 24;
 enum IconRole : uint8_t {
   ROLE_NONE, ROLE_CLOUD, ROLE_CLOUD_WET, ROLE_SUN, ROLE_RAYS, ROLE_MOON, ROLE_FOG, ROLE_RAIN, ROLE_SNOW,
   ROLE_BOLT, ROLE_LEVEL, ROLE_MARK, ROLE_WIND, ROLE_GLASS, ROLE_COLD, ROLE_HOT, ROLE_WAVES, ROLE_FLAKE,
-  ROLE_PAGE,
+  ROLE_PAGE, ROLE_AIR,
 };
 
 // One row of an icon: the part of each pixel, 0 for dark, as two bit planes
@@ -457,6 +457,33 @@ constexpr IconBits ICON_PICTURES[PIC_COUNT] = {
     iconRow("..#..##..##..##..##..#.."),
     iconRow("..#..................#.."),
     iconRow("..####################.."),
+    iconRow("........................"),
+    iconRow("........................"),
+  }},
+  {{ ROLE_AIR, ROLE_FOG, ROLE_NONE },   // ICON_AIR, a leaf in the colour of the air quality's band, its stem grey
+   {
+    iconRow("........................"),
+    iconRow("........................"),
+    iconRow("........................"),
+    iconRow("................####...."),
+    iconRow("..............#######..."),
+    iconRow("............##########.."),
+    iconRow("...........#######.###.."),
+    iconRow("..........#######.####.."),
+    iconRow(".........#######.#####.."),
+    iconRow("........#######.#####..."),
+    iconRow(".......#######.######..."),
+    iconRow(".......######.######...."),
+    iconRow("......######.#######...."),
+    iconRow("......#####.#######....."),
+    iconRow(".....#####.#######......"),
+    iconRow(".....####.#######......."),
+    iconRow(".....###.#######........"),
+    iconRow(".....##+#######........."),
+    iconRow("......+######..........."),
+    iconRow(".....+.####............."),
+    iconRow("....+..................."),
+    iconRow("...+...................."),
     iconRow("........................"),
     iconRow("........................"),
   }},

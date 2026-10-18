@@ -458,7 +458,7 @@ struct FeedSettings {
 };
 static_assert(sizeof(FeedSettings) == 16, "FeedSettings keeps the size stored blobs have");
 const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
-                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS)), 0, 0, 0, 1, 15, 0 };
+                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS) | (1 << FEED_AIR)), 0, 0, 0, 1, 15, 0 };
 // The info round's choices, in minutes (0 = never): each divides the hour.
 const uint8_t ROUND_CHOICES[] = { 0, 5, 10, 15, 20, 30, 60 };
 FeedSettings feedSettings;
@@ -534,11 +534,12 @@ bool       noticeCardsRound = false;   // the steps on the panel are cards of th
 // source and tag, or one of the clock's own: the clock change, the date, the
 // sun and the moon - and the picture it draws into.
 GFXcanvas16 bandPicture(WALL_W, WALL_BAND_H);
-enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON };
-const uint8_t BAND_LOCAL_FIRST = TURN_SHIFT, BAND_LOCAL_COUNT = 4;   // the clock's own, in their order
+enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON };
+const uint8_t BAND_LOCAL_FIRST = TURN_STATUS, BAND_LOCAL_COUNT = 5;   // the clock's own, in their order
 struct BandTurn { uint8_t kind, feed; uint32_t tag; };
 // The clock's own turns as they stand, worked out once a minute (bandLocalUpdate()).
-struct BandLocal { bool on; uint8_t icon; char line[2][32]; };
+struct BandLocal { bool on; uint8_t icon, severity; char line[2][32]; };
+unsigned long bandStatusTestAt = 0;   // millis() the console showed the clock status as a test; 0 = none
 BandLocal bandLocal[BAND_LOCAL_COUNT];
 bool bandLocalDone = false;
 const unsigned long BAND_TURN_MS = 6000;
@@ -6766,6 +6767,8 @@ void stopAPMode() {
 // - "tlsmem int" / "tlsmem ext": mbedTLS's memory from internal RAM first
 //   (from the start) or from PSRAM first, as the MatrixPortal S3 takes it
 //   (feedTlsCalloc()), until the next start.
+// - "status test" shows the band's clock status for BAND_STATUS_TEST_MS as if
+//   the time sync were failing.
 void wallConsole() {
   static char line[16];
   static uint8_t len = 0;
@@ -6807,6 +6810,11 @@ void wallConsole() {
                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
 #if BAND_DATA
+    if (strcmp(line, "status test") == 0) {
+      bandStatusTestAt = millisNow ? millisNow : 1;
+      bandLocalDone = false;   // worked out anew at once
+      Serial.println("Band: the clock status for 2 min, as if the time sync were failing");
+    }
     bool tlsInt = strcmp(line, "tlsmem int") == 0;
     if (tlsInt || strcmp(line, "tlsmem ext") == 0) {
       feedTlsInternal() = tlsInt;
@@ -8573,8 +8581,8 @@ void loadFeedSettings() {
     char lat[16], lon[16];
     feedDegrees(lat, sizeof(lat), feedSettings.lat);
     feedDegrees(lon, sizeof(lon), feedSettings.lon);
-    Serial.printf("Info band: weather %s, warnings %s, for %s, %s\n", feedOn(FEED_WEATHER) ? "on" : "off",
-                  feedOn(FEED_WARNINGS) ? "on" : "off", lat, lon);
+    Serial.printf("Info band: weather %s, warnings %s, air quality %s, for %s, %s\n", feedOn(FEED_WEATHER) ? "on" : "off",
+                  feedOn(FEED_WARNINGS) ? "on" : "off", feedOn(FEED_AIR) ? "on" : "off", lat, lon);
   }
 }
 
@@ -8782,11 +8790,13 @@ bool infoIsNew(const BandItem &it) {
 }
 
 // The information's order on the panel, the band's: DWD warnings first, then
-// rain soon, the weather, then Home Assistant's items in the order they came.
+// rain soon, the weather, the air quality, then Home Assistant's items in the
+// order they came.
 uint8_t infoRank(const BandItem &it) {
   if (it.feed == FEED_WARNINGS) { return 0; }
   if (it.feed == FEED_WEATHER)  { return strcmp(it.key, "rain") == 0 ? 1 : 2; }
-  return 3;
+  if (it.feed == FEED_AIR)      { return 3; }
+  return 4;
 }
 
 // The information in that order, as positions in bandItems; only what is new
@@ -9450,6 +9460,17 @@ IconRgb levelRgb(uint8_t severity) {
   }
 }
 
+// The air quality's band (airBand()), 0 good to 5 extremely poor, on the
+// clock's own scale: green through yellow and orange to red and violet, as
+// the warning levels go - not the European Environment Agency's colours,
+// whose pages give none (looked for on 2026-10-18).
+IconRgb airRgb(uint8_t band) {
+  static const IconRgb BANDS[] = {
+    { 0, 210, 70 }, { 150, 220, 0 }, { 255, 220, 0 }, { 255, 130, 0 }, { 255, 0, 0 }, { 170, 0, 255 },
+  };
+  return BANDS[band < 6 ? band : 5];
+}
+
 IconRgb chanceRgb(IconRgb c, uint8_t chance) {
   if (chance > 100) { return c; }   // CHANCE_UNKNOWN
   const IconRgb grey = { 70, 72, 82 };
@@ -9477,6 +9498,7 @@ IconRgb roleRgb(uint8_t role, const IconLook &look) {
     case ROLE_WAVES:     return { 255, 110, 0 };
     case ROLE_FLAKE:     return { 120, 210, 255 };
     case ROLE_PAGE:      return { 230, 30, 30 };
+    case ROLE_AIR:       return airRgb(look.severity);
     default:             return { 0, 0, 0 };
   }
 }
@@ -9878,12 +9900,41 @@ void bandMoonLines(BandLocal &l) {
            BAND_MONTHS[t.tm_mon]);
 }
 
+// The clock's trouble in words while the status pixel is red (syncOverdue()):
+// a new home WiFi that does not join, "Home WiFi does not join:" and its
+// name, or a time sync that keeps failing, "Time sync is failing" and when
+// the last good one was. The warning sign in yellow, the first of the
+// clock's own turns. Nothing while all is well.
+const unsigned long BAND_STATUS_TEST_MS = 2UL * 60UL * 1000UL;   // the console's "status test"
+void bandStatusLines(BandLocal &l) {
+  bool test = bandStatusTestAt && millisNow - bandStatusTestAt < BAND_STATUS_TEST_MS;
+  l.on = clockIsSet() && (syncOverdue() || test);
+  if (!l.on) { return; }
+  l.icon = ICON_WARNING;
+  l.severity = 1;
+  if (wifiStored() && !wifiCreds.verified && joinOutcome == JOIN_FAILED) {
+    strlcpy(l.line[0], "Home WiFi does not join:", sizeof(l.line[0]));
+    textToCp437(l.line[1], wifiCreds.ssid, 27);   // the name, cut to the line
+    return;
+  }
+  strlcpy(l.line[0], "Time sync is failing", sizeof(l.line[0]));
+  if (ntpSyncedAt == 0) {
+    strlcpy(l.line[1], "no good sync yet", sizeof(l.line[1]));
+    return;
+  }
+  time_t at = ntpSyncedAt + (time_t)tzTotalOffset();
+  struct tm t;
+  gmtime_r(&at, &t);
+  snprintf(l.line[1], sizeof(l.line[1]), "last good %d %.3s %02d:%02d", t.tm_mday, BAND_MONTHS[t.tm_mon], t.tm_hour, t.tm_min);
+}
+
 // The clock's own turns anew: once a minute, and when the clock gets its time.
 void bandLocalUpdate() {
   static bool wasSet = false;
   if (bandLocalDone && !minuteTrigger && clockIsSet() == wasSet) { return; }
   bandLocalDone = true;
   wasSet = clockIsSet();
+  bandStatusLines(bandLocal[TURN_STATUS - BAND_LOCAL_FIRST]);
   bandShiftLines(bandLocal[TURN_SHIFT - BAND_LOCAL_FIRST]);
   bandDateLines(bandLocal[TURN_DATE - BAND_LOCAL_FIRST]);
   bandSunLines(bandLocal[TURN_SUN - BAND_LOCAL_FIRST]);
@@ -9900,7 +9951,7 @@ void bandDraw() {
     matrix.showBand(b.getBuffer());
     return;
   }
-  IconLook look = { own ? own->icon : (uint8_t)ICON_NONE, 0, INTENSITY_NONE, CHANCE_UNKNOWN };
+  IconLook look = { own ? own->icon : (uint8_t)ICON_NONE, own ? own->severity : (uint8_t)0, INTENSITY_NONE, CHANCE_UNKNOWN };
   uint16_t ink = scaledColorVisible(235, 235, 235);
   bool frame = false;
   if (i >= 0) {
@@ -10285,6 +10336,7 @@ void applyFeedParams(const String &q) {
   uint8_t on = 0;
   if (getParam(q, "feedw") == "on") { on |= (uint8_t)(1 << FEED_WEATHER); }   // checkboxes: absent when unticked
   if (getParam(q, "feeda") == "on") { on |= (uint8_t)(1 << FEED_WARNINGS); }
+  if (getParam(q, "feedq") == "on") { on |= (uint8_t)(1 << FEED_AIR); }
   feedSettings.on = on;
   feedSettings.frames = getParam(q, "afr") == "on" ? 1 : 0;
   String iround = getParam(q, "iround");
@@ -10633,6 +10685,7 @@ void apiState(Print &c) {
   s["lon"] = feedSettings.located ? deg : "";
   s["feedw"] = feedOn(FEED_WEATHER);
   s["feeda"] = feedOn(FEED_WARNINGS);
+  s["feedq"] = feedOn(FEED_AIR);
   s["afr"] = feedSettings.frames != 0;
 #if BAND_ON_PANEL
   d["band"] = true;       // the information takes turns in the band: no info round

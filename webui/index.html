@@ -439,7 +439,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     </section>
 
     <section class="sec" id="band" data-title="Info">
-      <div class="sec-head"><h2>Info</h2><p id="bandIntro">Weather and DWD warnings for one place, and what Home Assistant sends. This clock has no band: alerts come up as banners, messages as running text, and the rest as cards - once when it is new, and all of it in the info round.</p></div>
+      <div class="sec-head"><h2>Info</h2><p id="bandIntro">Weather, air quality and DWD warnings for one place, and what Home Assistant sends. This clock has no band: alerts come up as banners, messages as running text, and the rest as cards - once when it is new, and all of it in the info round.</p></div>
       <div class="card">
         <div class="row">
           <div><div class="lbl">Place</div><div class="hint">Latitude and longitude in degrees, from a map.</div></div>
@@ -455,7 +455,12 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <label class="switch"><input type="checkbox" id="feeda" aria-label="Weather warnings"><span></span></label>
         </div>
         <div class="row stack" id="fNeedRow1" hidden><div class="need" id="fNeed1"></div></div>
-        <div class="row stack"><div class="note">Weather data by Open-Meteo.com (CC BY 4.0). Warnings: Deutscher Wetterdienst, through Bright Sky.</div></div>
+        <div class="row row-switch">
+          <div><div class="lbl">Air quality, every hour<span class="badge" id="fBadge2"></span></div><div class="status" style="margin-top:2px"><span class="dot" id="fDot2"></span><span class="hint" style="margin:0" id="fLine2"></span></div></div>
+          <label class="switch"><input type="checkbox" id="feedq" aria-label="Air quality"><span></span></label>
+        </div>
+        <div class="row stack" id="fNeedRow2" hidden><div class="need" id="fNeed2"></div></div>
+        <div class="row stack"><div class="note">Weather data by Open-Meteo.com (CC BY 4.0). Air quality: CAMS ENSEMBLE data provider, through Open-Meteo.com. Warnings: Deutscher Wetterdienst, through Bright Sky.</div></div>
       </div>
       <div class="card" id="clockCard">
         <div class="group-title">On this clock</div>
@@ -548,10 +553,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var PAL = ['#ffffff', '#ff0000', '#ff8000', '#ffff00', '#80ff00', '#00ff00', '#00ff80', '#00ffff', '#00c0ff', '#0000ff', '#8000ff', '#ff00ff', '#ff0080', '#ff80c0'];
   var DIR_ARROWS = ['↓', '←', '↑', '→'];        // the way a digit moves when it comes from the top, right, bottom, left
   var DIR_NAMES = ['from the top', 'from the right', 'from the bottom', 'from the left'];
-  var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠', '〜', '❅', '♨', '▦'];   // ItemIcon in band_data.h
+  var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠', '〜', '❅', '♨', '▦', '❦'];   // ItemIcon in band_data.h
   // What the page edits; ssid and the WiFi password go through their own form.
   var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'mst', 'mkn', 'mpace', 'mpel', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
-    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda', 'afr', 'iround', 'ast', 'acol', 'akn', 'anap', 'dxr', 'dqf', 'dqt', 'ddk'];
+    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda', 'feedq', 'afr', 'iround', 'ast', 'acol', 'akn', 'anap', 'dxr', 'dqf', 'dqt', 'ddk'];
   var S = null, saved = null, cur = null, gone = false, auth = '';
   try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
   function headers(extra) { var h = extra || {}; if (auth) { h.Authorization = 'Basic ' + btoa('clock:' + auth); } return h; }
@@ -618,6 +623,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       o.lat = cur.lat; o.lon = cur.lon;
       if (cur.feedw) { o.feedw = 'on'; }
       if (cur.feeda) { o.feeda = 'on'; }
+      if (cur.feedq) { o.feedq = 'on'; }
       if (cur.afr) { o.afr = 'on'; }
       if (has('iround')) { o.iround = cur.iround; }
     }
@@ -915,7 +921,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       setNumber('ddk', 'ddk');
     }
     // Info band
-    if (has('lat')) { setNumber('lat', 'lat'); setNumber('lon', 'lon'); setCheck('feedw', 'feedw', showNeeds); setCheck('feeda', 'feeda', showNeeds); }
+    if (has('lat')) { setNumber('lat', 'lat'); setNumber('lon', 'lon'); setCheck('feedw', 'feedw', showNeeds); setCheck('feeda', 'feeda', showNeeds); setCheck('feedq', 'feedq', showNeeds); }
     $('#afrRow').hidden = !has('afr');
     if (has('afr')) { setCheck('afr', 'afr'); }
     $('#roundRow').hidden = !has('iround');
@@ -926,8 +932,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }
     // With a band (the wall clock) the information takes turns there: no cards, no info round.
     $('#bandIntro').textContent = S.band
-      ? 'Weather and DWD warnings for one place, and what Home Assistant sends. This clock shows them in its band below the face, one after the other: alerts first, also once as a banner over the face, then messages, then the rest, then the date.'
-      : 'Weather and DWD warnings for one place, and what Home Assistant sends. This clock has no band: alerts come up as banners, messages as running text, and the rest as cards - once when it is new, and all of it in the info round.';
+      ? 'Weather, air quality and DWD warnings for one place, and what Home Assistant sends. This clock shows them in its band below the face, one after the other: alerts first, also once as a banner over the face, then messages, then the rest, then the date.'
+      : 'Weather, air quality and DWD warnings for one place, and what Home Assistant sends. This clock has no band: alerts come up as banners, messages as running text, and the rest as cards - once when it is new, and all of it in the info round.';
     $('#msgHint').textContent = S.band
       ? 'The alerts and messages once more over the face, with their text, and the band again from its first item - as “show notifications” on the Inputs page does.'
       : 'Everything above once more on the panel - alerts and messages with their text, then the cards - as “show notifications” on the Inputs page does.';
@@ -975,7 +981,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var feedsNow = [];
   function showNeeds() {
     if (!S || !has('lat')) { return; }
-    ['feedw', 'feeda'].forEach(function (k, i) {
+    ['feedw', 'feeda', 'feedq'].forEach(function (k, i) {
       var f = feedsNow[i] || {}, always = !!f.always, badge = $('#fBadge' + i);
       badge.textContent = always ? 'needs continuous network access' : '';
       badge.className = 'badge' + (always ? ' always' : '');
