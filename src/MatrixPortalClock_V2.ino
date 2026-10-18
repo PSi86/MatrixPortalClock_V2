@@ -100,6 +100,10 @@ struct FeedResult;                     // named by prototypes generated from thi
 struct BandItem;
 struct NoticeStep;
 #endif
+// The wall clock shows the items in its band below the face (bandUpdate());
+// the 64x32 clocks have no room for one and show them over the face.
+#define BAND_ON_PANEL (BAND_DATA && BOARD_WAVESHARE_WALL)
+struct BandTurn;                       // named by prototypes generated from this sketch
 
 #if HA_LINK
 #if !(BAND_DATA && WEBUI_APP)
@@ -520,6 +524,30 @@ uint8_t    noticeStepCount = 0;   // 0: none on the panel
 uint8_t    noticeStepAt = 0;      // the step on the panel
 unsigned long noticeStepMs = 0;   // how long it stays
 bool       noticeCardsRound = false;   // the steps on the panel are cards of their own accord: an input ends them
+
+#if BAND_ON_PANEL
+// The wall clock's info band (bandUpdate()): the turn on show - an item by
+// source and tag, or the date - and the picture it draws into.
+GFXcanvas16 bandPicture(WALL_W, WALL_BAND_H);
+enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_DATE };
+struct BandTurn { uint8_t kind, feed; uint32_t tag; };
+const unsigned long BAND_TURN_MS = 6000;
+const int16_t BAND_ICON_X = 4, BAND_ICON_Y = (WALL_BAND_H - ICON_SIZE) / 2;
+const int16_t BAND_TEXT_X = 32, BAND_TEXT_X_BARE = 4;   // beside an icon, and without one
+const int16_t BAND_LINE_Y[2] = { 6, 19 }, BAND_MID_Y = (WALL_BAND_H - 7) / 2;
+BandTurn bandTurn = { TURN_NONE, 0, 0 };   // the item on show
+BandTurn bandWant = { TURN_NONE, 0, 0 };   // one that takes the band at once (a new notice)
+uint8_t  bandWantRuns = 1;
+unsigned long bandTurnAt = 0;              // millis() it came; 0 = the next one is due
+unsigned long bandTurnMs = BAND_TURN_MS;   // how long it stays
+uint8_t  bandTurnRuns = 1;                 // how often its text runs through (or stands BAND_TURN_MS)
+uint32_t bandTurnLook = 0;                 // what it showed (bandLook()), to see it change
+char     bandLine[2][32];                  // its two lines in the font's code page (CP437), or
+char     bandRunText[sizeof(BandItem::text)];   // its text running through, when they cannot hold it
+uint16_t bandRunWidth = 0;
+int16_t  bandRunLastX = INT16_MIN;
+bool     bandHidden = false;               // dark while the hotspot has the panel
+#endif
 
 // An info card: the item's icon, and beside it (below it, upright) its short
 // form in two lines - a first line of three characters or fewer at double
@@ -1633,6 +1661,9 @@ void loop(void) {
     warningIconsTested = true;
     warningIconSelfTest();
     feedRetrySelfTest();
+#if BAND_ON_PANEL
+    bandSelfTest();
+#endif
   }
 #endif
   if (minuteTrigger) { panelDirty = true; }   // whatever shows the time has to follow it
@@ -1663,6 +1694,9 @@ void loop(void) {
     updateOrientation();// the info screen and the preview follow the panel as well
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
+#if BAND_ON_PANEL
+    bandHide();        // no band beside the hotspot's screens
+#endif
 #if defined(CLOCK_DEBUG)
     apLoopStats(apT1 - apT0, micros() - apT1);
 #endif
@@ -1717,6 +1751,9 @@ void loop(void) {
     case SCREEN_GESTURE_TEST: gestureTestUpdate(); if (panelDirty) { drawGestureTest(); } break;
     default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
   }
+#if BAND_ON_PANEL
+  bandUpdate();         // the wall's info band below the face
+#endif
 }
 
 /* ======================================================================
@@ -8682,8 +8719,11 @@ bool isNotice(const BandItem &it) {
 }
 
 // How this clock shows an item, for the web app's list: the 64x32 clock has
-// no band.
+// no band, the wall clock has one.
 const char *itemShowsHere(const BandItem &it) {
+#if BAND_ON_PANEL
+  return it.level == LEVEL_ALERT ? "banner, then in the band" : "in the band";
+#endif
   if (isMessage(it))            { return it.level == LEVEL_ALERT ? "banner, then running text" : "running text"; }
   if (it.level == LEVEL_ALERT)  { return "banner"; }
   return "card";
@@ -8917,12 +8957,22 @@ void noticeAdvance(bool nextNotice) {
 // message's icon and then its text, a message's text. Alerts that are not
 // messages and share an icon share one banner, so two warnings that came
 // together do not bring the same banner twice; it shows the most severe.
+//
+// On the wall clock the texts go into the band instead, which takes the
+// first of these notices at once, a message's text running through twice;
+// the alerts' icons still come up over the face.
 void noticeStepsForNew() {
   uint8_t order[BAND_ITEMS_MAX];
   uint8_t n = noticeOrder(order, true);
   noticeStepCount = 0;
   noticeRuns = 2;
   noticeCardsRound = false;
+#if BAND_ON_PANEL
+  if (n) {
+    bandWant = { TURN_ITEM, bandItems[order[0]].feed, bandItems[order[0]].tag };
+    bandWantRuns = isMessage(bandItems[order[0]]) ? 2 : 1;
+  }
+#endif
   for (uint8_t k = 0; k < n; k++) {
     const BandItem &it = bandItems[order[k]];
     noticeSeenAdd(it);
@@ -8941,7 +8991,9 @@ void noticeStepsForNew() {
       continue;
     }
     if (alert)      { noticeAddStep(it, PHASE_ICON); }
+#if !BAND_ON_PANEL
     if (it.text[0]) { noticeAddStep(it, PHASE_TEXT); }
+#endif
   }
 }
 
@@ -8951,7 +9003,9 @@ void noticeStepsForNew() {
 // alert colour, a message's text, each text running through once - whoever
 // asked is looking from the start - and an info card alone: the text is for
 // what is urgent (Peter, 2026-10-11). Over the face only; "nothing to show"
-// when there is nothing. Returns how many items it shows.
+// when there is nothing. Returns how many items it shows. On the wall
+// clock the information is in the band, which starts again at its first
+// item; the notices come over the face as here.
 uint8_t noticesShowAgain() {
   if (screen != SCREEN_FACE) { return 0; }
   uint8_t order[BAND_ITEMS_MAX];
@@ -8966,13 +9020,17 @@ uint8_t noticesShowAgain() {
     if (it.text[0])              { noticeAddStep(it, PHASE_TEXT); }
   }
   uint8_t m = infoOrder(order, false);
+#if BAND_ON_PANEL
+  bandRestart();
+#else
   for (uint8_t k = 0; k < m; k++) {
     const BandItem &it = bandItems[order[k]];
     noticeSeenAdd(it);
     noticeAddStep(it, PHASE_CARD);
   }
+#endif
   Serial.printf("Notifications: %u notices, %u information\n", n, m);
-  if (!noticeStart()) {
+  if (!noticeStart() && m == 0) {
     showBanner("nothing", "to show", 110, 110, 110);
     return 0;
   }
@@ -8999,8 +9057,12 @@ bool faceTimeShown() {
 }
 
 // On every pass: a round's minute begins, and whether its round starts now -
-// the face at rest, with nothing over it, for ROUND_AFTER_FACE_MS.
+// the face at rest, with nothing over it, for ROUND_AFTER_FACE_MS. None on
+// the wall clock, whose band shows the information all the time.
 bool infoRoundReady() {
+#if BAND_ON_PANEL
+  return false;
+#endif
   if (minuteTrigger && feedSettings.roundMinutes && minuteNow % feedSettings.roundMinutes == 0) {
     roundMinuteAt = secondStartedAt;
     faceRestAt = 0;
@@ -9111,8 +9173,13 @@ void noticesUpdate() {
   if (newAny) {
 #if GIF_PLAYBACK
     // An alert at once, over everything but the person at the clock;
-    // messages at the minute's place for them, after a GIF's end.
+    // messages at the minute's place for them, after a GIF's end - on the
+    // wall clock they go into the band, which does not cover the face.
+#if BAND_ON_PANEL
+    if (!newAlert && screen == SCREEN_GIF) {
+#else
     if (!newAlert && (screen == SCREEN_GIF || !infoSlotOpen(noticeNewMs()))) {
+#endif
       noticesPending = true;
       return;
     }
@@ -9122,6 +9189,9 @@ void noticesUpdate() {
     noticeStart();
     return;
   }
+#if BAND_ON_PANEL
+  return;                                                         // the information takes turns in the band
+#endif
   if (screen != SCREEN_FACE) { return; }                          // information waits for a GIF's end
   if ((newInfo || round) && !infoCardsStart(round) && newInfo) { noticesPending = true; }
 }
@@ -9396,12 +9466,14 @@ IconRgb roleRgb(uint8_t role, const IconLook &look) {
     case ROLE_HOT:       return { 255, 20, 0 };
     case ROLE_WAVES:     return { 255, 110, 0 };
     case ROLE_FLAKE:     return { 120, 210, 255 };
+    case ROLE_PAGE:      return { 230, 30, 30 };
     default:             return { 0, 0, 0 };
   }
 }
 
-// An icon at (x, y), its top left corner, each part in its colour.
-void drawItemIcon(int16_t x, int16_t y, const IconLook &look) {
+// An icon at (x, y), its top left corner, each part in its colour: on the
+// panel's canvas, or into another picture (the wall's band).
+void drawItemIconOn(Adafruit_GFX &g, int16_t x, int16_t y, const IconLook &look) {
   const IconBits &pic = iconPicture(look.icon, look.intensity);
   uint16_t colour[3];
   for (uint8_t p = 0; p < 3; p++) {
@@ -9413,10 +9485,12 @@ void drawItemIcon(int16_t x, int16_t y, const IconLook &look) {
     for (uint8_t c = 0; c < ICON_SIZE; c++) {
       uint8_t bit = ICON_SIZE - 1 - c;
       uint8_t part = (uint8_t)((((hi >> bit) & 1u) << 1) | ((lo >> bit) & 1u));
-      if (part) { matrix.drawPixel(x + c, y + r, colour[part - 1]); }
+      if (part) { g.drawPixel(x + c, y + r, colour[part - 1]); }
     }
   }
 }
+
+void drawItemIcon(int16_t x, int16_t y, const IconLook &look) { drawItemIconOn(matrix, x, y, look); }
 
 #if defined(CLOCK_DEBUG)
 // At start-up: the icon each DWD event gets (feedWarningIcon()). The first
@@ -9561,6 +9635,296 @@ void drawRunBanner() {
   matrix.show();
   panelDirty = false;
 }
+
+#if BAND_ON_PANEL
+/* ----------------------------------------------------------------------
+   The info band on the wall clock: the 192x32 below the face (concept doc,
+   section "Info band"). It shows what the clock knows, one item after the
+   other, each with its icon and its text in two lines of the 5x7 font beside
+   it (the mock-up of 2026-10-05): the alerts first, then the messages, each
+   in the order they came, then the information in its order (infoOrder()),
+   then the date. An item stands BAND_TURN_MS, or, when its text does not fit
+   the two lines, as long as the text takes to run through once. An alert is
+   in its level's colour, framed when the frames are on. A new alert or
+   message takes the band at once, a message's text twice (bandWant); the
+   alert's banner comes over the face as on the 64x32 clock. Show
+   notifications starts the band again at its first item. A GIF covers the
+   band as it covers the face; the hotspot leaves it dark. Its state is with
+   the notices' (bandTurn).
+   ---------------------------------------------------------------------- */
+
+// The item a turn shows; -1 for the date, or when the item has gone.
+int8_t bandItemOf(const BandTurn &t) {
+  if (t.kind != TURN_ITEM) { return -1; }
+  for (uint8_t i = 0; i < bandItemCount; i++) {
+    if (bandItems[i].feed == t.feed && bandItems[i].tag == t.tag) { return (int8_t)i; }
+  }
+  return -1;
+}
+
+bool bandTurnSame(const BandTurn &a, const BandTurn &b) {
+  return a.kind == b.kind && a.feed == b.feed && a.tag == b.tag;
+}
+
+// Every turn in the band's order; returns how many.
+uint8_t bandTurnList(BandTurn *t) {
+  uint8_t order[BAND_ITEMS_MAX], n = 0;
+  uint8_t k = noticeOrder(order, false);   // alerts, then messages
+  for (uint8_t i = 0; i < k; i++) { t[n++] = { TURN_ITEM, bandItems[order[i]].feed, bandItems[order[i]].tag }; }
+  k = infoOrder(order, false);
+  for (uint8_t i = 0; i < k; i++) { t[n++] = { TURN_ITEM, bandItems[order[i]].feed, bandItems[order[i]].tag }; }
+  if (clockIsSet()) { t[n++] = { TURN_DATE, 0, 0 }; }
+  return n;
+}
+
+// The icon an item has in the band: an alert's own or the warning sign, any
+// other item's own or none.
+uint8_t bandIconOf(const BandItem &it) {
+  if (it.level == LEVEL_ALERT) { return noticeIcon(it); }
+  return it.icon < ICON_COUNT ? it.icon : ICON_NONE;
+}
+
+// What a turn shows, as a number, so the band sees its item change (a new
+// temperature, a warning that got worse) or the day turn.
+uint32_t bandLook(const BandTurn &t) {
+  if (t.kind == TURN_DATE) { return (uint32_t)(localTime / 86400); }
+  int8_t i = bandItemOf(t);
+  if (i < 0) { return 0; }
+  const BandItem &it = bandItems[i];
+  uint32_t h = itemTag(it.text);
+  const uint8_t parts[] = { it.icon, it.level, it.severity, it.intensity, it.chance };
+  for (uint8_t p : parts) { h = (h ^ p) * 16777619u; }
+  return h;
+}
+
+// A text in two lines of up to `chars` characters, broken between words;
+// false when it does not fit them.
+bool bandWrap(const char *s, uint8_t chars, char lines[2][32]) {
+  lines[0][0] = lines[1][0] = '\0';
+  for (uint8_t l = 0; l < 2; l++) {
+    while (*s == ' ') { s++; }
+    if (strlen(s) <= chars) {
+      strlcpy(lines[l], s, sizeof(lines[l]));
+      return true;
+    }
+    if (l == 1) { return false; }
+    int cut = -1;
+    for (int i = chars; i > 0 && cut < 0; i--) { if (s[i] == ' ') { cut = i; } }
+    if (cut < 0) { return false; }   // a word longer than a line
+    memcpy(lines[l], s, (size_t)cut);
+    lines[l][cut] = '\0';
+    s += cut;
+  }
+  return false;
+}
+
+// The ISO 8601 week of a date: the week with the year's first Thursday is 1.
+// yday and wday as struct tm has them (0 = 1 January, 0 = Sunday).
+int isoWeek(int year, int yday, int wday) {
+  auto weeks = [](int y) {   // 53 when the year starts on a Thursday, or a leap year on a Wednesday
+    auto p = [](int v) { return (v + v / 4 - v / 100 + v / 400) % 7; };
+    return 52 + ((p(y) == 4 || p(y - 1) == 3) ? 1 : 0);
+  };
+  int isoDay = wday == 0 ? 7 : wday;
+  int week = (yday + 1 - isoDay + 10) / 7;
+  if (week < 1) { return weeks(year - 1); }
+  if (week > weeks(year)) { return 1; }
+  return week;
+}
+
+// The date in the clock's language: "Sunday 18 October" and "2026, week 42".
+void bandDateLines() {
+  static const char *const DAYS[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+  static const char *const MONTHS[] = { "January", "February", "March", "April", "May", "June", "July",
+                                        "August", "September", "October", "November", "December" };
+  struct tm t;
+  gmtime_r(&localTime, &t);
+  snprintf(bandLine[0], sizeof(bandLine[0]), "%s %d %s", DAYS[t.tm_wday], t.tm_mday, MONTHS[t.tm_mon]);
+  snprintf(bandLine[1], sizeof(bandLine[1]), "%d, week %d", t.tm_year + 1900,
+           isoWeek(t.tm_year + 1900, t.tm_yday, t.tm_wday));
+}
+
+// The band's picture as the turn stands, onto the wall.
+void bandDraw() {
+  GFXcanvas16 &b = bandPicture;
+  b.fillScreen(0);
+  int8_t i = bandItemOf(bandTurn);
+  if (bandTurn.kind == TURN_NONE || (bandTurn.kind == TURN_ITEM && i < 0)) {
+    matrix.showBand(b.getBuffer());
+    return;
+  }
+  IconLook look = { ICON_CALENDAR, 0, INTENSITY_NONE, CHANCE_UNKNOWN };
+  uint16_t ink = scaledColorVisible(235, 235, 235);
+  bool frame = false;
+  if (i >= 0) {
+    const BandItem &it = bandItems[i];
+    look = { bandIconOf(it), it.severity, it.intensity, it.chance };
+    if (it.level == LEVEL_ALERT) {
+      IconRgb c = levelRgb(it.severity);
+      ink = scaledColorVisible(c.r, c.g, c.b);
+      frame = feedSettings.frames;
+    }
+  }
+  int16_t tx = look.icon != ICON_NONE ? BAND_TEXT_X : BAND_TEXT_X_BARE;
+  b.setFont();          // the built-in 5x7 font, code page 437
+  b.setTextSize(1);
+  b.setTextWrap(false);
+  b.cp437(true);
+  b.setTextColor(ink);
+  if (bandRunText[0]) {
+    uint32_t moved = (uint32_t)(millisNow - bandTurnAt) * RUN_PX_PER_S / 1000UL;
+    uint32_t pass = bandRunWidth + (WALL_W - tx);
+    int16_t x = moved >= bandTurnRuns * pass ? -(int16_t)bandRunWidth : WALL_W - (int16_t)(moved % pass);
+    bandRunLastX = x;
+    b.setCursor(x, BAND_MID_Y);
+    b.print(bandRunText);
+    b.fillRect(0, 0, tx, WALL_BAND_H, 0);   // it runs in and out beside the icon
+  } else if (bandLine[1][0]) {
+    b.setCursor(tx, BAND_LINE_Y[0]);
+    b.print(bandLine[0]);
+    b.setCursor(tx, BAND_LINE_Y[1]);
+    b.print(bandLine[1]);
+  } else {
+    b.setCursor(tx, BAND_MID_Y);
+    b.print(bandLine[0]);
+  }
+  b.cp437(false);
+  if (look.icon != ICON_NONE) { drawItemIconOn(b, BAND_ICON_X, BAND_ICON_Y, look); }
+  if (frame) { b.drawRect(0, 0, WALL_W, WALL_BAND_H, ink); }
+  matrix.showBand(b.getBuffer());
+}
+
+// Puts a turn on the band, its text running through `runs` times - or, when
+// it fits the two lines, standing `runs` x BAND_TURN_MS.
+void bandStart(const BandTurn &t, uint8_t runs) {
+  bandTurn     = t;
+  bandTurnAt   = millisNow ? millisNow : 1;
+  bandTurnRuns = runs;
+  bandTurnLook = bandLook(t);
+  bandTurnMs   = BAND_TURN_MS * runs;
+  bandRunText[0] = '\0';
+  bandRunLastX = INT16_MIN;
+  int8_t i = bandItemOf(t);
+  if (t.kind == TURN_DATE) {
+    bandDateLines();
+  } else if (i >= 0) {
+    const BandItem &it = bandItems[i];
+    char text[sizeof(it.text)];
+    textToCp437(text, it.text, sizeof(text));
+    int16_t tx = bandIconOf(it) != ICON_NONE ? BAND_TEXT_X : BAND_TEXT_X_BARE;
+    if (!bandWrap(text, (uint8_t)((WALL_W - tx - 2) / 6), bandLine)) {
+      strlcpy(bandRunText, text, sizeof(bandRunText));
+      bandRunWidth = (uint16_t)(strlen(bandRunText) * 6);   // 5 px a character and 1 between
+      unsigned long ms = (unsigned long)runs * (bandRunWidth + (WALL_W - tx)) * 1000UL / RUN_PX_PER_S;
+      bandTurnMs = max(ms, BAND_TURN_MS);
+    }
+  }
+  bandDraw();
+}
+
+// The turn after the one on show, in the band's order; the first when that
+// one has gone. Nothing to show: the band dark, and a look again later.
+void bandNext() {
+  BandTurn list[BAND_ITEMS_MAX + 1];
+  uint8_t n = bandTurnList(list);
+  if (n == 0) {
+    bandTurn   = { TURN_NONE, 0, 0 };
+    bandTurnAt = millisNow ? millisNow : 1;
+    bandTurnMs = BAND_TURN_MS;
+    bandDraw();
+    return;
+  }
+  uint8_t next = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    if (bandTurnSame(list[i], bandTurn)) { next = (uint8_t)((i + 1) % n); break; }
+  }
+  bandStart(list[next], 1);
+}
+
+// Show notifications: the band again from its first item.
+void bandRestart() {
+  bandTurn   = { TURN_NONE, 0, 0 };
+  bandTurnAt = 0;
+}
+
+// On every pass outside the hotspot.
+void bandUpdate() {
+  if (screen == SCREEN_GIF) { return; }   // a GIF has the whole wall
+  bandHidden = false;
+  if (bandWant.kind != TURN_NONE) {
+    BandTurn w = bandWant;
+    bandWant.kind = TURN_NONE;
+    if (bandItemOf(w) >= 0) {
+      bandStart(w, bandWantRuns);
+      return;
+    }
+  }
+  bool gone = bandTurn.kind == TURN_ITEM && bandItemOf(bandTurn) < 0;
+  if (bandTurnAt == 0 || millisNow - bandTurnAt >= bandTurnMs || gone) {
+    bandNext();
+    return;
+  }
+  if (bandTurn.kind != TURN_NONE && bandLook(bandTurn) != bandTurnLook) {   // its item changed, or the day
+    bandStart(bandTurn, bandTurnRuns);
+    return;
+  }
+  if (bandRunText[0]) {
+    int16_t tx = bandIconOf(bandItems[bandItemOf(bandTurn)]) != ICON_NONE ? BAND_TEXT_X : BAND_TEXT_X_BARE;
+    uint32_t moved = (uint32_t)(millisNow - bandTurnAt) * RUN_PX_PER_S / 1000UL;
+    uint32_t pass = bandRunWidth + (WALL_W - tx);
+    int16_t x = moved >= bandTurnRuns * pass ? -(int16_t)bandRunWidth : WALL_W - (int16_t)(moved % pass);
+    if (x != bandRunLastX) { bandDraw(); return; }
+  }
+  if (matrix.bandStale()) { bandDraw(); }   // a GIF, a test picture or a new brightness wrote over it
+}
+
+#if defined(CLOCK_DEBUG)
+// At start-up: the ISO weeks of dates around the turn of the year (2026 has
+// 53 weeks, 2020 too), and how texts break into the band's two lines.
+void bandSelfTest() {
+  struct Week { int y, m, d, week; };
+  static const Week WEEKS[] = {
+    { 2026, 1, 1, 1 }, { 2026, 10, 18, 42 }, { 2026, 10, 19, 43 }, { 2026, 12, 31, 53 }, { 2027, 1, 1, 53 },
+    { 2027, 1, 4, 1 }, { 2024, 12, 30, 1 }, { 2021, 1, 3, 53 }, { 2025, 12, 29, 1 },
+  };
+  uint8_t wrong = 0;
+  for (const Week &w : WEEKS) {
+    time_t t = (time_t)daysFromCivil(w.y, (unsigned)w.m, (unsigned)w.d) * 86400;
+    struct tm v;
+    gmtime_r(&t, &v);
+    int got = isoWeek(v.tm_year + 1900, v.tm_yday, v.tm_wday);
+    if (got != w.week) { wrong++; Serial.printf("Band: %d-%02d-%02d is week %d, not %d\n", w.y, w.m, w.d, got, w.week); }
+  }
+  struct Wrap { const char *text; bool fits; const char *first, *second; };
+  static const Wrap WRAPS[] = {
+    { "10\xF8" "C overcast, 10/8\xF8" "C, rain 100%", true, "10\xF8" "C overcast, 10/8\xF8" "C,", "rain 100%" },
+    { "Rain from 15:15", true, "Rain from 15:15", "" },
+    { "abcdefghijklmnopqrstuvwxyz", true, "abcdefghijklmnopqrstuvwxyz", "" },
+    { "abcdefghijklmnopqrstuvwxyz0", false, "", "" },
+    { "One two three four five six seven eight nine ten eleven", false, "", "" },
+  };
+  for (const Wrap &w : WRAPS) {
+    char lines[2][32];
+    bool fits = bandWrap(w.text, 26, lines);
+    if (fits != w.fits || (fits && (strcmp(lines[0], w.first) != 0 || strcmp(lines[1], w.second) != 0))) {
+      wrong++;
+      Serial.printf("Band: \"%s\" gave %s \"%s\" / \"%s\"\n", w.text, fits ? "two lines" : "no fit", lines[0], lines[1]);
+    }
+  }
+  Serial.printf("Band self-test: %s, %u cases\n", wrong ? "FAILED" : "all right",
+                (unsigned)(sizeof(WEEKS) / sizeof(WEEKS[0]) + sizeof(WRAPS) / sizeof(WRAPS[0])));
+}
+#endif
+
+// While the hotspot has the panel: the band dark, once; it starts again after.
+void bandHide() {
+  if (bandHidden) { return; }
+  bandHidden = true;
+  bandRestart();
+  bandPicture.fillScreen(0);
+  matrix.showBand(bandPicture.getBuffer());
+}
+#endif
 
 // A fetch that did not work: again after 1, 2, 4 ... minutes, never later
 // than the source's own interval. Its items stay until they run out.

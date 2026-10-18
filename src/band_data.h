@@ -30,13 +30,13 @@ enum ItemLevel : uint8_t { LEVEL_INFO, LEVEL_ALERT };
 enum ItemIcon : uint8_t {
   ICON_NONE, ICON_CLEAR_DAY, ICON_CLEAR_NIGHT, ICON_PARTLY_DAY, ICON_PARTLY_NIGHT, ICON_CLOUDY,
   ICON_FOG, ICON_DRIZZLE, ICON_RAIN, ICON_SNOW, ICON_THUNDER, ICON_WARNING,
-  ICON_WIND, ICON_FROST, ICON_HEAT, ICON_COUNT
+  ICON_WIND, ICON_FROST, ICON_HEAT, ICON_CALENDAR, ICON_COUNT
 };
 
 // The icons by name, as Home Assistant gives them, in ItemIcon's order.
 const char *const ITEM_ICON_NAMES[ICON_COUNT] = {
   "", "clear-day", "clear-night", "partly-day", "partly-night", "cloudy",
-  "fog", "drizzle", "rain", "snow", "thunder", "warning", "wind", "frost", "heat",
+  "fog", "drizzle", "rain", "snow", "thunder", "warning", "wind", "frost", "heat", "calendar",
 };
 
 // How heavy rain or snow is (BandItem::intensity); its icon shows it by the

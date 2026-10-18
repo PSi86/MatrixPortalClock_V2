@@ -281,6 +281,7 @@ const uint8_t WALL_CHAIN = 6;
 // top; the 192x32 below it is the info band's (concept doc, wall clock B).
 const uint8_t WALL_SCALE = 3;
 const int16_t WALL_CANVAS_X = 0, WALL_CANVAS_Y = 0;
+const int16_t WALL_BAND_Y = 96, WALL_BAND_H = 32;   // the band's rows, below the canvas (showBand())
 // The panels' supply gives 7.5 A at most (Peter, 2026-10-18). Measured on its
 // 5 V side the same day (bus at 16 MHz, buffer in PSRAM): the wall dark 555 mA,
 // one panel in white 564-567 mA more at brightness 160 and 451 mA at 128, so
@@ -346,6 +347,8 @@ class PanelCanvas : public GFXcanvas16 {
     if (!_held[0]) { return false; }
     // Without it native pictures are written whole every frame (wallRow()).
     _shown = (uint8_t *)heap_caps_malloc((size_t)WALL_W * WALL_H * 3, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // And without this the band (showBand()).
+    _bandHeld = (uint16_t *)heap_caps_malloc((size_t)WALL_W * WALL_BAND_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #else
     HUB75_I2S_CFG::i2s_pins pins = {
       (int8_t)rgb[0], (int8_t)rgb[1], (int8_t)rgb[2], (int8_t)rgb[3], (int8_t)rgb[4], (int8_t)rgb[5],
@@ -538,13 +541,48 @@ class PanelCanvas : public GFXcanvas16 {
   }
 
   // After a native picture: the rows below the canvas dark again (the canvas
-  // rows are written whole, forgetHeld()).
+  // rows are written whole, forgetHeld()), until showBand() fills the band's.
   void endNative() {
     static uint8_t dark[WALL_W * 3] = {};
     for (int16_t y = WALL_CANVAS_Y + HEIGHT * WALL_SCALE; y < WALL_H; y++) { wallSpan(0, y, WALL_W, dark); }
     _native = false;
     _shownValid = false;
+    _bandStale = true;
   }
+
+  // The info band in the wall's own LEDs below the canvas: a picture of
+  // WALL_W x WALL_BAND_H in canvas colours, turned into driver values through
+  // the same tables as the canvas. Only what changed since the last call is
+  // written, a run of neighbours at a time - all of it after anything else
+  // wrote over its rows (a GIF, a test picture, another brightness). Nothing
+  // while a GIF or a test picture holds the wall.
+  void showBand(const uint16_t *src) {
+    if (!_dma || _testing || _native || !src) { _bandStale = true; return; }
+    static uint8_t run[WALL_W * 3];
+    for (int16_t y = 0; y < WALL_BAND_H; y++) {
+      const uint16_t *s = src + y * WALL_W;
+      uint16_t *held = _bandHeld ? _bandHeld + y * WALL_W : nullptr;
+      int16_t x = 0;
+      while (x < WALL_W) {
+        if (held && !_bandStale && s[x] == held[x]) { x++; continue; }
+        int16_t from = x;
+        uint8_t *o = run;
+        while (x < WALL_W && (!held || _bandStale || s[x] != held[x])) {
+          uint16_t c = s[x];
+          uint8_t r = c >> 11, g = (c >> 5) & 0x3F, b = c & 0x1F;
+          *o++ = _lut[0][(r << 3) | (r >> 2)];
+          *o++ = _lut[1][(g << 2) | (g >> 4)];
+          *o++ = _lut[2][(b << 3) | (b >> 2)];
+          if (held) { held[x] = c; }
+          x++;
+        }
+        wallSpan(from, WALL_BAND_Y + y, x - from, run);
+      }
+    }
+    _bandStale = false;
+    writeBackRows();
+  }
+  bool bandStale() const { return _bandStale; }
   // The light of each bit plane, out of 65535 for the value 255, reckoned from
   // how the driver (3.0.15) shows them: each plane once at the start of a
   // row, then the planes above its lsbMsbTransition() again 2^(i - t - 1)
@@ -625,7 +663,12 @@ class PanelCanvas : public GFXcanvas16 {
 
   // After a picture was drawn straight into the driver (driver() below), the
   // copies no longer tell what its buffers hold: the next shows write all.
-  void forgetHeld() { _stale[0] = _stale[1] = true; }
+  void forgetHeld() {
+    _stale[0] = _stale[1] = true;
+#if BOARD_WAVESHARE_WALL
+    _bandStale = true;   // and the band's next showBand()
+#endif
+  }
 
   // Brightness of the whole panel, 0..255: 0 switches it dark (through the OE
   // time), anything else sets the light the colour values give (see above),
@@ -727,8 +770,8 @@ class PanelCanvas : public GFXcanvas16 {
   void endTestPicture() {
     if (!_testing) { return; }
     _testing = false;
-    for (int16_t y = 0; y < WALL_H; y++) { wallLine(0, y, WALL_W, 0, 0, 0); }   // the band stays dark
-    forgetHeld();   // the next show() writes the whole picture again
+    for (int16_t y = 0; y < WALL_H; y++) { wallLine(0, y, WALL_W, 0, 0, 0); }
+    forgetHeld();   // the next show() and showBand() write the whole picture again
   }
   bool testing() const { return _testing; }
 
@@ -849,6 +892,8 @@ class PanelCanvas : public GFXcanvas16 {
   bool      _shownValid = false;  // ... and nothing wrote over it since
   uint32_t  _touched = 0;         // driver rows written since the last writeBackRows(), a bit each
   uint16_t  _planeLight[8] = {};  // reckonPlaneLight()
+  uint16_t *_bandHeld = nullptr;  // what showBand() left in the band's rows, canvas colours (PSRAM)
+  bool      _bandStale = true;    // ... and something wrote over them since
 #endif
   uint16_t  _light[3][256];
   uint8_t   _order[3][256];

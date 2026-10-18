@@ -496,7 +496,7 @@ the card shows its topics.
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
-`thunder`, `warning`, `wind`, `frost`, `heat`. The optional fields change how
+`thunder`, `warning`, `wind`, `frost`, `heat`, `calendar`. The optional fields change how
 the icon looks:
 
 - `severity`: a warning's level, as the DWD names them - `minor`, `moderate`,

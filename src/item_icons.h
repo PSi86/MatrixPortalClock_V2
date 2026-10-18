@@ -27,6 +27,7 @@ const uint8_t ICON_SIZE = 24;
 enum IconRole : uint8_t {
   ROLE_NONE, ROLE_CLOUD, ROLE_CLOUD_WET, ROLE_SUN, ROLE_RAYS, ROLE_MOON, ROLE_FOG, ROLE_RAIN, ROLE_SNOW,
   ROLE_BOLT, ROLE_LEVEL, ROLE_MARK, ROLE_WIND, ROLE_GLASS, ROLE_COLD, ROLE_HOT, ROLE_WAVES, ROLE_FLAKE,
+  ROLE_PAGE,
 };
 
 // One row of an icon: the part of each pixel, 0 for dark, as two bit planes
@@ -431,6 +432,33 @@ constexpr IconBits ICON_PICTURES[PIC_COUNT] = {
     iconRow(".....#.++++.#..........."),
     iconRow(".....###..###..........."),
     iconRow(".......####............."),
+  }},
+  {{ ROLE_MARK, ROLE_PAGE, ROLE_NONE },   // ICON_CALENDAR, today in the colour of its head
+   {
+    iconRow("........................"),
+    iconRow("......##........##......"),
+    iconRow("..++++##++++++++##++++.."),
+    iconRow("..++++##++++++++##++++.."),
+    iconRow("..++++++++++++++++++++.."),
+    iconRow("..++++++++++++++++++++.."),
+    iconRow("..++++++++++++++++++++.."),
+    iconRow("..####################.."),
+    iconRow("..#..................#.."),
+    iconRow("..#..##..##..##..##..#.."),
+    iconRow("..#..##..##..##..##..#.."),
+    iconRow("..#..................#.."),
+    iconRow("..#..##..##..++..##..#.."),
+    iconRow("..#..##..##..++..##..#.."),
+    iconRow("..#..................#.."),
+    iconRow("..#..##..##..##..##..#.."),
+    iconRow("..#..##..##..##..##..#.."),
+    iconRow("..#..................#.."),
+    iconRow("..#..##..##..##..##..#.."),
+    iconRow("..#..##..##..##..##..#.."),
+    iconRow("..#..................#.."),
+    iconRow("..####################.."),
+    iconRow("........................"),
+    iconRow("........................"),
   }},
   {{ ROLE_CLOUD_WET, ROLE_RAIN, ROLE_NONE },   // PIC_RAIN_LIGHT
    {
