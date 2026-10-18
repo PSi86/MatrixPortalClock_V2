@@ -1,0 +1,12 @@
+{
+  "name": "ESP32 HUB75 LED MATRIX PANEL DMA Display - wall clock copy",
+  "version": "3.0.15-wall.1",
+  "description": "ESP32-HUB75-MatrixPanel-DMA 3.0.15 by MrCodetastic, copied for the wall clock build (env waveshare_wallclock) with writeBackRow(), rowsPerFrame() and lsbMsbTransition() added. See README.md.",
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

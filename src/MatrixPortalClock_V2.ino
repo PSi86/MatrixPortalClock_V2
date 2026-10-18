@@ -297,7 +297,11 @@ GifSettings gifSettings;
 SettingsStore<GifSettings> gifStore;
 
 // GIF playback state (the section "GIF playback" at the end of the sketch).
+#if BOARD_WAVESHARE_WALL
+const int     GIF_CANVAS_MAX = WALL_W * WALL_H;   // GIFs play in the wall's own LEDs, up to 192x128
+#else
 const int     GIF_CANVAS_MAX = 64 * 32;      // pixels of the largest GIF that fits the 64x32 panel either way round
+#endif
 // The decoder and the canvas only while a GIF plays: 30 KB of RAM the rest of
 // the time, the hotspot's time included, has better uses.
 struct GifPlayer { AnimatedGIF decoder; uint8_t canvas[GIF_CANVAS_MAX * 3]; };
@@ -705,12 +709,14 @@ struct Button {
   InputFunction holding;      // what its hold event started, running until it is let go
 };
 
+#if BOARD_BUTTON_COUNT
 Button buttons[] = {
   { UP_BUTTON_PIN,   EV_UP_SHORT,   EV_UP_2X,   EV_UP_3X,   EV_UP_HOLD,   EV_UP_HOLD_REPEAT,
     BTN_RELEASED, 0, 0, 0, 0, 0, FN_NONE },
   { DOWN_BUTTON_PIN, EV_DOWN_SHORT, EV_DOWN_2X, EV_DOWN_3X, EV_DOWN_HOLD, EV_DOWN_HOLD_REPEAT,
     BTN_RELEASED, 0, 0, 0, 0, 0, FN_NONE },
 };
+#endif
 
 // Gesture sensor -----------------------------------------------------------
 // A PAJ7620U2 on the I2C bus (0x73), optional, found at boot or not at all. It
@@ -878,6 +884,22 @@ bool dstAutoActive = false;           // DST_AUTO: whether summer time is in eff
 #define AP_SSID "MatrixClock"
 #define AP_PASS "clock1234"   // must be >= 8 characters
 bool        apActive = false;
+#if BOARD_BUTTON_COUNT == 0
+// A clock without buttons whose gesture sensor was not found has no input to
+// open the hotspot with. It needs the hotspot only when it cannot reach its
+// home WiFi (Peter, 2026-10-18, in place of the 5 minutes after every
+// power-up of 2026-10-04); otherwise the web app on the home network, on
+// from the start on such a clock (loadLanSettings()), is its way in:
+// - no home WiFi stored: the hotspot opens at the start and stays open;
+// - the stored one does not connect for AP_FALLBACK_MS: the hotspot opens for
+//   AP_AUTO_OPEN_MS, closes then unless a phone is on it, and the clock tries
+//   its WiFi again.
+const unsigned long AP_FALLBACK_MS  = 2UL * 60UL * 1000UL;
+const unsigned long AP_AUTO_OPEN_MS = 5UL * 60UL * 1000UL;
+unsigned long apAutoCloseAt = 0;       // millis() it closes itself; 0 = it does not
+unsigned long apAutoCheckLast = 0;
+unsigned long joinTroubleSince = 0;    // millis() the station started failing to connect; 0 = it does not
+#endif
 unsigned long apStatusLast = 0;        // last time the AP connection status was polled
 unsigned long apNoStationSince = 0;    // preview: since when no phone is connected; 0 = one is
 const unsigned long AP_NO_STATION_MS = 5000;   // then the info screen comes back
@@ -1034,10 +1056,10 @@ bool    accelOK = false;          // true once the LIS3DH was found on I2C
 //   the device rotation; the hotspot info screen is landscape however the panel
 //   is held, so the two differ while it is up.
 const uint8_t ROTATION_NONE = 0xFF;   // sensorRotation(): the sensor cannot tell
-uint8_t deviceRotation = 3;       // 3 = portrait, today's default
-uint8_t screenRotation = 3;
+uint8_t deviceRotation = BOARD_DEFAULT_ROTATION;   // MatrixPortal: 3 = portrait; wall clock: 0
+uint8_t screenRotation = BOARD_DEFAULT_ROTATION;
 unsigned long orientLast = 0;     // last accelerometer poll (throttle)
-uint8_t orientCandidate = 3;      // debounce: rotation the sensor currently favours
+uint8_t orientCandidate = BOARD_DEFAULT_ROTATION;   // debounce: rotation the sensor currently favours
 uint8_t orientStable = 0;         // consecutive polls the candidate has held
 const unsigned long ORIENT_POLL_MS = 250; // ~4 Hz orientation polling
 const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persist
@@ -1392,10 +1414,14 @@ void setup(void) {
   prevBootStage = boardBootStageRead();
   boardBootStageWrite(BOOT_STAGE_START);
 
+#if BOARD_BUTTON_COUNT
   pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
   pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
+#endif
+#if BOARD_HAS_FEEDBACK_LED
   pinMode(FEEDBACK_LED_PIN, OUTPUT);
   digitalWrite(FEEDBACK_LED_PIN, LOW);
+#endif
   loadSettings(); // pulls brightness/colors/animation/tz from flash (or writes defaults)
   loadUiSettings();
 #if GIF_PLAYBACK
@@ -1419,7 +1445,9 @@ void setup(void) {
   // Onboard LIS3DH accelerometer -> automatic screen rotation. If it is not
   // found the clock simply stays in the default portrait orientation.
   Wire.begin();
+#if BOARD_HAS_ACCEL
   accelOK = lis.begin(ACCEL_I2C_ADDR); // onboard, non-standard address on both boards
+#endif
   if (accelOK) {
     lis.setRange(LIS3DH_RANGE_2_G);
     // 100 Hz, not 10: a knock lasts about as long as one 10 Hz sample, so at
@@ -1430,7 +1458,11 @@ void setup(void) {
     shakeSensorBegin();   // let the sensor itself watch for a knock
 #endif
   } else {
+#if BOARD_HAS_ACCEL
     Serial.println("LIS3DH not found - orientation locked to portrait");
+#else
+    Serial.println("No LIS3DH on this board - the clock stays in landscape");
+#endif
   }
 
   // External BH1750 ambient light sensor -> auto-brightness. Shares the I2C bus
@@ -1460,11 +1492,14 @@ void setup(void) {
 #endif
 
   // Initialize matrix...
-  matrix.setRotation(3); //1
+  matrix.setRotation(BOARD_DEFAULT_ROTATION);
   matrix.setTextWrap(false);      // Allow text off edge
 #if PANEL_DRIVER_DMA
   bool matrixOk = matrix.begin();
   Serial.println(matrixOk ? "Panel driver started" : "Panel driver FAILED");
+#if defined(CLOCK_DEBUG)
+  debugMemoryLog();
+#endif
   matrix.setBrightness(panelBrightness());     // the canvas colours are shares of it
 #else
   ProtomatterStatus matrixstatus = matrix.begin();
@@ -1472,7 +1507,7 @@ void setup(void) {
   Serial.println((int)matrixstatus);
   bool matrixOk = (matrixstatus == PROTOMATTER_OK);
 #endif
-  matrix.setRotation(3); //1
+  matrix.setRotation(BOARD_DEFAULT_ROTATION);
   if(!matrixOk) {
     // DO NOT CONTINUE if matrix setup encountered an error. The delay keeps the
     // ESP32's task watchdog fed so the board reports the error instead of
@@ -1507,17 +1542,27 @@ void setup(void) {
   // button held through the start has done its job with that: held on, it
   // would otherwise count as a hold once the loop runs - and holding UP on
   // the hotspot screen closes it again.
+#if BOARD_BUTTON_COUNT
   for (Button &b : buttons) {
     if (digitalRead(b.pin) == LOW) { b.phase = BTN_SPENT; }
   }
   if (digitalRead(UP_BUTTON_PIN) == LOW) {
     handleInput(EV_UP_AT_BOOT, 1);
   }
+#endif
   // The same for a hand held over the gesture sensor - the only way on a clock
   // without buttons.
   if (!apActive && gestureHeldAtBoot()) {
     handleInput(EV_APPROACH_AT_BOOT, 1);
   }
+#if BOARD_BUTTON_COUNT == 0
+  // No buttons and no gesture sensor, and no home WiFi to join: the hotspot is
+  // the only way to set the clock up, so it opens and stays open.
+  if (!apActive && !gestureOK && !wifiStored()) {
+    startAPMode();
+    Serial.println("No input fitted and no home WiFi stored: the hotspot stays open");
+  }
+#endif
 
   // Start joining the home WiFi, without waiting for it: the clock comes up at
   // once and the join and the first sync run in the loop (SYNC_JOINING). The
@@ -1552,6 +1597,10 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
+#if BOARD_WAVESHARE_WALL
+  wallConsole();  // "black" on the USB console before a flash, test pictures
+  if (matrix.testing()) { delay(5); return; }   // a test picture stands: the clock draws nothing
+#endif
 #if WATCHFACE_MUNCHER && defined(CLOCK_DEBUG)
   // Ten seconds in, so the console has come back after a restart.
   static bool muncherTested = false;
@@ -1573,6 +1622,7 @@ void loop(void) {
 #if defined(CLOCK_DEBUG)
   static bool dstTested = false;
   if (!dstTested && millisNow > 10000) { dstTested = true; dstSelfTest(); }
+  debugMemoryLog();
 #endif
   updateInput();  // buttons -> events -> whatever the profile maps them to on this screen
 
@@ -1581,6 +1631,10 @@ void loop(void) {
     uint32_t apT0 = micros();
 #endif
     apWatchdog();      // re-create the AP if the ESP32 silently rebooted
+#if BOARD_BUTTON_COUNT == 0
+    apAutoClose();     // the hotspot that opened by itself, once its time is up
+    if (!apActive) { return; }
+#endif
     handleAP();        // captive-portal DNS + web UI + live settings updates
 #if defined(CLOCK_DEBUG)
     uint32_t apT1 = micros();
@@ -1595,6 +1649,10 @@ void loop(void) {
   }
 
   stationUpdate();      // the home WiFi while the sync, the info band or the web app needs it
+#if BOARD_BUTTON_COUNT == 0
+  apFallback();         // no input to open the hotspot with: it opens when the WiFi fails
+  if (apActive) { return; }
+#endif
 #if WEBUI_APP
   lanUpdate();          // the web app on the home network
 #endif
@@ -2684,6 +2742,20 @@ void placeFlight(uint8_t i, uint16_t iters) {
 // over (with double buffering it waits for the next panel refresh).
 struct FrameStats { uint32_t frames, drawSum, drawMax, showSum, showMax, since; };
 FrameStats frameStats = {};
+
+// Debug build only: the RAM every 30 s - internal free, its lowest since the
+// start and its largest free block, and the free PSRAM. The panel driver's
+// buffer, the WiFi and the TLS sessions all want internal RAM.
+void debugMemoryLog() {
+  static unsigned long last = 0;
+  if (last != 0 && millisNow - last < 30000) { return; }
+  last = millisNow ? millisNow : 1;
+  Serial.printf("RAM: internal free %u, lowest %u, largest block %u; PSRAM free %u\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
 
 // Debug build only: the loop while the hotspot is up, printed every 2 s - how
 // often it ran, how long the web side (handleAP) and the panel side (preview)
@@ -5430,7 +5502,8 @@ int8_t faceEventIndex(InputEvent ev) {
 }
 
 // Whether the source of a face event was found: the buttons always, the knock
-// with the accelerometer, the gestures with the gesture sensor.
+// with the accelerometer, the gestures with the gesture sensor. (The wall clock
+// has no buttons.)
 bool faceEventFitted(InputEvent ev) {
   // The knock is sensed by the Tetris face's code (updateShake()), so a board
   // without it - the M4 - has no knock, accelerometer or not.
@@ -5438,7 +5511,11 @@ bool faceEventFitted(InputEvent ev) {
   if (ev == EV_WAVE) { return false; }   // not read: too unreliable (updateGestures())
   if (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) { return false; }   // left out (gestureLeftOut())
   if (isGestureEvent(ev)) { return gestureOK; }
+#if BOARD_BUTTON_COUNT
   return true;
+#else
+  return false;   // what is left are the buttons' events, and this board has none
+#endif
 }
 
 // Whether an action can sit on a face event of this clock.
@@ -5476,7 +5553,17 @@ bool faceKeysReachMenu(const uint8_t *codes) {
   for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
     if (faceEventFitted(FACE_EVENTS[i].event) && FACE_ACTIONS[codes[i]].function == FN_OPEN_MENU) { return true; }
   }
+#if BOARD_BUTTON_COUNT == 0
+  // A clock without buttons whose gesture sensor was not found has no input
+  // at all: no shortcut can open its menu, and the web app is its way to the
+  // settings. Its shortcuts are kept for when the sensor is there.
+  for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
+    if (faceEventFitted(FACE_EVENTS[i].event)) { return false; }
+  }
+  return true;
+#else
   return false;
+#endif
 }
 
 // At start-up, once the sensors have been looked for.
@@ -5749,15 +5836,18 @@ uint8_t burstSteps(const Button &b) {
 
 // Whether any button is down right now.
 bool anyButtonDown() {
+#if BOARD_BUTTON_COUNT
   for (const Button &b : buttons) {
     if (b.phase == BTN_PRESSED || b.phase == BTN_HELD || b.phase == BTN_SPENT) { return true; }
   }
+#endif
   return false;
 }
 
 // Once per loop: read every button, run what its events map to, keep a hold
 // function going while its button stays down, and drive the press indicator.
 void updateInput() {
+#if BOARD_BUTTON_COUNT
   for (Button &b : buttons) {
     ButtonPhase before = b.phase;
     InputEvent ev = stepButton(b);
@@ -5767,6 +5857,7 @@ void updateInput() {
     if (b.phase == BTN_HELD) { holdStep(b.holding); }
     if (before == BTN_HELD && b.phase != BTN_HELD) { holdEnd(b.holding); b.holding = FN_NONE; }
   }
+#endif
   updateGestures();
   updateFeedbackLed();
 }
@@ -6404,7 +6495,9 @@ void updateFeedbackLed() {
   bool lit = feedbackLit();
   if (lit != fbLit) {
     fbLit = lit;
+#if BOARD_HAS_FEEDBACK_LED
     digitalWrite(FEEDBACK_LED_PIN, lit ? HIGH : LOW);
+#endif
 #if BUTTON_FEEDBACK_ON_MATRIX
     panelDirty = true;   // the matrix shows the same square, so the panel has to follow
 #endif
@@ -6554,6 +6647,9 @@ void stopAPMode() {
   if (!apActive) { return; }
   Serial.println("Stopping config AP...");
   apActive = false;
+#if BOARD_BUTTON_COUNT == 0
+  apAutoCloseAt = 0;
+#endif
   dnsUdp.stop();
   apServer.end(); // release the listening socket (a fresh begin() would leak one)
   netApEnd(); // drop the softAP
@@ -6572,6 +6668,92 @@ void stopAPMode() {
   }
   setScreen(SCREEN_FACE); // back to the normal clock, in the current orientation
 }
+
+#if BOARD_WAVESHARE_WALL
+// The wall clock's USB console, which has no buttons to reach the hotspot with
+// once it runs:
+// - "black" switches the panels dark until the next start. A flash resets the
+//   chip in the middle of a refresh, and with nobody driving the panels the row
+//   pair they show then may stay lit at full duty while it runs (bench rule of
+//   2026-10-17: the picture black before every flash).
+// - "lan on" / "lan off" switch the web app on the home network, as its
+//   switch on the hotspot's page does (with the password set there).
+// - "test <panel> <brightness>" shows a test picture to measure the panels'
+//   current with: that panel (1-3 the top row from the left, 4-6 the bottom
+//   row; 0 none) in the clock's white at that brightness, the rest dark. The
+//   clock stands still meanwhile; "test off" gives the wall back.
+// - "bus <divider>" sets the panel bus to 160 MHz / divider while it runs,
+//   to judge faster clocks than the driver's 13.3 MHz by eye.
+void wallConsole() {
+  static char line[16];
+  static uint8_t len = 0;
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c != '\n' && c != '\r') {
+      if (len < sizeof(line) - 1) { line[len++] = c; }
+      continue;
+    }
+    line[len] = '\0';
+    if (strcmp(line, "black") == 0) {
+      matrix.holdDark();
+      Serial.println("Panels dark until the next start");
+    }
+    unsigned panel = 0, bright = 0, div = 0;
+    if (strcmp(line, "test off") == 0) {
+      matrix.endTestPicture();
+      matrix.setBrightness(panelBrightness());
+      panelDirty = true;
+      Serial.println("Test picture off");
+    } else if (sscanf(line, "test %u %u", &panel, &bright) == 2 && panel <= 6 && bright <= 255) {
+      matrix.testPicture((uint8_t)panel, (uint8_t)bright);
+      Serial.printf("Test picture: panel %u white at brightness %u (the cap is %u), the rest dark\n",
+                    panel, bright, (unsigned)PANEL_BRIGHT_CAP);
+    } else if (sscanf(line, "bus %u", &div) == 1 && div >= 8 && div <= 32) {
+      matrix.setBusDivider((uint8_t)div);
+      Serial.printf("Panel bus: 160 MHz / %u = %u kHz, refresh %lu Hz\n", div, 160000U / div,
+                    (unsigned long)matrix.refreshRate());
+    }
+#if WEBUI_APP
+    bool lanOn = strcmp(line, "lan on") == 0;
+    if (lanOn || strcmp(line, "lan off") == 0) {
+      lanSettings.on = lanOn ? 1 : 0;
+      saveLanSettings();
+      lanWantRadio();
+      Serial.printf("Web app on the home network: %s\n", lanOn ? "on" : "off");
+    }
+#endif
+    len = 0;
+  }
+}
+#endif
+
+#if BOARD_BUTTON_COUNT == 0
+// A clock without inputs whose stored WiFi has not connected for
+// AP_FALLBACK_MS opens the hotspot for a while (apAutoClose()). Not while the
+// station is off because nobody needs it, nor while it is connected.
+void apFallback() {
+  if (gestureOK || apActive || !wifiStored() || stationState != STA_JOINING) { joinTroubleSince = 0; return; }
+  if (joinTroubleSince == 0) { joinTroubleSince = millisNow ? millisNow : 1; return; }
+  if (millisNow - joinTroubleSince < AP_FALLBACK_MS) { return; }
+  joinTroubleSince = 0;
+  Serial.println("The home WiFi does not connect: the hotspot opens for 5 minutes");
+  startAPMode();
+  apAutoCloseAt = millis() + AP_AUTO_OPEN_MS;
+  if (apAutoCloseAt == 0) { apAutoCloseAt = 1; }
+}
+
+// Closes the hotspot that opened for want of the home WiFi (apFallback())
+// once its time is up and no phone is connected to it; a phone on it keeps it
+// open. One that opened for want of any WiFi stored stays.
+void apAutoClose() {
+  if (apAutoCloseAt == 0 || (long)(millisNow - apAutoCloseAt) < 0) { return; }
+  if (millisNow - apAutoCheckLast < 1000) { return; }
+  apAutoCheckLast = millisNow;
+  if (netApHasStation()) { return; }
+  Serial.println("Hotspot: its time after the start is over");
+  stopAPMode();
+}
+#endif
 
 // Re-create the AP when the radio dropped it: the M4's NINA firmware can crash
 // and reboot under captive-portal probe load, and after its reboot the SSID
@@ -7685,7 +7867,11 @@ int16_t gifCount() {
 
 bool gifFits(int16_t i) {
   uint16_t w = gifPack[i].width, h = gifPack[i].height;
+#if BOARD_WAVESHARE_WALL
+  return w <= WALL_W && h <= WALL_H;   // the wall's LEDs, not the clock's 64x32 picture
+#else
   return w <= matrix.width() && h <= matrix.height() && (int32_t)w * h <= GIF_CANVAS_MAX;
+#endif
 }
 
 // A random GIF that fits the panel as it is held, not the last one shown while
@@ -7835,6 +8021,46 @@ void gifDispose() {
   }
 }
 
+#if BOARD_WAVESHARE_WALL
+// The canvas onto the wall in its own LEDs, centred, the rest dark, through
+// the gamma table and the panel's table for the brightness; the wall writes
+// only what changed since the frame before (PanelCanvas::wallRow()).
+void gifRender() {
+  int16_t x0 = (WALL_W - gifW) / 2, y0 = (WALL_H - gifH) / 2;
+  static uint8_t row[WALL_W * 3];
+  static const uint8_t dark[WALL_W * 3] = {};
+  memset(row, 0, sizeof(row));   // left and right of the GIF stays dark
+  matrix.waitForBackBuffer();
+#if defined(CLOCK_DEBUG)
+  // Debug build: how long a frame takes onto the wall, every 2 s while GIFs play.
+  static uint32_t frames = 0, sumUs = 0, maxUs = 0, since = 0;
+  uint32_t t0 = micros();
+#endif
+  for (int16_t y = 0; y < WALL_H; y++) {
+    int16_t gy = y - y0;
+    if (gy < 0 || gy >= gifH) { matrix.wallRow(y, dark); continue; }
+    const uint8_t *c = &gifPlayer->canvas[gy * gifW * 3];
+    uint8_t *o = row + x0 * 3;
+    for (int16_t gx = 0; gx < gifW; gx++, c += 3, o += 3) {
+      o[0] = matrix.panelValue(0, gifGamma[c[0]]);
+      o[1] = matrix.panelValue(1, gifGamma[c[1]]);
+      o[2] = matrix.panelValue(2, gifGamma[c[2]]);
+    }
+    matrix.wallRow(y, row);
+  }
+  matrix.endWallFrame();
+#if defined(CLOCK_DEBUG)
+  uint32_t us = micros() - t0;
+  frames++; sumUs += us; if (us > maxUs) { maxUs = us; }
+  if (millis() - since >= 2000) {
+    Serial.printf("GIF onto the wall: %lu frames, avg %lu max %lu us\n", (unsigned long)frames,
+                  (unsigned long)(sumUs / frames), (unsigned long)maxUs);
+    frames = sumUs = maxUs = 0;
+    since = millis();
+  }
+#endif
+}
+#else
 // The canvas onto the panel, centred, the rest dark, through the gamma table
 // and the panel's table for the brightness.
 void gifRender() {
@@ -7860,6 +8086,7 @@ void gifRender() {
   matrix.flip();
   matrix.forgetHeld();
 }
+#endif
 
 // The GIF screen: the next frame when it is due. Turning the panel ends it,
 // since the GIF no longer stands upright, or may no longer fit.
@@ -9504,10 +9731,10 @@ void apiState(Print &c) {
   JsonDocument d;
   d["mode"] = apActive ? "ap" : "lan";
   d["fw"] = FW_VERSION;
-  d["board"] = "MatrixPortal S3";
+  d["board"] = BOARD_NAME;
   JsonArray panel = d["panel"].to<JsonArray>();
-  panel.add(64);
-  panel.add(32);
+  panel.add(BOARD_PANEL_W);
+  panel.add(BOARD_PANEL_H);
 
   JsonObject s = d["settings"].to<JsonObject>();
   s["wf"] = settings.watchface;
@@ -10097,7 +10324,13 @@ void loadLanSettings() {
   // (decided by Peter, 2026-10-08). The page says while it is still that one.
   if (!lanSettings.hasPassword) {
     lanSetPassword(AP_PASS);
+#if BOARD_BUTTON_COUNT == 0
+    // A clock without buttons (the wall clock) is set up on the home network:
+    // without its gesture sensor that is its only way in (Peter, 2026-10-18).
+    lanSettings.on = 1;
+#else
     lanSettings.on = 0;
+#endif
     saveLanSettings();
   }
   lanWantRadio();
@@ -10285,7 +10518,7 @@ void haBuildAnnounce() {
   JsonDocument dev;
   dev["identifiers"][0] = netHostname();
   dev["name"] = String("Matrix Clock ") + id;
-  dev["model"] = "MatrixPortal S3";
+  dev["model"] = BOARD_NAME;
   dev["sw_version"] = FW_VERSION;
   dev["configuration_url"] = String("http://") + netHostname() + ".local/";
 

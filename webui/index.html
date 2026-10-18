@@ -639,10 +639,15 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     KEYS.forEach(function (k) { if (has(k) && JSON.stringify(saved[k]) !== JSON.stringify(cur[k])) { n++; } });
     return n;
   }
+  // Some input found opens the menu - or the clock has no input at all (the
+  // wall clock without its gesture sensor), when only this page reaches its
+  // settings and the rule cannot hold.
   function keysOk() {
-    var ok = false;
-    S.lists.events.forEach(function (e, i) { if (e.fitted && cur.keys[i] === S.lists.menuAction) { ok = true; } });
-    return ok;
+    var ok = false, any = false;
+    S.lists.events.forEach(function (e, i) {
+      if (e.fitted) { any = true; if (cur.keys[i] === S.lists.menuAction) { ok = true; } }
+    });
+    return ok || !any;
   }
   function changed() {
     var n = diffCount();
