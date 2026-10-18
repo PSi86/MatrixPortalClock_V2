@@ -353,10 +353,16 @@ GifPackState  gifPackState = GIF_PACK_NONE;
 const esp_partition_t *gifPackPart = nullptr;
 GifPackEntry *gifPack = nullptr;             // the index, in PSRAM when there is some
 uint16_t      gifPackCount = 0;
-// The pack GIF on show: its bytes mapped from flash, or inflated into PSRAM.
+// The pack GIF on show: its bytes mapped from flash, or read or inflated into PSRAM.
 esp_partition_mmap_handle_t gifPackMap;
 bool          gifPackMapped = false;
 uint8_t      *gifPackCopy = nullptr;
+// The core's cache maps flash only below 16 MB (24-bit addresses; it was
+// built without CONFIG_BOOTLOADER_CACHE_32BIT_ADDR_OCTAL_FLASH). The wall
+// clock's pack reaches up to 32 MB: GIFs above the line are read instead of
+// mapped, which the flash driver does at any address (2026-10-18: three GIFs
+// read back from above 16 MB had their CRCs).
+const uint32_t GIF_PACK_MAP_LIMIT = 0x1000000;
 #endif
 
 /* ======================================================================
@@ -8223,21 +8229,63 @@ void gifPackLoad() {
                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 }
 
+// Whether pack GIF e lies where the cache can map it (GIF_PACK_MAP_LIMIT).
+bool gifPackMappable(const GifPackEntry &e) {
+  return (uint64_t)gifPackPart->address + e.offset + e.size <= GIF_PACK_MAP_LIMIT;
+}
+
+// Whether the bytes of pack GIF e still have their CRC: mapped, or read a
+// piece at a time where the cache does not reach.
+bool gifPackCrcOk(const GifPackEntry &e) {
+  if (gifPackMappable(e)) {
+    const void *mapped = nullptr;
+    esp_partition_mmap_handle_t map;
+    if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &map) != ESP_OK) {
+      return false;
+    }
+    bool ok = esp_rom_crc32_le(0, (const uint8_t *)mapped, e.size) == e.crc;
+    esp_partition_munmap(map);
+    return ok;
+  }
+  static uint8_t piece[4096];
+  uint32_t crc = 0;
+  for (uint32_t at = 0; at < e.size; at += sizeof(piece)) {
+    uint32_t n = min<uint32_t>(sizeof(piece), e.size - at);
+    if (esp_partition_read(gifPackPart, e.offset + at, piece, n) != ESP_OK) { return false; }
+    crc = esp_rom_crc32_le(crc, piece, n);
+  }
+  return crc == e.crc;
+}
+
 // The bytes of pack GIF e for the decoder; false when they cannot be had.
 bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size) {
-  const void *mapped = nullptr;
-  if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &gifPackMap) != ESP_OK) {
-    Serial.printf("GIF %s: cannot map it\n", e.name);
-    return false;
+  const uint8_t *stored = nullptr;
+  uint8_t *read = nullptr;   // the stored bytes, read into PSRAM above GIF_PACK_MAP_LIMIT
+  if (gifPackMappable(e)) {
+    const void *mapped = nullptr;
+    if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &gifPackMap) != ESP_OK) {
+      Serial.printf("GIF %s: cannot map it\n", e.name);
+      return false;
+    }
+    gifPackMapped = true;
+    stored = (const uint8_t *)mapped;
+  } else {
+    read = (uint8_t *)heap_caps_malloc(e.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!read || esp_partition_read(gifPackPart, e.offset, read, e.size) != ESP_OK) {
+      Serial.printf("GIF %s: cannot read it\n", e.name);
+      free(read);
+      return false;
+    }
+    stored = read;
   }
-  gifPackMapped = true;
-  const uint8_t *stored = (const uint8_t *)mapped;
   if (esp_rom_crc32_le(0, stored, e.size) != e.crc) {
     Serial.printf("GIF %s: damaged in the pack\n", e.name);
+    free(read);
     gifPackClose();
     return false;
   }
   if (e.codec == GIF_PACK_STORED) {
+    if (read) { gifPackCopy = read; }   // freed by gifPackClose()
     data = stored;
     size = e.size;
     return true;
@@ -8262,8 +8310,11 @@ bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size) {
     Serial.printf("GIF %s: no PSRAM to inflate it\n", e.name);
   }
   free(inflator);
-  esp_partition_munmap(gifPackMap);   // the stored bytes are done with
-  gifPackMapped = false;
+  if (gifPackMapped) {   // the stored bytes are done with
+    esp_partition_munmap(gifPackMap);
+    gifPackMapped = false;
+  }
+  free(read);
   if (!ok) {
     gifPackClose();
     return false;
@@ -10080,15 +10131,7 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   // Every GIF's bytes against its CRC, as each is checked again before it plays.
   uint16_t damaged = 0;
   for (uint16_t n = 0; n < gifPackCount; n++) {
-    const GifPackEntry &e = gifPack[n];
-    const void *mapped = nullptr;
-    esp_partition_mmap_handle_t map;
-    if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &map) != ESP_OK) {
-      damaged++;
-      continue;
-    }
-    if (esp_rom_crc32_le(0, (const uint8_t *)mapped, e.size) != e.crc) { damaged++; }
-    esp_partition_munmap(map);
+    if (!gifPackCrcOk(gifPack[n])) { damaged++; }
   }
   gifScheduleNext();
   unsigned long ms = millis() - started;
