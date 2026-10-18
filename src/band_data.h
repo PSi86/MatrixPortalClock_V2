@@ -354,18 +354,19 @@ inline void feedWeather(const FeedJob &job, FeedResult &r) {
   if (!isDay && icon == ICON_CLEAR_DAY)  { icon = ICON_CLEAR_NIGHT; }
   if (!isDay && icon == ICON_PARTLY_DAY) { icon = ICON_PARTLY_NIGHT; }
 
-  // "16°C mainly clear, 22/11°C, rain 40%, UV 5": the rain chance only when
-  // there is one, the UV index only from 3 (moderate) on.
+  // "16°C mainly clear | 22/11°C | rain 40% | UV 5", its parts set apart as in
+  // every band text: the rain chance only when there is one, the UV index
+  // only from 3 (moderate) on.
   char text[96];
   int n = snprintf(text, sizeof(text), "%ld\xC2\xB0" "C %s", lroundf(cur["temperature_2m"].as<float>()), what);
   if (!day["temperature_2m_max"][0].isNull() && n > 0 && n < (int)sizeof(text)) {
-    n += snprintf(text + n, sizeof(text) - n, ", %ld/%ld\xC2\xB0" "C", lroundf(day["temperature_2m_max"][0].as<float>()),
+    n += snprintf(text + n, sizeof(text) - n, " | %ld/%ld\xC2\xB0" "C", lroundf(day["temperature_2m_max"][0].as<float>()),
                   lroundf(day["temperature_2m_min"][0].as<float>()));
   }
   int rainChance = day["precipitation_probability_max"][0] | 0;
-  if (rainChance > 0 && n > 0 && n < (int)sizeof(text)) { n += snprintf(text + n, sizeof(text) - n, ", rain %d%%", rainChance); }
+  if (rainChance > 0 && n > 0 && n < (int)sizeof(text)) { n += snprintf(text + n, sizeof(text) - n, " | rain %d%%", rainChance); }
   long uv = lroundf(day["uv_index_max"][0] | 0.0f);
-  if (uv >= 3 && n > 0 && n < (int)sizeof(text)) { snprintf(text + n, sizeof(text) - n, ", UV %ld", uv); }
+  if (uv >= 3 && n > 0 && n < (int)sizeof(text)) { snprintf(text + n, sizeof(text) - n, " | UV %ld", uv); }
   time_t stale = job.now + FEEDS[FEED_WEATHER].staleS;
   // The card: the temperature, and the day's high and low below it.
   char card[16];
@@ -448,11 +449,11 @@ inline void feedWarnings(const FeedJob &job, FeedResult &r) {
     const char *headline = al["headline_en"] | "Weather warning";
     if (onset > job.now) {
       feedWhen(when, sizeof(when), onset, job);
-      snprintf(text, sizeof(text), "%s from %s", headline, when);
+      snprintf(text, sizeof(text), "%s | from %s", headline, when);
       feedCardWhen(card, sizeof(card), "from", onset, job);
     } else if (expires != 0) {
       feedWhen(when, sizeof(when), expires, job);
-      snprintf(text, sizeof(text), "%s until %s", headline, when);
+      snprintf(text, sizeof(text), "%s | until %s", headline, when);
       feedCardWhen(card, sizeof(card), "until", expires, job);
     } else {
       strlcpy(text, headline, sizeof(text));
@@ -502,7 +503,7 @@ inline void feedAir(const FeedJob &job, FeedResult &r) {
   long eaqi = lroundf(doc["current"]["european_aqi"].as<float>());
   uint8_t band = airBand(eaqi);
   char text[64], card[16];
-  snprintf(text, sizeof(text), "Air quality: %s, index %ld", AIR_BAND_NAMES[band], eaqi);
+  snprintf(text, sizeof(text), "Air quality %s | index %ld", AIR_BAND_NAMES[band], eaqi);
   snprintf(card, sizeof(card), "%ld|AQI", eaqi);   // the card: the index large, "AQI" below it
   feedItem(r, "air", text, ICON_AIR, LEVEL_INFO, job.now + FEEDS[FEED_AIR].staleS, itemTag("air"), band,
            INTENSITY_NONE, card);

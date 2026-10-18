@@ -538,7 +538,7 @@ enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TUR
 const uint8_t BAND_LOCAL_FIRST = TURN_STATUS, BAND_LOCAL_COUNT = 5;   // the clock's own, in their order
 struct BandTurn { uint8_t kind, feed; uint32_t tag; };
 // The clock's own turns as they stand, worked out once a minute (bandLocalUpdate()).
-struct BandLocal { bool on; uint8_t icon, severity; char line[2][32]; };
+struct BandLocal { bool on; uint8_t icon, severity; char text[64]; };   // its parts set apart by " | " (bandWrap())
 unsigned long bandStatusTestAt = 0;   // millis() the console showed the clock status as a test; 0 = none
 BandLocal bandLocal[BAND_LOCAL_COUNT];
 bool bandLocalDone = false;
@@ -8901,6 +8901,17 @@ void textToCp437(char *dst, const char *src, size_t size) {
   dst[n] = '\0';
 }
 
+// On the panel a text's separator is the font's middle dot: " | " sets its
+// parts apart (bandWrap()), but the 5x7 font draws '|' broken in the middle,
+// like a colon (Peter, 2026-10-18). The texts keep their '|', which every
+// keyboard has; only what the panel shows changes.
+const char PANEL_SEPARATOR = (char)0xF9;   // CP437's middle dot, 2x2 at mid height
+void panelSeparators(char *s) {
+  for (; *s; s++) {
+    if (*s == '|') { *s = PANEL_SEPARATOR; }
+  }
+}
+
 // Puts step i on the panel; false when its item has gone meanwhile. An icon
 // stands ALERT_BANNER_MS, or ICON_BEFORE_TEXT_MS when the notice's text comes
 // next; a text runs through noticeRuns times; a card stands CARD_MS, or as
@@ -8915,6 +8926,7 @@ bool noticeStepShow(uint8_t i) {
     cardRuns = it.shortText[0] == '\0';
     if (cardRuns) {
       textToCp437(runText, it.text, sizeof(runText));
+      panelSeparators(runText);
       runWidth = (uint16_t)(strlen(runText) * 6);
       runLastX = INT16_MIN;
       CardLayout L = cardLayout();
@@ -8939,6 +8951,7 @@ bool noticeStepShow(uint8_t i) {
     Serial.printf("Notice: %s, icon %s\n", it.key, ITEM_ICON_NAMES[bannerLook.icon]);
   } else {
     textToCp437(runText, it.text, sizeof(runText));
+    panelSeparators(runText);
     runWidth = (uint16_t)(strlen(runText) * 6);   // 5 px a character and 1 between
     bool alert = it.level == LEVEL_ALERT;
     runR = alert ? ALERT_R : 255; runG = alert ? ALERT_G : 255; runB = alert ? ALERT_B : 255;
@@ -9724,10 +9737,17 @@ uint8_t bandIconOf(const BandItem &it) {
   return it.icon < ICON_COUNT ? it.icon : ICON_NONE;
 }
 
+// Where a turn's text starts: beside its icon, or at the left without one.
+int16_t bandTextX(const BandTurn &t) {
+  if (const BandLocal *own = bandLocalOf(t)) { return own->icon != ICON_NONE ? BAND_TEXT_X : BAND_TEXT_X_BARE; }
+  int8_t i = bandItemOf(t);
+  return (i >= 0 && bandIconOf(bandItems[i]) != ICON_NONE) ? BAND_TEXT_X : BAND_TEXT_X_BARE;
+}
+
 // What a turn shows, as a number, so the band sees its item change (a new
 // temperature, a warning that got worse) or its own lines (the day turns).
 uint32_t bandLook(const BandTurn &t) {
-  if (BandLocal *l = bandLocalOf(t)) { return itemTag(l->line[1], itemTag(l->line[0])) ^ l->icon; }
+  if (BandLocal *l = bandLocalOf(t)) { return itemTag(l->text) ^ l->icon; }
   int8_t i = bandItemOf(t);
   if (i < 0) { return 0; }
   const BandItem &it = bandItems[i];
@@ -9737,33 +9757,39 @@ uint32_t bandLook(const BandTurn &t) {
   return h;
 }
 
-// A text in two lines of up to `chars` characters, broken between words -
-// after its first colon when the rest fits the second line ("Public holiday
-// today:" / "All Saints' Day"); false when it does not fit them.
+// The parts of a text in the band are set apart by " | " (Peter, 2026-10-18,
+// for every text there: the clock's own, the sources' it puts together, and
+// Home Assistant's). A text in two lines of up to `chars` characters: in one
+// when it fits, " | " and all; else broken at the first " | " after which the
+// rest fits the second line, the separator left out there ("10°C overcast" /
+// "10/8°C | rain 100%"); else between words, a separator at the break left
+// out too. False when none of that fits: the text runs through instead.
 bool bandWrap(const char *s, uint8_t chars, char lines[2][32]) {
   lines[0][0] = lines[1][0] = '\0';
-  const char *colon = strstr(s, ": ");
-  if (colon && colon - s + 1 <= chars && strlen(colon + 2) <= chars && strlen(s) > chars) {
-    memcpy(lines[0], s, (size_t)(colon - s + 1));
-    lines[0][colon - s + 1] = '\0';
-    strlcpy(lines[1], colon + 2, sizeof(lines[1]));
+  while (*s == ' ') { s++; }
+  if (strlen(s) <= chars) {
+    strlcpy(lines[0], s, sizeof(lines[0]));
     return true;
   }
-  for (uint8_t l = 0; l < 2; l++) {
-    while (*s == ' ') { s++; }
-    if (strlen(s) <= chars) {
-      strlcpy(lines[l], s, sizeof(lines[l]));
-      return true;
-    }
-    if (l == 1) { return false; }
-    int cut = -1;
-    for (int i = chars; i > 0 && cut < 0; i--) { if (s[i] == ' ') { cut = i; } }
-    if (cut < 0) { return false; }   // a word longer than a line
-    memcpy(lines[l], s, (size_t)cut);
-    lines[l][cut] = '\0';
-    s += cut;
+  for (const char *p = strstr(s, " | "); p && p - s <= chars; p = strstr(p + 1, " | ")) {
+    if (strlen(p + 3) > chars) { continue; }
+    memcpy(lines[0], s, (size_t)(p - s));
+    lines[0][p - s] = '\0';
+    strlcpy(lines[1], p + 3, sizeof(lines[1]));
+    return true;
   }
-  return false;
+  int cut = -1;
+  for (int i = chars; i > 0 && cut < 0; i--) { if (s[i] == ' ') { cut = i; } }
+  if (cut < 0) { return false; }   // a word longer than a line
+  int end = cut;                   // the first line without a separator, and the spaces, at its end
+  while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == '|')) { end--; }
+  const char *rest = s + cut;
+  while (*rest == ' ' || *rest == '|') { rest++; }   // nor at the second's start
+  if (strlen(rest) > chars) { return false; }
+  memcpy(lines[0], s, (size_t)end);
+  lines[0][end] = '\0';
+  strlcpy(lines[1], rest, sizeof(lines[1]));
+  return true;
 }
 
 // The ISO 8601 week of a date: the week with the year's first Thursday is 1.
@@ -9790,8 +9816,8 @@ void bandDateLines(BandLocal &l) {
   l.icon = ICON_CALENDAR;
   struct tm t;
   gmtime_r(&localTime, &t);
-  snprintf(l.line[0], sizeof(l.line[0]), "%s %d %s", BAND_DAYS[t.tm_wday], t.tm_mday, BAND_MONTHS[t.tm_mon]);
-  snprintf(l.line[1], sizeof(l.line[1]), "%d, week %d", t.tm_year + 1900, isoWeek(t.tm_year + 1900, t.tm_yday, t.tm_wday));
+  snprintf(l.text, sizeof(l.text), "%s %d %s %d | week %d", BAND_DAYS[t.tm_wday], t.tm_mday, BAND_MONTHS[t.tm_mon],
+           t.tm_year + 1900, isoWeek(t.tm_year + 1900, t.tm_yday, t.tm_wday));
 }
 
 // The change of the clocks nearest to `now` under a daylight saving rule
@@ -9829,14 +9855,16 @@ void bandShiftLines(BandLocal &l) {
   time_t before = at + (time_t)settings.tzOffset + (forward ? 0 : 3600);   // the wall time it happens at
   int hour = (int)(before % 86400 / 3600), minute = (int)(before % 3600 / 60);
   bool coming = at > clockNow();
-  snprintf(l.line[0], sizeof(l.line[0]), "Clocks %s %s 1 h", coming ? "go" : "went", forward ? "forward" : "back");
+  int n = snprintf(l.text, sizeof(l.text), "Clocks %s %s 1 h | ", coming ? "go" : "went", forward ? "forward" : "back");
+  char *rest = l.text + n;
+  size_t room = sizeof(l.text) - (size_t)n;
   if (!coming && hour < 6) {
-    strlcpy(l.line[1], "last night", sizeof(l.line[1]));
+    strlcpy(rest, "last night", room);
   } else if (!coming) {
-    snprintf(l.line[1], sizeof(l.line[1]), "at %d:%02d", hour, minute);
+    snprintf(rest, room, "at %d:%02d", hour, minute);
   } else {
     const char *when = hour < 6 ? "tonight" : (before / 86400 == localTime / 86400 ? "today" : "tomorrow");
-    snprintf(l.line[1], sizeof(l.line[1]), "%s at %d:%02d", when, hour, minute);
+    snprintf(rest, room, "%s at %d:%02d", when, hour, minute);
   }
 }
 
@@ -9865,21 +9893,18 @@ void bandSunLines(BandLocal &l) {
     sky::sunEvent(day + 1, lat, lon, false, set);
   }
   if (kind == sky::SUN_UP_ALL_DAY) {
-    strlcpy(l.line[0], "Midnight sun:", sizeof(l.line[0]));
-    strlcpy(l.line[1], "no sunset today", sizeof(l.line[1]));
+    strlcpy(l.text, "Midnight sun | no sunset today", sizeof(l.text));
     return;
   }
   if (kind == sky::SUN_DOWN_ALL_DAY) {
     l.icon = ICON_CLEAR_NIGHT;
-    strlcpy(l.line[0], "Polar night:", sizeof(l.line[0]));
-    strlcpy(l.line[1], "no sunrise today", sizeof(l.line[1]));
+    strlcpy(l.text, "Polar night | no sunrise today", sizeof(l.text));
     return;
   }
   char r[8], s[8];
   bandHhmm(r, sizeof(r), rise + off);
   bandHhmm(s, sizeof(s), set + off);
-  snprintf(l.line[0], sizeof(l.line[0]), "Sunrise %s%s", tomorrow ? "tomorrow " : "", r);
-  snprintf(l.line[1], sizeof(l.line[1]), "Sunset %s%s", tomorrow ? "tomorrow " : "", s);
+  snprintf(l.text, sizeof(l.text), "Sunrise %s%s | Sunset %s%s", tomorrow ? "tomorrow " : "", r, tomorrow ? "tomorrow " : "", s);
 }
 
 // The moon's phase and how much of it is lit, and the next full or new moon,
@@ -9889,14 +9914,14 @@ void bandMoonLines(BandLocal &l) {
   if (!l.on) { return; }
   l.icon = ICON_CLEAR_NIGHT;
   double now = (double)clockNow(), e = sky::moonElongation(now);
-  snprintf(l.line[0], sizeof(l.line[0]), "%s, %d%%", sky::moonPhaseName(e), sky::moonLit(e));
-  l.line[0][0] = (char)toupper((unsigned char)l.line[0][0]);
+  int n = snprintf(l.text, sizeof(l.text), "%s | %d%% lit | ", sky::moonPhaseName(e), sky::moonLit(e));
+  l.text[0] = (char)toupper((unsigned char)l.text[0]);
   double full = sky::moonNext(now, true), fresh = sky::moonNext(now, false);
   bool isFull = full < fresh;
   time_t at = (time_t)(isFull ? full : fresh) + (time_t)tzTotalOffset();
   struct tm t;
   gmtime_r(&at, &t);
-  snprintf(l.line[1], sizeof(l.line[1]), "%s moon %.3s %d %.3s", isFull ? "Full" : "New", BAND_DAYS[t.tm_wday], t.tm_mday,
+  snprintf(l.text + n, sizeof(l.text) - (size_t)n, "%s moon %.3s %d %.3s", isFull ? "Full" : "New", BAND_DAYS[t.tm_wday], t.tm_mday,
            BAND_MONTHS[t.tm_mon]);
 }
 
@@ -9913,19 +9938,18 @@ void bandStatusLines(BandLocal &l) {
   l.icon = ICON_WARNING;
   l.severity = 1;
   if (wifiStored() && !wifiCreds.verified && joinOutcome == JOIN_FAILED) {
-    strlcpy(l.line[0], "Home WiFi does not join:", sizeof(l.line[0]));
-    textToCp437(l.line[1], wifiCreds.ssid, 27);   // the name, cut to the line
+    snprintf(l.text, sizeof(l.text), "Home WiFi does not join | %s", wifiCreds.ssid);
     return;
   }
-  strlcpy(l.line[0], "Time sync is failing", sizeof(l.line[0]));
   if (ntpSyncedAt == 0) {
-    strlcpy(l.line[1], "no good sync yet", sizeof(l.line[1]));
+    strlcpy(l.text, "Time sync is failing | no good sync yet", sizeof(l.text));
     return;
   }
   time_t at = ntpSyncedAt + (time_t)tzTotalOffset();
   struct tm t;
   gmtime_r(&at, &t);
-  snprintf(l.line[1], sizeof(l.line[1]), "last good %d %.3s %02d:%02d", t.tm_mday, BAND_MONTHS[t.tm_mon], t.tm_hour, t.tm_min);
+  snprintf(l.text, sizeof(l.text), "Time sync is failing | last good %d %.3s %02d:%02d", t.tm_mday, BAND_MONTHS[t.tm_mon],
+           t.tm_hour, t.tm_min);
 }
 
 // The clock's own turns anew: once a minute, and when the clock gets its time.
@@ -10003,19 +10027,21 @@ void bandStart(const BandTurn &t, uint8_t runs) {
   bandRunText[0] = '\0';
   bandRunLastX = INT16_MIN;
   int8_t i = bandItemOf(t);
-  if (const BandLocal *own = bandLocalOf(t)) {
-    memcpy(bandLine, own->line, sizeof(bandLine));
-  } else if (i >= 0) {
-    const BandItem &it = bandItems[i];
-    char text[sizeof(it.text)];
-    textToCp437(text, it.text, sizeof(text));
-    int16_t tx = bandIconOf(it) != ICON_NONE ? BAND_TEXT_X : BAND_TEXT_X_BARE;
+  const BandLocal *own = bandLocalOf(t);
+  const char *src = own ? own->text : i >= 0 ? bandItems[i].text : nullptr;
+  if (src) {
+    char text[sizeof(BandItem::text)];
+    textToCp437(text, src, sizeof(text));
+    int16_t tx = bandTextX(t);
     if (!bandWrap(text, (uint8_t)((WALL_W - tx - 2) / 6), bandLine)) {
       strlcpy(bandRunText, text, sizeof(bandRunText));
       bandRunWidth = (uint16_t)(strlen(bandRunText) * 6);   // 5 px a character and 1 between
       unsigned long ms = (unsigned long)runs * (bandRunWidth + (WALL_W - tx)) * 1000UL / RUN_PX_PER_S;
       bandTurnMs = max(ms, BAND_TURN_MS);
     }
+    panelSeparators(bandLine[0]);   // broken where the bars are; shown as dots
+    panelSeparators(bandLine[1]);
+    panelSeparators(bandRunText);
   }
   bandDraw();
 }
@@ -10069,7 +10095,7 @@ void bandUpdate() {
     return;
   }
   if (bandRunText[0]) {
-    int16_t tx = bandIconOf(bandItems[bandItemOf(bandTurn)]) != ICON_NONE ? BAND_TEXT_X : BAND_TEXT_X_BARE;
+    int16_t tx = bandTextX(bandTurn);
     uint32_t moved = (uint32_t)(millisNow - bandTurnAt) * RUN_PX_PER_S / 1000UL;
     uint32_t pass = bandRunWidth + (WALL_W - tx);
     int16_t x = moved >= bandTurnRuns * pass ? -(int16_t)bandRunWidth : WALL_W - (int16_t)(moved % pass);
@@ -10102,8 +10128,18 @@ void bandSelfTest() {
     { "abcdefghijklmnopqrstuvwxyz", true, "abcdefghijklmnopqrstuvwxyz", "" },
     { "abcdefghijklmnopqrstuvwxyz0", false, "", "" },
     { "One two three four five six seven eight nine ten eleven", false, "", "" },
-    { "Public holiday today: All Saints' Day", true, "Public holiday today:", "All Saints' Day" },
-    { "Public holiday tomorrow: Corpus Christi, in parts", true, "Public holiday tomorrow:", "Corpus Christi, in parts" },
+    // The parts set apart by " | " (Peter, 2026-10-18): broken at the first
+    // after which the rest fits, the separator left out at the break.
+    { "10\xF8" "C overcast | 10/8\xF8" "C | rain 100% | UV 3", true, "10\xF8" "C overcast", "10/8\xF8" "C | rain 100% | UV 3" },
+    { "First quarter | 53% lit | Full moon Mon 26 Oct", true, "First quarter | 53% lit", "Full moon Mon 26 Oct" },
+    { "Sunday 18 October 2026 | week 42", true, "Sunday 18 October 2026", "week 42" },
+    { "Air quality fair | index 32", true, "Air quality fair", "index 32" },
+    { "fair | index 32", true, "fair | index 32", "" },
+    { "Public holiday today | All Saints' Day", true, "Public holiday today", "All Saints' Day" },
+    { "One two three | four five six seven eight nine", true, "One two three | four five", "six seven eight nine" },
+    { "Wednesday 30 September 2026 | week 40", true, "Wednesday 30 September", "2026 | week 40" },
+    { "aaaaaaaaaaaaaaaaaaaa | bbbbbbbbbbbbbbbbbbbbbbbb", true, "aaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbb" },
+    { "aaaaaaaaaaaaaaaaaaaaaaa bbbb | ccc", true, "aaaaaaaaaaaaaaaaaaaaaaa", "bbbb | ccc" },
   };
   for (const Wrap &w : WRAPS) {
     char lines[2][32];
@@ -11689,7 +11725,7 @@ void haMessage(const char *payload, uint16_t len) {
   if (!text[0] && !title[0]) { Serial.println("Home Assistant: an empty message"); return; }
   long seconds = constrain(doc["seconds"] | (long)HA_MESSAGE_S, 5L, 3600L);
   char line[HA_PAYLOAD_MAX + 1];
-  if (title[0] && text[0]) { snprintf(line, sizeof(line), "%s: %s", title, text); }
+  if (title[0] && text[0]) { snprintf(line, sizeof(line), "%s | %s", title, text); }   // the band's separator
   else                     { strlcpy(line, text[0] ? text : title, sizeof(line)); }
   BandItem it = {};
   int8_t oldest = -1;   // the place to take when none is free: the oldest message, an urgent one only when all are

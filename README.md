@@ -517,7 +517,11 @@ card on the 64x32 clock: two lines with `|` between them, up to six
 characters each (five upright), such as `"31°|feels"`; a first line of three
 characters or fewer is drawn at double size. The card shows it, when the item
 is new, in the round and on **show notifications**; the band and the web app
-show `text`. Without `short`, the card runs `text` beside the icon. An item for the band, from an automation:
+show `text`. Without `short`, the card runs `text` beside the icon. In `text`,
+` | ` (a bar with a space either side) sets its parts apart: the band breaks its
+two lines there and leaves the bar out at the break (see
+[The info band on the wall clock](#the-info-band-on-the-wall-clock)). An item for
+the band, from an automation:
 
 ```yaml
 action: mqtt.publish
@@ -525,7 +529,7 @@ data:
   topic: mpclock/06c16c/item/waste
   retain: true
   payload: >-
-    {"text": "Paper bin tomorrow", "icon": "warning",
+    {"text": "Paper bin | tomorrow morning", "icon": "warning",
      "until": {{ (now() + timedelta(hours=12)).timestamp() | int }}}
 ```
 
@@ -584,8 +588,8 @@ actions:
           topic: "{{ topic }}"
           retain: true
           payload: >-
-            {{ {"text": ("Public holiday today: " ~ name_today) if name_today
-                        else ("Public holiday tomorrow: " ~ name_tomorrow),
+            {{ {"text": ("Public holiday today | " ~ name_today) if name_today
+                        else ("Public holiday tomorrow | " ~ name_tomorrow),
                 "icon": "calendar",
                 "until": (today_at('00:00') + timedelta(days=1)).timestamp() | int} | to_json }}
     else:
@@ -597,8 +601,8 @@ actions:
 ```
 
 It runs a minute after midnight and when Home Assistant starts. A holiday today
-comes as "Public holiday today: …", else one tomorrow as "Public holiday
-tomorrow: …", until midnight; on the band the text breaks after the colon. A
+comes as "Public holiday today | …", else one tomorrow as "Public holiday
+tomorrow | …", until midnight; on the band the text breaks at the bar. A
 day before none, the empty payload takes the item away. The holiday's name is in
 the language Home Assistant gives it; the words before it can be your own
 (umlauts are fine, see the font below).
@@ -717,7 +721,7 @@ actions:
           topic: "{{ topic }}"
           retain: true
           payload: >-
-            {{ {"text": "Breaking news: " ~ trigger.to_state.state,
+            {{ {"text": "Breaking news | " ~ trigger.to_state.state,
                 "icon": "warning", "level": "alert",
                 "until": (now() + timedelta(hours=2)).timestamp() | int} | to_json }}
     else:
@@ -801,7 +805,7 @@ Assistant as running text, and all the other information as **info cards**.
   the time's change and before :30, else in the next minute - and wait for a
   GIF's end ([Who takes the panel](#who-takes-the-panel)). Cards never run into
   the next change. A ticked input (see below) ends the cards on show.
-- **A message:** its text (`title: text`) runs through the middle of the panel
+- **A message:** its text (`title | text`) runs through the middle of the panel
   in the 5x7 font, white, from the right edge out at the left, twice, at about
   five characters a second; an urgent one (`"level": "alert"`) shows its icon
   for 3 s first and runs in red. The font has ä ö ü ß, é è à ç ñ and the other
@@ -860,24 +864,35 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
   the weather, the air quality, Home Assistant's items), then the clock's own,
   worked out on the clock once a minute without the internet:
   - **the clock's status**, only while its status pixel is red: a new home WiFi
-    that does not join ("Home WiFi does not join:" and its name), or a time
-    sync that keeps failing ("Time sync is failing" / "last good 18 Oct 03:00"),
+    that does not join ("Home WiFi does not join" / its name), or a time sync
+    that keeps failing ("Time sync is failing" / "last good 18 Oct 03:00"),
     beside the warning sign in yellow;
   - **the clock change**, from 24 hours before until 12 hours after it, when
     daylight saving is set to auto: "Clocks go back 1 h" / "tonight at 3:00"
     (the time on the clock before it), then "Clocks went back 1 h" / "last
     night";
-  - **the date**: "Sunday 18 October" / "2026, week 42" (the ISO week), with the
+  - **the date**: "Sunday 18 October 2026" / "week 42" (the ISO week), with the
     calendar icon;
   - **sunrise and sunset** at the place set for the weather, today's and after
     sunset tomorrow's, "Midnight sun" or "Polar night" when there is none -
     after NOAA's solar calculator, within a minute of published tables;
   - **the moon**: its phase and how much of it is lit, and the next full or new
-    moon, whichever comes first ("First quarter, 53%" / "Full moon Mon 26 Oct"),
+    moon, whichever comes first ("First quarter | 53% lit" / "Full moon Mon 26 Oct"),
     from its longitude, within about half an hour (`src/sky.h`).
-- **Turns:** each stands 6 s. A text breaks between words, after a colon when
-  the rest fits the second line; one that does not fit two lines runs through
-  once beside the icon, at five characters a second.
+- **Turns:** each stands 6 s, one that runs through as long as that takes.
+- **Lines** (one rule for every text in the band, Peter's of 2026-10-18): a
+  text's parts are set apart by ` | ` - the clock's own, those it puts together
+  from a source's fields (the weather "10°C overcast | 10/8°C | rain 100%", the
+  warnings, the air quality "Air quality fair | index 32") and Home Assistant's
+  (a message's title and text, and what an item's `text` sets apart so). A text
+  that fits one line stands in one, bars and all. Else it breaks at the first
+  bar after which the rest fits the second line, and that bar is left out
+  ("10°C overcast" / "10/8°C | rain 100%"); else between words, a bar at the
+  break left out too. One that fits neither runs through once beside the icon,
+  at five characters a second. On the panel a bar shows as a middle dot - the
+  5x7 font draws `|` broken in the middle, like a colon - here and in the
+  64x32 clock's running texts; the texts themselves, the web app and Home
+  Assistant keep the bar, which every keyboard has.
 - **Alerts:** in their level's colour, framed when **Frame round an alert** is
   on. A new alert takes the band at once and still comes up once as its banner
   over the face, as on the 64x32 clock.
