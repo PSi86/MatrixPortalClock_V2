@@ -602,6 +602,136 @@ day before none, the empty payload takes the item away. The holiday's name is in
 the language Home Assistant gives it; the words before it can be your own
 (umlauts are fine, see the font below).
 
+### Example: civil protection warnings (NINA)
+
+Germany's warnings of the Federal Office of Civil Protection (Bundesamt für
+Bevölkerungsschutz und Katastrophenhilfe) come through Home Assistant's
+[NINA](https://www.home-assistant.io/integrations/nina/) integration.
+
+1. In Home Assistant, **Settings → Devices & services → Add integration →
+   NINA**: the city or district, and how many warnings to fetch at most. It
+   checks every 5 minutes and makes one binary sensor per warning slot, on
+   while a warning fills it.
+2. On the clock: the Home Assistant link, nothing else.
+3. The automation, with your slots' entity IDs in its trigger and in `slots`,
+   and your clock's id:
+
+```yaml
+alias: "Matrix Clock: NINA warnings"
+description: "The NINA warnings for the place as items on the clock"
+mode: queued
+triggers:
+  - trigger: state
+    entity_id:                               # your NINA warning slots
+      - binary_sensor.stuttgart_warning_1
+      - binary_sensor.stuttgart_warning_2
+      - binary_sensor.stuttgart_warning_3
+  - trigger: homeassistant
+    event: start
+variables:
+  clock: mpclock/06c16c                      # your clock's id in place of 06c16c
+  slots:                                     # the same slots as above
+    - binary_sensor.stuttgart_warning_1
+    - binary_sensor.stuttgart_warning_2
+    - binary_sensor.stuttgart_warning_3
+actions:
+  - repeat:
+      for_each: "{{ slots }}"
+      sequence:
+        - action: nina.get_details             # null for a slot without a warning
+          target:
+            entity_id: "{{ repeat.item }}"
+          response_variable: nina
+        - variables:
+            topic: "{{ clock }}/item/nina{{ repeat.index }}"
+            w: "{{ (nina or {}).get(repeat.item) }}"
+        - if:
+            - condition: template
+              value_template: >-
+                {{ w is mapping and not (w.id | default('')).startswith('dwd.') }}
+          then:
+            - action: mqtt.publish
+              data:
+                topic: "{{ topic }}"
+                retain: true
+                payload: >-
+                  {{ {"text": w.headline,
+                      "icon": "warning",
+                      "level": "alert" if (w.severity | lower) in ['moderate', 'severe', 'extreme'] else "info",
+                      "severity": w.severity | lower,
+                      "until": as_timestamp(w.expires, 0) | int if w.expires
+                               else (now() + timedelta(hours=6)).timestamp() | int} | to_json }}
+          else:
+            - action: mqtt.publish
+              data:
+                topic: "{{ topic }}"
+                retain: true
+                payload: ""
+```
+
+Each slot becomes an item `nina1`, `nina2` …: the warning's headline (in German,
+as NINA writes it), the warning triangle in the colour of its level - from
+`moderate` on as an alert, which comes up as a banner - until the warning
+expires, 6 hours when it gives no end. A slot that empties takes its item away.
+NINA passes on the DWD's weather warnings too, whose IDs start with `dwd.` (as in
+the integration's example); the clock fetches those itself, so the automation
+leaves them out. Drop the `startswith` part to have them twice.
+
+### Example: breaking news (tagesschau)
+
+The tagesschau app's homepage marks a breaking news item (`breakingNews`). Home
+Assistant reads it with a [RESTful sensor](https://www.home-assistant.io/integrations/rest/),
+in `configuration.yaml`:
+
+```yaml
+rest:
+  - resource: https://www.tagesschau.de/api2u/homepage/
+    scan_interval: 300     # every 5 minutes; the API allows at most 60 calls an hour
+    timeout: 30            # the homepage is about 600 KB
+    sensor:
+      - name: "tagesschau breaking news"
+        unique_id: tagesschau_breaking_news
+        value_template: >-
+          {{ value_json.news | selectattr('breakingNews') | map(attribute='title')
+             | first | default('none') | truncate(250) }}
+```
+
+The sensor holds the headline of the breaking news item, `none` while there is
+none. An automation hands it to the clock as an alert:
+
+```yaml
+alias: "Matrix Clock: breaking news"
+triggers:
+  - trigger: state
+    entity_id: sensor.tagesschau_breaking_news
+variables:
+  topic: mpclock/06c16c/item/news            # your clock's id in place of 06c16c
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ trigger.to_state.state not in ['none', 'unknown', 'unavailable', ''] }}"
+    then:
+      - action: mqtt.publish
+        data:
+          topic: "{{ topic }}"
+          retain: true
+          payload: >-
+            {{ {"text": "Breaking news: " ~ trigger.to_state.state,
+                "icon": "warning", "level": "alert",
+                "until": (now() + timedelta(hours=2)).timestamp() | int} | to_json }}
+    else:
+      - action: mqtt.publish
+        data:
+          topic: "{{ topic }}"
+          retain: true
+          payload: ""
+```
+
+A new breaking news item comes up as an alert - its banner over the face, then
+first in the band - for two hours, or until the homepage no longer marks it. The
+tagesschau's content is for private, non-commercial use only; its API's terms
+allow no more than 60 calls an hour.
+
 A message goes to the **Message** entity (`notify.send_message`), or as JSON to
 the message topic. It is an item for its seconds, an hour unless it says; the
 clock keeps up to four, and a fifth takes the oldest one's place (an urgent
