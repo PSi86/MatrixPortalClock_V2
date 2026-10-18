@@ -414,10 +414,12 @@ deflated one into PSRAM with the inflate in the chip's ROM before it plays.
 
 ## Info band data
 
-The wall clock's face will have an info band below it. Its data is fetched on
-the MatrixPortal S3 already, so the data side can be tried out before the
-wall clock exists: until the band is drawn, the config page's section
-**Info band data** and the console list what was fetched.
+The wall clock shows these items in its info band below the face (see
+[The info band on the wall clock](#the-info-band-on-the-wall-clock)); the
+MatrixPortal S3, which has no room for a band, shows them over its face (see
+[Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel-s3)).
+The web app's section **Info** lists what the clock knows, and the console what
+was fetched.
 
 The clock fetches only a few key-free sources that are likely to last, and
 everything else is to come through Home Assistant:
@@ -474,7 +476,7 @@ Setting it up:
 1. In Home Assistant, install the **Mosquitto broker** add-on, add a Home
    Assistant user for the clock, and set up the MQTT integration if Home
    Assistant does not offer it by itself.
-2. On the clock's page, section **Info band data**, card **Home Assistant**:
+2. On the clock's page, section **Info**, card **Home Assistant**:
    the broker's address (`homeassistant.local` or its IP), port 1883, that user
    and its password, the switch on, **Save Home Assistant link**. The link needs
    a stored home WiFi and **continuous network access** (Home WiFi section);
@@ -525,6 +527,80 @@ data:
     {"text": "Paper bin tomorrow", "icon": "warning",
      "until": {{ (now() + timedelta(hours=12)).timestamp() | int }}}
 ```
+
+### Example: public holidays
+
+The clock has no holiday rules of its own: they differ from country to
+country and from region to region. Home Assistant's
+[Holiday](https://www.home-assistant.io/integrations/holiday/) integration knows
+them, offline, and an automation hands today's or tomorrow's to the clock as an
+item - in the band on the wall clock, as a card on the 64x32 clock.
+
+1. In Home Assistant, **Settings → Devices & services → Add integration →
+   Holiday**: the country, and the state or region where the clock hangs (for
+   Germany the federal state; some holidays exist only there). It makes a
+   calendar entity; note its entity ID (the integration's entity list shows it).
+2. On the clock: the Home Assistant link as above, nothing else. Its card shows
+   the clock's topics; `06c16c` below stands for the end of your clock's name.
+3. In Home Assistant, a new automation (**Settings → Automations & scenes →
+   Create automation → Edit in YAML**), with your calendar's entity ID and your
+   clock's topic in its first lines:
+
+```yaml
+alias: "Matrix Clock: public holiday"
+description: "Today's or tomorrow's public holiday as an item on the clock"
+triggers:
+  - trigger: time
+    at: "00:01:00"
+  - trigger: homeassistant
+    event: start
+variables:
+  holidays: calendar.germany           # your Holiday calendar's entity ID
+  topic: mpclock/06c16c/item/holiday   # your clock's id in place of 06c16c
+actions:
+  - action: calendar.get_events
+    target:
+      entity_id: "{{ holidays }}"
+    data:
+      start_date_time: "{{ today_at('00:00') }}"
+      duration:
+        hours: 48
+    response_variable: found
+  - variables:
+      events: "{{ found[holidays].events }}"
+      name_today: >-
+        {{ events | selectattr('start', 'match', now().date() | string)
+                  | map(attribute='summary') | first | default('') }}
+      name_tomorrow: >-
+        {{ events | selectattr('start', 'match', (now() + timedelta(days=1)).date() | string)
+                  | map(attribute='summary') | first | default('') }}
+  - if:
+      - condition: template
+        value_template: "{{ name_today != '' or name_tomorrow != '' }}"
+    then:
+      - action: mqtt.publish
+        data:
+          topic: "{{ topic }}"
+          retain: true
+          payload: >-
+            {{ {"text": ("Public holiday today: " ~ name_today) if name_today
+                        else ("Public holiday tomorrow: " ~ name_tomorrow),
+                "icon": "calendar",
+                "until": (today_at('00:00') + timedelta(days=1)).timestamp() | int} | to_json }}
+    else:
+      - action: mqtt.publish
+        data:
+          topic: "{{ topic }}"
+          retain: true
+          payload: ""
+```
+
+It runs a minute after midnight and when Home Assistant starts. A holiday today
+comes as "Public holiday today: …", else one tomorrow as "Public holiday
+tomorrow: …", until midnight; on the band the text breaks after the colon. A
+day before none, the empty payload takes the item away. The holiday's name is in
+the language Home Assistant gives it; the words before it can be your own
+(umlauts are fine, see the font below).
 
 A message goes to the **Message** entity (`notify.send_message`), or as JSON to
 the message topic. It is an item for its seconds, an hour unless it says; the
@@ -637,8 +713,41 @@ to three parts, and each part a role whose colour the clock picks when it draws
 it: the sun yellow with orange rays, the moon pale yellow, a cloud white (grey
 over rain, snow and thunder), rain blue, snow white, the bolt yellow, wind light
 blue, a thermometer white with blue (frost) or red (heat), the warning triangle
-in its level's colour with a white mark. Drizzle, rain and snow have a light
-and a heavy picture beside the usual one (see `intensity` above).
+in its level's colour with a white mark, the calendar white with a red head.
+Drizzle, rain and snow have a light and a heavy picture beside the usual one
+(see `intensity` above).
+
+## The info band on the wall clock
+
+The wall clock (192x128) shows its 64x32 face three times the size in the top
+192x96 and uses the 192x32 below as the info band: one item after the other,
+its icon on the left and its text in two lines of the 5x7 font beside it, up to
+26 characters each.
+
+- **Order:** the alerts first, then the messages, each in the order they came,
+  then the information as on the 64x32 clock's cards (DWD warnings, rain soon,
+  the weather, Home Assistant's items), then the date ("Sunday 18 October",
+  "2026, week 42", the ISO week) with the calendar icon.
+- **Turns:** each stands 6 s. A text breaks between words, after a colon when
+  the rest fits the second line; one that does not fit two lines runs through
+  once beside the icon, at five characters a second.
+- **Alerts:** in their level's colour, framed when **Frame round an alert** is
+  on. A new alert takes the band at once and still comes up once as its banner
+  over the face, as on the 64x32 clock.
+- **Messages:** a new one takes the band at once, for twice its time (its text
+  runs through twice); its text no longer runs over the face. An urgent one's
+  icon comes over the face first.
+- **No cards, no info round:** the band shows the information all the time; the
+  web app has no info round for this clock. **Show notifications** brings the
+  alerts and messages over the face as on the 64x32 clock and starts the band
+  again at its first item.
+- **Covered and dark:** a GIF covers the band as it covers the face; it comes
+  back after the GIF. The band is dark while the hotspot is open and until the
+  clock has its time.
+
+The band is drawn in `bandUpdate()` at the end of the sketch into a picture of
+its own and written onto the wall by `PanelCanvas::showBand()` in
+`src/board_hal.h`, which writes only what changed.
 
 ## Web app and the home network (S3)
 

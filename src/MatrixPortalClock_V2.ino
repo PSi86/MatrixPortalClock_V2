@@ -9697,10 +9697,18 @@ uint32_t bandLook(const BandTurn &t) {
   return h;
 }
 
-// A text in two lines of up to `chars` characters, broken between words;
-// false when it does not fit them.
+// A text in two lines of up to `chars` characters, broken between words -
+// after its first colon when the rest fits the second line ("Public holiday
+// today:" / "All Saints' Day"); false when it does not fit them.
 bool bandWrap(const char *s, uint8_t chars, char lines[2][32]) {
   lines[0][0] = lines[1][0] = '\0';
+  const char *colon = strstr(s, ": ");
+  if (colon && colon - s + 1 <= chars && strlen(colon + 2) <= chars && strlen(s) > chars) {
+    memcpy(lines[0], s, (size_t)(colon - s + 1));
+    lines[0][colon - s + 1] = '\0';
+    strlcpy(lines[1], colon + 2, sizeof(lines[1]));
+    return true;
+  }
   for (uint8_t l = 0; l < 2; l++) {
     while (*s == ' ') { s++; }
     if (strlen(s) <= chars) {
@@ -9902,6 +9910,8 @@ void bandSelfTest() {
     { "abcdefghijklmnopqrstuvwxyz", true, "abcdefghijklmnopqrstuvwxyz", "" },
     { "abcdefghijklmnopqrstuvwxyz0", false, "", "" },
     { "One two three four five six seven eight nine ten eleven", false, "", "" },
+    { "Public holiday today: All Saints' Day", true, "Public holiday today:", "All Saints' Day" },
+    { "Public holiday tomorrow: Corpus Christi, in parts", true, "Public holiday tomorrow:", "Corpus Christi, in parts" },
   };
   for (const Wrap &w : WRAPS) {
     char lines[2][32];
@@ -10419,7 +10429,11 @@ void apiState(Print &c) {
   s["feedw"] = feedOn(FEED_WEATHER);
   s["feeda"] = feedOn(FEED_WARNINGS);
   s["afr"] = feedSettings.frames != 0;
+#if BAND_ON_PANEL
+  d["band"] = true;       // the information takes turns in the band: no info round
+#else
   s["iround"] = feedSettings.roundMinutes;
+#endif
 #endif
   s["ssid"] = wifiCreds.ssid;
 
