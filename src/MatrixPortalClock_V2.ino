@@ -85,6 +85,13 @@ class JsonDocument;                    // named by prototypes generated from thi
 class JsonObject;
 #endif
 
+#if BOARD_WAVESHARE_WALL
+#include <mbedtls/sha256.h>    // the console's "crypto" test of the panel output beside the crypto DMA
+#include <mbedtls/aes.h>
+#include <soc/gdma_struct.h>   // and its "gdma": the DMA channels' peripherals and priorities
+#include <esp_timer.h>
+#endif
+
 #if BAND_DATA
 #include "band_data.h"         // the info band's items and the sources the clock fetches
 #include "item_icons.h"        // their icons, for the band and the alert banners
@@ -462,6 +469,9 @@ struct FeedRun {
 FeedRun       feedRuns[FEED_COUNT];
 bool          feedTaskOK = false;        // the fetch task is running
 bool          feedBusy = false;          // a job is with it
+#if BOARD_WAVESHARE_WALL
+unsigned long feedSentAt = 0;            // millis() the last job was handed to it (wallOutputWatch())
+#endif
 unsigned long feedWantedAt = 0;          // millis() the station was asked for
 char          feedPlace[32] = "";        // the warnings' place, as the DWD names it
 const unsigned long FEED_STATION_MS = 60UL * 1000UL;       // the longest wait for the station
@@ -1605,6 +1615,7 @@ void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
 #if BOARD_WAVESHARE_WALL
   wallConsole();  // "black" on the USB console before a flash, test pictures
+  wallOutputWatch();
   if (matrix.testing()) { delay(5); return; }   // a test picture stands: the clock draws nothing
 #endif
 #if WATCHFACE_MUNCHER && defined(CLOCK_DEBUG)
@@ -1618,7 +1629,11 @@ void loop(void) {
 #endif
 #if BAND_DATA && defined(CLOCK_DEBUG)
   static bool warningIconsTested = false;
-  if (!warningIconsTested && millisNow > 10000) { warningIconsTested = true; warningIconSelfTest(); }
+  if (!warningIconsTested && millisNow > 10000) {
+    warningIconsTested = true;
+    warningIconSelfTest();
+    feedRetrySelfTest();
+  }
 #endif
   if (minuteTrigger) { panelDirty = true; }   // whatever shows the time has to follow it
   if (secondTrigger && secondNow == 30) { rtcFollow(); }   // half way through every minute
@@ -6690,6 +6705,20 @@ void stopAPMode() {
 //   clock stands still meanwhile; "test off" gives the wall back.
 // - "bus <divider>" sets the panel bus to 160 MHz / divider while it runs,
 //   to judge faster clocks than the driver's 13.3 MHz by eye.
+// - "fetch" makes every source of the info band due now (weather, warnings
+//   over HTTPS), to watch the panel output while they are fetched.
+// - "prio <0-5>" sets the panel output's DMA channel priority among the
+//   GDMA channels (PANEL_DMA_PRIORITY from the start), until the next start.
+// - "gdma" lists every GDMA channel's peripheral, priority and weight.
+// - "crypto" times SHA-256 and AES-128 over blocks in internal RAM, as TLS
+//   hands them to the crypto engine; "crypto ext" the same over blocks in
+//   PSRAM (wallCryptoTest()).
+// - "extmem <bytes>" sets the size from which malloc() takes PSRAM (4096 from
+//   the start, CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL), until the next start: is
+//   it a buffer from malloc() that puts TLS data out of internal RAM?
+// - "tlsmem int" / "tlsmem ext": mbedTLS's memory from internal RAM first
+//   (from the start) or from PSRAM first, as the MatrixPortal S3 takes it
+//   (feedTlsCalloc()), until the next start.
 void wallConsole() {
   static char line[16];
   static uint8_t len = 0;
@@ -6704,7 +6733,7 @@ void wallConsole() {
       matrix.holdDark();
       Serial.println("Panels dark until the next start");
     }
-    unsigned panel = 0, bright = 0, div = 0;
+    unsigned panel = 0, bright = 0, div = 0, prio = 0;
     if (strcmp(line, "test off") == 0) {
       matrix.endTestPicture();
       matrix.setBrightness(panelBrightness());
@@ -6718,7 +6747,31 @@ void wallConsole() {
       matrix.setBusDivider((uint8_t)div);
       Serial.printf("Panel bus: 160 MHz / %u = %u kHz, refresh %lu Hz\n", div, 160000U / div,
                     (unsigned long)matrix.refreshRate());
+    } else if (sscanf(line, "prio %u", &prio) == 1 && prio <= 5) {
+      bool ok = matrix.setDmaPriority((uint8_t)prio);
+      Serial.printf("Panel output: DMA priority %u %s\n", prio, ok ? "set" : "NOT set");
+    } else if (strcmp(line, "gdma") == 0) {
+      wallGdmaList();
+    } else if (strcmp(line, "crypto") == 0 || strcmp(line, "crypto ext") == 0) {
+      wallCryptoTest(line[6] != '\0');
+    } else if (sscanf(line, "extmem %u", &prio) == 1 && prio <= 262144) {
+      heap_caps_malloc_extmem_enable(prio);
+      Serial.printf("RAM: malloc() takes PSRAM from %u bytes on; internal free %u\n", prio,
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
+#if BAND_DATA
+    bool tlsInt = strcmp(line, "tlsmem int") == 0;
+    if (tlsInt || strcmp(line, "tlsmem ext") == 0) {
+      feedTlsInternal() = tlsInt;
+      Serial.printf("TLS memory: %s first\n", tlsInt ? "internal RAM" : "PSRAM");
+    }
+#endif
+#if BAND_DATA
+    if (strcmp(line, "fetch") == 0) {
+      for (uint8_t f = 0; f < FEED_COUNT; f++) { feedRuns[f].dueAt = millisNow; }
+      Serial.println("Info band: every source due now");
+    }
+#endif
 #if WEBUI_APP
     bool lanOn = strcmp(line, "lan on") == 0;
     if (lanOn || strcmp(line, "lan off") == 0) {
@@ -6730,6 +6783,114 @@ void wallConsole() {
 #endif
     len = 0;
   }
+}
+
+// The panel output stops for good when the DMA cannot read the frame buffer
+// out of PSRAM fast enough: the clock runs on and the wall stays dark (bus at
+// 20 MHz, 2026-10-18; the same day twice at the start of a weather fetch).
+// Watched on every pass: once it has stopped it is logged, with what the
+// fetch task was doing, and started again (at most every 50 ms). Only after
+// it has been seen running: should the flag read 0 all along, that says so
+// once and nothing is restarted.
+uint32_t wallOutputStops = 0;   // since the start
+void wallOutputWatch() {
+  uint32_t &stops = wallOutputStops;
+  static bool seenRunning = false, toldNever = false;
+  static unsigned long restartedAt = 0;
+  if (matrix.outputRunning()) { seenRunning = true; return; }
+  if (!seenRunning) {
+    if (!toldNever && millisNow > 15000) {
+      toldNever = true;
+      Serial.println("Panel output: never seen running - the watch does nothing");
+    }
+    return;
+  }
+  if (restartedAt != 0 && millisNow - restartedAt < 50) { return; }
+  restartedAt = millisNow ? millisNow : 1;
+  stops++;
+  if (stops <= 20 || stops % 100 == 0) {
+#if BAND_DATA
+    if (feedBusy) {
+      Serial.printf("Panel output stopped (%lu since the start), a fetch running for %lu ms; started again\n",
+                    (unsigned long)stops, millisNow - feedSentAt);
+    } else {
+      Serial.printf("Panel output stopped (%lu since the start), no fetch running (the last %lu ms ago); started again\n",
+                    (unsigned long)stops, millisNow - feedSentAt);
+    }
+#else
+    Serial.printf("Panel output stopped (%lu since the start); started again\n", (unsigned long)stops);
+#endif
+  }
+  matrix.restartOutput();
+}
+
+// Console "gdma": the five GDMA channels both ways - the peripheral each is
+// connected to, its priority and weight - and whether the priorities count
+// at all. Shows whom the panel output (LCD_CAM, out) shares the DMA with.
+void wallGdmaList() {
+  static const char *const PERI[] = { "SPI2", "SPI3", "UHCI0", "I2S0", "I2S1", "LCD_CAM", "AES", "SHA",
+                                      "ADC_DAC", "RMT" };
+  for (uint8_t i = 0; i < 5; i++) {
+    unsigned o = GDMA.channel[i].out.peri_sel.sel, n = GDMA.channel[i].in.peri_sel.sel;
+    Serial.printf("GDMA %u: out %-7s priority %u weight %2u, L2 FIFO code %u | in %-7s priority %u weight %2u\n", i,
+                  o < 10 ? PERI[o] : "-", (unsigned)GDMA.channel[i].out.pri.tx_pri,
+                  (unsigned)GDMA.channel[i].out.weight.tx_weight, (unsigned)GDMA.sram_size[i].out.out_size,
+                  n < 10 ? PERI[n] : "-", (unsigned)GDMA.channel[i].in.pri.rx_pri,
+                  (unsigned)GDMA.channel[i].in.weight.rx_weight);
+  }
+  Serial.printf("GDMA: priority arbitration %s\n", GDMA.misc_conf.arb_pri_dis ? "OFF" : "on");
+}
+
+// Console "crypto": what the crypto engine does during a TLS handshake, on
+// its own - SHA-256 and AES-128-CTR, ten times over 16 KB each, in internal
+// RAM (the TLS buffers are there, CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC; the
+// ESP32-S3 feeds both engines by GDMA) or, with external, in PSRAM (where
+// larger application buffers go). Prints how long each took and how often
+// the panel output stopped meanwhile (watched between the blocks), so the DMA
+// priority can be judged on both sides: the panel's output and the crypto's
+// speed. On 2026-10-18 internal blocks stopped the output not once, even at
+// priority 0, while real handshakes did.
+void wallCryptoTest(bool external) {
+  const size_t N = 16384;
+  const uint8_t ROUNDS = 10;
+  uint32_t caps = external ? MALLOC_CAP_SPIRAM : (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+  uint8_t *in = (uint8_t *)heap_caps_aligned_alloc(64, N, caps);   // whole cache lines
+  uint8_t *out = (uint8_t *)heap_caps_aligned_alloc(64, N, caps);
+  if (!in || !out) {
+    heap_caps_free(in);
+    heap_caps_free(out);
+    Serial.println("Crypto test: not enough RAM");
+    return;
+  }
+  for (size_t i = 0; i < N; i++) { in[i] = (uint8_t)(i * 7); }
+  uint32_t stopsBefore = wallOutputStops;
+  uint8_t digest[32];
+  int64_t t0 = esp_timer_get_time();
+  for (uint8_t r = 0; r < ROUNDS; r++) {
+    mbedtls_sha256(in, N, digest, 0);
+    wallOutputWatch();
+  }
+  int64_t t1 = esp_timer_get_time();
+  static const uint8_t KEY[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_enc(&aes, KEY, 128);
+  for (uint8_t r = 0; r < ROUNDS; r++) {
+    size_t off = 0;
+    uint8_t nonce[16] = {}, block[16];
+    mbedtls_aes_crypt_ctr(&aes, N, &off, nonce, block, in, out);
+    wallOutputWatch();
+  }
+  int64_t t2 = esp_timer_get_time();
+  mbedtls_aes_free(&aes);
+  heap_caps_free(in);
+  heap_caps_free(out);
+  double mb = (double)N * ROUNDS / 1e6;
+  Serial.printf("Crypto test (%s): SHA-256 %lu us (%.2f MB/s), AES-128-CTR %lu us (%.2f MB/s), %u x 16 KB each; "
+                "panel output stopped %lu times meanwhile\n", external ? "PSRAM" : "internal RAM",
+                (unsigned long)(t1 - t0), mb / ((t1 - t0) / 1e6), (unsigned long)(t2 - t1), mb / ((t2 - t1) / 1e6),
+                (unsigned)ROUNDS, (unsigned long)(wallOutputStops - stopsBefore));
+  wallGdmaList();   // the crypto engines' channels, should they be given back after use
 }
 #endif
 
@@ -8344,7 +8505,8 @@ void gifPackClose() {
 
    A source due wants the station (RADIO_FEEDS), and its fetch goes to the
    task once the station is up; sources due within FEED_GATHER_MS come along
-   while the radio is on anyway. Then the radio goes off again unless the
+   while the radio is on anyway, except one whose last fetch failed: that one
+   waits out its back-off. Then the radio goes off again unless the
    sync still needs it (stationUpdate()).
    ---------------------------------------------------------------------- */
 
@@ -8385,11 +8547,15 @@ bool feedsReady() {
   return feedTaskOK && feedSettings.located && wifiStored() && clockIsSet();
 }
 
-// Whether source f is on and due within `early` ms.
+// Whether source f is on and due within `early` ms. One whose last fetch
+// failed waits out its back-off (feedFailed()), never coming along early:
+// with the radio on for its retry it would otherwise be fetched again at
+// once (an HTTP 503 three times within a second, 2026-10-18).
 bool feedDueWithin(uint8_t f, unsigned long early) {
 #if WEBUI_APP
   if (FEEDS[f].needsAlways && !lanSettings.on) { return false; }   // needs continuous network access
 #endif
+  if (feedRuns[f].failures) { early = 0; }
   return feedOn(f) && (long)(millisNow + early - feedRuns[f].dueAt) >= 0;
 }
 
@@ -9408,6 +9574,38 @@ void feedFailed(uint8_t f, const char *why) {
   Serial.printf("Info band: %s failed (%s), again in %lu min\n", FEEDS[f].name, r.error, wait / 60000UL);
 }
 
+#if defined(CLOCK_DEBUG)
+// At start-up: a source whose fetch failed waits out its back-off, also while
+// the radio is on for the others (feedsUpdate() takes the sources due within
+// FEED_GATHER_MS along); one without a failure still comes along early. On
+// 2026-10-18 an HTTP 503 was fetched three times within a second. Leaves the
+// source as it found it.
+void feedRetrySelfTest() {
+  int8_t f = -1;
+  for (uint8_t i = 0; i < FEED_COUNT && f < 0; i++) {
+    unsigned long due = feedRuns[i].dueAt;
+    feedRuns[i].dueAt = millisNow;
+    if (feedDueWithin(i, 0)) { f = (int8_t)i; }   // on, and fetched on this clock at all
+    feedRuns[i].dueAt = due;
+  }
+  if (f < 0) {
+    Serial.println("Feed retry self-test: skipped, no source on");
+    return;
+  }
+  FeedRun saved = feedRuns[f];
+  feedRuns[f].failures = 0;
+  feedFailed(f, "self-test");                      // due again FEED_RETRY_MS from now
+  bool waits = !feedDueWithin(f, FEED_GATHER_MS);
+  feedRuns[f].failures = 0;                        // the same wait without a failure
+  bool gathers = feedDueWithin(f, FEED_GATHER_MS);
+  feedRuns[f] = saved;
+  Serial.printf("Feed retry self-test: %s (%s: a failed one %s, one without a failure %s)\n",
+                waits && gathers ? "all right" : "FAILED", FEEDS[f].name,
+                waits ? "waits out its back-off" : "is fetched again at once",
+                gathers ? "comes along early" : "does not come along");
+}
+#endif
+
 // A result back from the fetch task.
 void feedApply(const FeedResult &res) {
   if (res.feed >= FEED_COUNT) { return; }
@@ -9466,7 +9664,12 @@ void feedsUpdate() {
     return;
   }
   FeedJob job = { (uint8_t)f, feedSettings.lat, feedSettings.lon, clockNow(), (int32_t)tzTotalOffset() };
-  if (xQueueSend(feedJobs(), &job, 0) == pdTRUE) { feedBusy = true; }
+  if (xQueueSend(feedJobs(), &job, 0) == pdTRUE) {
+    feedBusy = true;
+#if BOARD_WAVESHARE_WALL
+    feedSentAt = millisNow;
+#endif
+  }
 }
 
 // "52.52", "-13,405" or "48" in millionths of a degree, up to `limit` degrees

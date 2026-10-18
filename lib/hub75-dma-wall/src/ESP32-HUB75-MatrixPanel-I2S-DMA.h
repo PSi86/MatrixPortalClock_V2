@@ -707,6 +707,15 @@ public:
   void writeRowRGB(int16_t x, int16_t y, int16_t n, const uint8_t *rgb, bool reversed);
   uint8_t rowsPerFrame() const { return ROWS_PER_FRAME; }
   int lsbMsbTransition() const { return lsbMsbTransitionBit; }
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  /* outputRunning(): whether the LCD peripheral still sends the buffer out;
+   * restartOutput() starts it again once it has stopped; setDmaPriority():
+   * the output's DMA channel priority, 0 (as allocated) to 5 (the ESP32-S3
+   * only). */
+  bool outputRunning() const { return dma_bus.output_running(); }
+  void restartOutput() { dma_bus.restart_output(); }
+  bool setDmaPriority(uint8_t priority) { return dma_bus.set_dma_priority(priority) == ESP_OK; }
+#endif
   /* --- end of the wall clock's addition ------------------------------------ */
 
   inline bool setCfg(const HUB75_I2S_CFG &cfg)

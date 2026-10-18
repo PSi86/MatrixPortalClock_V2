@@ -150,6 +150,16 @@
 
      void flip_dma_output_buffer(int back_buffer_id);
 
+    // MatrixPortalClock_V2 wall clock: whether the LCD peripheral still sends
+    // (the hardware clears lcd_start when its transfer ends), and a fresh
+    // start of the output from the first descriptor once it has stopped.
+    bool output_running() const { return LCD_CAM.lcd_user.lcd_start; }
+    void restart_output();
+    // ... and the DMA channel's priority among the GDMA channels (0, as
+    // allocated, to GDMA_LL_CHANNEL_MAX_PRIORITY), to test whether the output
+    // loses out to another DMA user.
+    esp_err_t set_dma_priority(uint32_t priority) { return gdma_set_priority(dma_chan, priority); }
+
   private:
 
     config_t _cfg;

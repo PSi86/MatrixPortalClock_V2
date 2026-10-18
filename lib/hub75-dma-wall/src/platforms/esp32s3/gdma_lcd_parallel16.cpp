@@ -429,9 +429,23 @@
         LCD_CAM.lcd_user.lcd_reset = 1;        // Trigger LCD DMA transfer
         LCD_CAM.lcd_user.lcd_update = 1;        // Trigger LCD DMA transfer
 
-        gdma_stop(dma_chan);   
-        
-  } // end   
+        gdma_stop(dma_chan);
+
+  } // end
+
+  // MatrixPortalClock_V2 wall clock: the output started again after it has
+  // stopped, with the steps init() takes for a clean start; the descriptors
+  // and the frame buffer stay as they are.
+  void Bus_Parallel16::restart_output()
+  {
+    dma_transfer_stop();
+    gdma_reset(dma_chan);
+    esp_rom_delay_us(100);
+    LCD_CAM.lcd_user.lcd_dout        = 1;
+    LCD_CAM.lcd_user.lcd_update      = 1;
+    LCD_CAM.lcd_misc.lcd_afifo_reset = 1;
+    dma_transfer_start();
+  }
 
 
   void Bus_Parallel16::flip_dma_output_buffer(int back_buffer_id)

@@ -288,6 +288,9 @@ const int16_t WALL_CANVAS_X = 0, WALL_CANVAS_Y = 0;
 // about 3.9 A at 160 and 6.0 A at 255. Capped at 230: about 5.4 A at most,
 // 72 % of the supply. Brightness is light here (show() turns it into values).
 const uint8_t PANEL_BRIGHT_CAP = 230;
+// The output's DMA channel priority, 0 (as allocated) to 5 (the ESP32-S3's
+// highest), set in begin().
+const uint8_t PANEL_DMA_PRIORITY = 5;
 // The driver's frame buffer is in PSRAM (SPIRAM_DMA_BUFFER, set by the wall
 // clock's envs; the driver is the copy in lib/hub75-dma-wall). At 8 bits one
 // buffer for the six panels takes 192 KB: in internal RAM that left 56 KB
@@ -369,6 +372,13 @@ class PanelCanvas : public GFXcanvas16 {
 #if BOARD_WAVESHARE_WALL
     reckonPlaneLight();   // from the planes the driver has just chosen
     buildLight();
+    // The output's DMA channel first among the GDMA channels. It shares them
+    // with the crypto engine (AES), all at priority 0 as allocated, and lost
+    // out to it during TLS handshakes: the output stopped, a row flashed
+    // bright until wallOutputWatch() restarted it. Measured 2026-10-18 at
+    // 16 MHz, weather + warnings fetched six times each way: 20 stops at
+    // priority 0, 1 at 5; the crypto engine as fast at 5 as at 0.
+    if (!_dma->setDmaPriority(PANEL_DMA_PRIORITY)) { Serial.println("Panel: DMA priority NOT set"); }
 #endif
     _dma->setBrightness8(0);   // dark until the sketch sets a brightness
     // The driver clocks the panel bus without a pause and sets its pins to the
@@ -735,6 +745,12 @@ class PanelCanvas : public GFXcanvas16 {
     _periodUs = 1000000UL / _rate;
   }
   uint32_t refreshRate() const { return _rate; }
+  // Whether the driver still sends the buffer to the panels, and a fresh start
+  // of that once it has stopped (wallOutputWatch() in the sketch).
+  bool outputRunning() const { return !_dma || _dma->outputRunning(); }
+  void restartOutput() { if (_dma) { _dma->restartOutput(); } }
+  // Test (console "prio"): the output's DMA channel priority, 0 to 5.
+  bool setDmaPriority(uint8_t priority) { return _dma && _dma->setDmaPriority(priority); }
 #else
   void flip() { _dma->flipDMABuffer(); _flippedAt = micros(); _back ^= 1; }
 #endif

@@ -20,6 +20,12 @@ Added, each marked "MatrixPortalClock_V2 wall clock" in the source:
 - `rowsPerFrame()`: the rows the buffer holds (the panel height halved);
 - `lsbMsbTransition()`: how many low bit planes the driver shows once each, weighted by their OE time
   alone; the clock reckons each plane's light from it.
+- `outputRunning()`, `restartOutput()` (in `platforms/esp32s3/gdma_lcd_parallel16.*`: `output_running()`,
+  `restart_output()`): whether the LCD peripheral still sends the buffer out, and a fresh start of it. With
+  the buffer in PSRAM the output stops for good when its DMA does not get the buffer read in time; on
+  2026-10-18 the crypto engine's DMA working on TLS data in PSRAM did that, a row flashing bright.
+- `setDmaPriority()` (`set_dma_priority()`): the output's DMA channel priority among the GDMA channels;
+  the release leaves it at 0, the same as the crypto engine's, the clock sets 5.
 
 Added: `PSRAM_LCD_DIV_NUM` (in `platforms/esp32s3/gdma_lcd_parallel16.cpp`) sets the bus clock's divider
 with the buffer in PSRAM, where the release fixes 12 (160 MHz / 12 = 13.3 MHz). On the wall clock board

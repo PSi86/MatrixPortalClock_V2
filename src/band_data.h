@@ -509,7 +509,26 @@ inline void feedTask(void *) {
 // the Home Assistant link need too: on 2026-10-09 a fetch at start-up with
 // the link on left only 18 KB of it free. PSRAM is what the core's own
 // CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC would use.
+//
+// Not on the wall clock: its panel driver reads the frame buffer out of
+// PSRAM by DMA, and the crypto engine's DMA on TLS data in PSRAM made that
+// output stop, a row flashing bright (2026-10-18). Its internal RAM is ample
+// with the frame buffer in PSRAM (about 195 KB free), so mbedTLS's memory is
+// taken from there first; feedTlsInternal() = false (console "tlsmem ext")
+// brings back PSRAM first, to compare.
+#if BOARD_WAVESHARE_WALL
+inline bool &feedTlsInternal() {
+  static bool internalFirst = true;
+  return internalFirst;
+}
+#endif
 inline void *feedTlsCalloc(size_t n, size_t size) {
+#if BOARD_WAVESHARE_WALL
+  if (feedTlsInternal()) {
+    void *p = heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
+#endif
   void *p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
@@ -517,16 +536,20 @@ inline void feedTlsFree(void *p) { heap_caps_free(p); }
 
 // Starts the fetch task, on core 0 beside the WiFi so the loop on core 1
 // keeps drawing during a fetch, with its stack in PSRAM when there is some
-// (it never touches the flash). false when there was no RAM for it.
+// (it never touches the flash) - on the wall clock in internal RAM, since
+// the crypto engine works on buffers on it too (see feedTlsCalloc()). false
+// when there was no RAM for it.
 inline bool feedBegin() {
   if (feedJobs()) { return true; }
   mbedtls_platform_set_calloc_free(feedTlsCalloc, feedTlsFree);   // before any TLS
   feedJobs()    = xQueueCreate(1, sizeof(FeedJob));
   feedResults() = xQueueCreate(1, sizeof(FeedResult));
   if (!feedJobs() || !feedResults()) { return false; }
+#if !BOARD_WAVESHARE_WALL
   if (xTaskCreatePinnedToCoreWithCaps(feedTask, "feeds", FEED_TASK_STACK, nullptr, 1, nullptr, 0,
                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS) {
     return true;
   }
+#endif
   return xTaskCreatePinnedToCore(feedTask, "feeds", FEED_TASK_STACK, nullptr, 1, nullptr, 0) == pdPASS;
 }
