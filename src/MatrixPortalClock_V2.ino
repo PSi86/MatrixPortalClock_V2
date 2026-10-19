@@ -91,6 +91,7 @@ class JsonObject;
 #include <soc/gdma_struct.h>   // and its "gdma": the DMA channels' peripherals and priorities
 #include <esp_timer.h>
 #include "rtc_pcf85063.h"      // the board's own real-time clock
+#include "wall_imu_test.h"     // its motion sensor's measuring round for the knock (console "imu")
 #endif
 
 #if BAND_DATA
@@ -1576,6 +1577,7 @@ void setup(void) {
   i2cScan();              // after the sensors: a PAJ7620U2 asleep may miss the first call
 #if BOARD_WAVESHARE_WALL
   boardBusScan();
+  imuTestBegin();
 #endif
   loadFaceKeys();         // needs to know which sensors were found
 #if BAND_DATA
@@ -1690,6 +1692,7 @@ void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
 #if BOARD_WAVESHARE_WALL
   wallConsole();  // "black" on the USB console before a flash, test pictures
+  imuTestPrint();
   wallOutputWatch();
   if (matrix.testing()) { delay(5); return; }   // a test picture stands: the clock draws nothing
 #endif
@@ -6983,8 +6986,10 @@ void stopAPMode() {
 //   the time sync were failing.
 // - "rtc" shows what the DS3231 and the board's PCF85063 hold against the
 //   clock (wallRtcReport()).
+// - "imu ..." the measuring round of the board's motion sensor for the knock
+//   (src/wall_imu_test.h).
 void wallConsole() {
-  static char line[16];
+  static char line[32];
   static uint8_t len = 0;
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
@@ -7020,6 +7025,8 @@ void wallConsole() {
       wallCryptoTest(line[6] != '\0');
     } else if (strcmp(line, "rtc") == 0) {
       wallRtcReport();
+    } else {
+      imuTestCommand(line);
     }
 #if BAND_DATA
     if (strcmp(line, "status test") == 0) {
