@@ -106,8 +106,9 @@
 #if BOARD_WAVESHARE_WALL
   // No user LED on the wall clock board.
   #define BOARD_HAS_FEEDBACK_LED 0
-  // No LIS3DH: the board's own motion sensor is a QMI8658, not used yet, and
-  // the wall clock hangs in landscape (decided 2026-10-18).
+  // No LIS3DH: the board's own motion sensor is a QMI8658, which gives the
+  // knock only (src/imu_qmi8658.h); the wall clock hangs in landscape and does
+  // not turn (decided 2026-10-18).
   #define BOARD_HAS_ACCEL 0
   // The rotation the clock draws in without an accelerometer: landscape.
   #define BOARD_DEFAULT_ROTATION 0
@@ -228,8 +229,8 @@ inline bool boardBusBegin() {
   // The link to Home Assistant over MQTT (src/ha_link.h).
   #define HA_LINK 1
 #if BOARD_WAVESHARE_WALL
-  // No LIS3DH, so no INT1 line: the knock code is built but never runs
-  // (accelOK stays false).
+  // No LIS3DH, so no INT1 line of its: the LIS3DH's knock code is not built
+  // here. The knock comes from the QMI8658's INT1 on GPIO13 (knockSensorBegin()).
   #define ACCEL_INT_PIN -1
 #else
   // The accelerometer's INT1 line. Not in Adafruit's pinout page - taken from

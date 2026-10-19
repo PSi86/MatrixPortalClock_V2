@@ -91,7 +91,7 @@ class JsonObject;
 #include <soc/gdma_struct.h>   // and its "gdma": the DMA channels' peripherals and priorities
 #include <esp_timer.h>
 #include "rtc_pcf85063.h"      // the board's own real-time clock
-#include "wall_imu_test.h"     // its motion sensor's measuring round for the knock (console "imu")
+#include "imu_qmi8658.h"       // its motion sensor, for the knock
 #endif
 
 #if BAND_DATA
@@ -1105,6 +1105,11 @@ const int8_t landYTarget[6] = {17, 17, 17, 17, 30, 30}; // HH/MM baseline 17, SS
 // rotate the display in 90 deg steps so the clock always shows the right way up.
 Adafruit_LIS3DH lis = Adafruit_LIS3DH();
 bool    accelOK = false;          // true once the LIS3DH was found on I2C
+#if BOARD_WAVESHARE_WALL
+bool    knockOK = false;          // the board's QMI8658 watches for the knock (knockSensorBegin())
+#else
+#define knockOK accelOK           // the LIS3DH's knock: the same chip as the rotation
+#endif
 // Two rotations, kept apart on purpose:
 // - deviceRotation is how the panel is held: the accelerometer's reading after
 //   the debounce, or the default when there is no sensor. Only the orientation
@@ -1539,7 +1544,7 @@ void setup(void) {
     // the old rate it was a coin toss whether the sensor even showed it.
     lis.setDataRate(LIS3DH_DATARATE_100_HZ);
     Serial.println("LIS3DH found");
-#if WATCHFACE_TETRIS
+#if WATCHFACE_TETRIS && !BOARD_WAVESHARE_WALL
     shakeSensorBegin();   // let the sensor itself watch for a knock
 #endif
   } else {
@@ -1577,7 +1582,9 @@ void setup(void) {
   i2cScan();              // after the sensors: a PAJ7620U2 asleep may miss the first call
 #if BOARD_WAVESHARE_WALL
   boardBusScan();
-  imuTestBegin();
+#if WATCHFACE_TETRIS
+  knockSensorBegin();     // the board's QMI8658; before loadFaceKeys(), which asks what was found
+#endif
 #endif
   loadFaceKeys();         // needs to know which sensors were found
 #if BAND_DATA
@@ -1692,7 +1699,6 @@ void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
 #if BOARD_WAVESHARE_WALL
   wallConsole();  // "black" on the USB console before a flash, test pictures
-  imuTestPrint();
   wallOutputWatch();
   if (matrix.testing()) { delay(5); return; }   // a test picture stands: the clock draws nothing
 #endif
@@ -3758,6 +3764,92 @@ uint8_t accelReadReg(uint8_t reg) {
   return (uint8_t)Wire.read();
 }
 
+#if BOARD_WAVESHARE_WALL
+/* The wall clock's knock: the board's QMI8658 in its Wake on Motion
+   (src/imu_qmi8658.h). The chip compares every sample, at 128 Hz, with the
+   threshold and toggles INT1 (GPIO13) for each one over it - a knock comes as
+   1 to 5 edges 7-15 ms apart (measured on 2026-10-19). An interrupt counts the
+   edges, so none is lost between two passes, and updateShake() takes the first
+   of a burst as the knock. The chip decides, as the S3's LIS3DH does. */
+Qmi8658 imu;
+const uint8_t IMU_INT_PIN = 13;              // the QMI8658's INT1 (schematic, 2026-10-19)
+const unsigned long KNOCK_BURST_MS = 150;    // edges this close are the same knock
+const unsigned long KNOCK_FRESH_MS = 100;    // an edge older than this when looked at is dropped
+const unsigned long KNOCK_ARM_MS   = 300;    // after a (re)start the chip's own edges
+volatile uint32_t      knockEdges = 0;       // INT1's edges since the start
+volatile unsigned long knockEdgeAt = 0;      // millis() of the last
+uint32_t      knockEdgesSeen = 0;            // as far as updateShake() looked
+unsigned long knockLastEdgeAt = 0;           // the last edge it saw, a knock or not
+unsigned long knockArmedAt = 0;
+uint32_t      knocksSeen = 0;                // bursts taken as knocks, for the console
+
+// INT1's interrupt. A struct's member: the prototypes generated from this
+// sketch are free functions, on every board, and IRAM_ATTR exists on the
+// ESP32 only. Defined outside it: in IRAM an inline function's literals land
+// elsewhere, and the linker refuses that.
+struct KnockIsr {
+  static void edge();
+};
+void IRAM_ATTR KnockIsr::edge() {
+  knockEdges = knockEdges + 1;
+  knockEdgeAt = millis();
+}
+
+// Sensitivity 1..10 as the threshold in mg (Wake on Motion takes 1-255).
+// Measured on the wall on 2026-10-19: at rest 4-13 mg, knocks 180 mg to 3.3 g;
+// at 128 Hz 100 mg took 5 of 5 normal knocks, one of them as a single edge,
+// and nothing in two quiet minutes. Level 10 is about three times the noise,
+// level 1 the most the chip takes.
+const uint8_t KNOCK_WOM_MG[SHAKE_LEVEL_MAX + 1] = { 0, 255, 200, 160, 130, 100, 80, 64, 50, 40, 30 };
+
+uint8_t knockLevel() { return min<uint8_t>(tetrisSettings.shakeLevel, SHAKE_LEVEL_MAX); }
+
+// The sensitivity into the chip, at start-up and whenever it changes (also
+// from the live preview): a reset ends what ran, then Wake on Motion at the
+// threshold - or nothing, for 0.
+void shakeApplyThreshold() {
+  if (!knockOK) { return; }
+  bool ok = imu.begin(Wire1);
+  if (ok && knockLevel() > 0) { ok = imu.womStart(KNOCK_WOM_MG[knockLevel()], 16); }
+  knockArmedAt = millis();
+  if (!ok) { Serial.println("QMI8658: the knock did not start"); }
+}
+
+// At start-up, once the board's bus runs (and before loadFaceKeys()).
+void knockSensorBegin() {
+  pinMode(IMU_INT_PIN, INPUT);
+  if (!imu.begin(Wire1)) { Serial.println("QMI8658 not found - no knock"); return; }
+  knockOK = true;
+  attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN), KnockIsr::edge, CHANGE);
+  shakeApplyThreshold();
+  Serial.printf("QMI8658 found (revision 0x%02X): the knock by Wake on Motion over %u mg\n", imu.revision(),
+                KNOCK_WOM_MG[knockLevel()]);
+}
+
+void updateShake() {
+  if (!knockOK) { return; }
+  uint32_t edges = knockEdges;
+  if (edges == knockEdgesSeen) { return; }             // nothing happened
+  knockEdgesSeen = edges;
+  unsigned long at = knockEdgeAt;
+  bool sameKnock = knockLastEdgeAt != 0 && (long)(at - knockLastEdgeAt) < (long)KNOCK_BURST_MS;
+  knockLastEdgeAt = at;
+  if (sameKnock) { return; }
+  if ((long)(at - knockArmedAt) < (long)KNOCK_ARM_MS) { return; }   // the chip starting
+  if ((long)(millisNow - at) > (long)KNOCK_FRESH_MS) { return; }    // seen too late: now or not at all
+  knocksSeen++;
+  if (knockIsReal()) { handleInput(EV_KNOCK, 1); }
+}
+
+// Console "imu": the chip, the threshold and what it gave.
+void wallKnockReport() {
+  if (!knockOK) { Serial.println("QMI8658 not found - no knock"); return; }
+  Serial.printf("QMI8658 (revision 0x%02X): knock sensitivity %u, Wake on Motion over %u mg; INT1 %s; "
+                "%lu edges and %lu knocks since the start; bus errors %lu\n", imu.revision(), knockLevel(),
+                KNOCK_WOM_MG[knockLevel()], digitalRead(IMU_INT_PIN) == HIGH ? "high" : "low",
+                (unsigned long)knockEdges, (unsigned long)knocksSeen, (unsigned long)imu.busErrors());
+}
+#else
 // Push the current sensitivity into the sensor. Called at start-up and whenever
 // the setting changes, including from the live preview.
 void shakeApplyThreshold() {
@@ -3794,6 +3886,7 @@ void updateShake() {
   (void)accelReadReg(LIS3DH_INT1_SRC);
   if (knockIsReal()) { handleInput(EV_KNOCK, 1); }
 }
+#endif
 
 // Whether the sensor's latched event is worth reporting as a knock. These are
 // the reasons it fires without anyone knocking; one per line, each reading one
@@ -3825,7 +3918,12 @@ bool knockEffectReady() {
 // is concerned - would otherwise still be waiting when the face comes back, and
 // fire at once. (A side effect of the old rotation block used to swallow it.)
 void shakeDiscardLatched() {
+#if BOARD_WAVESHARE_WALL
+  knockEdgesSeen = knockEdges;      // the wall's edges so far count as seen
+  knockLastEdgeAt = knockEdgeAt;
+#else
   if (accelOK) { (void)accelReadReg(LIS3DH_INT1_SRC); }
+#endif
 }
 #endif  // WATCHFACE_TETRIS
 
@@ -5794,7 +5892,7 @@ int8_t faceEventIndex(InputEvent ev) {
 bool faceEventFitted(InputEvent ev) {
   // The knock is sensed by the Tetris face's code (updateShake()), so a board
   // without it - the M4 - has no knock, accelerometer or not.
-  if (ev == EV_KNOCK) { return accelOK && WATCHFACE_TETRIS != 0; }
+  if (ev == EV_KNOCK) { return knockOK && WATCHFACE_TETRIS != 0; }
   if (ev == EV_WAVE) { return false; }   // not read: too unreliable (updateGestures())
   if (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) { return false; }   // left out (gestureLeftOut())
   if (isGestureEvent(ev)) { return gestureOK; }
@@ -5836,16 +5934,28 @@ void faceKeysOfProfile(uint8_t profile, uint8_t *codes) {
 }
 
 // Whether some input found opens the menu with these shortcuts.
+#if BOARD_BUTTON_COUNT == 0
+// Whether a fitted input counts for the rule that one of them opens the menu.
+// On a clock without buttons the knock does not: it cannot work a menu, and
+// as the only input found it would refuse every shortcut stored and saved.
+bool faceEventCountsForMenu(InputEvent ev) {
+  if (ev == EV_KNOCK) { return false; }
+  return faceEventFitted(ev);
+}
+#else
+#define faceEventCountsForMenu faceEventFitted
+#endif
+
 bool faceKeysReachMenu(const uint8_t *codes) {
   for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
-    if (faceEventFitted(FACE_EVENTS[i].event) && FACE_ACTIONS[codes[i]].function == FN_OPEN_MENU) { return true; }
+    if (faceEventCountsForMenu(FACE_EVENTS[i].event) && FACE_ACTIONS[codes[i]].function == FN_OPEN_MENU) { return true; }
   }
 #if BOARD_BUTTON_COUNT == 0
   // A clock without buttons whose gesture sensor was not found has no input
   // at all: no shortcut can open its menu, and the web app is its way to the
   // settings. Its shortcuts are kept for when the sensor is there.
   for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) {
-    if (faceEventFitted(FACE_EVENTS[i].event)) { return false; }
+    if (faceEventCountsForMenu(FACE_EVENTS[i].event)) { return false; }
   }
   return true;
 #else
@@ -6986,8 +7096,8 @@ void stopAPMode() {
 //   the time sync were failing.
 // - "rtc" shows what the DS3231 and the board's PCF85063 hold against the
 //   clock (wallRtcReport()).
-// - "imu ..." the measuring round of the board's motion sensor for the knock
-//   (src/wall_imu_test.h).
+// - "imu" shows the board's motion sensor and what it gave of the knock
+//   (wallKnockReport()).
 void wallConsole() {
   static char line[32];
   static uint8_t len = 0;
@@ -7025,8 +7135,10 @@ void wallConsole() {
       wallCryptoTest(line[6] != '\0');
     } else if (strcmp(line, "rtc") == 0) {
       wallRtcReport();
-    } else {
-      imuTestCommand(line);
+#if WATCHFACE_TETRIS
+    } else if (strcmp(line, "imu") == 0) {
+      wallKnockReport();
+#endif
     }
 #if BAND_DATA
     if (strcmp(line, "status test") == 0) {
@@ -10995,6 +11107,7 @@ void apiState(Print &c) {
     JsonObject o = events.add<JsonObject>();
     o["label"] = e.label;
     o["fitted"] = faceEventFitted(e.event);
+    o["menu"] = faceEventCountsForMenu(e.event);   // counts for "some input opens the menu"
     JsonArray offered = o["actions"].to<JsonArray>();
     for (uint8_t a = 0; a < FACE_ACTION_COUNT; a++) {
       if (faceActionOffered(a, e.event)) { offered.add(a); }
@@ -11051,6 +11164,11 @@ void apiState(Print &c) {
   hw["muncher"] = WATCHFACE_MUNCHER != 0;
   hw["aliens"] = WATCHFACE_ALIENS != 0;
   hw["accel"] = accelOK;
+  hw["knock"] = knockOK && WATCHFACE_TETRIS != 0;   // as the knock's row on the Inputs page
+  hw["buttons"] = BOARD_BUTTON_COUNT;
+#if BOARD_WAVESHARE_WALL
+  hw["knockBy"] = "QMI8658";
+#endif
   hw["gesture"] = gestureOK;
   hw["gestureInt"] = GESTURE_INT >= 0;
   hw["rtc"] = rtcOK;
