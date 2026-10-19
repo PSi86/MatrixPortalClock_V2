@@ -62,13 +62,17 @@ in the wall's own 192x128 LEDs.
   has not joined for 2 minutes, for 5 minutes, after which the clock tries the
   WiFi again. The I2C sensors (DS3231, BH1750, PAJ7620) go on IO45/IO46 (SDA,
   SCL) and are not tried on this board yet.
+- **Real-time clock:** the board's own PCF85063, with a coin cell in its socket
+  J4 if wanted, and a DS3231 on the GPIO header before it (see
+  [The wall clock's own real-time clock](#the-wall-clocks-own-real-time-clock-pcf85063)).
 - **Console** (USB, 115200 baud, DTR and RTS low): `black` switches the panels
   dark until the next start - before every upload, since the ROM bootloader
   leaves the last row pair lit at full duty; `test <panel> <brightness>` and
   `test off` a panel in white to measure the current; `bus <divider>` the panel
   bus' clock; `lan on|off` the web app on the home network; for the panel
   output and the fetches `fetch`, `prio <0-5>`, `gdma`, `crypto [ext]`,
-  `tlsmem int|ext`, and `status test` for the band's clock status.
+  `tlsmem int|ext`, `status test` for the band's clock status, and `rtc` for
+  what the real-time clocks hold.
 - **Wiring rules** from the bench: the panels' supply minus to the board's GND
   first, the supply on before the ribbon cable goes in.
 
@@ -1748,6 +1752,37 @@ everything works as before.
 
 Tested on the MatrixPortal S3 with Adafruit's DS3231 breakout (3013) and a
 CR1220 on 2026-10-10.
+
+### The wall clock's own real-time clock (PCF85063)
+
+The Waveshare board carries a PCF85063 (0x51 on the board's own I2C bus, GPIO47
+and GPIO48 behind a level shifter). The clock uses it besides a DS3231 on the
+GPIO header:
+
+- **Which time counts:** a DS3231 with a time comes first, then the PCF85063.
+  Every new time (NTP, a phone, typed in) is written to both.
+- **NTP stays daily** with the PCF85063 alone, as without a real-time clock: its
+  crystal has no temperature compensation, so the sync interval and "never" are
+  offered only with a DS3231 (`hw.rtcSync` in `/api/state`). What the PCF85063
+  brings is the time at once after a restart, a flash and, with a coin cell, a
+  power cut.
+- **Coin cell:** the board's socket J4 (SH1.0, two pins, pin 1 plus) feeds the
+  chip through a Schottky diode, and the charging path is not fitted (Waveshare's
+  schematic), so a primary cell such as a CR2032 or CR1220 with an SH1.0 lead may
+  go in. Without one the chip keeps its time over a restart, not over a power
+  cut; it then reports that its oscillator stopped, and the clock waits for NTP.
+- **A time of this clock's only:** the clock marks the chip's free RAM byte
+  whenever it sets the time and trusts no time without that mark - Waveshare's
+  demo firmware writes a fixed date at every start. A chip without a time of
+  the clock's is reset (as the datasheet gives), set to 12.5 pF and its CLKOUT
+  switched off.
+- **Drift:** each NTP sync logs how far the PCF85063 was off and how long since
+  it was set, in ppm. Within 2 s it is left running rather than set again, so
+  its drift adds up over the days. When it was last set is stored (NVS key
+  `pcf`). Its Offset register stays 0 until that drift is known.
+- The clock follows only a DS3231 once a minute, not the PCF85063: its crystal
+  is no better than the ESP32's.
+- The console's `rtc` shows what each chip holds against the clock.
 
 ## Libraries
 

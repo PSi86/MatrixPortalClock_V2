@@ -607,7 +607,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
     if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; o.mpel = cur.mpel; }
     if (S.hw.aliens) { o.ast = cur.ast; o.acol = cur.acol; o.akn = cur.akn; o.anap = cur.anap; }
-    if (S.hw.rtc) { o.syncd = cur.syncd; }
+    if (S.hw.rtcSync) { o.syncd = cur.syncd; }
     if (S.hw.gesture) { o.gmount = cur.gmount; }
     S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } });
     if (has('closes')) {   // ticks: absent when off; cset says they were sent
@@ -887,10 +887,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       sync.dataset.bound = 1;
       sync.addEventListener('change', function () { var p = sync.value.split(':'); if (p.length === 2) { cur.synch = +p[0]; cur.syncm = +p[1]; changed(); } });
     }
-    $('#syncHint').textContent = S.hw.rtc ? 'At this time on the days a sync is due.' : 'Daily at this time.';
-    $('#syncdRow').hidden = !S.hw.rtc;
+    $('#syncHint').textContent = S.hw.rtcSync ? 'At this time on the days a sync is due.' : 'Daily at this time.';
+    $('#syncdRow').hidden = !S.hw.rtcSync;
     var sd = $('#syncd');
-    if (S.hw.rtc && !$('option[value="' + cur.syncd + '"]', sd)) { var o = document.createElement('option'); o.value = cur.syncd; o.textContent = 'every ' + cur.syncd + ' days'; sd.appendChild(o); }
+    if (S.hw.rtcSync && !$('option[value="' + cur.syncd + '"]', sd)) { var o = document.createElement('option'); o.value = cur.syncd; o.textContent = 'every ' + cur.syncd + ' days'; sd.appendChild(o); }
     sd.value = cur.syncd;
     if (!sd.dataset.bound) { sd.dataset.bound = 1; sd.addEventListener('change', function () { cur.syncd = +sd.value; changed(); }); }
     var now = new Date();
@@ -965,7 +965,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       ['Internal RAM', kb(y.heapFree) + ' free, ' + kb(y.heapLow) + ' at the lowest'], ['PSRAM', kb(y.psramFree) + ' free'],
       ['Program', mb(y.program) + ' of ' + mb(y.programMax) + ' (' + (100 * y.program / y.programMax).toFixed(1) + ' %)'],
       ['Last start', y.reset + (y.bootStage ? '; the run before ended early, in start stage ' + y.bootStage : '')],
-      ['Real-time clock', S.hw.rtc ? (S.hw.rtcLost ? 'DS3231, had lost power' : 'DS3231') : 'none']];
+      ['Real-time clock', S.hw.rtc ? S.hw.rtcChip + (S.hw.rtcLost ? ', had lost power' : '') : 'none']];
     kv.innerHTML = '';
     rows.forEach(function (r) { var dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = r[0]; dd.textContent = r[1]; kv.appendChild(dt); kv.appendChild(dd); });
     $('#railFoot').textContent = 'Firmware ' + S.fw + '. Changes show on the clock at once and stay after Save.';
