@@ -127,11 +127,42 @@
 
 // Gesture sensor (PAJ7620U2, optional, I2C 0x73, e.g. on STEMMA QT): its INT
 // line, if it is wired to a free pin - STEMMA QT carries none - for instance
-// with -D GESTURE_INT_PIN=A0 in build_flags. With it the sensor is read only
-// when the line says a gesture is waiting; without it (-1) the sketch asks the
-// sensor over I2C now and then.
+// with -D GESTURE_INT_PIN=A0 in build_flags on a MatrixPortal. With it the
+// sensor is read only when the line says a gesture is waiting; without it (-1)
+// the sketch asks the sensor over I2C now and then. On the wall clock A0 is
+// GPIO1, the microSD card's clock line, and the GPIO header has only IO45 and
+// IO46, the I2C bus: there the sensor is asked.
 #ifndef GESTURE_INT_PIN
   #define GESTURE_INT_PIN -1
+#endif
+
+#if BOARD_WAVESHARE_WALL
+#include <Wire.h>
+// The wall clock board's own I2C bus (schematic, read on 2026-10-19): IO47 and
+// IO48 run at 1.8 V and reach the 3.3 V side through a level shifter
+// (NDC7002N, 4.7 kOhm pull-ups on both sides). On it: the PCF85063 real-time
+// clock (0x51), the QMI8658 motion sensor (0x6B), the SHTC3 (0x70) and the
+// audio codecs ES8311 (0x18) and ES7210 (0x40). It is Wire1; Wire is the GPIO
+// header's bus (IO45/IO46) for the clock's own sensors.
+#define BOARD_I2C_SDA 47
+#define BOARD_I2C_SCL 48
+#define BOARD_I2C_HZ  100000
+
+// One lock over a whole transfer on the board's bus - the address written,
+// the bytes read and taken out of TwoWire's buffer - for more than one task
+// may use it. TwoWire locks only its own calls, and read() not at all.
+inline SemaphoreHandle_t &boardBusMutex() {
+  static SemaphoreHandle_t m = nullptr;
+  return m;
+}
+struct BoardBusLock {
+  BoardBusLock()  { xSemaphoreTake(boardBusMutex(), portMAX_DELAY); }
+  ~BoardBusLock() { xSemaphoreGive(boardBusMutex()); }
+};
+inline bool boardBusBegin() {
+  if (!boardBusMutex()) { boardBusMutex() = xSemaphoreCreateMutex(); }
+  return Wire1.begin(BOARD_I2C_SDA, BOARD_I2C_SCL, BOARD_I2C_HZ);
+}
 #endif
 
 /* ======================================================================

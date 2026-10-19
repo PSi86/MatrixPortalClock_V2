@@ -90,6 +90,7 @@ class JsonObject;
 #include <mbedtls/aes.h>
 #include <soc/gdma_struct.h>   // and its "gdma": the DMA channels' peripherals and priorities
 #include <esp_timer.h>
+#include "rtc_pcf85063.h"      // the board's own real-time clock
 #endif
 
 #if BAND_DATA
@@ -1245,6 +1246,34 @@ uint8_t i2cFound[16];        // the addresses that answered at boot, one bit eac
 RTC_DS3231 rtc;
 bool rtcOK        = false;   // a DS3231 answered at boot
 bool rtcLostPower = false;   // its oscillator had stopped, so its time is not used until it is set again
+#if BOARD_WAVESHARE_WALL
+// The wall clock has two places for one: a DS3231 on the GPIO header, as on
+// the MatrixPortals, and the board's own PCF85063 (src/rtc_pcf85063.h). There
+// rtcOK says that either answered and rtcLostPower that the one whose time
+// counts (rtcChip) has none. A DS3231 with a time comes first. Only it lets
+// the NTP sync wait for its interval (rtcSync): the PCF85063's crystal has no
+// temperature compensation, so the clock syncs daily as without a real-time
+// clock, and the PCF85063 gives it its time at start-up.
+const uint8_t RTC_CHIP_NONE = 0, RTC_CHIP_DS3231 = 1, RTC_CHIP_PCF85063 = 2;
+uint8_t  rtcChip = RTC_CHIP_NONE;
+bool     dsOK = false;       // a DS3231 answered at boot
+bool     dsLost = false;     // and has no time
+bool     rtcSync = false;    // a DS3231 with a time
+Pcf85063 pcf;
+uint8_t  i2cBoardFound[16];  // the addresses that answered on the board's bus (boardBusScan())
+// When the PCF85063 was last set (UTC), kept over a restart (NVS key "pcf"),
+// so each sync can log how far it drifted since.
+#define PCF_RECORD_MAGIC 0x9C63
+struct PcfRecord {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  reserved;
+  uint32_t setAt;
+};
+SettingsStore<PcfRecord> pcfStore;
+#else
+#define rtcSync rtcOK        // on the MatrixPortals the DS3231 is the only real-time clock
+#endif
 
 // A due sync that has not succeeded for this long is an error, shown on the
 // status pixel. The hour covers the retries, so a sync in progress never shows.
@@ -1534,6 +1563,10 @@ void setup(void) {
     Serial.println("BH1750 not found - auto-brightness disabled");
   }
 
+#if BOARD_WAVESHARE_WALL
+  // The board's own bus, for its PCF85063 (and its motion sensor).
+  if (!boardBusBegin()) { Serial.println("Board I2C bus did not start"); }
+#endif
   // DS3231 real-time clock on the same bus: the time at once, if it has one,
   // and with it when the last NTP sync was.
   rtcBegin();
@@ -1541,6 +1574,9 @@ void setup(void) {
   // PAJ7620U2 gesture sensor, also on the bus.
   gestureBegin();
   i2cScan();              // after the sensors: a PAJ7620U2 asleep may miss the first call
+#if BOARD_WAVESHARE_WALL
+  boardBusScan();
+#endif
   loadFaceKeys();         // needs to know which sensors were found
 #if BAND_DATA
   loadNoticeKeys();       // which of those events close a notice on the panel
@@ -4979,8 +5015,169 @@ void i2cScan() {
   Serial.println(n ? "" : " nothing answers");
 }
 
+#if BOARD_WAVESHARE_WALL
+// The same for the wall clock board's own bus (board_hal.h): which of its
+// parts answer - the codecs 0x18 and 0x40, the PCF85063 0x51, the QMI8658
+// 0x6B, the SHTC3 0x70.
+void boardBusScan() {
+  Serial.print("Board I2C bus:");
+  uint8_t n = 0;
+  for (uint8_t a = 0x08; a < 0x78; a++) {
+    uint8_t err;
+    {
+      BoardBusLock lock;
+      Wire1.beginTransmission(a);
+      err = Wire1.endTransmission();
+    }
+    if (err != 0) { continue; }
+    i2cBoardFound[a / 8] |= (uint8_t)(1 << (a % 8));
+    Serial.printf(" 0x%02X", a);
+    n++;
+  }
+  Serial.println(n ? "" : " nothing answers");
+}
+#endif
+
 /* ---- Real-time clock (DS3231) -------------------------------------------- */
 
+#if BOARD_WAVESHARE_WALL
+// The name of the real-time clock whose time counts, for the web app and the
+// console; "" without one.
+const char *rtcChipName() {
+  return rtcChip == RTC_CHIP_DS3231 ? "DS3231" : rtcChip == RTC_CHIP_PCF85063 ? "PCF85063" : "";
+}
+
+// At boot: which real-time clocks answer - a DS3231 on the GPIO header, the
+// board's PCF85063 - and the time of the first that has one, the DS3231
+// before the PCF85063. One without a time (its oscillator stopped, or the
+// PCF85063 never set by this clock) gives none, so the clock stays without
+// one until NTP or the user sets it - the face never shows a time it does
+// not have.
+void rtcBegin() {
+  pcfStore.begin("pcf");
+  dsOK = rtc.begin(&Wire);
+  time_t dsUtc = 0;
+  if (dsOK) {
+    dsLost = rtc.lostPower();
+    if (!dsLost) { dsUtc = rtcRead(); dsLost = (dsUtc == 0); }
+    Serial.println(dsLost ? "DS3231 found, but it has no time" : "DS3231 found");
+  } else {
+    Serial.println("DS3231 not found");
+  }
+  time_t pcfUtc = 0;
+  if (pcf.begin(Wire1)) {
+    Serial.printf("PCF85063 found: Control_1 0x%02X, Control_2 0x%02X, Offset %d, %s\n", pcf.control1(),
+                  pcf.control2(), pcf.offset(), pcf.kept() ? "holds a time of this clock's" : "holds no time of this clock's");
+    if (pcf.kept()) { pcfUtc = pcf.read(); }
+    if (pcfUtc == 0) {
+      // Lost power, or never set by this clock: started afresh, set with the next time.
+      if (!pcf.reset()) { Serial.println("PCF85063: the reset failed"); }
+    } else if (!pcf.clkoutOff()) {
+      Serial.println("PCF85063: CLKOUT did not switch off");
+    }
+  } else {
+    Serial.println("PCF85063 not found");
+  }
+  rtcOK = dsOK || pcf.found();
+  if (dsUtc != 0) {
+    rtcChip = RTC_CHIP_DS3231;
+    setClockTo(dsUtc, TIME_RTC);
+    if (pcf.found() && pcfUtc == 0) { pcfSet(dsUtc); }   // the PCF85063 takes the DS3231's
+    Serial.print("Clock set from the DS3231: UTC "); Serial.println((long)dsUtc);
+  } else if (pcfUtc != 0) {
+    rtcChip = RTC_CHIP_PCF85063;
+    setClockTo(pcfUtc, TIME_RTC);
+    Serial.print("Clock set from the PCF85063: UTC "); Serial.println((long)pcfUtc);
+  } else {
+    rtcChip = dsOK ? RTC_CHIP_DS3231 : pcf.found() ? RTC_CHIP_PCF85063 : RTC_CHIP_NONE;
+    if (rtcOK) { Serial.println("No real-time clock has a time - none until NTP or a time set by hand"); }
+  }
+  rtcLostPower = rtcOK && !clockIsSet();
+  rtcSync = dsOK && !dsLost;
+}
+
+// Every real-time clock found takes the new time; that also clears the
+// DS3231's lost-power flag. From then on the DS3231's time counts when there
+// is one, else the PCF85063's.
+void rtcWrite(time_t utc) {
+  if (!rtcOK || (int64_t)utc < UTC_PLAUSIBLE_FROM || (int64_t)utc > UTC_PLAUSIBLE_TO) { return; }
+  if (dsOK) {
+    rtc.adjust(DateTime((uint32_t)utc));
+    dsLost = false;
+    Serial.println("DS3231 set");
+  }
+  if (pcf.found()) { pcfSet(utc); }
+  rtcChip = dsOK ? RTC_CHIP_DS3231 : RTC_CHIP_PCF85063;
+  rtcLostPower = false;
+  rtcSync = dsOK;
+}
+
+// The PCF85063 takes a new time, and says how far it had drifted since it was
+// last set: plus is ahead. From NTP within PCF_KEEP_S it is left running
+// instead, so its drift adds up over the days and the log shows its real rate
+// (ppm) - with a write every day it would show one day at one-second steps.
+const long PCF_KEEP_S = 2;
+void pcfSet(time_t utc) {
+  time_t had = pcf.kept() ? pcf.read() : 0;
+  if (had != 0) {
+    long apart = (long)(had - utc);
+    PcfRecord rec;
+    pcfStore.read(rec);
+    if (rec.magic == PCF_RECORD_MAGIC && (int64_t)rec.setAt >= UTC_PLAUSIBLE_FROM && (time_t)rec.setAt < utc) {
+      long since = (long)(utc - (time_t)rec.setAt);
+      Serial.printf("PCF85063: %+ld s from the new time, %.1f h after it was set (%+.0f ppm)\n", apart,
+                    since / 3600.0f, apart * 1e6f / since);
+    } else {
+      Serial.printf("PCF85063: %+ld s from the new time\n", apart);
+    }
+    if (timeSource == TIME_NTP && apart >= -PCF_KEEP_S && apart <= PCF_KEEP_S) {
+      Serial.println("PCF85063 left running");
+      return;
+    }
+  }
+  if (!pcf.write(utc)) { Serial.println("PCF85063: not set, the bus failed"); return; }
+  PcfRecord rec = { PCF_RECORD_MAGIC, 1, 0, (uint32_t)utc };
+  pcfStore.write(rec);
+  Serial.println("PCF85063 set");
+}
+
+// Once a minute, half way through it: the clock counts on millis(), whose
+// crystal drifts far more than the DS3231's 2 ppm, so it is pulled back to the
+// DS3231 once they are two seconds apart (one second can be the moment of
+// reading alone). Not to the PCF85063: its crystal is no better than the
+// ESP32's.
+void rtcFollow() {
+  if (!dsOK || dsLost || !clockIsSet()) { return; }
+  time_t utc = rtcRead();
+  if (utc == 0) { return; }
+  long apart = (long)(utc - clockNow());
+  if (apart >= -1 && apart <= 1) { return; }
+  setClockTo(utc, TIME_RTC);
+  Serial.print("Clock pulled back to the DS3231 by "); Serial.print(apart); Serial.println(" s");
+}
+
+// Console "rtc": what each real-time clock holds against the clock.
+void wallRtcReport() {
+  time_t now = clockIsSet() ? clockNow() : 0;
+  if (dsOK) {
+    time_t t = dsLost ? 0 : rtcRead();
+    Serial.printf("DS3231: %s\n", t ? (String("UTC ") + (long)t + ", " + (long)(t - now) + " s from the clock").c_str()
+                                    : "no time");
+  } else {
+    Serial.println("DS3231: not found");
+  }
+  if (pcf.found()) {
+    time_t t = pcf.kept() ? pcf.read() : 0;
+    Serial.printf("PCF85063: %s; Control_1 0x%02X, Control_2 0x%02X\n",
+                  t ? (String("UTC ") + (long)t + ", " + (long)(t - now) + " s from the clock").c_str() : "no time",
+                  pcf.control1(), pcf.control2());
+  } else {
+    Serial.println("PCF85063: not found");
+  }
+  Serial.printf("Time counts from: %s; NTP waits for its interval: %s\n", rtcOK ? rtcChipName() : "none",
+                rtcSync ? "yes" : "no, daily");
+}
+#else
 // At boot: whether a DS3231 answers, and its time if it has one. One whose
 // oscillator has stopped (the coin cell ran empty, or it never had one) has
 // no time worth showing, so the clock stays without one until NTP or the user
@@ -5002,8 +5199,9 @@ void rtcBegin() {
   setClockTo(utc, TIME_RTC);
   Serial.print("DS3231 found, clock set from it: UTC "); Serial.println((long)utc);
 }
+#endif
 
-// The RTC's time as UTC, or 0 when it is outside the plausible range (a read
+// The DS3231's time as UTC, or 0 when it is outside the plausible range (a read
 // that went wrong reads as garbage).
 time_t rtcRead() {
   uint32_t utc = rtc.now().unixtime();
@@ -5011,6 +5209,7 @@ time_t rtcRead() {
   return (time_t)utc;
 }
 
+#if !BOARD_WAVESHARE_WALL
 // Set the RTC; that also clears its lost-power flag.
 void rtcWrite(time_t utc) {
   if (!rtcOK || (int64_t)utc < UTC_PLAUSIBLE_FROM || (int64_t)utc > UTC_PLAUSIBLE_TO) { return; }
@@ -5032,19 +5231,23 @@ void rtcFollow() {
   setClockTo(utc, TIME_RTC);
   Serial.print("Clock pulled back to the DS3231 by "); Serial.print(apart); Serial.println(" s");
 }
+#endif
 
 // Whether the clock syncs with NTP at all. Without a real-time clock always,
-// daily as it always has; with one, unless the interval is set to none.
+// daily as it always has; with one, unless the interval is set to none. On
+// the wall clock only a DS3231 with a time counts here (rtcSync): with the
+// PCF85063 alone the clock syncs as without a real-time clock.
 bool ntpSyncOn() {
-  return !rtcOK || uiSettings.syncDays > 0;
+  return !rtcSync || uiSettings.syncDays > 0;
 }
 
 // Whether the sync time at `when` (UTC) brings a sync. Without a real-time
-// clock every day. With one, once the interval has run out: counted in the
-// clock's own calendar days since the last good sync, so the sync time of the
-// day it runs out counts, whatever time of day that sync was made.
+// clock (rtcSync, as above) every day. With one, once the interval has run
+// out: counted in the clock's own calendar days since the last good sync, so
+// the sync time of the day it runs out counts, whatever time of day that sync
+// was made.
 bool syncDueAt(time_t when) {
-  if (!rtcOK) { return true; }
+  if (!rtcSync) { return true; }
   if (uiSettings.syncDays == 0) { return false; }
   if (ntpSyncedAt == 0) { return true; }
   long offset = tzTotalOffset();
@@ -5086,9 +5289,21 @@ String clockStatusText() {
 String timeStatusText() {
   String s = clockStatusText();
   if (clockIsSet()) { s += "."; }   // the line about the clock ends here; the one about the RTC follows
+#if BOARD_WAVESHARE_WALL
+  if (!rtcOK) { s += " No real-time clock: a time set here lasts until the next power loss."; }
+  else if (rtcLostPower) {
+    s += " The real-time clock ("; s += rtcChipName();
+    s += ") had lost power and has no time until one is set here or comes from the internet.";
+  }
+  else if (rtcChip == RTC_CHIP_PCF85063) {
+    s += " The board's real-time clock (PCF85063) keeps the time over a restart, and over a power loss with a coin cell in its socket.";
+  }
+  else { s += " The real-time clock (DS3231) keeps the time without power."; }
+#else
   if (!rtcOK)            { s += " No real-time clock: a time set here lasts until the next power loss."; }
   else if (rtcLostPower) { s += " The real-time clock (DS3231) had lost power and has no time until one is set here or comes from the internet."; }
   else                   { s += " The real-time clock (DS3231) keeps the time without power."; }
+#endif
   return s;
 }
 
@@ -6766,6 +6981,8 @@ void stopAPMode() {
 //   (feedTlsCalloc()), until the next start.
 // - "status test" shows the band's clock status for BAND_STATUS_TEST_MS as if
 //   the time sync were failing.
+// - "rtc" shows what the DS3231 and the board's PCF85063 hold against the
+//   clock (wallRtcReport()).
 void wallConsole() {
   static char line[16];
   static uint8_t len = 0;
@@ -6801,6 +7018,8 @@ void wallConsole() {
       wallGdmaList();
     } else if (strcmp(line, "crypto") == 0 || strcmp(line, "crypto ext") == 0) {
       wallCryptoTest(line[6] != '\0');
+    } else if (strcmp(line, "rtc") == 0) {
+      wallRtcReport();
     }
 #if BAND_DATA
     if (strcmp(line, "status test") == 0) {
@@ -10639,6 +10858,14 @@ void apiStatusInto(JsonDocument &d) {
 #endif
 }
 
+#if !BOARD_WAVESHARE_WALL
+// The real-time clock's name for the web app: the MatrixPortal S3 has a place
+// for a DS3231 only. (The wall clock's is with its real-time clocks.)
+const char *rtcChipName() {
+  return rtcOK ? "DS3231" : "";
+}
+#endif
+
 // Everything once: the settings as they are now (with live changes not saved
 // yet), the lists to choose from, what the clock found, and its state.
 void apiState(Print &c) {
@@ -10821,6 +11048,8 @@ void apiState(Print &c) {
   hw["gestureInt"] = GESTURE_INT >= 0;
   hw["rtc"] = rtcOK;
   hw["rtcLost"] = rtcLostPower;
+  hw["rtcSync"] = rtcSync;           // the NTP sync waits for its interval (syncDays)
+  hw["rtcChip"] = rtcChipName();     // the one whose time counts
   JsonArray i2c = hw["i2c"].to<JsonArray>();   // the addresses that answered at boot
   for (uint8_t a = 0; a < 128; a++) {
     if (i2cFound[a / 8] & (1 << (a % 8))) {
@@ -10829,6 +11058,16 @@ void apiState(Print &c) {
       i2c.add(hex);
     }
   }
+#if BOARD_WAVESHARE_WALL
+  JsonArray i2cBoard = hw["i2cBoard"].to<JsonArray>();   // the same on the board's own bus
+  for (uint8_t a = 0; a < 128; a++) {
+    if (i2cBoardFound[a / 8] & (1 << (a % 8))) {
+      char hex[8];
+      snprintf(hex, sizeof(hex), "0x%02X", a);
+      i2cBoard.add(hex);
+    }
+  }
+#endif
   hw["lux"] = lastLux >= 0;
 
 #if GIF_PLAYBACK
