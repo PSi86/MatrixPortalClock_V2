@@ -141,6 +141,7 @@ class TetrisFace : public Watchface {
   static const uint8_t  SHAKE_CLEAR_FLASH = 3;       // steps a row stays lit before it goes
   static const uint16_t SHAKE_HOLD_MS     = 300;     // beat of empty space before it builds again
   static const uint16_t SHAKE_REST_MS     = 1200;    // after an effect, before the next can start
+  static const uint16_t KNOCK_MS          = 6000;    // a knock's break-up and the build after it, about
   // All of this is per digit, not per display: a knock takes all four apart
   // at once, but a minute change only replaces the digits that actually
   // changed, and those have to come apart on their own while the rest stand
@@ -780,9 +781,13 @@ inline bool TetrisFace::busy(const FaceNow &) const {
 }
 
 // The input's animation: all four digits come apart and are built anew -
-// unless they are coming apart already, or the last effect ended less than
-// SHAKE_REST_MS ago. A preview asked for by the web app plays once the run
-// before it has finished.
+// unless they are coming apart already, the last effect ended less than
+// SHAKE_REST_MS ago, or the break-up and the build after it would not end
+// FACE_GUARD_MS before the next minute's change starts. A build under way,
+// the minute change's too, may be smashed: only the time before the change
+// is kept free, so the change starts from a clean picture (Peter,
+// 2026-10-20; from 2026-10-12 every build refused it). A preview asked for by
+// the web app plays once the run before it has finished.
 inline FaceOutcome TetrisFace::request(const FaceNow &now, FaceTrigger why) {
   if (why == TRIGGER_PREVIEW) {
     _previewAsked = true;
@@ -790,6 +795,8 @@ inline FaceOutcome TetrisFace::request(const FaceNow &now, FaceTrigger why) {
   }
   if (why != TRIGGER_ACTION) { return OUTCOME_NONE; }
   if (shakeAnyBusy() || now.ms - _shakeEndedAt < SHAKE_REST_MS) { return OUTCOME_REFUSED; }
+  unsigned long changeAt = now.secondAt + (60UL - now.second) * 1000UL;   // the next minute's start
+  if (now.set && !faceFits(changeAt, now.ms, KNOCK_MS)) { return OUTCOME_REFUSED; }
   shakeStartAll(now.ms);
   return OUTCOME_PLAYED;
 }

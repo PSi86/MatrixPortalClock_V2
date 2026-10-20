@@ -1376,14 +1376,18 @@ so level 10 is 6 steps and level 1 is 24.
 Nothing is triggered while another screen owns the panel (the menu, an editor,
 a banner), in the config AP, for
 the first three seconds after start-up, for 1.2 s after a rotation or after an
-effect has run, while an animation is already running, **while a button is
+effect has run, while the digits are already coming apart, **while a button is
 held, and for 3 s after a button was last pressed or let go** — the switches sit
 next to the sensor, so a button press is a knock as far as it is concerned, and
 so is everything around it: the release, steadying the clock, letting go of a
 held button. A knock the sensor latched while the config AP was up is
-discarded when the face comes back. The reasons the sensor fires without a real
-knock sit together in `knockIsReal()`, the reasons the face cannot be knocked
-apart right now in `knockEffectReady()`.
+discarded when the face comes back. Digits still being built can be knocked
+apart again, the minute change's too; only the time just before a change is
+kept free: a knock whose break-up and rebuild (about 6 s) would not end 3 s
+before the next minute starts does nothing, so the change always starts from a
+clean picture. The reasons the sensor fires without a real knock sit together
+in `knockIsReal()`, the reasons the face cannot be knocked apart right now in
+`TetrisFace::request()` (`src/face_tetris.h`).
 
 At a minute rollover only the digits that actually changed break up, and they
 rebuild while the others stand still; a digit still being built is simply

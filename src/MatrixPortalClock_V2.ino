@@ -440,7 +440,6 @@ const unsigned long PANEL_GUARD_BEFORE_MS = FACE_GUARD_MS;   // optional things 
 const unsigned long PANEL_INFO_AFTER_MS   = 3000;   // messages, cards, the info round: after a change's end
 const unsigned long PANEL_DECOR_REST_MS   = 10000;  // GIFs and extras of their own accord: the plain face this long first
 const unsigned long PANEL_EXTRA_MS        = 8000;   // the longest extra of a face, about
-const unsigned long TETRIS_KNOCK_MS       = 6000;   // a knock's break-up and build on the Tetris face, about
 const uint8_t       PANEL_INFO_HALF_S     = 30;     // messages and cards start before this second
 unsigned long faceChangeEndedAt = 0;   // the face's last change or scene ended
 unsigned long panelFaceSince    = 0;   // the face came back on top
@@ -5033,9 +5032,10 @@ void runFunction(InputFunction fn, uint8_t steps) {
   }
 }
 
-// FN_FACE_ANIMATION, on the face only: the watchface's own animation. The
-// Tetris digits break up in the break-up effect; the classic digits all fly
-// in at the next second (ClassicFace::request()).
+// FN_FACE_ANIMATION, on the face only: the watchface's own animation, each
+// face deciding whether it plays now. The Tetris digits break up in the
+// break-up effect (TetrisFace::request()); the classic digits all fly in at
+// the next second (ClassicFace::request()).
 void faceAnimationStart() {
   if (screen != SCREEN_FACE) { return; }
 #if WATCHFACE_MUNCHER
@@ -5045,14 +5045,7 @@ void faceAnimationStart() {
   if (settings.watchface == WATCHFACE_ALIENS_ID) { aliensKnock(); return; }
 #endif
 #if WATCHFACE_TETRIS
-  if (settings.watchface == WATCHFACE_TETRIS_ID) {
-#if GIF_PLAYBACK
-    // Not into the time's change: dropped, not kept (Peter, 2026-10-12).
-    if (!panelFitsBeforeChange(TETRIS_KNOCK_MS)) { return; }
-#endif
-    tetrisFace.request(faceMoment(), TRIGGER_ACTION);
-    return;
-  }
+  if (settings.watchface == WATCHFACE_TETRIS_ID) { tetrisFace.request(faceMoment(), TRIGGER_ACTION); return; }
 #endif
   classicFace.request(faceMoment(), TRIGGER_ACTION);
 }
