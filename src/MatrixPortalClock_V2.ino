@@ -3073,22 +3073,31 @@ void saveFaceSettings() {
 // The web app's face settings, live or to be saved. A setting that redraws
 // redraws, the knock's sensitivity goes to the sensor, and - live, on the
 // face shown - a new watchface animation plays once, and pv asks to see what
-// a control changed. The page says outright when such a control was used:
+// a control changed: now or not at all, and the page is told which. The page says outright when such a control was used:
 // comparing the values instead, as this did at first, was unreliable, since
 // the updates sent while a slider was dragged had already pushed the final
 // value across, and the release looked like no change at all.
-void applyFaceParams(const String &q, bool live) {
+FaceOutcome applyFaceParams(const String &q, bool live) {
+  FaceOutcome shown = OUTCOME_NONE;
   for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) {
     FaceBlob &b = *FACE_BLOBS[i];
     uint8_t came = faceBlobApply(b, [&q](const char *key) { return getParam(q, key); });
     if (came & PARAM_REDRAW) { panelDirty = true; }
     if (came & PARAM_KNOCK)  { knockFollowSetting(); }
     if (live && (came & PARAM_PLAYS) && settings.watchface == b.face) {
-      faceFor(b.face).request(faceMoment(), TRIGGER_PREVIEW_ANIMATION);
+      shown = previewOutcome(shown, faceFor(b.face).request(faceMoment(), TRIGGER_PREVIEW_ANIMATION));
     }
   }
-  if (!live || !getParam(q, "pv").length()) { return; }
-  faceFor(settings.watchface).request(faceMoment(), TRIGGER_PREVIEW_CHANGE);
+  if (!live || !getParam(q, "pv").length()) { return shown; }
+  return previewOutcome(shown, faceFor(settings.watchface).request(faceMoment(), TRIGGER_PREVIEW_CHANGE));
+}
+
+// What the page is told of two previews asked for at once: one played, or
+// one refused, or none of them asked.
+FaceOutcome previewOutcome(FaceOutcome a, FaceOutcome b) {
+  if (a == OUTCOME_PLAYED || b == OUTCOME_PLAYED)   { return OUTCOME_PLAYED; }
+  if (a == OUTCOME_REFUSED || b == OUTCOME_REFUSED) { return OUTCOME_REFUSED; }
+  return OUTCOME_NONE;
 }
 #endif
 
@@ -5981,8 +5990,10 @@ void printAgo(Print &c, unsigned long at) {
 
 // Live preview (/live): apply only the visual settings to RAM, no flash write,
 // no reboot. The clock is being rendered every frame, so changes show instantly.
-void applyLiveParams(const String &q) {
+// Returns what became of a preview the page asked for (OUTCOME_NONE: none).
+FaceOutcome applyLiveParams(const String &q) {
   String v;
+  uint8_t faceBefore = settings.watchface;
 #if WATCHFACE_TETRIS
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
 #endif
@@ -5996,7 +6007,13 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); }
   v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); }
 #if WATCHFACE_TETRIS
-  applyFaceParams(q, true);    // the faces' own settings, and what the page asks to see
+  // The faces' own settings, and what the page asks to see - but a face just
+  // chosen shows itself as it comes (the Tetris digits drop, the others show
+  // the time) and plays no preview with it: it has planned nothing yet.
+  return applyFaceParams(q, settings.watchface == faceBefore);
+#else
+  (void)faceBefore;
+  return OUTCOME_NONE;
 #endif
 }
 
@@ -9153,6 +9170,15 @@ void sendJson(Print &c, JsonDocument &doc, int code = 200) {
   serializeJson(doc, c);
 }
 
+// The answer to a change tried live: nothing when it asked for no preview,
+// else whether the face played it now or could not (it does not wait).
+void sendPreviewOutcome(Print &c, FaceOutcome o) {
+  if (o == OUTCOME_NONE) { sendNoContent(c); return; }
+  JsonDocument d;
+  d["preview"] = o == OUTCOME_PLAYED ? "played" : "refused";
+  sendJson(c, d);
+}
+
 void sendJsonError(Print &c, int code, const char *text) {
   JsonDocument d;
   d["error"] = text;
@@ -9785,16 +9811,15 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     return;
   }
   if (path == "/api/live") {
-    applyLiveParams(body);    // RAM only; Save keeps it, Discard reads the stored settings back
-    sendNoContent(c);
+    // RAM only; Save keeps it, Discard reads the stored settings back.
+    sendPreviewOutcome(c, applyLiveParams(body));
   } else if (path == "/api/save") {
     apiSave(c, body, closeHotspot);
   } else if (path == "/api/discard") {
-    loadSettings();           // the stored settings, with the Tetris ones, applied at once
-#if WATCHFACE_TETRIS
-    tetrisFace.request(faceMoment(), TRIGGER_PREVIEW_CHANGE);   // show what was restored
-#endif
-    sendNoContent(c);
+    loadSettings();           // the stored settings, with the faces' ones, applied at once
+    // The face shows what was restored, as after a change tried live (U1 of
+    // the face refactor: until 2026-10-20 only the Tetris face did).
+    sendPreviewOutcome(c, faceFor(settings.watchface).request(faceMoment(), TRIGGER_PREVIEW_CHANGE));
   } else if (path == "/api/time") {
     apiSetTime(c, body);
   } else if (path == "/api/wifi") {

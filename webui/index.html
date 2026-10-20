@@ -648,7 +648,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     clearTimeout(liveTimer);
     liveTimer = setTimeout(function () {
       var f = liveForm(livePv); livePv = false;
-      api('/api/live', f).catch(function () { toast('The clock did not answer.'); });
+      api('/api/live', f).then(function (j) {
+        // A preview plays now or not at all; the setting is taken either way.
+        if (j && j.preview === 'refused') { toast('No preview now: the face is busy or about to change the time.'); }
+      }).catch(function () { toast('The clock did not answer.'); });
     }, 120);
   }
 

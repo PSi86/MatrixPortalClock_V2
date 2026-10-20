@@ -1400,14 +1400,18 @@ builds again. (Until 2026-10-08 an option chose between this and a plain swap,
 where the old digit vanished at once; the break-up now always counts.) The colon is never touched by any of this — it blinks on the second
 throughout, being the one thing on this face that shows time actually passing.
 
-**Trying it out on the config page.** Changing the watchface, the drop or turn
-pace, the sensitivity or the effect takes the digits
-apart and builds them again straight away, so the setting can be judged on the
-panel. That matters here because the clock deliberately ignores the sensor while
-the AP is up, so a knock is not available to test with. It happens on the
-settled value only — a slider let go of, or a point on it tapped. **Discard
-changes** puts the stored settings back: everything on the page previews live but
-sits in RAM until saved, and this is the way back from that.
+**Trying it out on the config page.** Changing the drop or turn pace or the
+effect takes the digits apart and builds them again straight away, so the
+setting can be judged on the panel; choosing the face drops its digits anew.
+That matters here because the clock deliberately ignores the sensor while the AP
+is up, so a knock is not available to test with. It happens on the settled value
+only — a slider let go of, or a point on it tapped — and now or not at all, as
+the knock: while the digits are coming apart, for 1 s after, or when it would run
+into the minute's change, the page says that no preview is possible now, and the
+setting is taken anyway (until 2026-10-20 the preview waited). **Discard
+changes** puts the stored settings back and shows them the same way on every
+face: everything on the page previews live but sits in RAM until saved, and this
+is the way back from that.
 
 The **digit and trail colors do not apply** to this face. The master brightness
 (and therefore the light sensor) does: the palette is rescaled before every frame.
@@ -1519,11 +1523,13 @@ The settings are in a blob of their own (NVS key `muncher`), as the Tetris ones
 are; `mst`, `mkn` (0 power pellet, 1 last digit again, 2 random, 3 ghosts win:
 the newest value went to the end, so a stored *random* stays random) and `mpace`
 in the web app's interface. Changing the pace shows a change of the minutes' ones
-(eaten and laid again); choosing another knock shows its scene; a new change
-style shows at the next change of the time. A preview waits until it can end 3 s
-before the next change starts, so it never holds one up, and the time on show is
-never wrong for it: the first previews showed the last minute's digits and walked
-them to this minute's, which at midnight set the clock back to 23:59 for a moment.
+(eaten and laid again); choosing another watchface animation shows its scene; a
+new change style shows at the next change of the time. A preview plays at once
+when it can end 3 s before the next change starts and no scene runs, and
+otherwise not at all - the page says so; until 2026-10-20 it waited for room.
+The time on show is never wrong for it: the first previews showed the last
+minute's digits and walked them to this minute's, which at midnight set the clock
+back to 23:59 for a moment.
 The debug build walks every change of every digit, both ways
 and on both layouts, and every other scene - the power pellet (both ghosts
 caught, away from the panel's edges), the ghosts winning, both with the same
@@ -1588,9 +1594,9 @@ no room when it is due, measured by its own length - the wave's minute, info car
 waiting, a GIF just before - is dropped, not kept. **Knock** (`akn`): what a knock, or the face action "trigger watchface
 animation", plays - *Last digit again* (the minutes' ones shot and brought back),
 *Saucer*, *Aliens shoot back*, or *Random each time* (the default); a new value
-chosen in the web app plays it once, and choosing the face shows a change of the
-minutes' ones. None of them starts when it could not end 3 s before the next
-change; GIFs and info cards do not start into a scene.
+chosen in the web app plays it once, at once or not at all (the page says when
+not). None of them starts when it could not end 3 s before the next change; GIFs
+and info cards do not start into a scene.
 
 **Colours** (`acol`): white, as the arcade's overlay, or each row in its own colour
 (magenta, cyan, green). The settings blob of the trial build (revision 1, with a

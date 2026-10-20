@@ -150,7 +150,6 @@ class MuncherFace : public PlannedFace {
     _rotation = 0xFF;
     _after = AFTER_NOTHING;
     _sceneEndedAt = 0;
-    _previewAsked = _animationAsked = false;
   }
 #endif
 
@@ -160,13 +159,10 @@ class MuncherFace : public PlannedFace {
   // fruit; the fruit is an extra of its own now, at its drawn time.)
   static const uint8_t AFTER_NOTHING = 0;
   static const uint8_t AFTER_HOUR    = 2;
-  // The most steps what the web app asks to see can take: a change of the
-  // minutes' ones, or the watchface animation's scene.
-  static const long PREVIEW_STEPS = 260;
 
   void startScene(muncher::Mode mode, unsigned long at, uint8_t after = AFTER_NOTHING);
   void placeFruit();
-  bool playAnimation(const FaceNow &now);
+  bool playScene(const FaceNow &now, uint8_t kind);
   bool extra(const FaceNow &now);
   void idle(const FaceNow &now, const uint8_t d[4]);
   void sceneEnded(const FaceNow &now);
@@ -204,10 +200,9 @@ inline void MuncherFace::placeFruit() {
 
 // The watchface animation's scene: refused while a scene runs, just
 // after one, and when it could not end before the next change starts.
-inline bool MuncherFace::playAnimation(const FaceNow &now) {
+inline bool MuncherFace::playScene(const FaceNow &now, uint8_t kind) {
   if (_m.mode != muncher::MODE_IDLE || _m.shown[0] == muncher::NO_DIGIT) { return false; }
   if (now.ms - _sceneEndedAt < FACE_REST_MS) { return false; }
-  uint8_t kind = _s.animation;
   if (kind == MUNCHER_ANIM_RANDOM) {
     const uint8_t KINDS[3] = { MUNCHER_ANIM_POWER, MUNCHER_ANIM_REPLAY, MUNCHER_ANIM_DEATH };
     kind = KINDS[faceRandom(3)];
@@ -288,28 +283,6 @@ inline void MuncherFace::idle(const FaceNow &now, const uint8_t d[4]) {
   // The start, worked out anew on every pass until the change begins; a
   // sync that moves the second, or a new pace, is followed the same way.
   _startAt = nextMinuteAt(now) - (unsigned long)_plannedDone * _s.paceMs;
-  // What the web app asks to see waits until it can end before the next
-  // change starts, and for the rest after a scene: a preview never holds up
-  // a change of the time.
-  long r = room(now);
-  bool rest = rested(now, FACE_REST_MS);
-  long pace = _s.paceMs;
-  if (_previewAsked && rest && r >= PREVIEW_STEPS * pace) {
-    // A change: the minutes' ones eaten and laid again, as the animation "last
-    // digit again" does, so the time on show stays right. Showing the last
-    // minute's digits first, as this did, set the clock back a minute for
-    // the preview's time (midnight, 2026-10-11).
-    _previewAsked = false;
-    uint8_t same[4];
-    memcpy(same, d, 4);
-    if (_m.planChange(same, muncher::STYLE_ALL, 1 << 3)) { startScene(muncher::MODE_CHANGE, now.ms); }
-    _plannedFor = 0;
-    return;
-  }
-  if (_animationAsked && rest && r >= PREVIEW_STEPS * pace) {
-    _animationAsked = false;
-    if (playAnimation(now)) { return; }
-  }
   // Started at its planned moment even when that has passed (the face was
   // away): stepped from there, the muncher is where it ought to be by now.
   if (_m.legsPlanned() && (long)(now.ms - _startAt) >= 0) {
@@ -490,17 +463,19 @@ inline void MuncherFace::draw(Adafruit_GFX &g, const FaceNow &, const FacePaint 
 }
 
 // The input's scene; the extra now and then; what the web app asks to see -
-// a change, or the scene a new choice of the watchface animation plays -
-// once it can end before the next change starts and the rest after a scene
-// is over.
+// a change (the minutes' ones eaten and laid again, so the time on show
+// stays right), or the scene a new choice of the watchface animation plays.
+// Each now or not at all: until 2026-10-20 the web app's waited for room.
 inline FaceOutcome MuncherFace::request(const FaceNow &now, FaceTrigger why) {
+  bool played;
   switch (why) {
-    case TRIGGER_ACTION:            return playAnimation(now) ? OUTCOME_PLAYED : OUTCOME_REFUSED;
-    case TRIGGER_NOW_AND_THEN:      return extra(now) ? OUTCOME_PLAYED : OUTCOME_REFUSED;
-    case TRIGGER_PREVIEW_CHANGE:    _previewAsked = true; return OUTCOME_PLAYED;
-    case TRIGGER_PREVIEW_ANIMATION: _animationAsked = true;   return OUTCOME_PLAYED;
+    case TRIGGER_ACTION:
+    case TRIGGER_PREVIEW_ANIMATION: played = playScene(now, _s.animation); break;
+    case TRIGGER_PREVIEW_CHANGE:    played = playScene(now, MUNCHER_ANIM_REPLAY); break;
+    case TRIGGER_NOW_AND_THEN:      played = extra(now); break;
+    default:                        return OUTCOME_NONE;
   }
-  return OUTCOME_NONE;
+  return played ? OUTCOME_PLAYED : OUTCOME_REFUSED;
 }
 
 #endif  // FACE_MUNCHER_H

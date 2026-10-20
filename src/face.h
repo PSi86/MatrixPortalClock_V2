@@ -118,9 +118,11 @@ enum FaceTrigger : uint8_t {
   TRIGGER_PREVIEW_CHANGE,      // a setting of the change was tried in the web app: show a change
   TRIGGER_PREVIEW_ANIMATION,   // a new choice of the watchface animation: play what it picks
 };
+// Now or not at all: nothing asked for is kept for later (Peter, 2026-10-12
+// for the inputs, 2026-10-20 for the web app's previews).
 enum FaceOutcome : uint8_t {
   OUTCOME_NONE,       // the face offers nothing for this trigger
-  OUTCOME_PLAYED,     // it plays, or will at the moment it plays such things
+  OUTCOME_PLAYED,     // it plays now (the classic face's from the next second)
   OUTCOME_REFUSED,    // not now: something runs, or it would run into the time's change
 };
 

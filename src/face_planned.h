@@ -40,11 +40,6 @@ class PlannedFace : public Watchface {
     return true;
   }
 
-  // The time before the planned change starts, less FACE_GUARD_MS: what a
-  // scene may take; and whether the rest after the last scene is over.
-  long room(const FaceNow &now) const { return (long)(_startAt - now.ms) - (long)FACE_GUARD_MS; }
-  bool rested(const FaceNow &now, unsigned long rest) const { return now.ms - _sceneEndedAt >= rest; }
-
   static void logStands(const char *face, const FaceNow &now) {
     Serial.printf("%s: the new time stands at :%02d.%03lu\n", face, clockSecond(now.local), now.ms - now.secondAt);
   }
@@ -53,8 +48,6 @@ class PlannedFace : public Watchface {
   unsigned long _startAt      = 0;      // when the planned or running scene starts
   time_t        _plannedFor   = 0;      // the minute the planned change is for; 0 = none
   unsigned long _sceneEndedAt = 0;
-  bool          _previewAsked = false;  // the web app asks to see a change
-  bool          _animationAsked   = false;  // ... or the watchface animation's scene
   bool          _dirty        = false;  // the picture changed outside a pass: drawn on the next
 };
 

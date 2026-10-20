@@ -118,11 +118,10 @@ class TetrisFace : public Watchface {
 
 #if defined(FACE_FRAME_LOG)
   // Test builds: a scene starts with the face afresh - a new layout and drop,
-  // no rest after an effect, no preview asked for.
+  // no rest after an effect.
   void testReset() {
     _rotation = 0xFF;
     _breakUpEndedAt = 0;
-    _previewAsked = false;
   }
 #endif
 
@@ -225,7 +224,6 @@ class TetrisFace : public Watchface {
   unsigned long _breakUpStepLast = 0;                   // one clock for all of them, they step together
   unsigned long _holdUntil[4] = {0, 0, 0, 0};    // empty space before the rebuild starts
   unsigned long _breakUpEndedAt = 0;   // when the last effect had run its course
-  bool          _previewAsked = false;   // the web app asked to show a setting off
 };
 
 // Chosen: a fresh layout and a fresh drop on the next pass. Shown again or
@@ -698,14 +696,6 @@ inline bool TetrisFace::update(const FaceNow &now) {
     layout(now);
   }
 
-  // The web app asks for a run when a setting has been changed there. Held
-  // back until the last run has finished, so each one can be watched to the
-  // end rather than being cut off by the next slider release.
-  if (_previewAsked && !breakingUp()) {
-    _previewAsked = false;
-    breakUpAll(now.ms);
-  }
-
   // A digit that has finished coming apart is marked unknown, so the next
   // pushTime() starts it again from the current time - which is also what
   // makes the rebuild show the right value if a minute passed on the way.
@@ -786,14 +776,11 @@ inline bool TetrisFace::busy(const FaceNow &) const {
 // FACE_GUARD_MS before the next minute's change starts. A build under way,
 // the minute change's too, may be smashed: only the time before the change
 // is kept free, so the change starts from a clean picture (Peter,
-// 2026-10-20; from 2026-10-12 every build refused it). A preview asked for by
-// the web app plays once the run before it has finished.
+// 2026-10-20; from 2026-10-12 every build refused it). The web app's
+// preview of a setting tried there is the same run, now or not at all
+// (until 2026-10-20 it waited for the run before it to finish).
 inline FaceOutcome TetrisFace::request(const FaceNow &now, FaceTrigger why) {
-  if (why == TRIGGER_PREVIEW_CHANGE) {
-    _previewAsked = true;
-    return OUTCOME_PLAYED;
-  }
-  if (why != TRIGGER_ACTION) { return OUTCOME_NONE; }
+  if (why != TRIGGER_ACTION && why != TRIGGER_PREVIEW_CHANGE) { return OUTCOME_NONE; }
   if (breakingUp() || now.ms - _breakUpEndedAt < FACE_REST_MS) { return OUTCOME_REFUSED; }
   unsigned long changeAt = now.secondAt + (60UL - now.second) * 1000UL;   // the next minute's start
   if (now.set && !faceFits(changeAt, now.ms, ANIMATION_MS)) { return OUTCOME_REFUSED; }

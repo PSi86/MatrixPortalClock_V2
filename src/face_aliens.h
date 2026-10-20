@@ -119,12 +119,10 @@ class AliensFace : public PlannedFace {
   void testReset() {
     _rotation = 0xFF;
     _sceneEndedAt = 0;
-    _previewAsked = _animationAsked = false;
   }
 #endif
 
  private:
-  static const unsigned long PREVIEW_MS    = 15000;  // the longest a scene asked for takes: the minutes' ones shot and back
 
   uint32_t planBack();
   uint32_t planNap();
@@ -242,23 +240,6 @@ inline void AliensFace::idle(const FaceNow &now, const uint8_t d[4]) {
     _plannedFor = next;
   }
   _startAt = nextMinuteAt(now) - _plannedStand;
-  // What the web app asks to see waits until it can end before the next
-  // change starts, and for the rest after a scene, as with the Muncher. A
-  // scene tried returns either way: one refused has taken the face's plan,
-  // and the change is planned anew on the next pass, before its start is
-  // looked at - else the refused scene would start as the time's change.
-  long r = room(now);
-  bool rest = rested(now, FACE_REST_MS);
-  if (_previewAsked && rest && r >= (long)PREVIEW_MS) {
-    _previewAsked = false;
-    scene(now, ALIENS_ANIM_REPLAY, "the web app's preview");
-    return;
-  }
-  if (_animationAsked && rest && r >= (long)PREVIEW_MS) {
-    _animationAsked = false;
-    scene(now, _s.animation, "the web app's knock");
-    return;
-  }
   // Started at its planned moment even when that has passed (the face was
   // away): from there, everything is where it ought to be by now.
   if (_plannedStand && (long)(now.ms - _startAt) >= 0) {
@@ -394,17 +375,21 @@ inline void AliensFace::draw(Adafruit_GFX &g, const FaceNow &, const FacePaint &
 }
 
 // The input's scene; the extra now and then, measured by its own length
-// against the next change; what the web app asks to see - a change, or the
-// scene a new choice of the watchface animation plays - once it can end
-// before the next change starts and the rest after a scene is over.
+// against the next change; what the web app asks to see - a change (the
+// minutes' ones shot and marching in again), or the scene a new choice of
+// the watchface animation plays. Each now or not at all: until 2026-10-20
+// the web app's waited for room. One refused has taken the face's plan, and
+// the change is planned anew on the face's next pass.
 inline FaceOutcome AliensFace::request(const FaceNow &now, FaceTrigger why) {
+  bool played;
   switch (why) {
-    case TRIGGER_ACTION:            return scene(now, _s.animation, "a knock") ? OUTCOME_PLAYED : OUTCOME_REFUSED;
-    case TRIGGER_NOW_AND_THEN:      return scene(now, extraKind(), "now and then") ? OUTCOME_PLAYED : OUTCOME_REFUSED;
-    case TRIGGER_PREVIEW_CHANGE:    _previewAsked = true; return OUTCOME_PLAYED;
-    case TRIGGER_PREVIEW_ANIMATION: _animationAsked = true;   return OUTCOME_PLAYED;
+    case TRIGGER_ACTION:            played = scene(now, _s.animation, "a knock"); break;
+    case TRIGGER_NOW_AND_THEN:      played = scene(now, extraKind(), "now and then"); break;
+    case TRIGGER_PREVIEW_CHANGE:    played = scene(now, ALIENS_ANIM_REPLAY, "the web app's preview"); break;
+    case TRIGGER_PREVIEW_ANIMATION: played = scene(now, _s.animation, "the web app's choice"); break;
+    default:                        return OUTCOME_NONE;
   }
-  return OUTCOME_NONE;
+  return played ? OUTCOME_PLAYED : OUTCOME_REFUSED;
 }
 
 #endif  // FACE_ALIENS_H
