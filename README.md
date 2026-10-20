@@ -1670,6 +1670,23 @@ so two builds show the same frames when nothing has changed. That is how the
 move of the faces into their headers was checked to leave the panel as it was;
 the scripts for it are not part of the repository.
 
+Measured on the wall clock before the faces moved behind the interface and
+after (debug builds, each face 150 s on the live clock, 2026-10-21; a pass is
+one run of the main loop, a frame one the face drew):
+
+| Face | passes/s | time a pass takes, average | frames/s |
+|---|---|---|---|
+| Classic | 145 -> 656 | 5711 -> 514 us | 145 -> 54.6 |
+| Tetris | 992 -> 994 | 14 -> 18 us | 3.3 -> 2.4 |
+| Muncher | 992 -> 993 | 16 -> 14 us | 4.4 -> 4.1 |
+| Aliens | 991 -> 991 | 24 -> 25 us | 6.0 -> 5.9 |
+
+The classic face drew on every pass and so held the loop for over 80 % of its
+time; it now draws when a digit has moved. The other faces drew only on a change
+before as well, and stay as they were (their frames depend on how many digits
+changed in the window). The internal RAM free while running was about 200 bytes
+lower (142.6 instead of 142.9 KB at its least).
+
 ## Animation timing
 
 The **fly-in time** is how long every flight of the classic face takes, in ms
