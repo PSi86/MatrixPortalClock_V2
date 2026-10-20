@@ -15,7 +15,7 @@
 
 // Its settings are in a blob of their own (NVS "aliens"), as the Muncher's are.
 #define ALIENS_SETTINGS_MAGIC 0xA11E
-#define ALIENS_SETTINGS_REV   4   // 1 = the trial build with four looks, 2 = without them, 3 = adds knock, 4 = nap
+#define ALIENS_SETTINGS_REV   4   // 1 = the trial build with four looks, 2 = without them, 3 = adds the animation (akn), 4 = nap
 
 // The digits are blocks of 3 x 3 with a gap, and only the blocks a change
 // takes wake as aliens: digits of aliens could not be read as a time (Peter,
@@ -25,13 +25,14 @@
 const uint8_t ALIENS_COLOURS_ARCADE = 0;
 const uint8_t ALIENS_COLOURS_ROWS   = 1;
 const uint8_t ALIENS_COLOURS_COUNT  = 2;
-// What a knock, or the face action "trigger watchface animation", plays.
-const uint8_t ALIENS_KNOCK_REPLAY = 0;   // the minutes' ones shot and marching in again
-const uint8_t ALIENS_KNOCK_SAUCER = 1;   // a saucer, shot by the cannon
-const uint8_t ALIENS_KNOCK_BACK   = 2;   // an alien shoots back and hits the cannon
-const uint8_t ALIENS_KNOCK_RANDOM = 3;   // one of the others, drawn each time
-const uint8_t ALIENS_KNOCK_COUNT  = 4;
-// Not a knock's choice: a block waking for a moment, one of the extras that
+// What the watchface animation plays: the input action "trigger watchface
+// animation", the knock by default.
+const uint8_t ALIENS_ANIM_REPLAY = 0;   // the minutes' ones shot and marching in again
+const uint8_t ALIENS_ANIM_SAUCER = 1;   // a saucer, shot by the cannon
+const uint8_t ALIENS_ANIM_BACK   = 2;   // an alien shoots back and hits the cannon
+const uint8_t ALIENS_ANIM_RANDOM = 3;   // one of the others, drawn each time
+const uint8_t ALIENS_ANIM_COUNT  = 4;
+// Not one the watchface animation picks: a block waking for a moment, one of the extras that
 // come now and then at the pace the faces share when its option is on
 // (Peter, 2026-10-12).
 const uint8_t ALIENS_EXTRA_NAP = 4;
@@ -41,33 +42,33 @@ struct AliensSettings {
   uint8_t  rev;
   uint8_t  style;     // aliens::STYLE_*: how a changing digit goes
   uint8_t  colours;   // ALIENS_COLOURS_*
-  uint8_t  knock;     // rev 3: ALIENS_KNOCK_* (was a spare byte, 0)
+  uint8_t  animation;   // rev 3: ALIENS_ANIM_*, what the watchface animation plays (was a spare byte, 0)
   uint8_t  nap;       // rev 4: 1 = a block wakes for a moment now and then (was a spare byte, 0)
   uint8_t  spare[1];
 };
 static_assert(sizeof(AliensSettings) == 8, "the stored blob keeps its size");
 
 const AliensSettings ALIENS_DEFAULTS = {
-  ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, aliens::STYLE_MIXED, ALIENS_COLOURS_ARCADE, ALIENS_KNOCK_RANDOM, 1, { 0 }
+  ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, aliens::STYLE_MIXED, ALIENS_COLOURS_ARCADE, ALIENS_ANIM_RANDOM, 1, { 0 }
 };
 
 // The Aliens settings for the web app and the store (face.h).
 const char *const ALIENS_AST_LABELS[] = { "Mixed", "Whole digit", "Only the difference" };                     // aliens::STYLE_*
 const char *const ALIENS_ACOL_LABELS[] = { "White", "Coloured rows" };                                         // ALIENS_COLOURS_*
-const char *const ALIENS_AKN_LABELS[] = { "Last digit again", "Saucer", "Aliens shoot back", "Random each time" };   // ALIENS_KNOCK_*
+const char *const ALIENS_AKN_LABELS[] = { "Last digit again", "Saucer", "Aliens shoot back", "Random each time" };   // ALIENS_ANIM_*
 const char *const ALIENS_ANAP_LABELS[] = { "Off", "Now and then" };
 static_assert(sizeof(ALIENS_AST_LABELS) / sizeof(ALIENS_AST_LABELS[0]) == aliens::STYLE_COUNT, "a name per change style");
 static_assert(sizeof(ALIENS_ACOL_LABELS) / sizeof(ALIENS_ACOL_LABELS[0]) == ALIENS_COLOURS_COUNT, "a name per colouring");
-static_assert(sizeof(ALIENS_AKN_LABELS) / sizeof(ALIENS_AKN_LABELS[0]) == ALIENS_KNOCK_COUNT, "a name per scene");
+static_assert(sizeof(ALIENS_AKN_LABELS) / sizeof(ALIENS_AKN_LABELS[0]) == ALIENS_ANIM_COUNT, "a name per scene");
 const FaceParam ALIENS_PARAMS[] = {
   { "ast",  offsetof(AliensSettings, style),   1, PARAM_CHOICE, 0,            0, aliens::STYLE_COUNT - 1,  ALIENS_AST_LABELS },
   { "acol", offsetof(AliensSettings, colours), 1, PARAM_CHOICE, PARAM_REDRAW, 0, ALIENS_COLOURS_COUNT - 1, ALIENS_ACOL_LABELS },
-  { "akn",  offsetof(AliensSettings, knock),   1, PARAM_CHOICE, PARAM_PLAYS,  0, ALIENS_KNOCK_COUNT - 1,   ALIENS_AKN_LABELS },
+  { "akn",  offsetof(AliensSettings, animation),   1, PARAM_CHOICE, PARAM_PLAYS,  0, ALIENS_ANIM_COUNT - 1,   ALIENS_AKN_LABELS },
   { "anap", offsetof(AliensSettings, nap),     1, PARAM_FLAG,   0,            0, 1,                        ALIENS_ANAP_LABELS },
 };
 
 // An older blob: the trial build's (rev 1: look, style, idle, colours after
-// the rev) keeps its change and its colours; rev 2 gets the knock's default,
+// the rev) keeps its change and its colours; rev 2 gets the animation's default,
 // rev 3 the waking blocks'.
 inline void aliensMigrate(uint8_t *data, uint8_t rev) {
   AliensSettings &a = *(AliensSettings *)data;
@@ -77,7 +78,7 @@ inline void aliensMigrate(uint8_t *data, uint8_t rev) {
     was.colours = data[6];
     a = was;
   } else if (rev < 3) {
-    a.knock = ALIENS_DEFAULTS.knock;
+    a.animation = ALIENS_DEFAULTS.animation;
     a.nap = ALIENS_DEFAULTS.nap;
   } else if (rev < 4) {
     a.nap = ALIENS_DEFAULTS.nap;
@@ -118,12 +119,12 @@ class AliensFace : public PlannedFace {
   void testReset() {
     _rotation = 0xFF;
     _sceneEndedAt = 0;
-    _previewAsked = _knockAsked = false;
+    _previewAsked = _animationAsked = false;
   }
 #endif
 
  private:
-  static const unsigned long KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
+  static const unsigned long REST_MS = 1000;   // after a scene, before an animation asked for counts again
   static const unsigned long PREVIEW_MS    = 15000;  // the longest a scene asked for takes: the minutes' ones shot and back
 
   uint32_t planBack();
@@ -174,29 +175,29 @@ inline uint32_t AliensFace::planNap() {
 // option on - a block waking for a moment.
 inline uint8_t AliensFace::extraKind() {
   uint8_t k = (uint8_t)faceRandom(_s.nap ? 3 : 2);
-  return k == 0 ? ALIENS_KNOCK_SAUCER : k == 1 ? ALIENS_KNOCK_BACK : ALIENS_EXTRA_NAP;
+  return k == 0 ? ALIENS_ANIM_SAUCER : k == 1 ? ALIENS_ANIM_BACK : ALIENS_EXTRA_NAP;
 }
 
 // A scene between changes - the minutes' ones shot and marching in again
 // (the time on show stays right), a saucer, an alien shooting back, a block
-// waking - for a knock, the web app, and now and then. Refused while a scene
+// waking - for the watchface animation, the web app, and now and then. Refused while a scene
 // runs, just after one, and when it could not end before the next change
 // starts: then it is dropped, not kept.
 inline bool AliensFace::scene(const FaceNow &now, uint8_t kind, const char *why) {
   if (_a.running || _a.shown[0] == aliens::NO_DIGIT) { return false; }
-  if (now.ms - _sceneEndedAt < KNOCK_REST_MS) { return false; }
+  if (now.ms - _sceneEndedAt < REST_MS) { return false; }
   if (_plannedFor == 0) { return false; }   // the next change is planned on the face's next pass
-  if (kind == ALIENS_KNOCK_RANDOM) {
-    const uint8_t KINDS[3] = { ALIENS_KNOCK_REPLAY, ALIENS_KNOCK_SAUCER, ALIENS_KNOCK_BACK };
+  if (kind == ALIENS_ANIM_RANDOM) {
+    const uint8_t KINDS[3] = { ALIENS_ANIM_REPLAY, ALIENS_ANIM_SAUCER, ALIENS_ANIM_BACK };
     kind = KINDS[faceRandom(3)];
   }
   unsigned long plannedStart = _startAt;
   uint32_t len;
   const char *what;
-  if (kind == ALIENS_KNOCK_SAUCER) {
+  if (kind == ALIENS_ANIM_SAUCER) {
     len = _a.planSaucer(faceRandom(2) == 0, (uint8_t)faceRandom(3));
     what = "a saucer";
-  } else if (kind == ALIENS_KNOCK_BACK) {
+  } else if (kind == ALIENS_ANIM_BACK) {
     len = planBack();
     what = "an alien shoots back";
   } else if (kind == ALIENS_EXTRA_NAP) {
@@ -248,15 +249,15 @@ inline void AliensFace::idle(const FaceNow &now, const uint8_t d[4]) {
   // and the change is planned anew on the next pass, before its start is
   // looked at - else the refused scene would start as the time's change.
   long r = room(now);
-  bool rest = rested(now, KNOCK_REST_MS);
+  bool rest = rested(now, REST_MS);
   if (_previewAsked && rest && r >= (long)PREVIEW_MS) {
     _previewAsked = false;
-    scene(now, ALIENS_KNOCK_REPLAY, "the web app's preview");
+    scene(now, ALIENS_ANIM_REPLAY, "the web app's preview");
     return;
   }
-  if (_knockAsked && rest && r >= (long)PREVIEW_MS) {
-    _knockAsked = false;
-    scene(now, _s.knock, "the web app's knock");
+  if (_animationAsked && rest && r >= (long)PREVIEW_MS) {
+    _animationAsked = false;
+    scene(now, _s.animation, "the web app's knock");
     return;
   }
   // Started at its planned moment even when that has passed (the face was
@@ -399,10 +400,10 @@ inline void AliensFace::draw(Adafruit_GFX &g, const FaceNow &, const FacePaint &
 // before the next change starts and the rest after a scene is over.
 inline FaceOutcome AliensFace::request(const FaceNow &now, FaceTrigger why) {
   switch (why) {
-    case TRIGGER_ACTION:            return scene(now, _s.knock, "a knock") ? OUTCOME_PLAYED : OUTCOME_REFUSED;
+    case TRIGGER_ACTION:            return scene(now, _s.animation, "a knock") ? OUTCOME_PLAYED : OUTCOME_REFUSED;
     case TRIGGER_NOW_AND_THEN:      return scene(now, extraKind(), "now and then") ? OUTCOME_PLAYED : OUTCOME_REFUSED;
     case TRIGGER_PREVIEW_CHANGE:    _previewAsked = true; return OUTCOME_PLAYED;
-    case TRIGGER_PREVIEW_ANIMATION: _knockAsked = true;   return OUTCOME_PLAYED;
+    case TRIGGER_PREVIEW_ANIMATION: _animationAsked = true;   return OUTCOME_PLAYED;
   }
   return OUTCOME_NONE;
 }

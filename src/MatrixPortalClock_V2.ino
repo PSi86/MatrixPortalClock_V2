@@ -953,7 +953,7 @@ bool          panelDirty = true;
 // Declared here rather than with the knock code because setup() and the
 // orientation code set them, and those are compiled on every board.
 const unsigned long KNOCK_START_QUIET_MS = 3000;  // after setup(): plugging the clock in
-const unsigned long SHAKE_SETTLE_MS      = 1200;  // after a turn
+const unsigned long KNOCK_AFTER_TURN_MS      = 1200;  // after a turn
 unsigned long setupDoneAt  = 0;   // millis() at the end of setup()
 unsigned long rotatedAt    = 0;   // millis() when the device rotation last changed
 // Boot breadcrumb stages, written to flash while starting (see board_hal.h).
@@ -2885,7 +2885,7 @@ void drawNoticeMarker() {
    ====================================================================== */
 #if WATCHFACE_TETRIS
 #if KNOCK_SENSING
-static_assert(SHAKE_LEVEL_MAX == KNOCK_LEVEL_MAX, "the stored knock sensitivity and knock.h agree on its range");
+static_assert(TETRIS_KNOCK_LEVEL_MAX == KNOCK_LEVEL_MAX, "the stored knock sensitivity and knock.h agree on its range");
 #endif
 
 TetrisSettings tetrisSettings;
@@ -2911,7 +2911,7 @@ bool knockIsReal() {
   if (millisNow - lastInputAt  < INPUT_SETTLE_MS)      { return false; }  // hands still on the clock
   if (orientCandidate != deviceRotation)               { return false; }  // a rotation is being debounced
   if (millisNow - setupDoneAt  < KNOCK_START_QUIET_MS) { return false; }  // just plugged in
-  if (millisNow - rotatedAt    < SHAKE_SETTLE_MS)      { return false; }  // turning is not a knock
+  if (millisNow - rotatedAt    < KNOCK_AFTER_TURN_MS)      { return false; }  // turning is not a knock
   return true;
 }
 
@@ -2924,7 +2924,7 @@ void updateKnock() {
 // The sensitivity setting into the sensor, wherever it changes.
 void knockFollowSetting() {
 #if KNOCK_SENSING
-  knock.setLevel(tetrisSettings.shakeLevel);
+  knock.setLevel(tetrisSettings.knockLevel);
 #endif
 }
 

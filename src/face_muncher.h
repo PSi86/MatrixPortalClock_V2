@@ -18,13 +18,14 @@
 #define MUNCHER_SETTINGS_MAGIC 0x3C1A
 #define MUNCHER_SETTINGS_REV   2   // 2 = adds pellets
 
-// What a knock, or the face action "trigger watchface animation", plays.
+// What the watchface animation plays: the input action "trigger watchface
+// animation", the knock by default.
 // Stored values: a new one goes at the end, so "random" keeps its 2.
-const uint8_t MUNCHER_KNOCK_POWER  = 0;   // the power pellet: the ghosts turn and flee
-const uint8_t MUNCHER_KNOCK_REPLAY = 1;   // the minutes' ones eaten and laid again
-const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
-const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
-const uint8_t MUNCHER_KNOCK_COUNT  = 4;
+const uint8_t MUNCHER_ANIM_POWER  = 0;   // the power pellet: the ghosts turn and flee
+const uint8_t MUNCHER_ANIM_REPLAY = 1;   // the minutes' ones eaten and laid again
+const uint8_t MUNCHER_ANIM_RANDOM = 2;   // one of the others, drawn each time
+const uint8_t MUNCHER_ANIM_DEATH  = 3;   // the ghosts win
+const uint8_t MUNCHER_ANIM_COUNT  = 4;
 // The LEDs of a pellet, in the digits and the corridor: one, or more to be
 // seen better from afar (Peter, 2026-10-11) - two side by side, which makes
 // the level strokes solid lines, two one above the other, which makes the
@@ -43,7 +44,7 @@ struct MuncherSettings {
   uint16_t magic;
   uint8_t  rev;
   uint8_t  style;     // muncher::STYLE_*: how a changing digit is walked
-  uint8_t  knock;     // MUNCHER_KNOCK_*
+  uint8_t  animation;   // MUNCHER_ANIM_*: what the watchface animation plays
   uint8_t  paceMs;    // milliseconds per pixel the muncher walks
   uint8_t  pellets;   // rev 2: MUNCHER_PELLETS_*, the LEDs of a pellet (was a spare byte, 0)
   uint8_t  spare[1];
@@ -53,7 +54,7 @@ static_assert(sizeof(MuncherSettings) == 8, "the stored blob keeps its size");
 const MuncherSettings MUNCHER_DEFAULTS = {
   MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV,
   muncher::STYLE_MIXED,   // the whole digit when one changes, only the difference when several do
-  MUNCHER_KNOCK_RANDOM,
+  MUNCHER_ANIM_RANDOM,
   40,                     // 25 pixels a second
   0,                      // one LED a pellet
   { 0 }
@@ -61,14 +62,14 @@ const MuncherSettings MUNCHER_DEFAULTS = {
 
 // The Muncher settings for the web app and the store (face.h).
 const char *const MUNCHER_MST_LABELS[] = { "Mixed", "Whole digit", "Only the difference" };              // muncher::STYLE_*
-const char *const MUNCHER_MKN_LABELS[] = { "Power pellet", "Last digit again", "Random each time", "Ghosts win" };   // MUNCHER_KNOCK_*
+const char *const MUNCHER_MKN_LABELS[] = { "Power pellet", "Last digit again", "Random each time", "Ghosts win" };   // MUNCHER_ANIM_*
 const char *const MUNCHER_MPEL_LABELS[] = { "One LED", "Side by side", "One above the other", "Solid" };   // MUNCHER_PELLETS_*
 static_assert(sizeof(MUNCHER_MST_LABELS) / sizeof(MUNCHER_MST_LABELS[0]) == muncher::STYLE_COUNT, "a name per change style");
-static_assert(sizeof(MUNCHER_MKN_LABELS) / sizeof(MUNCHER_MKN_LABELS[0]) == MUNCHER_KNOCK_COUNT, "a name per scene");
+static_assert(sizeof(MUNCHER_MKN_LABELS) / sizeof(MUNCHER_MKN_LABELS[0]) == MUNCHER_ANIM_COUNT, "a name per scene");
 static_assert(sizeof(MUNCHER_MPEL_LABELS) / sizeof(MUNCHER_MPEL_LABELS[0]) == MUNCHER_PELLETS_COUNT, "a name per pellet");
 const FaceParam MUNCHER_PARAMS[] = {
   { "mst",   offsetof(MuncherSettings, style),   1, PARAM_CHOICE, 0,            0, muncher::STYLE_COUNT - 1,  MUNCHER_MST_LABELS },
-  { "mkn",   offsetof(MuncherSettings, knock),   1, PARAM_CHOICE, PARAM_PLAYS,  0, MUNCHER_KNOCK_COUNT - 1,   MUNCHER_MKN_LABELS },
+  { "mkn",   offsetof(MuncherSettings, animation),   1, PARAM_CHOICE, PARAM_PLAYS,  0, MUNCHER_ANIM_COUNT - 1,   MUNCHER_MKN_LABELS },
   { "mpace", offsetof(MuncherSettings, paceMs),  1, PARAM_RANGE,  0,            MUNCHER_PACE_MIN, MUNCHER_PACE_MAX, nullptr },
   { "mpel",  offsetof(MuncherSettings, pellets), 1, PARAM_CHOICE, PARAM_REDRAW, 0, MUNCHER_PELLETS_COUNT - 1, MUNCHER_MPEL_LABELS },
 };
@@ -149,7 +150,7 @@ class MuncherFace : public PlannedFace {
     _rotation = 0xFF;
     _after = AFTER_NOTHING;
     _sceneEndedAt = 0;
-    _previewAsked = _knockAsked = false;
+    _previewAsked = _animationAsked = false;
   }
 #endif
 
@@ -159,14 +160,14 @@ class MuncherFace : public PlannedFace {
   // fruit; the fruit is an extra of its own now, at its drawn time.)
   static const uint8_t AFTER_NOTHING = 0;
   static const uint8_t AFTER_HOUR    = 2;
-  static const unsigned long KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
+  static const unsigned long REST_MS = 1000;   // after a scene, before an animation asked for counts again
   // The most steps what the web app asks to see can take: a change of the
-  // minutes' ones, or a knock's scene.
+  // minutes' ones, or the watchface animation's scene.
   static const long PREVIEW_STEPS = 260;
 
   void startScene(muncher::Mode mode, unsigned long at, uint8_t after = AFTER_NOTHING);
   void placeFruit();
-  bool knock(const FaceNow &now);
+  bool playAnimation(const FaceNow &now);
   bool extra(const FaceNow &now);
   void idle(const FaceNow &now, const uint8_t d[4]);
   void sceneEnded(const FaceNow &now);
@@ -202,14 +203,14 @@ inline void MuncherFace::placeFruit() {
   _dirty = true;
 }
 
-// The knock's scene, or the face action's: refused while a scene runs, just
+// The watchface animation's scene: refused while a scene runs, just
 // after one, and when it could not end before the next change starts.
-inline bool MuncherFace::knock(const FaceNow &now) {
+inline bool MuncherFace::playAnimation(const FaceNow &now) {
   if (_m.mode != muncher::MODE_IDLE || _m.shown[0] == muncher::NO_DIGIT) { return false; }
-  if (now.ms - _sceneEndedAt < KNOCK_REST_MS) { return false; }
-  uint8_t kind = _s.knock;
-  if (kind == MUNCHER_KNOCK_RANDOM) {
-    const uint8_t KINDS[3] = { MUNCHER_KNOCK_POWER, MUNCHER_KNOCK_REPLAY, MUNCHER_KNOCK_DEATH };
+  if (now.ms - _sceneEndedAt < REST_MS) { return false; }
+  uint8_t kind = _s.animation;
+  if (kind == MUNCHER_ANIM_RANDOM) {
+    const uint8_t KINDS[3] = { MUNCHER_ANIM_POWER, MUNCHER_ANIM_REPLAY, MUNCHER_ANIM_DEATH };
     kind = KINDS[faceRandom(3)];
   }
   // Only against a planned change: until the face has planned one (it does
@@ -219,12 +220,12 @@ inline bool MuncherFace::knock(const FaceNow &now) {
   uint16_t steps;
   muncher::Mode mode;
   const char *what;
-  if (kind == MUNCHER_KNOCK_POWER) {
+  if (kind == MUNCHER_ANIM_POWER) {
     steps = _m.planPower();
     steps += 120;                      // the walk back and the ghosts, at the most
     mode = muncher::MODE_POWER;
     what = "the power pellet";
-  } else if (kind == MUNCHER_KNOCK_DEATH) {
+  } else if (kind == MUNCHER_ANIM_DEATH) {
     steps = _m.planDeath();
     steps += 140;                      // the fall, the pause and the next one's walk
     mode = muncher::MODE_DEATH;
@@ -239,7 +240,7 @@ inline bool MuncherFace::knock(const FaceNow &now) {
   }
   _plannedFor = 0;                     // the change is planned anew afterwards
   if (!faceFits(plannedStart, now.ms, (unsigned long)steps * _s.paceMs)) {
-    _m.show(_m.shown);                 // drop the knock's walk
+    _m.show(_m.shown);                 // drop the animation's walk
     return false;
   }
   startScene(mode, now.ms);
@@ -273,7 +274,7 @@ inline void MuncherFace::idle(const FaceNow &now, const uint8_t d[4]) {
     return;
   }
   if (d[0] == muncher::NO_DIGIT) { return; }
-  // The next change first: a knock is measured against it.
+  // The next change first: an animation asked for is measured against it.
   time_t next = nextMinute(now);
   if (_plannedFor != next) {
     // To a full hour four ghosts follow the muncher, and the hour show
@@ -292,10 +293,10 @@ inline void MuncherFace::idle(const FaceNow &now, const uint8_t d[4]) {
   // change starts, and for the rest after a scene: a preview never holds up
   // a change of the time.
   long r = room(now);
-  bool rest = rested(now, KNOCK_REST_MS);
+  bool rest = rested(now, REST_MS);
   long pace = _s.paceMs;
   if (_previewAsked && rest && r >= PREVIEW_STEPS * pace) {
-    // A change: the minutes' ones eaten and laid again, as the knock's "last
+    // A change: the minutes' ones eaten and laid again, as the animation "last
     // digit again" does, so the time on show stays right. Showing the last
     // minute's digits first, as this did, set the clock back a minute for
     // the preview's time (midnight, 2026-10-11).
@@ -306,9 +307,9 @@ inline void MuncherFace::idle(const FaceNow &now, const uint8_t d[4]) {
     _plannedFor = 0;
     return;
   }
-  if (_knockAsked && rest && r >= PREVIEW_STEPS * pace) {
-    _knockAsked = false;
-    if (knock(now)) { return; }
+  if (_animationAsked && rest && r >= PREVIEW_STEPS * pace) {
+    _animationAsked = false;
+    if (playAnimation(now)) { return; }
   }
   // Started at its planned moment even when that has passed (the face was
   // away): stepped from there, the muncher is where it ought to be by now.
@@ -428,7 +429,7 @@ inline void MuncherFace::draw(Adafruit_GFX &g, const FaceNow &, const FacePaint 
     }
   }
   // The colon: two power pellets, 4 x 4 without their corners, on the
-  // second's beat. The one the knock's muncher ate stays away until its
+  // second's beat. The one the power pellet's muncher ate stays away until its
   // scene is over.
   if (_colonOn) {
     for (uint8_t p = 0; p < 2; p++) {
@@ -495,10 +496,10 @@ inline void MuncherFace::draw(Adafruit_GFX &g, const FaceNow &, const FacePaint 
 // is over.
 inline FaceOutcome MuncherFace::request(const FaceNow &now, FaceTrigger why) {
   switch (why) {
-    case TRIGGER_ACTION:            return knock(now) ? OUTCOME_PLAYED : OUTCOME_REFUSED;
+    case TRIGGER_ACTION:            return playAnimation(now) ? OUTCOME_PLAYED : OUTCOME_REFUSED;
     case TRIGGER_NOW_AND_THEN:      return extra(now) ? OUTCOME_PLAYED : OUTCOME_REFUSED;
     case TRIGGER_PREVIEW_CHANGE:    _previewAsked = true; return OUTCOME_PLAYED;
-    case TRIGGER_PREVIEW_ANIMATION: _knockAsked = true;   return OUTCOME_PLAYED;
+    case TRIGGER_PREVIEW_ANIMATION: _animationAsked = true;   return OUTCOME_PLAYED;
   }
   return OUTCOME_NONE;
 }

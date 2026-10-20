@@ -56,20 +56,20 @@ const uint8_t TETRIS_PALETTE[TETRIS_COLOUR_CLASSES][3] = {
 #define TETRIS_SETTINGS_REV   3   // 1 = drop and spin, 2 = adds the shake, 3 = on a time change too
 
 // How the digits come apart: the break-up effect.
-const uint8_t SHAKE_STYLE_COLLAPSE = 0;  // the stack gives way and drops
-const uint8_t SHAKE_STYLE_SCATTER  = 1;  // the pieces fly off and tumble
-const uint8_t SHAKE_STYLE_CLEAR    = 2;  // rows flash and vanish, bottom up
-const uint8_t SHAKE_STYLE_RANDOM   = 3;  // one of the three, drawn each time
-const uint8_t SHAKE_STYLE_COUNT    = 4;
-const uint8_t SHAKE_LEVEL_MAX      = 10;   // the knock's sensitivity, stored here (shk)
+const uint8_t BREAKUP_COLLAPSE = 0;  // the stack gives way and drops
+const uint8_t BREAKUP_SCATTER  = 1;  // the pieces fly off and tumble
+const uint8_t BREAKUP_CLEAR    = 2;  // rows flash and vanish, bottom up
+const uint8_t BREAKUP_RANDOM   = 3;  // one of the three, drawn each time
+const uint8_t BREAKUP_COUNT    = 4;
+const uint8_t TETRIS_KNOCK_LEVEL_MAX      = 10;   // the knock's sensitivity, stored here (shk)
 
 struct TetrisSettings {
   uint16_t magic;
   uint8_t  rev;
   uint8_t  dropMs;      // milliseconds per cell of fall
   uint16_t spinMs;      // average milliseconds between quarter turns
-  uint8_t  shakeLevel;  // 0 = knocking the clock does nothing, 1..10 sensitivity
-  uint8_t  shakeStyle;  // the break-up effect: how the digits come apart, see SHAKE_STYLE_*
+  uint8_t  knockLevel;  // 0 = knocking the clock does nothing, 1..10 sensitivity
+  uint8_t  breakUp;  // the break-up effect: how the digits come apart, see BREAKUP_*
   uint8_t  unusedRev3;  // was shakeOnChange (rev 3); since 2026-10-08 a changing digit always breaks up
 };
 
@@ -84,13 +84,13 @@ const TetrisSettings TETRIS_DEFAULTS = {
 
 // The Tetris settings for the web app and the store (face.h). shk, the knock's
 // sensitivity, is kept here, where it has always been stored.
-const char *const TETRIS_SHS_LABELS[] = { "Collapse", "Scatter", "Clear rows", "Random each time" };   // by value: SHAKE_STYLE_*
-static_assert(sizeof(TETRIS_SHS_LABELS) / sizeof(TETRIS_SHS_LABELS[0]) == SHAKE_STYLE_COUNT, "a name per break-up effect");
+const char *const TETRIS_SHS_LABELS[] = { "Collapse", "Scatter", "Clear rows", "Random each time" };   // by value: BREAKUP_*
+static_assert(sizeof(TETRIS_SHS_LABELS) / sizeof(TETRIS_SHS_LABELS[0]) == BREAKUP_COUNT, "a name per break-up effect");
 const FaceParam TETRIS_PARAMS[] = {
   { "tdrop", offsetof(TetrisSettings, dropMs),     1, PARAM_RANGE,  0,           TETRIS_DROP_MIN, TETRIS_DROP_MAX,       nullptr },
   { "tspin", offsetof(TetrisSettings, spinMs),     2, PARAM_RANGE,  0,           TETRIS_SPIN_MIN, TETRIS_SPIN_MAX,       nullptr },
-  { "shk",   offsetof(TetrisSettings, shakeLevel), 1, PARAM_RANGE,  PARAM_KNOCK, 0,               SHAKE_LEVEL_MAX,       nullptr },
-  { "shs",   offsetof(TetrisSettings, shakeStyle), 1, PARAM_CHOICE, 0,           0,               SHAKE_STYLE_COUNT - 1, TETRIS_SHS_LABELS },
+  { "shk",   offsetof(TetrisSettings, knockLevel), 1, PARAM_RANGE,  PARAM_KNOCK, 0,               TETRIS_KNOCK_LEVEL_MAX,       nullptr },
+  { "shs",   offsetof(TetrisSettings, breakUp), 1, PARAM_CHOICE, 0,           0,               BREAKUP_COUNT - 1, TETRIS_SHS_LABELS },
 };
 
 // A blob of an older revision, the same idea as the main settings: rev 1 only
@@ -99,8 +99,8 @@ const FaceParam TETRIS_PARAMS[] = {
 inline void tetrisMigrate(uint8_t *data, uint8_t rev) {
   TetrisSettings &t = *(TetrisSettings *)data;
   if (rev < 2) {
-    t.shakeLevel = TETRIS_DEFAULTS.shakeLevel;
-    t.shakeStyle = TETRIS_DEFAULTS.shakeStyle;
+    t.knockLevel = TETRIS_DEFAULTS.knockLevel;
+    t.breakUp = TETRIS_DEFAULTS.breakUp;
   }
   if (rev < 3) { t.unusedRev3 = 0; }
 }
@@ -121,7 +121,7 @@ class TetrisFace : public Watchface {
   // no rest after an effect, no preview asked for.
   void testReset() {
     _rotation = 0xFF;
-    _shakeEndedAt = 0;
+    _breakUpEndedAt = 0;
     _previewAsked = false;
   }
 #endif
@@ -130,24 +130,24 @@ class TetrisFace : public Watchface {
   /* ----------------------------------------------------------------------
      Coming apart: the break-up effect
 
-     A knock throws the digits away and the time is then built up again from
+     The watchface animation throws the digits away and the time is then built up again from
      scratch, which also picks fresh tilings and fresh colours. Three ways of
      coming apart: the stack collapsing, the pieces flying off, and the rows
      being cleared away from the bottom. The first two need pieces that move
      freely, the third needs a cell grid - both are built from the same tables
      when the animation starts, and only the one the style needs is filled in.
      ------------------------------------------------------------------------- */
-  static const uint8_t  SHAKE_STEP_MS     = 30;      // one animation step
-  static const int16_t  SHAKE_GRAVITY     = 10;      // added to the fall speed each step, 1/16 px
-  static const uint8_t  SHAKE_CLEAR_FLASH = 3;       // steps a row stays lit before it goes
-  static const uint16_t SHAKE_HOLD_MS     = 300;     // beat of empty space before it builds again
-  static const uint16_t SHAKE_REST_MS     = 1200;    // after an effect, before the next can start
-  static const uint16_t KNOCK_MS          = 6000;    // a knock's break-up and the build after it, about
-  // All of this is per digit, not per display: a knock takes all four apart
+  static const uint8_t  BREAKUP_STEP_MS     = 30;      // one animation step
+  static const int16_t  BREAKUP_GRAVITY     = 10;      // added to the fall speed each step, 1/16 px
+  static const uint8_t  ROW_FLASH_STEPS = 3;       // steps a row stays lit before it goes
+  static const uint16_t HOLD_MS     = 300;     // beat of empty space before it builds again
+  static const uint16_t REST_MS     = 1200;    // after an effect, before the next can start
+  static const uint16_t ANIMATION_MS          = 6000;    // the watchface animation: a break-up and the build after it, about
+  // All of this is per digit, not per display: the animation takes all four apart
   // at once, but a minute change only replaces the digits that actually
   // changed, and those have to come apart on their own while the rest stand
   // still.
-  static const uint8_t  SHAKE_MAX_PIECES  = 13;      // the most any digit is made of
+  static const uint8_t  MAX_PIECES  = 13;      // the most any digit is made of
 
   // State of one of the four digits.
   struct Digit {
@@ -166,7 +166,7 @@ class TetrisFace : public Watchface {
 
   // One flying piece. Position and speed are in 1/16 of a pixel so the
   // movement does not step in whole pixels.
-  struct ShakePiece {
+  struct Debris {
     int16_t x16, y16;    // top-left corner
     int16_t vx16, vy16;  // speed per step
     uint8_t orient;
@@ -191,12 +191,12 @@ class TetrisFace : public Watchface {
   void drawDashes(Adafruit_GFX &g, const FacePaint &paint) const;
   int originX(uint8_t idx) const { return ((idx < 2) ? _xHour : _xMin) + ((idx & 1) ? TETRIS_PITCH : 0); }
   int originY(uint8_t idx) const { return (idx < 2) ? _yHour : _yMin; }
-  uint8_t pickStyle() const;
-  void shakeStartDigit(uint8_t d, uint8_t style);
-  bool shakeAnyBusy() const;
-  void shakeStartAll(unsigned long ms);
-  bool shakeStepDigit(uint8_t d, int16_t panelH);
-  void shakeDrawDigit(Adafruit_GFX &g, uint8_t d, const FacePaint &paint) const;
+  uint8_t pickBreakUp() const;
+  void breakUpDigit(uint8_t d, uint8_t style);
+  bool breakingUp() const;
+  void breakUpAll(unsigned long ms);
+  bool stepBreakUp(uint8_t d, int16_t panelH);
+  void drawBreakUp(Adafruit_GFX &g, uint8_t d, const FacePaint &paint) const;
 
   const TetrisSettings &_s;
   Digit         _digits[4];
@@ -212,20 +212,20 @@ class TetrisFace : public Watchface {
   int           _yHour = 0, _yMin = 0;        // top edge of each digit group
   int           _dropHour = 4, _dropMin = 4;  // cells above the box where a piece's bottom edge starts
 
-  bool          _shakeBusy[4]    = {false, false, false, false};
-  uint8_t       _shakeStyleOf[4] = {0, 0, 0, 0};   // the style that digit is using
-  uint8_t       _shakeCount[4]   = {0, 0, 0, 0};   // pieces flying, per digit
-  uint16_t      _shakeFrame[4]   = {0, 0, 0, 0};   // steps since that one started
-  ShakePiece    _shakeDebris[4][SHAKE_MAX_PIECES];
+  bool          _breaking[4]    = {false, false, false, false};
+  uint8_t       _breakUpOf[4] = {0, 0, 0, 0};   // the style that digit is using
+  uint8_t       _debrisCount[4]   = {0, 0, 0, 0};   // pieces flying, per digit
+  uint16_t      _breakUpSteps[4]   = {0, 0, 0, 0};   // steps since that one started
+  Debris    _debris[4][MAX_PIECES];
   // Cell grid for the row-clearing style: colour + 1 per cell, 0 = empty. Rows
   // are always taken off the bottom of the digit and everything above drops
   // into the gap, just like a line clear in the game.
-  uint8_t       _shakeGrid[4][TETRIS_GRID_W * TETRIS_GRID_H];
-  uint8_t       _shakeClearsLeft[4] = {0, 0, 0, 0};   // rows still to take away
-  uint8_t       _shakeClearTick[4]  = {0, 0, 0, 0};   // steps spent on the row going
-  unsigned long _shakeStepLast = 0;                   // one clock for all of them, they step together
-  unsigned long _shakeHoldUntil[4] = {0, 0, 0, 0};    // empty space before the rebuild starts
-  unsigned long _shakeEndedAt = 0;   // when the last effect had run its course
+  uint8_t       _clearGrid[4][TETRIS_GRID_W * TETRIS_GRID_H];
+  uint8_t       _rowsLeft[4] = {0, 0, 0, 0};   // rows still to take away
+  uint8_t       _rowTick[4]  = {0, 0, 0, 0};   // steps spent on the row going
+  unsigned long _breakUpStepLast = 0;                   // one clock for all of them, they step together
+  unsigned long _holdUntil[4] = {0, 0, 0, 0};    // empty space before the rebuild starts
+  unsigned long _breakUpEndedAt = 0;   // when the last effect had run its course
   bool          _previewAsked = false;   // the web app asked to show a setting off
 };
 
@@ -419,7 +419,7 @@ inline void TetrisFace::layout(const FaceNow &now) {
   }
   for (uint8_t i = 0; i < 4; i++) {
     _digits[i].value = 0xFF;
-    _shakeHoldUntil[i] = 0;   // a rotation rebuilds at once, it does not wait
+    _holdUntil[i] = 0;   // a rotation rebuilds at once, it does not wait
   }
   _settled = false;
 }
@@ -432,16 +432,16 @@ inline void TetrisFace::pushTime(const FaceNow &now) {
   faceDigits(now.local, true, d, 0xFF);
   uint8_t changeStyle = 0xFF;   // drawn once, so digits changing together match
   for (uint8_t i = 0; i < 4; i++) {
-    if (_shakeBusy[i]) { continue; }   // still coming apart, it will be rebuilt after
-    if (now.ms < _shakeHoldUntil[i]) { continue; }   // the pause after it came apart
+    if (_breaking[i]) { continue; }   // still coming apart, it will be rebuilt after
+    if (now.ms < _holdUntil[i]) { continue; }   // the pause after it came apart
     if (d[i] == _digits[i].value) { continue; }
     // The outgoing digit breaks up rather than vanishing at once (decided by
     // Peter, 2026-10-08: the effect always counts at a time change). Only one
     // that is actually standing there can break up, so a digit still being
     // built, or not yet drawn at all, is just swapped.
     if (_digits[i].value <= 9 && _digits[i].piece > 0) {
-      if (changeStyle == 0xFF) { changeStyle = pickStyle(); }
-      shakeStartDigit(i, changeStyle);
+      if (changeStyle == 0xFF) { changeStyle = pickBreakUp(); }
+      breakUpDigit(i, changeStyle);
       continue;
     }
     startDigit(i, d[i], now.ms);
@@ -455,7 +455,7 @@ inline void TetrisFace::step(unsigned long ms) {
   bool allSettled = true;
   for (uint8_t i = 0; i < 4; i++) {
     Digit &s = _digits[i];
-    if (s.value > 9 || _shakeBusy[i]) { continue; }
+    if (s.value > 9 || _breaking[i]) { continue; }
     uint8_t total = TETRIS_PIECES_PER_DIGIT[s.value];
     if (s.piece >= total) { continue; }        // this digit is complete
     allSettled = false;
@@ -546,50 +546,50 @@ inline void TetrisFace::drawDashes(Adafruit_GFX &g, const FacePaint &paint) cons
 }
 
 // The style is chosen per EVENT and passed in, never per digit: with "random"
-// selected, picking it per digit would give a knock four different effects at
+// selected, picking it per digit would give one animation four different effects at
 // once.
-inline uint8_t TetrisFace::pickStyle() const {
-  uint8_t style = _s.shakeStyle;
-  if (style >= SHAKE_STYLE_RANDOM) { style = (uint8_t)faceRandom(SHAKE_STYLE_RANDOM); }
+inline uint8_t TetrisFace::pickBreakUp() const {
+  uint8_t style = _s.breakUp;
+  if (style >= BREAKUP_RANDOM) { style = (uint8_t)faceRandom(BREAKUP_RANDOM); }
   return style;
 }
 
 // Take one digit apart. Only the pieces that have actually landed are thrown;
 // one still in the air simply goes with the rest of the build.
-inline void TetrisFace::shakeStartDigit(uint8_t d, uint8_t style) {
+inline void TetrisFace::breakUpDigit(uint8_t d, uint8_t style) {
   Digit &s = _digits[d];
-  _shakeStyleOf[d]    = style;
-  _shakeCount[d]      = 0;
-  _shakeFrame[d]      = 0;
-  _shakeClearTick[d]  = 0;
-  _shakeClearsLeft[d] = (style == SHAKE_STYLE_CLEAR) ? TETRIS_GRID_H : 0;
-  if (style == SHAKE_STYLE_CLEAR) { memset(_shakeGrid[d], 0, TETRIS_GRID_W * TETRIS_GRID_H); }
+  _breakUpOf[d]    = style;
+  _debrisCount[d]      = 0;
+  _breakUpSteps[d]      = 0;
+  _rowTick[d]  = 0;
+  _rowsLeft[d] = (style == BREAKUP_CLEAR) ? TETRIS_GRID_H : 0;
+  if (style == BREAKUP_CLEAR) { memset(_clearGrid[d], 0, TETRIS_GRID_W * TETRIS_GRID_H); }
   if (s.value > 9) { return; }   // nothing standing there, so nothing to throw
 
   uint8_t total   = TETRIS_PIECES_PER_DIGIT[s.value];
   uint8_t settled = (s.piece < total) ? s.piece : total;
   // Marked busy only when there is something to show, or an empty digit would
   // hold the whole display in the animation for nothing.
-  _shakeBusy[d] = (settled > 0);
-  if (!_shakeBusy[d]) { return; }
+  _breaking[d] = (settled > 0);
+  if (!_breaking[d]) { return; }
   for (uint8_t p = 0; p < settled; p++) {
     uint16_t rec    = pieceAt(s.value, s.variant, p);
     uint8_t  orient = TETRIS_PIECE_ORIENT(rec);
     uint8_t  colour = s.hue[TETRIS_PIECE_CLASS(rec)];
-    if (style == SHAKE_STYLE_CLEAR) {
+    if (style == BREAKUP_CLEAR) {
       for (uint8_t c = 0; c < 4; c++) {
         uint8_t cell = TETRIS_SHAPE[orient][c];
         uint8_t gx = TETRIS_PIECE_X(rec) + (cell >> 4);
         uint8_t gy = TETRIS_PIECE_TOP(rec) + (cell & 0x0F);
-        _shakeGrid[d][gy * TETRIS_GRID_W + gx] = colour + 1;
+        _clearGrid[d][gy * TETRIS_GRID_W + gx] = colour + 1;
       }
-    } else if (_shakeCount[d] < SHAKE_MAX_PIECES) {
-      ShakePiece &f = _shakeDebris[d][_shakeCount[d]++];
+    } else if (_debrisCount[d] < MAX_PIECES) {
+      Debris &f = _debris[d][_debrisCount[d]++];
       f.orient = orient;
       f.colour = colour;
       f.x16 = (int16_t)((originX(d) + TETRIS_PIECE_X(rec) * TETRIS_CELL) * 16);
       f.y16 = (int16_t)((originY(d) + TETRIS_PIECE_TOP(rec) * TETRIS_CELL) * 16);
-      if (style == SHAKE_STYLE_COLLAPSE) {
+      if (style == BREAKUP_COLLAPSE) {
         // The bottom gives way first and the rest sinks after it.
         f.vx16 = 0;
         f.vy16 = 0;
@@ -607,38 +607,38 @@ inline void TetrisFace::shakeStartDigit(uint8_t d, uint8_t style) {
   }
 }
 
-inline bool TetrisFace::shakeAnyBusy() const {
-  for (uint8_t d = 0; d < 4; d++) { if (_shakeBusy[d]) { return true; } }
+inline bool TetrisFace::breakingUp() const {
+  for (uint8_t d = 0; d < 4; d++) { if (_breaking[d]) { return true; } }
   return false;
 }
 
-// Take all four apart at once - what a knock does.
-inline void TetrisFace::shakeStartAll(unsigned long ms) {
-  _shakeStepLast = ms;
-  uint8_t style = pickStyle();   // one effect for the whole knock
-  for (uint8_t d = 0; d < 4; d++) { shakeStartDigit(d, style); }
+// Take all four apart at once - the watchface animation.
+inline void TetrisFace::breakUpAll(unsigned long ms) {
+  _breakUpStepLast = ms;
+  uint8_t style = pickBreakUp();   // one effect for the whole animation
+  for (uint8_t d = 0; d < 4; d++) { breakUpDigit(d, style); }
 }
 
 // Advance one digit by one step. Returns true once it has nothing left to show.
-inline bool TetrisFace::shakeStepDigit(uint8_t d, int16_t panelH) {
-  if (++_shakeFrame[d] > 150) { return true; }   // never let it hang
+inline bool TetrisFace::stepBreakUp(uint8_t d, int16_t panelH) {
+  if (++_breakUpSteps[d] > 150) { return true; }   // never let it hang
 
-  if (_shakeStyleOf[d] == SHAKE_STYLE_CLEAR) {
-    if (++_shakeClearTick[d] < SHAKE_CLEAR_FLASH) { return false; }
-    _shakeClearTick[d] = 0;
+  if (_breakUpOf[d] == BREAKUP_CLEAR) {
+    if (++_rowTick[d] < ROW_FLASH_STEPS) { return false; }
+    _rowTick[d] = 0;
     for (uint8_t r = TETRIS_GRID_H - 1; r > 0; r--) {   // everything drops into the gap
-      memcpy(&_shakeGrid[d][r * TETRIS_GRID_W],
-             &_shakeGrid[d][(r - 1) * TETRIS_GRID_W], TETRIS_GRID_W);
+      memcpy(&_clearGrid[d][r * TETRIS_GRID_W],
+             &_clearGrid[d][(r - 1) * TETRIS_GRID_W], TETRIS_GRID_W);
     }
-    memset(&_shakeGrid[d][0], 0, TETRIS_GRID_W);
-    return (_shakeClearsLeft[d] == 0) || (--_shakeClearsLeft[d] == 0);
+    memset(&_clearGrid[d][0], 0, TETRIS_GRID_W);
+    return (_rowsLeft[d] == 0) || (--_rowsLeft[d] == 0);
   }
 
   bool allGone = true;
-  for (uint8_t i = 0; i < _shakeCount[d]; i++) {
-    ShakePiece &f = _shakeDebris[d][i];
+  for (uint8_t i = 0; i < _debrisCount[d]; i++) {
+    Debris &f = _debris[d][i];
     if (f.delay) { f.delay--; allGone = false; continue; }
-    f.vy16 += SHAKE_GRAVITY;
+    f.vy16 += BREAKUP_GRAVITY;
     f.x16  += f.vx16;
     f.y16  += f.vy16;
     // A quarter turn swaps the piece's bounding box, so shift it by half the
@@ -660,14 +660,14 @@ inline bool TetrisFace::shakeStepDigit(uint8_t d, int16_t panelH) {
 }
 
 // Draw the one digit that is coming apart.
-inline void TetrisFace::shakeDrawDigit(Adafruit_GFX &g, uint8_t d, const FacePaint &paint) const {
-  if (_shakeStyleOf[d] == SHAKE_STYLE_CLEAR) {
-    bool flash = (_shakeClearTick[d] == SHAKE_CLEAR_FLASH - 1);
+inline void TetrisFace::drawBreakUp(Adafruit_GFX &g, uint8_t d, const FacePaint &paint) const {
+  if (_breakUpOf[d] == BREAKUP_CLEAR) {
+    bool flash = (_rowTick[d] == ROW_FLASH_STEPS - 1);
     uint16_t white = paint.visible(255, 255, 255);
     int ox = originX(d), oy = originY(d);
     for (uint8_t gy = 0; gy < TETRIS_GRID_H; gy++) {
       for (uint8_t gx = 0; gx < TETRIS_GRID_W; gx++) {
-        uint8_t v = _shakeGrid[d][gy * TETRIS_GRID_W + gx];
+        uint8_t v = _clearGrid[d][gy * TETRIS_GRID_W + gx];
         if (!v) { continue; }
         uint16_t col = (flash && gy == TETRIS_GRID_H - 1) ? white : _pal[v - 1];
         g.fillRect(ox + gx * TETRIS_CELL, oy + gy * TETRIS_CELL, TETRIS_CELL, TETRIS_CELL, col);
@@ -675,8 +675,8 @@ inline void TetrisFace::shakeDrawDigit(Adafruit_GFX &g, uint8_t d, const FacePai
     }
     return;
   }
-  for (uint8_t i = 0; i < _shakeCount[d]; i++) {
-    const ShakePiece &f = _shakeDebris[d][i];
+  for (uint8_t i = 0; i < _debrisCount[d]; i++) {
+    const Debris &f = _debris[d][i];
     int bx = f.x16 >> 4, by = f.y16 >> 4;
     uint16_t col = _pal[f.colour];
     for (uint8_t c = 0; c < 4; c++) {
@@ -695,39 +695,39 @@ inline bool TetrisFace::update(const FaceNow &now) {
   // A rotation moves every coordinate a running animation holds, and a rotation
   // rebuilds the digits anyway - so it wins over the animation.
   if (now.turn != _rotation) {
-    for (uint8_t i = 0; i < 4; i++) { _shakeBusy[i] = false; }
+    for (uint8_t i = 0; i < 4; i++) { _breaking[i] = false; }
     layout(now);
   }
 
   // The web app asks for a run when a setting has been changed there. Held
   // back until the last run has finished, so each one can be watched to the
   // end rather than being cut off by the next slider release.
-  if (_previewAsked && !shakeAnyBusy()) {
+  if (_previewAsked && !breakingUp()) {
     _previewAsked = false;
-    shakeStartAll(now.ms);
+    breakUpAll(now.ms);
   }
 
   // A digit that has finished coming apart is marked unknown, so the next
   // pushTime() starts it again from the current time - which is also what
   // makes the rebuild show the right value if a minute passed on the way.
-  bool anyShake = false;
-  bool shakeEnded = false;   // a digit finished this pass and the panel must be cleared
-  bool shakeDue = (now.ms - _shakeStepLast >= SHAKE_STEP_MS);
+  bool anyBreakingUp = false;
+  bool breakUpEnded = false;   // a digit finished this pass and the panel must be cleared
+  bool breakUpDue = (now.ms - _breakUpStepLast >= BREAKUP_STEP_MS);
   for (uint8_t i = 0; i < 4; i++) {
-    if (!_shakeBusy[i]) { continue; }
-    if (shakeDue && shakeStepDigit(i, now.h)) {
-      shakeEnded = true;
-      _shakeBusy[i] = false;
+    if (!_breaking[i]) { continue; }
+    if (breakUpDue && stepBreakUp(i, now.h)) {
+      breakUpEnded = true;
+      _breaking[i] = false;
       _digits[i].value = 0xFF;
       // Let the space stand empty for a moment. Without it the first new block
       // is already on its way down while the last of the old ones is still
       // leaving the panel, and the two read as one continuous movement.
-      _shakeHoldUntil[i] = now.ms + SHAKE_HOLD_MS;
-      _shakeEndedAt = now.ms;   // do not retrigger on the same knock
+      _holdUntil[i] = now.ms + HOLD_MS;
+      _breakUpEndedAt = now.ms;   // do not retrigger on the same knock
     }
-    if (_shakeBusy[i]) { anyShake = true; }
+    if (_breaking[i]) { anyBreakingUp = true; }
   }
-  if (shakeDue) { _shakeStepLast = now.ms; }
+  if (breakUpDue) { _breakUpStepLast = now.ms; }
 
   pushTime(now);
 
@@ -742,11 +742,11 @@ inline bool TetrisFace::update(const FaceNow &now) {
   bool changed = _colonOn != _colonDrawn || spinPending != _spinDrawn;
   // Debris moving is a change in itself, so while anything is coming apart the
   // face repaints on the animation's clock rather than waiting to be asked.
-  // shakeEnded matters just as much: on the pass where the last piece leaves,
+  // breakUpEnded matters just as much: on the pass where the last piece leaves,
   // nothing is moving any more and nothing has "changed", so without it the
   // face would leave the previous frame - debris and all - standing on the
   // panel for the whole pause.
-  if (!stepDue && !changed && !shakeEnded && !(anyShake && shakeDue)) { return false; }
+  if (!stepDue && !changed && !breakUpEnded && !(anyBreakingUp && breakUpDue)) { return false; }
   if (stepDue) {
     _stepLast = now.ms;
     step(now.ms);
@@ -762,7 +762,7 @@ inline void TetrisFace::draw(Adafruit_GFX &g, const FaceNow &now, const FacePain
   }
   g.fillScreen(0);
   for (uint8_t i = 0; i < 4; i++) {
-    if (_shakeBusy[i]) { shakeDrawDigit(g, i, paint); } else { drawDigit(g, i, originX(i), originY(i), now.ms); }
+    if (_breaking[i]) { drawBreakUp(g, i, paint); } else { drawDigit(g, i, originX(i), originY(i), now.ms); }
   }
   if (!now.set) { drawDashes(g, paint); }
   // The colon keeps its own beat and is never touched by the animations. It is
@@ -778,12 +778,12 @@ inline void TetrisFace::draw(Adafruit_GFX &g, const FaceNow &now, const FacePain
 
 // Whether the digits are coming apart or blocks are still falling.
 inline bool TetrisFace::busy(const FaceNow &) const {
-  return shakeAnyBusy() || !_settled;
+  return breakingUp() || !_settled;
 }
 
 // The input's animation: all four digits come apart and are built anew -
 // unless they are coming apart already, the last effect ended less than
-// SHAKE_REST_MS ago, or the break-up and the build after it would not end
+// REST_MS ago, or the break-up and the build after it would not end
 // FACE_GUARD_MS before the next minute's change starts. A build under way,
 // the minute change's too, may be smashed: only the time before the change
 // is kept free, so the change starts from a clean picture (Peter,
@@ -795,10 +795,10 @@ inline FaceOutcome TetrisFace::request(const FaceNow &now, FaceTrigger why) {
     return OUTCOME_PLAYED;
   }
   if (why != TRIGGER_ACTION) { return OUTCOME_NONE; }
-  if (shakeAnyBusy() || now.ms - _shakeEndedAt < SHAKE_REST_MS) { return OUTCOME_REFUSED; }
+  if (breakingUp() || now.ms - _breakUpEndedAt < REST_MS) { return OUTCOME_REFUSED; }
   unsigned long changeAt = now.secondAt + (60UL - now.second) * 1000UL;   // the next minute's start
-  if (now.set && !faceFits(changeAt, now.ms, KNOCK_MS)) { return OUTCOME_REFUSED; }
-  shakeStartAll(now.ms);
+  if (now.set && !faceFits(changeAt, now.ms, ANIMATION_MS)) { return OUTCOME_REFUSED; }
+  breakUpAll(now.ms);
   return OUTCOME_PLAYED;
 }
 

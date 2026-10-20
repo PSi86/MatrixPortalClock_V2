@@ -54,7 +54,7 @@ class PlannedFace : public Watchface {
   time_t        _plannedFor   = 0;      // the minute the planned change is for; 0 = none
   unsigned long _sceneEndedAt = 0;
   bool          _previewAsked = false;  // the web app asks to see a change
-  bool          _knockAsked   = false;  // ... or the watchface animation's scene
+  bool          _animationAsked   = false;  // ... or the watchface animation's scene
   bool          _dirty        = false;  // the picture changed outside a pass: drawn on the next
 };
 
