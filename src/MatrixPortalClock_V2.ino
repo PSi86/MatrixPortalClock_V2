@@ -1229,6 +1229,8 @@ uint32_t      testVirtualSeed = 1;
 unsigned long testVirtualMs = 0, testVirtualMs0 = 0;   // the test's millis(), and where its scene began
 time_t        testVirtualLocal = 0;                    // the panel's time at testVirtualMs0
 bool          testQuiet = false;                       // no notices and no info cards over the face
+String        testPendingPlan;                         // the next scene's steps, taken when it begins
+bool          testFrameAnew = false;                   // log the next frame even if it looks like the last
 struct TestStep { unsigned long atMs; char what; long arg; };   // ms after the scene's start
 TestStep      testPlan[8];
 uint8_t       testPlanCount = 0, testPlanNext = 0;
@@ -3013,8 +3015,9 @@ void faceFrameDrawn() {
 #if defined(FACE_FRAME_LOG)
   static uint32_t last = 0;
   uint32_t crc = faceCrc32((const uint8_t *)matrix.getBuffer(), (size_t)matrix.width() * matrix.height() * 2);
-  if (crc == last) { return; }
+  if (crc == last && !testFrameAnew) { return; }
   last = crc;
+  testFrameAnew = false;
   char line[56];
   int n = snprintf(line, sizeof(line), "F %02u:%02u:%02u.%03lu %08lx %u", (unsigned)hourNow, (unsigned)minuteNow,
                    (unsigned)secondNow, (unsigned long)(millisNow - secondStartedAt), (unsigned long)crc,
@@ -4799,6 +4802,7 @@ void aliensSelfTest() {
    run; its steps (plan=) happen at their moment on the test's clock. */
 void testFaceReset() {
   faceCatchUp();
+  faceItersPerSec = 1000 / TEST_STEP_MS;   // the classic flights' pace: the test clock's, not one measured before
 #if WATCHFACE_TETRIS
   tetrisRotation = 0xFF;
   shakeEndedAt = 0;
@@ -5054,6 +5058,8 @@ void timekeeper(void) {
     testShift = 0;
     FaceRandom::seed(testVirtualSeed);
     secondNow = minuteNow = hourNow = 0xFF;  // its second, minute and hour all begin now
+    testPlanParse(testPendingPlan);          // its steps count from now, not from the request
+    testFrameAnew = true;                    // and its first frame is logged, whatever came before
   }
   if (testVirtualOn) {                       // the test's own clock: a pass is TEST_STEP_MS
     testVirtualMs += TEST_STEP_MS;
@@ -11778,7 +11784,8 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
       testVirtualReset = getParam(body, "reset") == "1";
       String s = getParam(body, "seed");
       testVirtualSeed = s.length() ? (uint32_t)strtoul(s.c_str(), nullptr, 10) : 1;
-      testPlanParse(getParam(body, "plan"));
+      testPendingPlan = getParam(body, "plan");
+      testPlanCount = testPlanNext = 0;   // the scene still running asks for nothing more
     } else if (v == "0") {
       testVirtualOn = false;
       testPlanCount = testPlanNext = 0;
