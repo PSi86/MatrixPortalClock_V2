@@ -40,9 +40,9 @@ inline void faceDigits(time_t t, bool set, uint8_t d[4], uint8_t none) {
 }
 
 // ---- What the core hands a face ---------------------------------------------
-// The moment a face is stepped or drawn at: the core's time as it stands then
-// (faceMoment() in the sketch). The ticks are true on the one pass that began
-// a new second, minute or hour.
+// The moment a face is stepped or drawn at: the core's time as it stands then,
+// and the panel as it is turned (faceMoment() in the sketch). The ticks are
+// true on the one pass that began a new second, minute or hour.
 struct FaceNow {
   unsigned long ms;         // millis() of the pass (a test build's own clock while it runs one)
   unsigned long secondAt;   // when the second on show began, in ms
@@ -51,6 +51,8 @@ struct FaceNow {
   uint8_t hour, minute, second;
   bool secondTick, minuteTick, hourTick;
   uint16_t loopHz;          // how often the loop runs per second as the board paces it
+  uint8_t turn;             // the panel's rotation, 0..3: 0 and 2 landscape
+  int16_t w, h;             // its size as it is turned, 64x32 or 32x64
 };
 
 // Perceived brightness to linear light, as the eye sees it: the brightness
@@ -81,6 +83,14 @@ struct FacePaint {
                   ((uint16_t)b * at + 127) / 255);
 #endif
   }
+  // A colour that never dims below VISIBLE_MIN, so it cannot quantise to
+  // black at a very low brightness: the hotspot's details, the Tetris colon.
+  static const uint8_t VISIBLE_MIN = 24;
+  uint16_t visible(uint8_t r, uint8_t g, uint8_t b) const {
+    uint8_t at = bright;
+    if (at < VISIBLE_MIN) { at = VISIBLE_MIN; }
+    return color(r, g, b, at);
+  }
   // As both panel drivers pack a colour.
   static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
@@ -89,8 +99,9 @@ struct FacePaint {
 
 // Why a face comes onto the panel (Watchface::enter()).
 enum FaceEnter : uint8_t {
-  ENTER_SHOWN,    // chosen, or uncovered again: it was not stepped meanwhile
-  ENTER_TURNED,   // the panel turned: a new layout
+  ENTER_CHOSEN,   // chosen as the clock's face: everything afresh
+  ENTER_SHOWN,    // uncovered again by a screen on top: it was not stepped meanwhile
+  ENTER_TURNED,   // the panel turned
 };
 
 // Who asks a face for an animation (Watchface::request()).
@@ -111,9 +122,9 @@ enum FaceOutcome : uint8_t {
 // and shows it (faceShow() in the sketch).
 class Watchface {
  public:
-  // It comes onto the panel (why), w x h pixels as the panel is turned now:
-  // it shows the time as it stands, nothing of before under way.
-  virtual void enter(const FaceNow &now, FaceEnter why, int16_t w, int16_t h) = 0;
+  // It comes onto the panel (why): it shows the time as it stands, with what
+  // it keeps of before as it decides.
+  virtual void enter(const FaceNow &now, FaceEnter why) = 0;
   // One pass: it steps what moves. Whether its picture changed.
   virtual bool update(const FaceNow &now) = 0;
   // Its picture, the whole canvas, without the core's marks.

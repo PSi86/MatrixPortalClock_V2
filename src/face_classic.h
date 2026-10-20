@@ -49,7 +49,7 @@ class ClassicFace : public Watchface {
  public:
   explicit ClassicFace(const ClassicSettings &s) : _s(s) {}
 
-  void enter(const FaceNow &now, FaceEnter why, int16_t w, int16_t h) override;
+  void enter(const FaceNow &now, FaceEnter why) override;
   bool update(const FaceNow &now) override;
   void draw(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) override;
   bool busy(const FaceNow &now) const override;
@@ -108,12 +108,12 @@ class ClassicFace : public Watchface {
   uint16_t _ignored = 0;           // requests refused since the last one taken, for the console
 };
 
-// Up to the time, nothing of before resumes: shown again, it also gets fresh
-// digit strings, which update() would only make at the next tick, and cuts
-// off an animation another screen or face covered. Shown or turned, every
+// Up to the time, nothing of before resumes: chosen or shown again, it also
+// gets fresh digit strings, which update() would only make at the next tick,
+// and cuts off an animation another screen or face covered. Every time, every
 // digit stands on its place for the panel as it is turned now.
-inline void ClassicFace::enter(const FaceNow &now, FaceEnter why, int16_t w, int16_t h) {
-  if (why == ENTER_SHOWN) {
+inline void ClassicFace::enter(const FaceNow &now, FaceEnter why) {
+  if (why != ENTER_TURNED) {
     _tickMs = 0;   // it was not stepped meanwhile: the next tick starts a new count
     if (_anim != ANIM_IDLE) {
       _anim = ANIM_IDLE;
@@ -121,9 +121,9 @@ inline void ClassicFace::enter(const FaceNow &now, FaceEnter why, int16_t w, int
     }
     digits(now);
   }
-  _w = w;
-  _h = h;
-  bool land = w > h;
+  _w = now.w;
+  _h = now.h;
+  bool land = now.w > now.h;
   for (uint8_t i = 0; i < 6; i++) {
     _placeX[i] = land ? CLASSIC_LAND_X[i] : CLASSIC_PORT_X[i];
     _placeY[i] = land ? CLASSIC_LAND_Y[i] : CLASSIC_PORT_Y[i];
