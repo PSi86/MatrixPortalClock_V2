@@ -23,15 +23,11 @@ Todo Concept:
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 #include "input_map.h"      // input events, functions and the profiles mapping them
 #include "face.h"           // what the watchfaces share
+#include "face_classic.h"   // the classic watchface, on every board
 
 #if !PANEL_DRIVER_DMA
 #include <Adafruit_Protomatter.h>   // the M4's panel driver; the S3's is in board_hal.h
 #endif
-//#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font works
-//#include <Fonts/FreeMonoBold12pt7b.h> // Large friendly font
-//#include <Fonts/FreeSans12pt7b.h> // Large friendly font
-#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font
-#include <Fonts/FreeSansBold9pt7b.h> // Large friendly font
 #include <Fonts/Picopixel.h>
 #include <Fonts/TomThumb.h>    // 3x5, for the menu
 
@@ -46,7 +42,7 @@ Todo Concept:
 #endif
 #if WATCHFACE_MUNCHER
 #if !WATCHFACE_TETRIS
-#error "The Muncher watchface is drawn through the Tetris face's branch of drawClock(): WATCHFACE_TETRIS has to be on as well"
+#error "The Muncher's settings are loaded and saved with the Tetris face's (FACE_BLOBS): WATCHFACE_TETRIS has to be on as well"
 #endif
 #include "muncher.h"           // the Muncher watchface's logic
 #endif
@@ -167,10 +163,7 @@ struct Settings {
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
   uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
-  uint8_t  flyInTime;    // how long every fly-in of the classic face takes, in 10 ms (rev 1: ms per pixel)
-  uint8_t  digitR, digitG, digitB; // color of the time digits
-  uint8_t  trailR, trailG, trailB; // color of a digit while it is flying in
-  uint8_t  dir[6];       // fly-in direction per digit (0=top,1=right,2=bottom,3=left)
+  ClassicSettings classic;   // the classic face's fly-in time, colours and fly-in sides (face_classic.h)
   uint8_t  syncHour;     // hour of daily NTP resync
   uint8_t  syncMinute;   // minute of daily NTP resync
   uint8_t  autoBright;   // 1 = BH1750 light sensor controls the master brightness
@@ -186,10 +179,8 @@ struct Settings {
 // sizeof(Settings), and a mismatch would silently reset EVERY setting.
 static_assert(sizeof(Settings) == 32,
               "Settings must stay 32 bytes - stored blobs are read back by exact size");
-
-// The fly-in time's range (Settings::flyInTime): at most 850 ms, so every digit
-// has landed before the next second's flights start.
-const uint16_t FLY_IN_MIN_MS = 100, FLY_IN_MAX_MS = 850;
+static_assert(offsetof(Settings, classic) == 10 && offsetof(Settings, syncHour) == 23,
+              "The classic face's settings must stay where the stored blobs have them");
 
 // Watchfaces (Settings::watchface). A value a firmware does not know falls
 // back to the classic face (applySettings()).
@@ -219,10 +210,10 @@ const Settings DEFAULTS = {
   3600,            // CET base (UTC+1)
   DST_AUTO,        // CET/CEST switched automatically (the original was a fixed UTC+2)
   128,             // neutral: absolute half in manual mode, sensor-as-is trim in auto mode
-  40,              // fly-in time 400 ms
-  0, 0, 255,       // blue digits
-  255, 255, 255,   // fly-in trail (full color; dimmed relative to brightness at render time)
-  {3, 1, 3, 1, 1, 1},
+  { 40,            // the classic face: fly-in time 400 ms
+    0, 0, 255,     // blue digits
+    255, 255, 255, // fly-in trail (full color; dimmed relative to brightness at render time)
+    {3, 1, 3, 1, 1, 1} },
   5, 11,           // original sync time 05:11
   1,               // auto-brightness on (BH1750)
   1, 400,          // lux mapping range: 1 lux (dark) .. 400 lux (bright)
@@ -890,8 +881,7 @@ unsigned long fbBlinkStart = 0;              // millis() when that sequence star
 bool          fbLit = false;                 // feedback state of this loop (LED and matrix)
 
 // Perceptual brightness fade (Classic clicks: UP held) ----------------------
-const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep
-const float FADE_GAMMA     = 2.2f;    // perceptual -> linear-light exponent
+const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep (FADE_GAMMA: face.h)
 float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the human eye)
 int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
@@ -1091,56 +1081,9 @@ class BufferedWriter : public Print {
 uint8_t BufferedWriter::_buf[2000];
 #endif
 
-// Sundry globals used for animation ---------------------------------------
-
-char timeStr[7], animStr[7]; // 6 digits + null terminator
-bool animTrigger[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
-// FN_FACE_ANIMATION on the classic face: asked for (all six fly in at the next
-// second), flying, or neither. A new one is ignored until the last one has
-// landed and CLASSIC_ANIM_REST_MS have passed. An input can come again before
-// the first has played - a knock reports every event the sensor latches
-// (Knock::sensed()), seen 2 to 7 per knock - and one that came after the second
-// had taken the request asked for a second animation.
-enum ClassicAnim : uint8_t { CLASSIC_ANIM_IDLE, CLASSIC_ANIM_ASKED, CLASSIC_ANIM_FLYING };
-ClassicAnim classicAnim = CLASSIC_ANIM_IDLE;
-unsigned long classicAnimEndedAt = 0;   // millis() when the last one landed or was cut off
-uint16_t      classicAnimIgnored = 0;   // requests ignored since the last one taken, for the console
-const unsigned long CLASSIC_ANIM_REST_MS = 300;
-bool animShow[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
-int8_t animXPos[6] = {0, 0, 0, 0, 0, 0};
-int8_t animYPos[6] = {0, 0, 0, 0, 0, 0};
-// Active (runtime) layout - populated by applyOrientation() from the source tables
-// below. Initialised to the portrait layout so the very first frames look right
-// even before the first accelerometer read.
-int8_t timeXPos[6] = {0, 13, 6, 19, 6, 17};
-int8_t timeYPos[6] = {16, 16, 35, 35, 50, 50};
-int8_t animXTarget[6] = {0, 13, 6, 19, 6, 17}; // Todo check 25 abd 31 value
-int8_t animYTarget[6] = {16, 16, 35, 35, 50, 50};
-// Each digit's flight, set when it starts (startFlight()): the side it comes
-// from (settings.dir: 0 = from the top, 1 = from the right, 2 = from the
-// bottom, 3 = from the left) and how many pixels it flies.
-uint8_t flightDir[6]  = {0, 0, 0, 0, 0, 0};
-uint8_t flightDist[6] = {1, 1, 1, 1, 1, 1};
-// The loop iterations every flight takes, set at each second tick
-// (flightIterations()): all flights take the same time, so whatever flies at a
-// tick lands together.
-uint16_t flightTime = 1;
-// The loop iterations the classic face had in its last whole second, counted
-// between two second ticks (0 = none counted yet). Web requests are served in
-// the same loop and take iterations away - measured: with /api/panel asked
-// every 60 ms a flight paced by the panel's refresh rate ran 30 % slow and
-// missed its landing. Pacing by this count keeps the fly-in time real.
-uint16_t faceItersPerSec = 0;
-uint32_t faceTickMs = 0;   // when stepClockAnim() last saw a second tick; 0 = not since the face came up
-
-// Source layouts. The active tables above are copied from one of these whenever
-// the orientation changes. Portrait = 32 wide x 64 tall (digits stacked
-// HH/MM/SS); landscape = 64 wide x 32 tall (HH/MM large side by side, SS small
-// centered below). Landscape positions are starting values, easy to fine-tune.
-const int8_t portXTarget[6] = {0, 13, 6, 19, 6, 17};
-const int8_t portYTarget[6] = {16, 16, 35, 35, 50, 50};
-const int8_t landXTarget[6] = {2, 15, 36, 49, 22, 32}; // HH | MM big, SS small
-const int8_t landYTarget[6] = {17, 17, 17, 17, 30, 30}; // HH/MM baseline 17, SS baseline 30
+// The classic watchface (face_classic.h), on every board, with its settings
+// inside the clock's.
+ClassicFace classicFace(settings.classic);
 
 // Orientation handling -----------------------------------------------------
 // The MatrixPortal M4 has an onboard LIS3DH accelerometer. We read gravity and
@@ -1868,9 +1811,9 @@ void loop(void) {
 #endif
   switch (screen) {
 #if defined(CLOCK_DEBUG)
-    case SCREEN_FACE: { uint32_t passStart = micros(); drawClock(); facePassStats(micros() - passStart); } break;
+    case SCREEN_FACE: { uint32_t passStart = micros(); faceUpdate(false); facePassStats(micros() - passStart); } break;
 #else
-    case SCREEN_FACE:   drawClock(); break;
+    case SCREEN_FACE:   faceUpdate(false); break;
 #endif
 #if GIF_PLAYBACK
     case SCREEN_GIF:    drawGif(); break;
@@ -2041,62 +1984,25 @@ void updateApDisplay() {
       return;
     }
   }
-  // SCREEN_HOTSPOT_PREVIEW: a client is connected. Keep the animation advancing
-  // every loop so it runs at real time (stepClockAnim is cheap, no panel I/O),
-  // but only push the latest state to the panel at the board's preview rate
-  // (5 fps on the M4): skipped frames are computed, not slowed down. This leaves
-  // the radio free for the slow WiFiNINA web server; the S3 draws every frame.
-#if WATCHFACE_TETRIS
-  // The Tetris and Muncher watchfaces throttle themselves (they only repaint on
-  // an animation step or a visible change), so they need no preview rate on
-  // top of that.
-  uint8_t face = activeWatchface();
-  if (face == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
-#if WATCHFACE_MUNCHER
-  if (face == WATCHFACE_MUNCHER_ID) { drawMuncherFace(); return; }
-#endif
-#if WATCHFACE_ALIENS
-  if (face == WATCHFACE_ALIENS_ID) { drawAliensFace(); return; }
-#endif
-#else
-  activeWatchface();
-#endif
-  stepClockAnim();
-  if (millisNow - apClockLast >= AP_PREVIEW_MS) {
-    apClockLast = millisNow;
-    renderClock();
-  }
+  // SCREEN_HOTSPOT_PREVIEW: a client is connected, and sees the face.
+  faceUpdate(true);
 }
 
 /* ======================================================================
    Orientation: read the accelerometer and rotate the display in 90 deg steps
    ====================================================================== */
 
-// Switch the matrix to rotation "rot" and load the matching digit layout into
-// the active runtime tables. Rotations 1/3 are portrait (32x64, stacked
-// HH/MM/SS); rotations 0/2 are landscape (64x32, HH/MM large + SS small below).
-// The fly-in directions mean the same in both: a digit set to come from the
-// top comes from the top of the panel as it is held (until 2026-10-08
-// landscape swapped them, but only until the next save, which set them back).
-// Digits snap to the new layout so an in-flight animation never streaks
-// across the screen during a rotation.
+// Switch the matrix to rotation "rot", and the classic face to its layout for
+// it. Rotations 1/3 are portrait (32x64, stacked HH/MM/SS); rotations 0/2 are
+// landscape (64x32, HH/MM large + SS small below). The fly-in directions mean
+// the same in both: a digit set to come from the top comes from the top of the
+// panel as it is held (until 2026-10-08 landscape swapped them, but only until
+// the next save, which set them back). Digits snap to the new layout so an
+// in-flight animation never streaks across the screen during a rotation. The
+// other faces see the turn by themselves, on their next pass.
 void applyOrientation(uint8_t rot) {
   setScreenRotation(rot);
-
-  for (uint8_t i = 0; i < 6; i++) {
-    if (screenIsLandscape()) {
-      animXTarget[i] = landXTarget[i];
-      animYTarget[i] = landYTarget[i];
-    } else {
-      animXTarget[i] = portXTarget[i];
-      animYTarget[i] = portYTarget[i];
-    }
-    timeXPos[i] = animXTarget[i];
-    timeYPos[i] = animYTarget[i];
-    animXPos[i] = animXTarget[i];
-    animYPos[i] = animYTarget[i];
-    animShow[i] = false;
-  }
+  classicFace.enter(faceMoment(), ENTER_TURNED, matrix.width(), matrix.height());
 }
 
 // The one place the panel's drawing rotation is set.
@@ -2797,11 +2703,9 @@ void updatePanelRate() {
   panelRateLast = millisNow;
 }
 
-// Loop iterations per second on the classic face: the last second's count, or
-// before there is one what the loop is made to do - on the S3 once per panel
-// refresh when nothing holds it up, on the M4 once every LOOP_MS.
-uint32_t faceLoopHz() {
-  if (faceItersPerSec) { return faceItersPerSec; }
+// How often the loop runs per second as the board paces it: on the S3 once
+// per panel refresh when nothing holds it up, on the M4 once every LOOP_MS.
+uint16_t boardLoopHz() {
 #if PANEL_PACED_LOOP
   return panelHz ? panelHz : PANEL_HZ_TYPICAL;
 #else
@@ -2809,133 +2713,15 @@ uint32_t faceLoopHz() {
 #endif
 }
 
-// Advance the clock animation state by one step. This is the cheap part - no
-// matrix I/O at all - so it can run on EVERY loop iteration to keep the animation
-// at real time regardless of how often the panel is actually redrawn. On a second
-// tick it rebuilds the digit strings and puts every digit that was flying back
-// on its place; per digit it starts a flight (animTrigger) and places one that
-// is under way (placeFlight()).
-void stepClockAnim(void) {
-  static uint16_t itersSinceTick = 0;   // loop iterations since the second tick, where flights start
-  if (secondTrigger) {
-    // The iterations of the second that just ended (the one the last tick
-    // started, counted with it) pace the flights of the next.
-    uint32_t span = millisNow - faceTickMs;
-    if (faceTickMs != 0 && span >= 900 && span <= 1100) {
-      faceItersPerSec = (uint16_t)min(((uint32_t)itersSinceTick + 1) * 1000UL / span, (uint32_t)0xFFFF);
-    }
-    faceTickMs = millisNow;
-    itersSinceTick = 0;
-    flightTime = flightIterations();
-  }
-  else if (itersSinceTick < 0xFFFF) { itersSinceTick++; }
-
-  if (secondTrigger) { classicDigits(); }
-  bool timeKnown = clockIsSet();   // dashes do not fly in
-
-  for (uint8_t i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
-    // On the tick the digit that flew in is the one the time shows now, so it
-    // stands on its place - also one a stalled loop kept from landing, which
-    // would otherwise leave the shown digit off its place from then on.
-    if (secondTrigger && animShow[i]) {
-      timeXPos[i] = animXTarget[i];
-      timeYPos[i] = animYTarget[i];
-      animShow[i] = false;
-    }
-    if (animTrigger[i] && timeKnown) { startFlight(i); }
-    if (animShow[i]) { placeFlight(i, itersSinceTick); }
-  }
-  // The watchface animation has landed once its flights have: every flight
-  // takes flightTime iterations from the tick it started on.
-  if (classicAnim == CLASSIC_ANIM_FLYING && itersSinceTick >= flightTime) {
-    classicAnim = CLASSIC_ANIM_IDLE;
-    classicAnimEndedAt = millisNow;
-  }
-}
-
-// How far digit i has to fly when it comes from side dir: so far that the
-// incoming digit starts wholly off the panel and the outgoing one, which moves
-// out the other side by the same distance, ends wholly off it. Measured with
-// the box all ten digits of its font cover, and the panel's size as it is
-// turned now.
-int16_t flightNeed(uint8_t i, uint8_t dir) {
-  const GFXfont *f = (i > 3) ? &FreeSansBold9pt7b : &FreeSansBold12pt7b;   // as renderClock() draws them
-  bool across = (dir == 1 || dir == 3);
-  int16_t lo = 127, hi = -128;   // the digits' box along the flight, from the cursor (hi exclusive)
-  for (char c = '0'; c <= '9'; c++) {
-    const GFXglyph &g = f->glyph[c - f->first];
-    int16_t a = across ? g.xOffset : g.yOffset;
-    int16_t b = a + (across ? g.width : g.height);
-    if (a < lo) { lo = a; }
-    if (b > hi) { hi = b; }
-  }
-  int16_t pos  = across ? animXTarget[i] : animYTarget[i];
-  int16_t size = across ? matrix.width() : matrix.height();
-  return max((int16_t)(size - pos - lo), (int16_t)(pos + hi));
-}
-
-// The loop iterations every flight takes: the fly-in time at the rate the
-// face's loop really has. All flights take this time, each covering its own way
-// in it, so whatever flies at a tick lands together, and every second looks the
-// same whether one digit flies or six. (Until 2026-10-08 the setting was ms per
-// pixel, rounded to whole loop iterations per pixel: with flights up to 62 px
-// and every flight held under a second, it had three steps - 4..7, 8..12 and
-// 13..60 ms looked alike within each.)
-uint16_t flightIterations() {
-  uint32_t ms = (uint32_t)settings.flyInTime * 10;
-  uint32_t iters = (ms * faceLoopHz() + 500) / 1000;
-  return (uint16_t)max(iters, (uint32_t)1);
-}
-
-// The fly-in time in the 10 ms Settings::flyInTime keeps, from ms, within its range.
-uint8_t flyInUnits(long ms) {
-  return (uint8_t)constrain((ms + 5) / 10, (long)(FLY_IN_MIN_MS / 10), (long)(FLY_IN_MAX_MS / 10));
-}
-
-// Digit i starts its flight from the side settings.dir names for it, in the
-// time all flights take (flightTime). Every digit that comes from the same side
-// flies the same distance, the longest any of them needs (flightNeed()), so
-// they move at one speed as one block and keep their spacing - a pair set to
-// one side flies in as it stands, and with every digit set to one side the
-// whole face slides. (Each flying only as far as it needs, the hours' and the
-// minutes' two digits drew apart or together on the way.)
-void startFlight(uint8_t i) {
-  flightDir[i] = settings.dir[i] & 3;
-  int16_t d = 1;
-  for (uint8_t j = 0; j < 6; j++) {
-    if ((settings.dir[j] & 3) == flightDir[i]) { d = max(d, flightNeed(j, flightDir[i])); }
-  }
-  bool across = (flightDir[i] == 1 || flightDir[i] == 3);
-  int16_t pos = across ? animXTarget[i] : animYTarget[i];
-  if (d > 127 - pos) { d = 127 - pos; }   // the positions are int8_t
-  flightDist[i] = (uint8_t)max(d, (int16_t)1);
-  animShow[i] = true;
-}
-
-// Put digit i where its flight is after iters loop iterations: the incoming
-// digit (animStr) the rest of the way out from its place, the outgoing one
-// (timeStr) as far past it on the other side as the flight has come. Every
-// flight covers its way in flightTime iterations, its pixels spread evenly
-// over them.
-void placeFlight(uint8_t i, uint16_t iters) {
-  static const int8_t SIDE_X[4] = { 0, 1, 0, -1 };   // where each settings.dir value comes from
-  static const int8_t SIDE_Y[4] = { -1, 0, 1, 0 };
-  uint32_t moved = (uint32_t)flightDist[i] * min(iters, flightTime) / flightTime;
-  int16_t rest = flightDist[i] - (int16_t)moved;
-  uint8_t d = flightDir[i];
-  animXPos[i] = animXTarget[i] + SIDE_X[d] * rest;
-  animYPos[i] = animYTarget[i] + SIDE_Y[d] * rest;
-  timeXPos[i] = animXTarget[i] - SIDE_X[d] * (int16_t)moved;
-  timeYPos[i] = animYTarget[i] - SIDE_Y[d] * (int16_t)moved;
-}
-
 #if defined(CLOCK_DEBUG)
 // Debug build only: frame timing, printed once per second. "frames" is how often
-// the clock was rendered, "panel" the panel's refresh rate (updatePanelRate()),
-// "draw" the time to build a frame and "show" the time show() spent handing it
-// over (with double buffering it waits for the next panel refresh).
+// a face was drawn, "panel" the panel's refresh rate (updatePanelRate()),
+// "draw" the time from the face's pass to the frame (faceDrawStart) and "show"
+// the time show() spent handing it over (with double buffering it waits for
+// the next panel refresh).
 struct FrameStats { uint32_t frames, drawSum, drawMax, showSum, showMax, since; };
 FrameStats frameStats = {};
+uint32_t faceDrawStart = 0;   // micros() when faceUpdate() began the face's pass
 
 // Debug build only: the RAM every 30 s - internal free, its lowest since the
 // start and its largest free block, and the free PSRAM. The panel driver's
@@ -3028,9 +2814,6 @@ void faceFrameDrawn() {
   Serial.println(line);
 #endif
 }
-#define FACE_FRAME_DRAWN() faceFrameDrawn()
-#else
-#define FACE_FRAME_DRAWN()
 #endif
 
 // Whether a due NTP sync counts as failed, for the status pixel.
@@ -3843,16 +3626,9 @@ void drawTetrisFace() {
   // knock and reappear off-beat as the new digits arrived.
   if (colonOn) { tetrisDrawColon(); }
 
-  // Same overlays the classic watchface draws, so both behave alike.
-  FACE_FRAME_DRAWN();
-  drawStatusPixel();
-  drawHotspotMark();
-  drawNoticeMarker();
-  drawFeedbackIndicator();
-  matrix.show();
+  faceShow();
 
   tetrisColonDrawn  = colonOn;
-  panelDirty        = false;
   // After the step, because a piece may have landed and the next one armed.
   tetrisSpinDrawn = 0;
   for (uint8_t i = 0; i < 4; i++) { tetrisSpinDrawn += tetrisPendingTurns(i); }
@@ -4314,13 +4090,7 @@ void muncherDraw(bool colonOn) {
       }
     }
   }
-  FACE_FRAME_DRAWN();
-  drawStatusPixel();
-  drawHotspotMark();
-  drawNoticeMarker();
-  drawFeedbackIndicator();
-  matrix.show();
-  panelDirty = false;
+  faceShow();
 }
 
 // One pass of the watchface. Between changes it only repaints when what it
@@ -4719,13 +4489,7 @@ void aliensDraw(bool colonOn, uint32_t sceneMs) {
   } else if (alienFace.burstOn) {
     aliensArt(ALIEN_BURST, 3, alienFace.burstX, alienFace.burstY, orange);
   }
-  FACE_FRAME_DRAWN();
-  drawStatusPixel();
-  drawHotspotMark();
-  drawNoticeMarker();
-  drawFeedbackIndicator();
-  matrix.show();
-  panelDirty = false;
+  faceShow();
 }
 
 // One pass of the watchface: it repaints only when what it shows has
@@ -4802,7 +4566,7 @@ void aliensSelfTest() {
    run; its steps (plan=) happen at their moment on the test's clock. */
 void testFaceReset() {
   faceCatchUp();
-  faceItersPerSec = 1000 / TEST_STEP_MS;   // the classic flights' pace: the test clock's, not one measured before
+  classicFace.pace(1000 / TEST_STEP_MS);   // the classic flights' pace: the test clock's, not one measured before
 #if WATCHFACE_TETRIS
   tetrisRotation = 0xFF;
   shakeEndedAt = 0;
@@ -4908,36 +4672,66 @@ void applyFaceParams(const String &q, bool live) {
 }
 #endif
 
-// Draw the current clock state to the panel. This is the expensive part (clears
-// the framebuffer, prints all six digits and pushes via matrix.show()). In the M4's
-// AP preview it is throttled to 5 fps while stepClockAnim() keeps the state moving,
-// so frames are skipped (latest state shown) instead of the animation slowing down.
-void renderClock(void) {
+// The moment for the face: the timekeeper's time as it stands now. Built
+// where the face is stepped or asked, not once per pass, since whether the
+// clock has a time can change within a pass (a sync).
+FaceNow faceMoment() {
+  FaceNow n;
+  n.ms         = millisNow;
+  n.secondAt   = secondStartedAt;
+  n.local      = localTime;
+  n.set        = clockIsSet();
+  n.hour       = hourNow;
+  n.minute     = minuteNow;
+  n.second     = secondNow;
+  n.secondTick = secondTrigger;
+  n.minuteTick = minuteTrigger;
+  n.hourTick   = hourTrigger;
+  n.loopHz     = boardLoopHz();
+  return n;
+}
+
+// One pass of the face on the panel: the plain face, or its preview while the
+// hotspot is up and a phone is on it. The face is stepped on every pass, so it
+// runs at real time, and drawn when its picture changed. In the M4's preview
+// the classic face is shown at most every AP_PREVIEW_MS, which leaves the radio
+// to the slow WiFiNINA web server: skipped frames are stepped, not slowed
+// down. The Tetris, Muncher and Aliens faces step, draw and show in one pass
+// of their own, and repaint only on a change.
+void faceUpdate(bool preview) {
 #if defined(CLOCK_DEBUG)
-  uint32_t drawStart = micros();
+  faceDrawStart = micros();
 #endif
-  matrix.fillScreen(0); // Fill background black
-
-  for (uint8_t i = 0; i < 6; i++) {
-    // Animate future digits BEGIN
-    if(i>3) { matrix.setFont(&FreeSansBold9pt7b); }  // Smaller Font for displaying Seconds
-    else    { matrix.setFont(&FreeSansBold12pt7b); } // Bigger Font for displaying Minutes and Hours
-
-    if(animShow[i] == true) {
-      if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i]) { matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB)); } // digit has arrived
-      else { matrix.setTextColor(scaledColorB(settings.trailR, settings.trailG, settings.trailB, trailBrightness())); } // dim trail (relative to brightness, never black)
-      matrix.setCursor(animXPos[i], animYPos[i]);
-      matrix.print(animStr[i]);
-    }
-    // Animate future digits END
-
-    // Time now digits are drawn here
-    matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB));
-    matrix.setCursor(timeXPos[i], timeYPos[i]);
-    matrix.print(timeStr[i]);
+  switch (activeWatchface()) {
+#if WATCHFACE_TETRIS
+    case WATCHFACE_TETRIS_ID:  drawTetrisFace();  return;
+#endif
+#if WATCHFACE_MUNCHER
+    case WATCHFACE_MUNCHER_ID: drawMuncherFace(); return;
+#endif
+#if WATCHFACE_ALIENS
+    case WATCHFACE_ALIENS_ID:  drawAliensFace();  return;
+#endif
+    default: break;   // the classic face
   }
+  FaceNow now = faceMoment();
+  bool changed = classicFace.update(now);
+  if (preview) {
+    if (millisNow - apClockLast < AP_PREVIEW_MS) { return; }
+    apClockLast = millisNow;
+  }
+  if (!changed && !panelDirty) { return; }
+  classicFace.draw(matrix, now, FacePaint{effectiveBrightness});
+  faceShow();
+}
 
-  FACE_FRAME_DRAWN();   // debug and test builds: counted, and logged as a checksum before the marks go over it
+// A face has drawn its picture: the marks go over it - the status pixel, the
+// hotspot's mark, the notices' marker, an input's feedback - and it goes to
+// the panel.
+void faceShow() {
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+  faceFrameDrawn();   // counted, and in a test build logged as a checksum, before the marks go over it
+#endif
   drawStatusPixel();
   drawHotspotMark();
   drawNoticeMarker();
@@ -4945,19 +4739,17 @@ void renderClock(void) {
 #if defined(CLOCK_DEBUG)
   uint32_t showStart = micros();
 #endif
-  matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
+  matrix.show();
   panelDirty = false;
 #if defined(CLOCK_DEBUG)
-  frameStatsAdd(showStart - drawStart, micros() - showStart);
+  frameStatsAdd(showStart - faceDrawStart, micros() - showStart);
 #endif
 }
 
 // The watchface to draw. It can change at runtime (the config page previews the
 // choice live), and only the visible face is stepped, so whichever takes over is
-// resynchronised here: the classic one gets fresh digit strings, which
-// stepClockAnim() would otherwise only rebuild on the next second tick, plus
-// digits snapped onto their targets; the Tetris one rebuilds its layout and
-// drops its digits again.
+// resynchronised here: the classic one comes up to the time (faceCatchUp());
+// the Tetris one rebuilds its layout and drops its digits again.
 uint8_t activeWatchface() {
   static uint8_t shown = 0xFF;
   if (settings.watchface == shown) { return shown; }
@@ -4977,66 +4769,18 @@ uint8_t activeWatchface() {
 }
 
 // Bring the classic face up to the time before it is drawn again, after it was
-// hidden or replaced: fresh digit strings, which stepClockAnim() would only
-// rebuild on the next second tick, and all six digits snapped onto their
-// places, so no fly-in from before resumes. The Tetris face catches up by
-// itself, digit by digit.
+// hidden or replaced, with the panel turned as it is held: no fly-in from
+// before resumes. The Tetris face catches up by itself, digit by digit.
 void faceCatchUp() {
-  faceTickMs = 0;                    // it was not stepped meanwhile: the next tick starts a new count
-  if (classicAnim != CLASSIC_ANIM_IDLE) {   // another screen or face cut the watchface animation off
-    classicAnim = CLASSIC_ANIM_IDLE;
-    classicAnimEndedAt = millisNow;
-  }
-  classicDigits();
-  applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
+  setScreenRotation(deviceRotation);
+  classicFace.enter(faceMoment(), ENTER_SHOWN, matrix.width(), matrix.height());
 }
 
-// The six characters of the classic face, for now and for one second ahead
-// (what flies in). Dashes while the clock has no time yet: it shows that it
-// has none rather than counting up from midnight.
-void classicDigits() {
-  if (!clockIsSet()) {
-    strcpy(timeStr, "------");
-    strcpy(animStr, "------");
-    return;
-  }
-  sprintf(timeStr, "%02d%02d%02d", clockHour(localTime),   clockMinute(localTime),   clockSecond(localTime));
-  sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
-}
-
-// Live (non-AP) mode: advance and draw the selected watchface every loop
-// iteration. The Tetris one keeps its own state machine and pacing, so the
-// classic fly-in animation is not stepped while it is showing.
-void drawClock(void) {
-#if WATCHFACE_TETRIS
-  uint8_t face = activeWatchface();
-  if (face == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
-#if WATCHFACE_MUNCHER
-  if (face == WATCHFACE_MUNCHER_ID) { drawMuncherFace(); return; }
-#endif
-#if WATCHFACE_ALIENS
-  if (face == WATCHFACE_ALIENS_ID) { drawAliensFace(); return; }
-#endif
-#else
-  activeWatchface();
-#endif
-  stepClockAnim();
-  renderClock();
-}
-
-/* Updates millisNow, localTime. Keeps track of the looptime using delay(). Updates the animTrigger[] array. */
+/* Updates millisNow, localTime and the ticks. Keeps track of the looptime using delay(). */
 void timekeeper(void) { 
   /*Call this always in the beginning of an iteration in loop()
     for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain localTime with the clock_time.h helpers eg: clockHour(localTime)
     Triggers are only active for one iteration: hourTrigger -> when the hour has changed
-    animTrigger[]: for each individual clock digit (6) the corresponding bool goes high if this digit will change in one second. This gives enough time for the entry animation of the digit.
-
-  - if secondTrigger: trigger secondNow[1] animation
-  - if secondNow+1 quotient 10 = 0: trigger secondNow[0] animation
-  - if secondNow=59: trigger minuteNow[1] animation
-  - if minuteNow+1 quotient 10 = 0: trigger minuteNow[0] animation
-  - if minuteNow=59: trigger hourNow[1] animation
-  - if hourNow+1 quotient 10 = 0: trigger hourNow[0] animation
 */
   deltaT=millisNow;
   millisNow=millis();
@@ -5085,32 +4829,6 @@ void timekeeper(void) {
 
   if(minuteTrigger && hourNow != clockHour(localTime)) { hourNow=clockHour(localTime); hourTrigger=true; }
   else { hourTrigger=false; }
-
-  if(secondTrigger) { 
-    animTrigger[5]=true; 
-    if ((secondNow+1) % 10 == 0) { animTrigger[4]=true; }
-      else { animTrigger[4]=false; }
-    if (animTrigger[4]==true && secondNow+1 == 60) { animTrigger[3]=true; }
-      else { animTrigger[3]=false; }
-    if (animTrigger[3]==true && (minuteNow+1) % 10 == 0) { animTrigger[2]=true; }
-      else { animTrigger[2]=false; }
-    if (animTrigger[2]==true && minuteNow+1 == 60) { animTrigger[1]=true; }
-      else { animTrigger[1]=false; }
-    if (animTrigger[1]==true && ((hourNow+1) % 10 == 0 || hourNow+1 == 24)) { animTrigger[0]=true; }
-      else { animTrigger[0]=false; }
-      // TODO: maybe there is another check necessary for the hours: 23 to 00 change
-    // The watchface animation on the classic face: every digit flies in as if
-    // it changed, through the same steps as a real change.
-    if (classicAnim == CLASSIC_ANIM_ASKED) {
-      classicAnim = CLASSIC_ANIM_FLYING;
-      for (uint8_t i = 0; i < sizeof(animTrigger); i++) { animTrigger[i] = true; }
-    }
-  }
-  else {
-    for (uint8_t i = 0; i < sizeof(animTrigger); i++) {
-      animTrigger[i] = false;
-    }
-  }
 }
 
 // The one way to change the sync state. A sync becomes due when it is entered
@@ -5707,7 +5425,7 @@ void loadSettings() {
     if (settings.settingsRev < 1) { settings.watchface = WATCHFACE_CLASSIC; }
     // Rev 1 held the fly-in speed in ms per pixel (4..60), and a fly-in went
     // 32 px in landscape: that times 32 is the time it took then.
-    if (settings.settingsRev < 2) { settings.flyInTime = flyInUnits((long)settings.flyInTime * 32); }
+    if (settings.settingsRev < 2) { settings.classic.flyInTime = flyInUnits((long)settings.classic.flyInTime * 32); }
     saveSettings();   // stamps the new revision
     Serial.print("Settings: stored layout migrated to rev "); Serial.println(SETTINGS_REV);
   }
@@ -5791,32 +5509,17 @@ void applySettings() {
 #if !WATCHFACE_TETRIS
   settings.watchface = WATCHFACE_CLASSIC;   // this build has no other watchface
 #endif
-  settings.flyInTime = constrain(settings.flyInTime, FLY_IN_MIN_MS / 10, FLY_IN_MAX_MS / 10);
+  settings.classic.flyInTime = constrain(settings.classic.flyInTime, FLY_IN_MIN_MS / 10, FLY_IN_MAX_MS / 10);
   syncTimeHour   = settings.syncHour;
   syncTimeMinute = settings.syncMinute;
   // Enforce full colors (the trail is dimmed at render time, not by the swatch).
-  normalizeColorFull(settings.digitR, settings.digitG, settings.digitB);
-  normalizeColorFull(settings.trailR, settings.trailG, settings.trailB);
+  normalizeColorFull(settings.classic.digitR, settings.classic.digitG, settings.classic.digitB);
+  normalizeColorFull(settings.classic.trailR, settings.classic.trailG, settings.classic.trailB);
 }
 
-// Scale a base color by an explicit brightness (0..255). Linear scaling keeps the
-// hue (channel ratios); rounding (+127) instead of truncating reduces drift when
-// dimming into the low end of the panel's few levels per channel.
-// On the S3 the panel itself dims to effectiveBrightness, so a colour asked at
-// that brightness (or above) is drawn at full strength, and one asked dimmer
-// keeps its share of it: the fly-in trail stays the same fraction of the digits.
+// Scale a base color by an explicit brightness (0..255), as the faces do (FacePaint).
 uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright) {
-#if PANEL_DRIVER_DMA
-  if (bright >= effectiveBrightness || effectiveBrightness == 0) { return matrix.color565(r, g, b); }
-  uint16_t panel = effectiveBrightness;
-  return matrix.color565(((uint16_t)r * bright + panel / 2) / panel,
-                         ((uint16_t)g * bright + panel / 2) / panel,
-                         ((uint16_t)b * bright + panel / 2) / panel);
-#else
-  return matrix.color565(((uint16_t)r * bright + 127) / 255,
-                         ((uint16_t)g * bright + 127) / 255,
-                         ((uint16_t)b * bright + 127) / 255);
-#endif
+  return FacePaint{effectiveBrightness}.color(r, g, b, bright);
 }
 
 // Scale a base color by the brightness actually used for rendering.
@@ -5833,25 +5536,9 @@ uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b) {
   return scaledColorB(r, g, b, br);
 }
 
-// Effective brightness of the fly-in (trail) color. The eye is roughly gamma
-// 2.2, so a *linear* fraction of the master brightness hardly looks dimmer
-// (50% linear ~= 73% perceived). We dim perceptually instead - using the same
-// FADE_GAMMA as the brightness fade - so the trail actually appears at
-// TRAIL_BRIGHTNESS_PCT of the digit's perceived brightness. Floored so it never
-// quantises to black, capped so it is never brighter than the digit.
-const uint8_t TRAIL_BRIGHTNESS_PCT = 50; // trail = ~50% of the digit's PERCEIVED brightness
-const uint8_t TRAIL_BRIGHTNESS_MIN = 24; // absolute floor that keeps the LEDs on
-uint8_t trailBrightness() {
-  float frac = TRAIL_BRIGHTNESS_PCT / 100.0f;                 // desired perceived fraction
-  uint16_t t = (uint16_t)lroundf(powf(frac, FADE_GAMMA) * effectiveBrightness); // -> linear light
-  if (t < TRAIL_BRIGHTNESS_MIN) { t = TRAIL_BRIGHTNESS_MIN; }
-  if (t > effectiveBrightness)  { t = effectiveBrightness; } // very low brightness -> match the digit
-  return (uint8_t)t;
-}
-
 // Snap a color to a "full" color (largest channel = 255) while preserving hue.
 // Digit and fly-in colors are always full colors now; the trail's dimness comes
-// from trailBrightness(), not from a pre-dimmed swatch. This also migrates any
+// from the classic face's trail brightness, not from a pre-dimmed swatch. This also migrates any
 // previously-stored dark/grey color so old settings never render near-black.
 void normalizeColorFull(uint8_t &r, uint8_t &g, uint8_t &b) {
   uint8_t m = max(r, max(g, b));
@@ -6100,11 +5787,7 @@ void runFunction(InputFunction fn, uint8_t steps) {
 
 // FN_FACE_ANIMATION, on the face only: the watchface's own animation. The
 // Tetris digits break up in the break-up effect; the classic digits all fly
-// in at the next second, as if every one of them changed then - unless one is
-// still asked for or flying, or landed less than CLASSIC_ANIM_REST_MS ago. The
-// console gets one line per animation taken, with the requests ignored since
-// the one before, not one per request (a stress test of fast knocks wrote over
-// 200 lines in 30 s).
+// in at the next second (ClassicFace::request()).
 void faceAnimationStart() {
   if (screen != SCREEN_FACE) { return; }
 #if WATCHFACE_MUNCHER
@@ -6123,14 +5806,7 @@ void faceAnimationStart() {
     return;
   }
 #endif
-  if (classicAnim != CLASSIC_ANIM_IDLE || millisNow - classicAnimEndedAt < CLASSIC_ANIM_REST_MS) {
-    if (classicAnimIgnored < 0xFFFF) { classicAnimIgnored++; }
-    return;
-  }
-  classicAnim = CLASSIC_ANIM_ASKED;
-  Serial.print("Face animation: the classic digits fly in at the next second (");
-  Serial.print(classicAnimIgnored); Serial.println(" requests ignored since the last one)");
-  classicAnimIgnored = 0;
+  classicFace.request(faceMoment(), TRIGGER_ACTION);
 }
 
 void holdStep(InputFunction fn) {
@@ -7804,12 +7480,12 @@ void applyParams(const String &q) {
   applyFaceParams(q, false);   // the faces' own settings (face.h)
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "speed");  if (v.length()) { settings.flyInTime  = flyInUnits(v.toInt()); }   // ms
-  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
-  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
+  v = getParam(q, "speed");  if (v.length()) { settings.classic.flyInTime  = flyInUnits(v.toInt()); }   // ms
+  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); }
+  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); }
   for (int i = 0; i < 6; i++) {
     v = getParam(q, "dir" + String(i));
-    if (v.length()) { settings.dir[i] = constrain(v.toInt(), 0, 3); }
+    if (v.length()) { settings.classic.dir[i] = constrain(v.toInt(), 0, 3); }
   }
   v = getParam(q, "synch");  if (v.length()) { settings.syncHour   = constrain(v.toInt(), 0, 23); }
   v = getParam(q, "syncm");  if (v.length()) { settings.syncMinute = constrain(v.toInt(), 0, 59); }
@@ -7910,9 +7586,9 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
   v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "speed");  if (v.length()) { settings.flyInTime = flyInUnits(v.toInt()); }   // ms
-  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
-  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
+  v = getParam(q, "speed");  if (v.length()) { settings.classic.flyInTime = flyInUnits(v.toInt()); }   // ms
+  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); }
+  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); }
 #if WATCHFACE_TETRIS
   applyFaceParams(q, true);    // the faces' own settings, and what the page asks to see
 #endif
@@ -8005,14 +7681,14 @@ void sendFormPage(Print &c) {
   // Fly-in time (live)
   c.print("<label>Fly-in time (ms, every digit lands at once)</label>");
   c.print("<input type=number min="); c.print(FLY_IN_MIN_MS); c.print(" max="); c.print(FLY_IN_MAX_MS);
-  c.print(" step=10 name=speed value="); c.print(settings.flyInTime * 10);
+  c.print(" step=10 name=speed value="); c.print(settings.classic.flyInTime * 10);
   c.println(" onchange=liveNow(0)>");
 
   // Colors (live) - palette swatches instead of a free color picker (few levels per channel)
   c.print("<label>Digit color</label><div class=swbox id=swDigit></div><input type=hidden name=digit value=");
-  c.print(toHex(settings.digitR, settings.digitG, settings.digitB)); c.println(">");
+  c.print(toHex(settings.classic.digitR, settings.classic.digitG, settings.classic.digitB)); c.println(">");
   c.print("<label>Fly-in color (auto-dimmed)</label><div class=swbox id=swTrail></div><input type=hidden name=trail value=");
-  c.print(toHex(settings.trailR, settings.trailG, settings.trailB)); c.println(">");
+  c.print(toHex(settings.classic.trailR, settings.classic.trailG, settings.classic.trailB)); c.println(">");
 
   // Animation directions
   const char *names[6] = {"Hours tens", "Hours ones", "Min tens", "Min ones", "Sec tens", "Sec ones"};
@@ -8020,10 +7696,10 @@ void sendFormPage(Print &c) {
   for (int i = 0; i < 6; i++) {
     c.print("<div style=\"margin-bottom:6px\">"); c.print(names[i]);
     c.print(" <select name=dir"); c.print(i); c.println(">");
-    printOption(c, settings.dir[i], 0, "from top");
-    printOption(c, settings.dir[i], 1, "from right");
-    printOption(c, settings.dir[i], 2, "from bottom");
-    printOption(c, settings.dir[i], 3, "from left");
+    printOption(c, settings.classic.dir[i], 0, "from top");
+    printOption(c, settings.classic.dir[i], 1, "from right");
+    printOption(c, settings.classic.dir[i], 2, "from bottom");
+    printOption(c, settings.classic.dir[i], 3, "from left");
     c.println("</select></div>");
   }
 
@@ -9624,7 +9300,7 @@ bool faceTimeShown() {
 #if WATCHFACE_ALIENS
   if (settings.watchface == WATCHFACE_ALIENS_ID) { return !alienFace.running; }
 #endif
-  return secondNow != 0 || millisNow - secondStartedAt >= (unsigned long)settings.flyInTime * 10UL;
+  return !classicFace.busy(faceMoment());
 }
 
 // On every pass: a round's minute begins, and whether its round starts now -
@@ -11208,11 +10884,11 @@ void apiState(Print &c) {
 
   JsonObject s = d["settings"].to<JsonObject>();
   s["wf"] = settings.watchface;
-  s["digit"] = toHex(settings.digitR, settings.digitG, settings.digitB);
-  s["trail"] = toHex(settings.trailR, settings.trailG, settings.trailB);
-  s["speed"] = settings.flyInTime * 10;   // ms
+  s["digit"] = toHex(settings.classic.digitR, settings.classic.digitG, settings.classic.digitB);
+  s["trail"] = toHex(settings.classic.trailR, settings.classic.trailG, settings.classic.trailB);
+  s["speed"] = settings.classic.flyInTime * 10;   // ms
   JsonArray dirs = s["dirs"].to<JsonArray>();
-  for (uint8_t i = 0; i < 6; i++) { dirs.add(settings.dir[i]); }
+  for (uint8_t i = 0; i < 6; i++) { dirs.add(settings.classic.dir[i]); }
 #if WATCHFACE_TETRIS
   for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobJson(*FACE_BLOBS[i], s); }   // tdrop .. anap
 #endif

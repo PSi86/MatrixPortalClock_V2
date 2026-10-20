@@ -1,15 +1,18 @@
 // What the watchfaces share (concept doc, tab "Watchface animations").
 //
 // The four faces - classic, Tetris, Muncher, Aliens - are being moved behind
-// one interface, step by step, with the panel kept as it was at every step.
-// This header starts with the tools that prove it: random numbers a test build
-// can repeat, and a checksum of a frame.
+// one interface, Watchface below, step by step, with the panel kept as it was
+// at every step. The core hands a face the moment (FaceNow), how to colour
+// (FacePaint) and the canvas; a face keeps everything about its own picture.
+// Also here: the tools that prove the panel stayed as it was - random numbers
+// a test build can repeat, and a checksum of a frame.
 //
 // It is built on every board, the M4 too, so it keeps to C++11.
 #ifndef FACE_H
 #define FACE_H
 
 #include <Arduino.h>
+#include <Adafruit_GFX.h>
 #include "clock_time.h"
 
 // Optional things - an animation asked for, an extra, a GIF, info cards - end
@@ -35,6 +38,94 @@ inline void faceDigits(time_t t, bool set, uint8_t d[4], uint8_t none) {
   uint8_t h = (uint8_t)clockHour(t), m = (uint8_t)clockMinute(t);
   d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
 }
+
+// ---- What the core hands a face ---------------------------------------------
+// The moment a face is stepped or drawn at: the core's time as it stands then
+// (faceMoment() in the sketch). The ticks are true on the one pass that began
+// a new second, minute or hour.
+struct FaceNow {
+  unsigned long ms;         // millis() of the pass (a test build's own clock while it runs one)
+  unsigned long secondAt;   // when the second on show began, in ms
+  time_t local;             // the panel's local time
+  bool set;                 // whether the clock has a time; without one the faces show dashes
+  uint8_t hour, minute, second;
+  bool secondTick, minuteTick, hourTick;
+  uint16_t loopHz;          // how often the loop runs per second as the board paces it
+};
+
+// Perceived brightness to linear light, as the eye sees it: the brightness
+// fade and the classic face's trail.
+const float FADE_GAMMA = 2.2f;
+
+// How a face colours its picture: every colour scaled to the brightness the
+// panel is drawn at. Linear scaling keeps the hue (channel ratios); rounding
+// instead of truncating reduces drift when dimming into the low end of the
+// panel's few levels per channel. The DMA boards' panel dims itself to that
+// brightness, so a colour asked at it (or above) is drawn at full strength,
+// and one asked dimmer keeps its share of it: the classic face's trail stays
+// the same fraction of its digits.
+struct FacePaint {
+  uint8_t bright;   // the brightness the panel is drawn at, 0..255
+
+  uint16_t color(uint8_t r, uint8_t g, uint8_t b) const { return color(r, g, b, bright); }
+  uint16_t color(uint8_t r, uint8_t g, uint8_t b, uint8_t at) const {
+#if PANEL_DRIVER_DMA
+    if (at >= bright || bright == 0) { return rgb565(r, g, b); }
+    uint16_t panel = bright;
+    return rgb565(((uint16_t)r * at + panel / 2) / panel,
+                  ((uint16_t)g * at + panel / 2) / panel,
+                  ((uint16_t)b * at + panel / 2) / panel);
+#else
+    return rgb565(((uint16_t)r * at + 127) / 255,
+                  ((uint16_t)g * at + 127) / 255,
+                  ((uint16_t)b * at + 127) / 255);
+#endif
+  }
+  // As both panel drivers pack a colour.
+  static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
+    return ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
+  }
+};
+
+// Why a face comes onto the panel (Watchface::enter()).
+enum FaceEnter : uint8_t {
+  ENTER_SHOWN,    // chosen, or uncovered again: it was not stepped meanwhile
+  ENTER_TURNED,   // the panel turned: a new layout
+};
+
+// Who asks a face for an animation (Watchface::request()).
+enum FaceTrigger : uint8_t {
+  TRIGGER_ACTION,         // the input action "trigger watchface animation": a knock, a button, a gesture
+  TRIGGER_NOW_AND_THEN,   // the shared beat "How often"
+  TRIGGER_PREVIEW,        // a setting changed in the web app
+};
+enum FaceOutcome : uint8_t {
+  OUTCOME_NONE,       // the face offers nothing for this trigger
+  OUTCOME_PLAYED,     // it plays, or will at the moment it plays such things
+  OUTCOME_REFUSED,    // not now: something runs, or it would run into the time's change
+};
+
+// What every watchface does for the core. The core keeps the time, the
+// screens and the rules for who takes the panel; it steps the face on every
+// pass and has it drawn when its picture changed, then puts its marks over it
+// and shows it (faceShow() in the sketch).
+class Watchface {
+ public:
+  // It comes onto the panel (why), w x h pixels as the panel is turned now:
+  // it shows the time as it stands, nothing of before under way.
+  virtual void enter(const FaceNow &now, FaceEnter why, int16_t w, int16_t h) = 0;
+  // One pass: it steps what moves. Whether its picture changed.
+  virtual bool update(const FaceNow &now) = 0;
+  // Its picture, the whole canvas, without the core's marks.
+  virtual void draw(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) = 0;
+  // Whether the time's change is under way: the picture moves for it.
+  virtual bool busy(const FaceNow &now) const = 0;
+  // An animation asked for.
+  virtual FaceOutcome request(const FaceNow &now, FaceTrigger why) = 0;
+
+ protected:
+  ~Watchface() {}   // the faces live for good: never deleted through this, so no virtual destructor
+};
 
 // ---- A face's settings --------------------------------------------------------
 // Each face keeps its settings in a blob of its own - NVS key, magic,
