@@ -22,6 +22,7 @@ Todo Concept:
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 #include "input_map.h"      // input events, functions and the profiles mapping them
+#include "face.h"           // what the watchfaces share
 
 #if !PANEL_DRIVER_DMA
 #include <Adafruit_Protomatter.h>   // the M4's panel driver; the S3's is in board_hal.h
@@ -1203,6 +1204,9 @@ uint8_t syncTimeHour = 5, syncTimeMinute = 11;
 unsigned long millisNow, deltaT;
 unsigned long secondStartedAt = 0;   // millis() when the second on show began (timekeeper())
 time_t localTime;   // what the panel shows: the clock's UTC plus zone and daylight saving
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+long testShift = 0;   // debug and test builds: seconds the panel's time is moved for a test (POST /api/test)
+#endif
 
 // NTP sync -----------------------------------------------------------------
 // One state instead of the flags ntpSuccess, ntpRequestActive and wifiEnabled.
@@ -1832,7 +1836,11 @@ void loop(void) {
   gifUpdate();          // a GIF of its own accord when one is due
 #endif
   switch (screen) {
+#if defined(CLOCK_DEBUG)
+    case SCREEN_FACE: { uint32_t passStart = micros(); drawClock(); facePassStats(micros() - passStart); } break;
+#else
     case SCREEN_FACE:   drawClock(); break;
+#endif
 #if GIF_PLAYBACK
     case SCREEN_GIF:    drawGif(); break;
 #endif
@@ -2945,6 +2953,49 @@ void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
   f = FrameStats{};
   f.since = millis();
 }
+
+// Debug build: the face's passes, printed every 2 s - how often the loop ran
+// it, how long a pass took on average and at most (handing a frame over and
+// waiting for the panel included), and how many frames it drew.
+uint32_t faceDraws = 0;
+void facePassStats(uint32_t us) {
+  static uint32_t passes = 0, sum = 0, most = 0, since = 0;
+  passes++;
+  sum += us; if (us > most) { most = us; }
+  if (millis() - since < 2000) { return; }
+  Serial.printf("face %u: %lu passes, avg %lu max %lu us, %lu frames\n", (unsigned)settings.watchface,
+                (unsigned long)passes, (unsigned long)(sum / passes), (unsigned long)most, (unsigned long)faceDraws);
+  passes = sum = most = faceDraws = 0;
+  since = millis();
+}
+#endif
+
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+// Debug and test builds: a face drew a frame, before the marks go over it.
+// Counted for facePassStats(); a test build (FACE_FRAME_LOG) also logs it as a
+// checksum of the canvas whenever that differs from the last one -
+// "F hh:mm:ss.mmm crc face" - so two runs of the same scenes, before and after
+// a step of the refactor, show whether every frame stayed as it was
+// (tools.local/refactor).
+void faceFrameDrawn() {
+#if defined(CLOCK_DEBUG)
+  faceDraws++;
+#endif
+#if defined(FACE_FRAME_LOG)
+  static uint32_t last = 0;
+  uint32_t crc = faceCrc32((const uint8_t *)matrix.getBuffer(), (size_t)matrix.width() * matrix.height() * 2);
+  if (crc == last) { return; }
+  last = crc;
+  char line[40];
+  snprintf(line, sizeof(line), "F %02u:%02u:%02u.%03lu %08lx %u", (unsigned)hourNow, (unsigned)minuteNow,
+           (unsigned)secondNow, (unsigned long)(millisNow - secondStartedAt), (unsigned long)crc,
+           (unsigned)settings.watchface);
+  Serial.println(line);
+#endif
+}
+#define FACE_FRAME_DRAWN() faceFrameDrawn()
+#else
+#define FACE_FRAME_DRAWN()
 #endif
 
 // Whether a due NTP sync counts as failed, for the status pixel.
@@ -3229,21 +3280,21 @@ void tetrisArmPiece(uint8_t idx) {
     unsigned long budget = (unsigned long)turnSteps * tetrisSettings.dropMs;
     uint8_t fits = 0;
     while (fits < 3 && (unsigned long)(fits + 1) * band <= budget) { fits++; }
-    turns = (fits == 0) ? 0 : (uint8_t)random(fits + 1);
+    turns = (fits == 0) ? 0 : (uint8_t)faceRandom(fits + 1);
     if (turns > 0) {
       // The turns themselves take turns*spinMs; whatever room is left over is
       // where they may begin. A piece with a long way to fall can therefore
       // still be turning well down the panel instead of sorting itself out at
       // the top, which is what a player does too.
       unsigned long slack = budget - (unsigned long)turns * band;
-      start = (unsigned long)random(slack + 1);
+      start = (unsigned long)faceRandom(slack + 1);
     }
   }
   s.turns = turns;
   // One turn per band, at a random point inside it: the gaps come out uneven
   // rather than metronomic, and they always finish inside the free window.
   for (uint8_t i = 0; i < turns; i++) {
-    s.turnAt[i] = millisNow + start + (unsigned long)i * band + 1 + (unsigned long)random(band);
+    s.turnAt[i] = millisNow + start + (unsigned long)i * band + 1 + (unsigned long)faceRandom(band);
   }
 
   // Where it comes in, and how far it has to walk.
@@ -3285,11 +3336,11 @@ void tetrisArmPiece(uint8_t idx) {
     int strideMax = (span > 1) ? (maxShift - 1) / (span - 1) : maxShift;
     if (strideMax > 3) { strideMax = 3; }        // slower than this reads as drifting
     if (strideMax < 1) { strideMax = 1; }
-    s.shiftEvery = (uint8_t)(1 + random(strideMax));
+    s.shiftEvery = (uint8_t)(1 + faceRandom(strideMax));
     int needed = 1 + (span - 1) * (int)s.shiftEvery;
     int slack  = maxShift - needed;
     if (slack < 0) { slack = 0; }
-    s.shiftAt = (uint8_t)random(slack + 1);
+    s.shiftAt = (uint8_t)faceRandom(slack + 1);
   }
 }
 
@@ -3315,12 +3366,12 @@ void tetrisStartDigit(uint8_t idx, uint8_t value) {
   s.value   = value;
   // Per digit, not TETRIS_VARIANTS: only builds where every piece lands on
   // something are shipped, and the 2, the 5 and the 7 have fewer of those.
-  s.variant = (uint8_t)random(TETRIS_VARIANTS_PER_DIGIT[value]);
+  s.variant = (uint8_t)faceRandom(TETRIS_VARIANTS_PER_DIGIT[value]);
   s.piece   = 0;
   tetrisArmPiece(idx);
   for (uint8_t i = 0; i < TETRIS_COLOUR_CLASSES; i++) { s.hue[i] = i; }
   for (uint8_t i = TETRIS_COLOUR_CLASSES - 1; i > 0; i--) {   // Fisher-Yates
-    uint8_t j = (uint8_t)random(i + 1);
+    uint8_t j = (uint8_t)faceRandom(i + 1);
     uint8_t t = s.hue[i]; s.hue[i] = s.hue[j]; s.hue[j] = t;
   }
 }
@@ -3506,7 +3557,7 @@ int tetrisOriginY(uint8_t idx) {
 // selected, picking it here would give a knock four different effects at once.
 uint8_t shakePickStyle() {
   uint8_t style = tetrisSettings.shakeStyle;
-  if (style >= SHAKE_STYLE_RANDOM) { style = (uint8_t)random(SHAKE_STYLE_RANDOM); }
+  if (style >= SHAKE_STYLE_RANDOM) { style = (uint8_t)faceRandom(SHAKE_STYLE_RANDOM); }
   return style;
 }
 
@@ -3551,10 +3602,10 @@ void shakeStartDigit(uint8_t d, uint8_t style) {
         f.spinTick = 0;
         f.delay = (uint8_t)((TETRIS_GRID_H - 1 - TETRIS_PIECE_TOP(rec)) / 2);
       } else {
-        f.vx16  = (int16_t)random(-40, 41);
-        f.vy16  = (int16_t)random(-48, -8);   // a kick upwards first
-        f.spin  = (uint8_t)random(2, 6);
-        f.spinTick = (uint8_t)random(f.spin);   // start them out of step
+        f.vx16  = (int16_t)faceRandom(-40, 41);
+        f.vy16  = (int16_t)faceRandom(-48, -8);   // a kick upwards first
+        f.spin  = (uint8_t)faceRandom(2, 6);
+        f.spinTick = (uint8_t)faceRandom(f.spin);   // start them out of step
         f.delay = 0;
       }
     }
@@ -3730,6 +3781,7 @@ void drawTetrisFace() {
   if (colonOn) { tetrisDrawColon(); }
 
   // Same overlays the classic watchface draws, so both behave alike.
+  FACE_FRAME_DRAWN();
   drawStatusPixel();
   drawHotspotMark();
   drawNoticeMarker();
@@ -4074,7 +4126,7 @@ void muncherStartScene(muncher::Mode mode, unsigned long at, uint8_t after = MUN
 void muncherPlaceFruit() {
   if (munch.fruitX != muncher::NO_FRUIT) { return; }
   int16_t slots = (munch.L.w - 20) / 4 + 1;   // the corridor's pellet places, 10 px off either end
-  munch.placeFruit(10 + 4 * (int16_t)random(slots), (uint8_t)random(muncher::FRUIT_KINDS));
+  munch.placeFruit(10 + 4 * (int16_t)faceRandom(slots), (uint8_t)faceRandom(muncher::FRUIT_KINDS));
   panelDirty = true;
 }
 
@@ -4086,7 +4138,7 @@ bool muncherKnock() {
   uint8_t kind = muncherSettings.knock;
   if (kind == MUNCHER_KNOCK_RANDOM) {
     const uint8_t KINDS[3] = { MUNCHER_KNOCK_POWER, MUNCHER_KNOCK_REPLAY, MUNCHER_KNOCK_DEATH };
-    kind = KINDS[random(3)];
+    kind = KINDS[faceRandom(3)];
   }
   // Only against a planned change: until the face has planned one (it does
   // on its next pass), there is nothing to measure the scene against.
@@ -4369,6 +4421,7 @@ void muncherDraw(bool colonOn) {
       }
     }
   }
+  FACE_FRAME_DRAWN();
   drawStatusPixel();
   drawHotspotMark();
   drawNoticeMarker();
@@ -4576,7 +4629,7 @@ void aliensDigitsAt(time_t t, uint8_t d[4]) {
 // An alien that can shoot back, drawn at random: a digit and a column with
 // a block, the lowest of which drops the bomb. Returns the scene's length.
 uint32_t aliensPlanBack() {
-  uint8_t first = (uint8_t)random(4 * aliens::COLS);
+  uint8_t first = (uint8_t)faceRandom(4 * aliens::COLS);
   for (uint8_t n = 0; n < 4 * aliens::COLS; n++) {
     uint8_t o = (first + n) % (4 * aliens::COLS);
     uint32_t len = alienFace.planBack(o / aliens::COLS, o % aliens::COLS);
@@ -4589,7 +4642,7 @@ uint32_t aliensPlanBack() {
 // Returns the scene's length.
 uint32_t aliensPlanNap() {
   const uint8_t cells = aliens::COLS * aliens::ROWS;
-  uint8_t first = (uint8_t)random(4 * cells);
+  uint8_t first = (uint8_t)faceRandom(4 * cells);
   for (uint8_t n = 0; n < 4 * cells; n++) {
     uint8_t o = (first + n) % (4 * cells);
     uint32_t len = alienFace.planNap(o / cells, o % cells);
@@ -4601,7 +4654,7 @@ uint32_t aliensPlanNap() {
 // The extra of this time: a saucer, an alien shooting back, or - with the
 // option on - a block waking for a moment.
 uint8_t aliensExtraKind() {
-  uint8_t k = (uint8_t)random(aliensSettings.nap ? 3 : 2);
+  uint8_t k = (uint8_t)faceRandom(aliensSettings.nap ? 3 : 2);
   return k == 0 ? ALIENS_KNOCK_SAUCER : k == 1 ? ALIENS_KNOCK_BACK : ALIENS_EXTRA_NAP;
 }
 
@@ -4616,13 +4669,13 @@ bool aliensScene(uint8_t kind, const char *why) {
   if (aliensPlannedFor == 0) { return false; }   // the next change is planned on the face's next pass
   if (kind == ALIENS_KNOCK_RANDOM) {
     const uint8_t KINDS[3] = { ALIENS_KNOCK_REPLAY, ALIENS_KNOCK_SAUCER, ALIENS_KNOCK_BACK };
-    kind = KINDS[random(3)];
+    kind = KINDS[faceRandom(3)];
   }
   unsigned long plannedStart = aliensStartAt;
   uint32_t len;
   const char *what;
   if (kind == ALIENS_KNOCK_SAUCER) {
-    len = alienFace.planSaucer(random(2) == 0, (uint8_t)random(3));
+    len = alienFace.planSaucer(faceRandom(2) == 0, (uint8_t)faceRandom(3));
     what = "a saucer";
   } else if (kind == ALIENS_KNOCK_BACK) {
     len = aliensPlanBack();
@@ -4786,6 +4839,7 @@ void aliensDraw(bool colonOn, uint32_t sceneMs) {
   } else if (alienFace.burstOn) {
     aliensArt(ALIEN_BURST, 3, alienFace.burstX, alienFace.burstY, orange);
   }
+  FACE_FRAME_DRAWN();
   drawStatusPixel();
   drawHotspotMark();
   drawNoticeMarker();
@@ -4938,6 +4992,7 @@ void renderClock(void) {
     matrix.print(timeStr[i]);
   }
 
+  FACE_FRAME_DRAWN();   // debug and test builds: counted, and logged as a checksum before the marks go over it
   drawStatusPixel();
   drawHotspotMark();
   drawNoticeMarker();
@@ -5049,12 +5104,18 @@ void timekeeper(void) {
   
   millisNow=millis();
   localTime=clockNow() + tzTotalOffset();   // the clock keeps UTC; the panel shows local time
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+  localTime += testShift;                    // a test's moment (POST /api/test shift=): the panel only, never the clock
+#endif
 
   if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; secondStartedAt=millisNow; }
   else { secondTrigger=false; }
  
   if(secondTrigger && minuteNow != clockMinute(localTime)) { minuteNow=clockMinute(localTime); minuteTrigger=true; }
   else { minuteTrigger=false; }
+#if defined(FACE_FRAME_LOG)
+  if (minuteTrigger) { FaceRandom::seed((uint32_t)((localTime / 60) % 1440) + 1); }   // the same minute of any day, the same numbers
+#endif
 
   if(minuteTrigger && hourNow != clockHour(localTime)) { hourNow=clockHour(localTime); hourTrigger=true; }
   else { hourTrigger=false; }
@@ -11846,6 +11907,34 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
 #if HA_LINK
   } else if (path == "/api/ha") {
     apiHa(c, body);
+#endif
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+  } else if (path == "/api/test") {
+    // Debug and test builds: what tools.local/refactor needs to play the same
+    // scenes again. shift= moves the panel's time by that many seconds (RAM
+    // only: the clock, its RTC and the sync keep the real time); seed= sets
+    // the faces' random numbers (test builds); quiet=1 keeps GIFs and extras
+    // from coming of their own accord until a restart; extra=1 makes an extra
+    // due now; anim=1 runs "trigger watchface animation", as a knock does.
+    String v = getParam(body, "shift");
+    if (v.length()) { testShift = v.toInt(); panelDirty = true; }
+#if defined(FACE_FRAME_LOG)
+    v = getParam(body, "seed");
+    if (v.length()) { FaceRandom::seed((uint32_t)strtoul(v.c_str(), nullptr, 10)); }
+#endif
+#if GIF_PLAYBACK
+    if (getParam(body, "quiet") == "1") {
+      gifSettings.randomOn = 0;
+      decorSettings.extras = 1;                    // the rarest pace, so extra=1 still has one to give
+      extrasDueAt = millisNow + 3600000UL;
+    }
+    if (getParam(body, "extra") == "1") { extrasDueAt = millisNow ? millisNow : 1; }
+#endif
+    if (getParam(body, "anim") == "1") { faceAnimationStart(); }
+    JsonDocument d;
+    d["shift"] = testShift;
+    d["local"] = (long long)localTime;
+    sendJson(c, d);
 #endif
   } else if (path == "/api/restart") {
     sendNoContent(c);
