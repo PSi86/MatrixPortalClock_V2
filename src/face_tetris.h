@@ -207,6 +207,7 @@ class TetrisFace : public Watchface {
   const TetrisSettings &_s;
   Digit         _digits[4];
   uint16_t      _pal[TETRIS_COLOUR_CLASSES];  // palette at the current brightness
+  uint16_t      _palBright = 0x100;           // the brightness it was made for; 0x100 = none yet
   uint8_t       _rotation   = 0xFF;   // rotation the layout was built for; 0xFF = build anew
   bool          _landscape  = false;  // orientation the layout was built for
   bool          _settled    = false;  // true once every block has landed
@@ -759,8 +760,11 @@ inline bool TetrisFace::update(const FaceNow &now) {
 // The digits, or the ones coming apart, and the colon. The palette follows
 // the brightness, as the classic face's colours do.
 inline void TetrisFace::draw(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) {
-  for (uint8_t i = 0; i < TETRIS_COLOUR_CLASSES; i++) {
-    _pal[i] = paint.color(TETRIS_PALETTE[i][0], TETRIS_PALETTE[i][1], TETRIS_PALETTE[i][2]);
+  if (paint.bright != _palBright) {   // made anew only for a new brightness (K8 of the face refactor)
+    for (uint8_t i = 0; i < TETRIS_COLOUR_CLASSES; i++) {
+      _pal[i] = paint.color(TETRIS_PALETTE[i][0], TETRIS_PALETTE[i][1], TETRIS_PALETTE[i][2]);
+    }
+    _palBright = paint.bright;
   }
   g.fillScreen(0);
   for (uint8_t i = 0; i < 4; i++) {

@@ -57,7 +57,6 @@ struct FaceNow {
   bool set;                 // whether the clock has a time; without one the faces show dashes
   uint8_t hour, minute, second;
   bool secondTick, minuteTick, hourTick;
-  uint16_t loopHz;          // how often the loop runs per second as the board paces it
   uint8_t turn;             // the panel's rotation, 0..3: 0 and 2 landscape
   int16_t w, h;             // its size as it is turned, 64x32 or 32x64
 };
@@ -174,7 +173,7 @@ enum FaceParamKind : uint8_t {
 };
 const uint8_t PARAM_REDRAW = 0x01;   // a new value: the face redraws at once
 const uint8_t PARAM_PLAYS  = 0x02;   // a new value tried live: the face plays what it picks
-const uint8_t PARAM_KNOCK  = 0x04;   // the knock's sensitivity: to the sensor whenever it comes
+const uint8_t PARAM_KNOCK  = 0x04;   // the knock's sensitivity: to the sensor when it changes
 struct FaceParam {
   const char *key;            // in the web app and in /api/state
   uint8_t offset, size;       // where in the blob: 1 or 2 bytes, little-endian
@@ -238,7 +237,9 @@ void faceBlobSave(FaceBlob &b, Store &store) {
 // The web app's values for a face's settings, live or to be saved: each key
 // that `get(key)` finds is taken, kept within its range. Returns what came:
 // PARAM_REDRAW or PARAM_PLAYS for such a setting whose value changed,
-// PARAM_KNOCK whenever the sensitivity was given.
+// PARAM_KNOCK when the sensitivity changed (U2 of the face refactor: until
+// 2026-10-20 whenever the web app sent it, which it does with every live
+// change - the wall's QMI8658 was reset each time, blind to a knock meanwhile).
 template <typename Get>
 uint8_t faceBlobApply(FaceBlob &b, Get get) {
   uint8_t came = 0;
@@ -248,8 +249,7 @@ uint8_t faceBlobApply(FaceBlob &b, Get get) {
     if (!v.length()) { continue; }
     long x = v.toInt();
     uint16_t now = p.kind == PARAM_FLAG ? (x ? 1 : 0) : (uint16_t)constrain(x, (long)p.lo, (long)p.hi);
-    if (now != faceParamGet(b.data, p)) { came |= p.flags & (PARAM_REDRAW | PARAM_PLAYS); }
-    came |= p.flags & PARAM_KNOCK;
+    if (now != faceParamGet(b.data, p)) { came |= p.flags & (PARAM_REDRAW | PARAM_PLAYS | PARAM_KNOCK); }
     faceParamSet(b.data, p, now);
   }
   return came;

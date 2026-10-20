@@ -2704,16 +2704,6 @@ void updatePanelRate() {
   panelRateLast = millisNow;
 }
 
-// How often the loop runs per second as the board paces it: on the S3 once
-// per panel refresh when nothing holds it up, on the M4 once every LOOP_MS.
-uint16_t boardLoopHz() {
-#if PANEL_PACED_LOOP
-  return panelHz ? panelHz : PANEL_HZ_TYPICAL;
-#else
-  return 1000 / LOOP_MS;
-#endif
-}
-
 #if defined(CLOCK_DEBUG)
 // Debug build only: frame timing, printed once per second. "frames" is how often
 // a face was drawn, "panel" the panel's refresh rate (updatePanelRate()),
@@ -3002,7 +2992,6 @@ void aliensSelfTest() {
    run; its steps (plan=) happen at their moment on the test's clock. */
 void testFaceReset() {
   faceCatchUp();
-  classicFace.pace(1000 / TEST_STEP_MS);   // the classic flights' pace: the test clock's, not one measured before
 #if WATCHFACE_TETRIS
   tetrisFace.testReset();
 #endif
@@ -3116,7 +3105,6 @@ FaceNow faceMoment() {
   n.secondTick = secondTrigger;
   n.minuteTick = minuteTrigger;
   n.hourTick   = hourTrigger;
-  n.loopHz     = boardLoopHz();
   n.turn       = screenRotation;
   n.w          = matrix.width();
   n.h          = matrix.height();
@@ -3946,6 +3934,7 @@ void applySettings() {
   // Enforce full colors (the trail is dimmed at render time, not by the swatch).
   normalizeColorFull(settings.classic.digitR, settings.classic.digitG, settings.classic.digitB);
   normalizeColorFull(settings.classic.trailR, settings.classic.trailG, settings.classic.trailB);
+  panelDirty = true;   // the faces draw on a change only: what is on the panel may be of other settings
 }
 
 // Scale a base color by an explicit brightness (0..255), as the faces do (FacePaint).
@@ -5896,8 +5885,8 @@ void applyParams(const String &q) {
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.classic.flyInTime  = flyInUnits(v.toInt()); }   // ms
-  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); }
-  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); }
+  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); panelDirty = true; }
+  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); panelDirty = true; }
   for (int i = 0; i < 6; i++) {
     v = getParam(q, "dir" + String(i));
     if (v.length()) { settings.classic.dir[i] = constrain(v.toInt(), 0, 3); }
@@ -6004,8 +5993,8 @@ FaceOutcome applyLiveParams(const String &q) {
   v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.classic.flyInTime = flyInUnits(v.toInt()); }   // ms
-  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); }
-  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); }
+  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); panelDirty = true; }
+  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); panelDirty = true; }
 #if WATCHFACE_TETRIS
   // The faces' own settings, and what the page asks to see - but a face just
   // chosen shows itself as it comes (the Tetris digits drop, the others show

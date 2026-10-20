@@ -62,12 +62,6 @@ class ClassicFace : public Watchface {
   bool offers(FaceTrigger why) const override { return why == TRIGGER_ACTION; }
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override;
 
-#if defined(FACE_FRAME_LOG)
-  // Test builds: the flights' pace as the passes per second, not the one
-  // counted before (a test scene's clock makes every pass TEST_STEP_MS).
-  void pace(uint16_t passesPerSecond) { _passesPerSec = passesPerSecond; }
-#endif
-
  private:
   // The animation on request: asked for (all six fly in at the next second),
   // flying, or neither. A new one is refused until the last one has landed
@@ -77,10 +71,9 @@ class ClassicFace : public Watchface {
   enum Anim : uint8_t { ANIM_IDLE, ANIM_ASKED, ANIM_FLYING };
 
   void digits(const FaceNow &now);
-  uint16_t flightPasses(const FaceNow &now) const;
   int16_t flightNeed(uint8_t i, uint8_t dir) const;
   void startFlight(uint8_t i);
-  void placeFlight(uint8_t i, uint16_t passes);
+  bool placeFlight(uint8_t i, unsigned long ms);
   uint8_t trailBrightness(uint8_t bright) const;
 
   const ClassicSettings &_s;
@@ -96,17 +89,10 @@ class ClassicFace : public Watchface {
   bool _flying[6] = {};
   uint8_t _flightDir[6] = {};
   uint8_t _flightDist[6] = {1, 1, 1, 1, 1, 1};
-  // The passes every flight takes, set at each second's tick: all flights
-  // take the same time, so whatever flies at a tick lands together.
-  uint16_t _flightTime = 1;
-  // The passes the face had in its last whole second, counted between two
-  // ticks (0 = none counted yet). Web requests are served in the same loop
-  // and take passes away - measured: with /api/panel asked every 60 ms a
-  // flight paced by the panel's refresh rate ran 30 % slow and missed its
-  // landing. Pacing by this count keeps the fly-in time real.
-  uint16_t _passesPerSec = 0;
-  uint16_t _passesSinceTick = 0;   // since the last tick, where flights start
-  unsigned long _tickMs = 0;       // when the last tick came; 0 = none since the face came up
+  // The time every flight of this second takes, in ms, set at its tick: all
+  // flights take the same time, so whatever flies at a tick lands together,
+  // and every second looks the same whether one digit flies or six.
+  unsigned long _flightMs = 400;
   Anim _anim = ANIM_IDLE;
   unsigned long _askedIn = 0;      // the second the animation was asked in (its secondAt)
   unsigned long _animEndedAt = 0;  // when the last one landed or was cut off
@@ -119,7 +105,6 @@ class ClassicFace : public Watchface {
 // digit stands on its place for the panel as it is turned now.
 inline void ClassicFace::enter(const FaceNow &now, FaceEnter why) {
   if (why != ENTER_TURNED) {
-    _tickMs = 0;   // it was not stepped meanwhile: the next tick starts a new count
     if (_anim != ANIM_IDLE) {
       _anim = ANIM_IDLE;
       _animEndedAt = now.ms;
@@ -155,20 +140,17 @@ inline void ClassicFace::digits(const FaceNow &now) {
 // places - also one a stalled loop kept from landing, which would otherwise
 // stay off its place from then on - the strings are made anew, and every
 // digit that changes at the next second starts its flight; a digit under
-// way is placed where its flight is. The flights are placed by the passes,
-// so the face is drawn on every pass.
+// way is placed where its flight is by the time since the second began.
+// Whether the picture changed: a tick, or a digit that moved. (K8 of the face
+// refactor: until 2026-10-20 the flights were placed by the passes counted
+// since the tick, paced by the passes of the second before, and the face was
+// drawn on every pass - about 200 times a second.)
 inline bool ClassicFace::update(const FaceNow &now) {
   bool starts[6] = {};
+  bool changed = false;
   if (now.secondTick) {
-    // The passes of the second that just ended (the one the last tick
-    // started, counted with it) pace the flights of the next.
-    uint32_t span = now.ms - _tickMs;
-    if (_tickMs != 0 && span >= 900 && span <= 1100) {
-      _passesPerSec = (uint16_t)min(((uint32_t)_passesSinceTick + 1) * 1000UL / span, (uint32_t)0xFFFF);
-    }
-    _tickMs = now.ms;
-    _passesSinceTick = 0;
-    _flightTime = flightPasses(now);
+    changed = true;
+    _flightMs = (unsigned long)_s.flyInTime * 10UL;
     // Which digits change at the next second: the seconds' ones always, each
     // other when the one to its right rolls over.
     starts[5] = true;
@@ -186,8 +168,8 @@ inline bool ClassicFace::update(const FaceNow &now) {
     }
     digits(now);
   }
-  else if (_passesSinceTick < 0xFFFF) { _passesSinceTick++; }
 
+  unsigned long since = now.ms - now.secondAt;
   for (uint8_t i = 0; i < 6; i++) {
     if (now.secondTick && _flying[i]) {
       _timeX[i] = _placeX[i];
@@ -195,29 +177,15 @@ inline bool ClassicFace::update(const FaceNow &now) {
       _flying[i] = false;
     }
     if (starts[i] && now.set) { startFlight(i); }   // dashes do not fly in
-    if (_flying[i]) { placeFlight(i, _passesSinceTick); }
+    if (_flying[i] && placeFlight(i, since)) { changed = true; }
   }
   // The animation has landed once its flights have: every flight takes
-  // _flightTime passes from the tick it started on.
-  if (_anim == ANIM_FLYING && _passesSinceTick >= _flightTime) {
+  // _flightMs from the tick it started on.
+  if (_anim == ANIM_FLYING && since >= _flightMs) {
     _anim = ANIM_IDLE;
     _animEndedAt = now.ms;
   }
-  return true;
-}
-
-// The passes every flight takes: the fly-in time at the rate the face's loop
-// really has. All flights take this time, each covering its own way in it,
-// so whatever flies at a tick lands together, and every second looks the same
-// whether one digit flies or six. (Until 2026-10-08 the setting was ms per
-// pixel, rounded to whole passes per pixel: with flights up to 62 px and
-// every flight held under a second, it had three steps - 4..7, 8..12 and
-// 13..60 ms looked alike within each.)
-inline uint16_t ClassicFace::flightPasses(const FaceNow &now) const {
-  uint32_t ms = (uint32_t)_s.flyInTime * 10;
-  uint32_t hz = _passesPerSec ? _passesPerSec : now.loopHz;
-  uint32_t passes = (ms * hz + 500) / 1000;
-  return (uint16_t)max(passes, (uint32_t)1);
+  return changed;
 }
 
 // How far digit i has to fly when it comes from side dir: so far that the
@@ -261,20 +229,27 @@ inline void ClassicFace::startFlight(uint8_t i) {
   _flying[i] = true;
 }
 
-// Digit i where its flight is after `passes`: the incoming digit the rest of
-// the way out from its place, the outgoing one as far past it on the other
-// side as the flight has come. Every flight covers its way in _flightTime
-// passes, its pixels spread evenly over them.
-inline void ClassicFace::placeFlight(uint8_t i, uint16_t passes) {
+// Digit i where its flight is `ms` after the tick it started on: the
+// incoming digit the rest of the way out from its place, the outgoing one as
+// far past it on the other side as the flight has come. Every flight covers
+// its way in _flightMs, its pixels spread evenly over it. (Until 2026-10-08
+// the setting was ms per pixel, rounded to whole passes per pixel: with
+// flights up to 62 px and every flight held under a second, it had three
+// steps - 4..7, 8..12 and 13..60 ms looked alike within each.) Whether the
+// digit moved.
+inline bool ClassicFace::placeFlight(uint8_t i, unsigned long ms) {
   static const int8_t SIDE_X[4] = { 0, 1, 0, -1 };   // where each dir comes from
   static const int8_t SIDE_Y[4] = { -1, 0, 1, 0 };
-  uint32_t moved = (uint32_t)_flightDist[i] * min(passes, _flightTime) / _flightTime;
+  unsigned long len = _flightMs ? _flightMs : 1;
+  uint32_t moved = (uint32_t)((unsigned long)_flightDist[i] * min(ms, len) / len);
   int16_t rest = _flightDist[i] - (int16_t)moved;
   uint8_t d = _flightDir[i];
-  _animX[i] = _placeX[i] + SIDE_X[d] * rest;
-  _animY[i] = _placeY[i] + SIDE_Y[d] * rest;
-  _timeX[i] = _placeX[i] - SIDE_X[d] * (int16_t)moved;
-  _timeY[i] = _placeY[i] - SIDE_Y[d] * (int16_t)moved;
+  int8_t ax = _placeX[i] + SIDE_X[d] * rest, ay = _placeY[i] + SIDE_Y[d] * rest;
+  int8_t tx = _placeX[i] - SIDE_X[d] * (int16_t)moved, ty = _placeY[i] - SIDE_Y[d] * (int16_t)moved;
+  bool moves = ax != _animX[i] || ay != _animY[i] || tx != _timeX[i] || ty != _timeY[i];
+  _animX[i] = ax; _animY[i] = ay;
+  _timeX[i] = tx; _timeY[i] = ty;
+  return moves;
 }
 
 // The trail's brightness for the digits' `bright` (TRAIL_BRIGHTNESS_PCT).
