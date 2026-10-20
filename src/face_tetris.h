@@ -119,6 +119,7 @@ class TetrisFace : public Watchface {
   // How long the watchface animation takes at most now: the break-up, the
   // empty beat, and the rebuild of the time on show at the drop pace.
   unsigned long animationMs(const FaceNow &now) const;
+  FaceSpan changeSpan(const FaceNow &now, time_t minute) const override;
 
 #if defined(FACE_FRAME_LOG)
   // Test builds: a scene starts with the face afresh - a new layout and drop,
@@ -193,6 +194,7 @@ class TetrisFace : public Watchface {
   void drawDigit(Adafruit_GFX &g, uint8_t idx, int originX, int originY, unsigned long ms) const;
   void drawColon(Adafruit_GFX &g, const FacePaint &paint) const;
   void drawDashes(Adafruit_GFX &g, const FacePaint &paint) const;
+  uint16_t buildSteps(const uint8_t to[4], const uint8_t *from) const;
   int originX(uint8_t idx) const { return ((idx < 2) ? _xHour : _xMin) + ((idx & 1) ? TETRIS_PITCH : 0); }
   int originY(uint8_t idx) const { return (idx < 2) ? _yHour : _yMin; }
   uint8_t pickBreakUp() const;
@@ -230,6 +232,11 @@ class TetrisFace : public Watchface {
   unsigned long _breakUpStepLast = 0;                   // one clock for all of them, they step together
   unsigned long _holdUntil[4] = {0, 0, 0, 0};    // empty space before the rebuild starts
   unsigned long _breakUpEndedAt = 0;   // when the last effect had run its course
+  // The tail of the last span asked for, kept: the rules for the panel ask on
+  // every pass, and it changes only with the minute, the pace or the turn.
+  mutable time_t        _spanFor  = 0;
+  mutable uint8_t       _spanDrop = 0, _spanTurn = 0xFF;
+  mutable unsigned long _spanTail = 0;
 };
 
 // Chosen: a fresh layout and a fresh drop on the next pass. Shown again or
@@ -792,10 +799,17 @@ inline bool TetrisFace::busy(const FaceNow &now) const {
 inline unsigned long TetrisFace::animationMs(const FaceNow &now) const {
   uint8_t d[4];
   faceDigits(now.local, true, d, 0xFF);
+  return (unsigned long)BREAKUP_MAX_MS + HOLD_MS + (unsigned long)buildSteps(d, nullptr) * _s.dropMs;
+}
+
+// The fall steps the slowest of the digits `to` takes to be built - each
+// with the longest of its tilings - of all four, or of those that differ
+// from `from`.
+inline uint16_t TetrisFace::buildSteps(const uint8_t to[4], const uint8_t *from) const {
   uint16_t most = 0;
   for (uint8_t i = 0; i < 4; i++) {
-    uint8_t v = d[i];
-    if (v > 9) { continue; }
+    uint8_t v = to[i];
+    if (v > 9 || (from && from[i] == v)) { continue; }
     int drop = (i < 2) ? _dropHour : _dropMin;
     for (uint8_t var = 0; var < TETRIS_VARIANTS_PER_DIGIT[v]; var++) {
       uint16_t steps = 0;
@@ -806,7 +820,25 @@ inline unsigned long TetrisFace::animationMs(const FaceNow &now) const {
       if (steps > most) { most = steps; }
     }
   }
-  return (unsigned long)BREAKUP_MAX_MS + HOLD_MS + (unsigned long)most * _s.dropMs;
+  return most;
+}
+
+// Its change starts at the minute: the digits that change break up, and are
+// built anew.
+inline FaceSpan TetrisFace::changeSpan(const FaceNow &now, time_t minute) const {
+  FaceSpan s = { 0, 0 };
+  if (!now.set) { return s; }
+  if (minute != _spanFor || _s.dropMs != _spanDrop || _rotation != _spanTurn) {
+    uint8_t from[4], to[4];
+    faceDigits(minute - 60, true, from, 0xFF);
+    faceDigits(minute, true, to, 0xFF);
+    _spanTail = (unsigned long)BREAKUP_MAX_MS + HOLD_MS + (unsigned long)buildSteps(to, from) * _s.dropMs;
+    _spanFor = minute;
+    _spanDrop = _s.dropMs;
+    _spanTurn = _rotation;
+  }
+  s.tail = _spanTail;
+  return s;
 }
 
 // The input's animation: all four digits come apart and are built anew -

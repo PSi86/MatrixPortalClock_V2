@@ -104,6 +104,12 @@ struct FacePaint {
   }
 };
 
+// A face's change of the time to a minute, about: how long before the minute
+// begins it starts, and how long after it goes on (Watchface::changeSpan()).
+struct FaceSpan {
+  unsigned long lead, tail;   // ms
+};
+
 // Why a face comes onto the panel (Watchface::enter()).
 enum FaceEnter : uint8_t {
   ENTER_CHOSEN,   // chosen as the clock's face: everything afresh
@@ -141,6 +147,10 @@ class Watchface {
   virtual void draw(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) = 0;
   // Whether the time's change is under way: the picture moves for it.
   virtual bool busy(const FaceNow &now) const = 0;
+  // The span of its change to the minute that begins at `minute` (local
+  // time): as it has planned it, or as it would plan it - the hour's longer
+  // ones included. The rules for the panel keep it free.
+  virtual FaceSpan changeSpan(const FaceNow &now, time_t minute) const = 0;
   // Whether it has anything for a trigger: an extra now and then, a preview.
   virtual bool offers(FaceTrigger why) const = 0;
   // An animation asked for.

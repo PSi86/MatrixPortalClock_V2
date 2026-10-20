@@ -136,12 +136,7 @@ class MuncherFace : public PlannedFace {
   bool busy(const FaceNow &) const override { return _m.mode != muncher::MODE_IDLE; }
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override;
 
-  // For the core's rules for the panel: whether the next change is planned,
-  // when it starts, and how long before the minute it starts (a guess of
-  // 15 s until one is planned).
-  bool planned() const { return _m.legsPlanned() && _plannedFor != 0; }
-  unsigned long plannedStart() const { return _startAt; }
-  unsigned long leadMs() const { return _plannedDone ? (unsigned long)_plannedDone * _s.paceMs : 15000UL; }
+  FaceSpan changeSpan(const FaceNow &now, time_t minute) const override;
 
 #if defined(FACE_FRAME_LOG)
   // Test builds: a scene starts with the face afresh, nothing asked for,
@@ -180,6 +175,10 @@ class MuncherFace : public PlannedFace {
   uint16_t _fruitsLogged = 0;   // bonus fruits eaten, as far as the console knows
   bool     _colonOn      = false;
   bool     _colonDrawn   = false;
+  // The hour show's steps, kept for the layout they were walked on: the
+  // rules for the panel ask on every pass of a minute before a full hour.
+  mutable uint8_t  _showTurn  = 0xFE;   // none walked yet (0xFF is a layout still to be made)
+  mutable uint16_t _showSteps = 0;
 };
 
 inline void MuncherFace::startScene(muncher::Mode mode, unsigned long at, uint8_t after) {
@@ -210,7 +209,7 @@ inline bool MuncherFace::playScene(const FaceNow &now, uint8_t kind) {
   }
   // Only against a planned change: until the face has planned one (it does
   // on its next pass), there is nothing to measure the scene against.
-  if (!planned()) { return false; }
+  if (!_m.legsPlanned() || _plannedFor == 0) { return false; }
   // How long it takes, exactly: planned and walked to its end on a copy -
   // muncher.h draws no random numbers, so the copy goes as the scene will
   // (K3 of the face refactor: until 2026-10-20 it was the walk plus a margin
@@ -300,6 +299,39 @@ inline void MuncherFace::idle(const FaceNow &now, const uint8_t d[4]) {
     _after = _plannedAfter;
     _plannedFor = 0;
   }
+}
+
+// The span of its change to `minute`: the walk before it, as planned for
+// the next minute or as it would be planned on a copy (muncher.h draws no
+// random numbers), with four ghosts to a full hour; and after a full hour
+// the hour show, walked on a copy. A copy is about 1 KB on the stack, while
+// it is used.
+inline FaceSpan MuncherFace::changeSpan(const FaceNow &now, time_t minute) const {
+  FaceSpan s = { 0, 0 };
+  if (!now.set) { return s; }
+  bool hour = clockMinute(minute) == 0;
+  if (_plannedFor == minute && _plannedDone) {
+    s.lead = (unsigned long)_plannedDone * _s.paceMs;
+  } else {
+    muncher::Face f = _m;
+    uint8_t from[4], to[4];
+    faceDigits(minute - 60, true, from, muncher::NO_DIGIT);
+    faceDigits(minute, true, to, muncher::NO_DIGIT);
+    f.show(from);
+    s.lead = (unsigned long)f.planChange(to, _s.style, 0, hour ? 4 : 2) * _s.paceMs;
+  }
+  if (hour) {
+    if (_showTurn != _rotation) {
+      muncher::Face f = _m;
+      f.startHour();
+      uint16_t n = 0;
+      while (f.mode != muncher::MODE_IDLE && n < 3000) { f.advanceTo(++n); }
+      _showSteps = n;
+      _showTurn = _rotation;
+    }
+    s.tail = (unsigned long)_showSteps * _s.paceMs;
+  }
+  return s;
 }
 
 // A scene is over: what it leads to. After the change to a full hour, the

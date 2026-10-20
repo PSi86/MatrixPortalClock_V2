@@ -7877,47 +7877,20 @@ unsigned long noticeNewMs() {
    Who takes the panel, and when: the rules (the constants at the top).
    ---------------------------------------------------------------------- */
 
-// How long before the minute the face's change starts, about - for drawing
-// random times only; faceChangeIn() is what counts.
-unsigned long faceLeadMs() {
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) { return aliensFace.leadMs(); }
-#endif
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) {
-    return muncherFace.leadMs();
-  }
-#endif
-  return 0;
-}
-
-// How long the face's change goes on after the minute has begun, about: the
-// Tetris digits come apart and build anew, the others stand at :00.
-unsigned long faceTailMs() {
-  return settings.watchface == WATCHFACE_TETRIS_ID ? 6000UL : 1500UL;
-}
-
 // How long until the time's next change starts, in ms: 0 while the face's
-// change or a scene of it runs, ~0UL without a time. The Muncher and the
-// Aliens plan theirs backwards from the minute; until a plan is made, about
-// 15 s before it.
+// change or a scene of it runs, ~0UL without a time. Each face says how long
+// before the minute its change starts (Watchface::changeSpan()): the Muncher
+// and the Aliens as planned backwards from it, the classic digits in the
+// second before, the Tetris ones at the minute. (K5 of the face refactor:
+// until 2026-10-20 the Muncher and the Aliens counted 15 s until they had
+// planned, and the classic face from the minute.)
 unsigned long faceChangeIn() {
   if (!clockIsSet()) { return ~0UL; }
   if (!faceTimeShown()) { return 0; }
-  long toMinute = (long)(secondStartedAt + (60UL - secondNow) * 1000UL - millisNow);
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) {
-    if (aliensFace.planned()) { long in = (long)(aliensFace.plannedStart() - millisNow); return in > 0 ? (unsigned long)in : 0; }
-    toMinute -= 15000;
-  }
-#endif
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) {
-    if (muncherFace.planned()) { long in = (long)(muncherFace.plannedStart() - millisNow); return in > 0 ? (unsigned long)in : 0; }
-    toMinute -= 15000;
-  }
-#endif
-  return toMinute > 0 ? (unsigned long)toMinute : 0;
+  time_t next = localTime - secondNow + 60;
+  long in = (long)(secondStartedAt + (60UL - secondNow) * 1000UL - millisNow)
+          - (long)faceFor(settings.watchface).changeSpan(faceMoment(), next).lead;
+  return in > 0 ? (unsigned long)in : 0;
 }
 
 // Whether something optional of `ms` ends PANEL_GUARD_BEFORE_MS before the
@@ -7980,12 +7953,30 @@ bool decorFree(unsigned long ms, bool gif) {
   return true;
 }
 
+// The minute the moment `at` (millis) falls in - the local time it began
+// at - and how far into it `at` lies, in ms.
+void panelMinuteOf(unsigned long at, time_t &minute, unsigned long &inMinute) {
+  unsigned long fromMinute = secondNow * 1000UL + (millisNow - secondStartedAt) + (at - millisNow);
+  minute = localTime - secondNow + (time_t)(fromMinute / 60000UL) * 60;
+  inMinute = fromMinute % 60000UL;
+}
+
 // Whether the moment `at` (millis) falls into the slot around a change of
-// the time, for something of `ms`: from its length, the guard and the
-// face's lead before the minute until the change's tail and the rest after it.
+// the time, for something of `ms`: from its length, the guard and the lead
+// of the change after it until the tail of the change before it and the rest
+// after that - each as the face says (Watchface::changeSpan()), the hour's
+// longer ones included. (K5 of the face refactor: until 2026-10-20 a flat
+// 15 s before on the Muncher and the Aliens, 1.5 s after - 6 s on the Tetris
+// face -, which let the Aliens' wave and the Muncher's hour show drop what
+// fell into them.)
 bool panelInChangeSlot(unsigned long at, unsigned long ms) {
-  unsigned long inMinute = (secondNow * 1000UL + (millisNow - secondStartedAt) + (at - millisNow)) % 60000UL;
-  unsigned long before = faceLeadMs() + PANEL_GUARD_BEFORE_MS + ms, after = faceTailMs() + PANEL_DECOR_REST_MS;
+  time_t minute;
+  unsigned long inMinute;
+  panelMinuteOf(at, minute, inMinute);
+  Watchface &face = faceFor(settings.watchface);
+  FaceNow now = faceMoment();
+  unsigned long before = face.changeSpan(now, minute + 60).lead + PANEL_GUARD_BEFORE_MS + ms;
+  unsigned long after = face.changeSpan(now, minute).tail + PANEL_DECOR_REST_MS;
   return inMinute + before >= 60000UL || inMinute < after;
 }
 
@@ -7998,9 +7989,14 @@ unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms
     at = millisNow + lo + (hi > lo ? esp_random() % (hi - lo + 1) : 0);
     if (!panelInChangeSlot(at, ms)) { return at; }
   }
-  unsigned long inMinute = (secondNow * 1000UL + (millisNow - secondStartedAt) + (at - millisNow)) % 60000UL;
-  unsigned long after = faceTailMs() + PANEL_DECOR_REST_MS;
-  return at + (inMinute < after ? after - inMinute : 60000UL - inMinute + after);
+  time_t minute;
+  unsigned long inMinute;
+  panelMinuteOf(at, minute, inMinute);
+  FaceNow now = faceMoment();
+  Watchface &face = faceFor(settings.watchface);
+  unsigned long after = face.changeSpan(now, minute).tail + PANEL_DECOR_REST_MS;
+  if (inMinute < after) { return at + (after - inMinute); }
+  return at + (60000UL - inMinute) + face.changeSpan(now, minute + 60).tail + PANEL_DECOR_REST_MS;
 }
 
 // The faces' extras: the next at a random time around the slider's mean -

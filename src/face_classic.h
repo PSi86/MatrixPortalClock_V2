@@ -53,6 +53,12 @@ class ClassicFace : public Watchface {
   bool update(const FaceNow &now) override;
   void draw(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) override;
   bool busy(const FaceNow &now) const override;
+  // The minute's digits fly in during its second :59; the seconds' flight
+  // into :00 ends a fly-in time later.
+  FaceSpan changeSpan(const FaceNow &, time_t) const override {
+    FaceSpan s = { 1000UL, (unsigned long)_s.flyInTime * 10UL };
+    return s;
+  }
   bool offers(FaceTrigger why) const override { return why == TRIGGER_ACTION; }
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override;
 

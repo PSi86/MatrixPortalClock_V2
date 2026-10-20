@@ -363,7 +363,8 @@ because whatever waited took the panel the moment it was free.
   extra is measured by its own length, which only the face knows, and one that
   would run into the face's next change is dropped too (`Extra: due, the face
   has no room for it - dropped`); a random time that falls into the slot around a change
-  is drawn anew straight away. A GIF or a face scene asked for by an input
+  is drawn anew straight away - the slot each face's own change, as long as it
+  really is, the Aliens' hour wave and the Muncher's hour show included. A GIF or a face scene asked for by an input
   (button, gesture, knock, the web app) plays at once or not at all: during the
   face's change or a scene it is dropped (`GIF: asked for during the face's
   change or scene, dropped`), and so is one that would run into the next change.

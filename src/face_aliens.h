@@ -10,6 +10,7 @@
 #define FACE_ALIENS_H
 
 #include <Adafruit_GFX.h>
+#include <new>
 #include "face_planned.h"
 #include "aliens.h"
 
@@ -106,12 +107,7 @@ class AliensFace : public PlannedFace {
   bool busy(const FaceNow &) const override { return _a.running; }
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override;
 
-  // For the core's rules for the panel: whether the next change is planned,
-  // when it starts, and how long before the minute it starts (a guess of
-  // 15 s until one is planned).
-  bool planned() const { return _plannedFor && _plannedStand; }
-  unsigned long plannedStart() const { return _startAt; }
-  unsigned long leadMs() const { return _plannedStand ? _plannedStand : 15000UL; }
+  FaceSpan changeSpan(const FaceNow &now, time_t minute) const override;
 
 #if defined(FACE_FRAME_LOG)
   // Test builds: a scene starts with the face afresh, nothing asked for,
@@ -248,6 +244,33 @@ inline void AliensFace::idle(const FaceNow &now, const uint8_t d[4]) {
     _a.start();
     if (_a.scene == aliens::SCENE_WAVE) { Serial.println("Aliens: the hour's wave"); }
   }
+}
+
+// The span of its change to `minute`: the march before it, the full hour's
+// wave included, as planned for the next minute or as it would be planned
+// on a copy - 2.8 KB, so on the heap, only while it is used; without one,
+// the guesses of before (15 s, the wave 17 s). The new time stands as the
+// minute begins.
+inline FaceSpan AliensFace::changeSpan(const FaceNow &now, time_t minute) const {
+  FaceSpan s = { 0, 0 };
+  if (!now.set) { return s; }
+  bool hour = clockMinute(minute) == 0;
+  if (_plannedFor == minute && _plannedStand) {
+    s.lead = _plannedStand;
+    return s;
+  }
+  aliens::Face *f = new (std::nothrow) aliens::Face(_a);
+  if (!f) {
+    s.lead = hour ? 17000UL : 15000UL;
+    return s;
+  }
+  uint8_t from[4], to[4];
+  faceDigits(minute - 60, true, from, aliens::NO_DIGIT);
+  faceDigits(minute, true, to, aliens::NO_DIGIT);
+  f->show(from);
+  s.lead = f->planChange(to, _s.style, 0, hour);
+  delete f;
+  return s;
 }
 
 // One pass: it reports a change only when what it shows has changed (a step
