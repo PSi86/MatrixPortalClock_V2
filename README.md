@@ -357,8 +357,11 @@ because whatever waited took the panel the moment it was free.
   need the plain face at rest for 10 s first, and a GIF a minute after info
   cards and before an info round.
 - **Nothing optional waits:** a GIF or an extra that has no room when it is due
-  is dropped (`GIF: due, the panel not free for it - dropped`), and the next
-  random time is drawn; a random time that falls into the slot around a change
+  is dropped (`GIF: due, the panel not free for it - dropped`, `Extra: due, the
+  panel not free for it - dropped`), and the next random time is drawn; an
+  extra is measured by its own length, which only the face knows, and one that
+  would run into the face's next change is dropped too (`Extra: due, the face
+  has no room for it - dropped`); a random time that falls into the slot around a change
   is drawn anew straight away. A GIF or a face scene asked for by an input
   (button, gesture, knock, the web app) plays at once or not at all: during the
   face's change or a scene it is dropped (`GIF: asked for during the face's
@@ -1481,10 +1484,11 @@ right. About 9 s.
 
 **Bonus fruit**: now and then, at the pace of the extras the faces share (the
 **Extras** slider, about every 5 min by default; none in quiet hours or a dark
-room), a fruit lies after a minute change in the
-corridor - a cherry, a strawberry, an orange or an apple, 7 × 7 px - still until
-the next change, whose muncher eats it on its way along (`Muncher: a bonus fruit
-eaten` on the console).
+room), a fruit appears in the corridor at its drawn time, outside the slot around
+the change - a cherry, a strawberry, an orange or an apple, 7 × 7 px - and lies
+still until the next change, whose muncher eats it on its way along (`Muncher: a
+bonus fruit (now and then)`, then `Muncher: a bonus fruit eaten` on the console).
+Until 2026-10-20 it came only at the end of a minute change.
 
 **Knock**, and the face action *trigger watchface animation*: *Power pellet*,
 *Last digit again* (the minutes' ones eaten and laid again), *Ghosts win*, or
@@ -1579,8 +1583,8 @@ it and, once it is there, the alien drops its bomb, which hits it; the wreck fli
 in at home and the alien turns back into its block; or, with **Waking blocks**
 (`anap`, on by default), a single block wakes as an alien for 3 s and turns back.
 Upright only the minutes shoot back, since the hours stand above them. One that has
-no room when it is due - the wave's minute, info cards waiting, a GIF just before -
-is dropped, not kept. **Knock** (`akn`): what a knock, or the face action "trigger watchface
+no room when it is due, measured by its own length - the wave's minute, info cards
+waiting, a GIF just before - is dropped, not kept. **Knock** (`akn`): what a knock, or the face action "trigger watchface
 animation", plays - *Last digit again* (the minutes' ones shot and brought back),
 *Saucer*, *Aliens shoot back*, or *Random each time* (the default); a new value
 chosen in the web app plays it once, and choosing the face shows a change of the

@@ -439,7 +439,7 @@ const uint32_t CARD_LOOP_MAX_MS = 25000;
 const unsigned long PANEL_GUARD_BEFORE_MS = FACE_GUARD_MS;   // optional things end this long before a change starts (face.h)
 const unsigned long PANEL_INFO_AFTER_MS   = 3000;   // messages, cards, the info round: after a change's end
 const unsigned long PANEL_DECOR_REST_MS   = 10000;  // GIFs and extras of their own accord: the plain face this long first
-const unsigned long PANEL_EXTRA_MS        = 8000;   // the longest extra of a face, about
+const unsigned long PANEL_EXTRA_MS        = 8000;   // the longest extra of a face, about: for drawing their times
 const uint8_t       PANEL_INFO_HALF_S     = 30;     // messages and cards start before this second
 unsigned long faceChangeEndedAt = 0;   // the face's last change or scene ended
 unsigned long panelFaceSince    = 0;   // the face came back on top
@@ -1805,6 +1805,7 @@ void loop(void) {
   gifCardUpdate();      // the card's task: its results, and the next GIF read ahead
 #endif
   gifUpdate();          // a GIF of its own accord when one is due
+  extrasUpdate();       // the face's extra when one is due
 #endif
   switch (screen) {
 #if defined(CLOCK_DEBUG)
@@ -2959,10 +2960,10 @@ const uint8_t MUNCHER_PELLETS_WIDE  = 1;
 const uint8_t MUNCHER_PELLETS_TALL  = 2;
 const uint8_t MUNCHER_PELLETS_SOLID = 3;
 const uint8_t MUNCHER_PELLETS_COUNT = 4;
-// What a scene that ends leads to: a minute change may leave a bonus fruit,
-// and the change to a full hour is followed by the hour show.
+// What a scene that ends leads to: the change to a full hour is followed by
+// the hour show. (Until 2026-10-20 a minute change could leave a bonus fruit;
+// the fruit is an extra of its own now, at its drawn time.)
 const uint8_t MUNCHER_AFTER_NOTHING = 0;
-const uint8_t MUNCHER_AFTER_MINUTE  = 1;
 const uint8_t MUNCHER_AFTER_HOUR    = 2;
 const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
 const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
@@ -3117,7 +3118,7 @@ void muncherIdle(const uint8_t now[4]) {
     faceDigits(next, clockIsSet(), to, muncher::NO_DIGIT);
     bool hour = clockMinute(next) == 0;
     muncherPlannedDone = munch.planChange(to, muncherSettings.style, 0, hour ? 4 : 2);
-    muncherPlannedAfter = hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_MINUTE;
+    muncherPlannedAfter = hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_NOTHING;
     muncherPlannedFor = next;
   }
   // The start, worked out anew on every pass until the change begins: the
@@ -3161,9 +3162,8 @@ void muncherIdle(const uint8_t now[4]) {
   }
 }
 
-// A scene is over: what it leads to. After the change to a full hour the
-// hour show; after a minute change now and then a bonus fruit, at the pace
-// of the extras the faces share, and none in quiet hours or a dark room.
+// A scene is over: what it leads to. After the change to a full hour, the
+// hour show.
 void muncherSceneEnded() {
   uint8_t after = muncherAfter;
   muncherAfter = MUNCHER_AFTER_NOTHING;
@@ -3174,12 +3174,18 @@ void muncherSceneEnded() {
     muncherStartAt = millisNow;
     muncherPlannedFor = 0;
     Serial.println("Muncher: the hour show");
-  } else if (after == MUNCHER_AFTER_MINUTE) {
-    if (extrasDue()) {   // the Muncher is built only with GIF playback, which has the extras
-      extrasScheduleNext();
-      if (!decorQuiet()) { muncherPlaceFruit(); }
-    }
   }
+}
+
+// The extra now and then (extrasUpdate()): a bonus fruit in the corridor,
+// which lies still until the next change eats it. None while a scene runs
+// or a fruit lies there already.
+bool muncherExtra() {
+  if (munch.mode != muncher::MODE_IDLE || munch.shown[0] == muncher::NO_DIGIT) { return false; }
+  if (munch.fruitX != muncher::NO_FRUIT) { return false; }
+  muncherPlaceFruit();
+  Serial.println("Muncher: a bonus fruit (now and then)");
+  return true;
 }
 
 // A sprite of 5 x 5, its rows with the leftmost pixel in bit 4, drawn round
@@ -3597,11 +3603,15 @@ bool aliensScene(uint8_t kind, const char *why) {
 // The knock's scene, or the face action's.
 bool aliensKnock() { return aliensScene(aliensSettings.knock, "a knock"); }
 
+// The extra now and then (extrasUpdate()), measured by its own length
+// against the next change.
+bool aliensExtra() { return aliensScene(aliensExtraKind(), "now and then"); }
+
 // Nothing moving: put a time right that moved on without a change, plan the
 // next change once a minute - backwards from the minute, worked out anew on
 // every pass from the second's beginning, as the Muncher's; to a full hour
 // the wave - and start it when its moment has come. In between, what the
-// web app asks for, and now and then an extra.
+// web app asks for.
 void aliensIdle(const uint8_t now[4]) {
   if (memcmp(alienFace.shown, now, 4) != 0) {
     if (alienFace.shown[0] == aliens::NO_DIGIT || now[0] == aliens::NO_DIGIT) {
@@ -3642,16 +3652,6 @@ void aliensIdle(const uint8_t now[4]) {
     aliensKnockReq = false;
     aliensScene(aliensSettings.knock, "the web app's knock");
     return;
-  }
-  // An extra now and then, at the pace the faces share: now, or dropped when
-  // the panel is not free for it (decorFree()) - it does not wait.
-  if (extrasDue()) {
-    extrasScheduleNext();
-    if (rested && decorFree(PANEL_EXTRA_MS, false)) {
-      aliensScene(aliensExtraKind(), "now and then");
-      return;
-    }
-    Serial.println("Aliens: an extra due, the panel not free for it - dropped");
   }
   // Started at its planned moment even when that has passed (the face was
   // away): from there, everything is where it ought to be by now.
@@ -8840,12 +8840,42 @@ void extrasScheduleNext() {
   if (!extrasDueAt) { extrasDueAt = 1; }
 }
 
-// Whether an extra is due. Then it plays now or not at all: the face asks
-// decorFree() and calls extrasScheduleNext() either way.
+// Whether an extra is due. Then it plays now or not at all (extrasUpdate()).
 bool extrasDue() {
   if (!decorSettings.extras) { return false; }
   if (extrasDueAt == 0) { extrasScheduleNext(); return false; }
   return (long)(millisNow - extrasDueAt) >= 0;
+}
+
+// On every pass outside the hotspot, after a GIF of its own accord: the
+// extra of the face shown, when one is due - now, or dropped, and the next
+// time drawn either way. The panel has to be free for something of its own
+// accord (decorFree(): quiet, the face at rest, information waiting, room
+// before the change); then the face, which knows how long its extra takes,
+// plays it or refuses one that would run into its next change. Faces
+// without extras leave the time alone.
+void extrasUpdate() {
+  bool muncher = false, aliens = false;
+#if WATCHFACE_MUNCHER
+  muncher = settings.watchface == WATCHFACE_MUNCHER_ID;
+#endif
+#if WATCHFACE_ALIENS
+  aliens = settings.watchface == WATCHFACE_ALIENS_ID;
+#endif
+  if ((!muncher && !aliens) || !extrasDue()) { return; }
+  extrasScheduleNext();
+  if (!decorFree(0, false)) {
+    Serial.println("Extra: due, the panel not free for it - dropped");
+    return;
+  }
+  bool played = false;
+#if WATCHFACE_MUNCHER
+  if (muncher) { played = muncherExtra(); }
+#endif
+#if WATCHFACE_ALIENS
+  if (aliens) { played = aliensExtra(); }
+#endif
+  if (!played) { Serial.println("Extra: due, the face has no room for it - dropped"); }
 }
 
 void loadDecorSettings() {
