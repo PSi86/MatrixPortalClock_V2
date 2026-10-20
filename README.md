@@ -367,7 +367,8 @@ because whatever waited took the panel the moment it was free.
   (button, gesture, knock, the web app) plays at once or not at all: during the
   face's change or a scene it is dropped (`GIF: asked for during the face's
   change or scene, dropped`), and so is one that would run into the next change.
-- **Extras** (the face section, **Extras**, shared by the faces that have them):
+- **Now and then** (the face section's card **Now and then**, its slider **How often**,
+  shared by the faces that have such scenes):
   how often the Aliens' saucer, an alien shooting back and a waking block, and
   the Muncher's fruit come - never, or about every 60, 30, 15, 10, 5 (the
   default) or 2 minutes, at a random time from half to one and a half times
@@ -378,6 +379,15 @@ because whatever waited took the panel the moment it was free.
   an input asks for still plays.
 
 The settings for extras and quiet are a blob of their own (NVS key `deco`).
+
+In the web app every face's settings come in the same groups (Peter,
+2026-10-20): **Change** - how its time changes: the Tetris break-up effect and
+paces, the classic fly-in time and sides, the Muncher's and the Aliens' style
+and the Muncher's pace -, **Look** - colours, pellets -, **Watchface
+animation** - what the input action of that name plays, only on the Muncher and
+the Aliens, which have a choice; on the classic face all six digits fly in, on
+the Tetris face all four break up - and **Now and then** - how often, and the
+Aliens' waking blocks. The keys and the stored values are those of before.
 
 ## GIF playback
 
@@ -1488,14 +1498,15 @@ intermission - a ghost chases the muncher out to the left, and a giant muncher
 right. About 9 s.
 
 **Bonus fruit**: now and then, at the pace of the extras the faces share (the
-**Extras** slider, about every 5 min by default; none in quiet hours or a dark
+**How often** slider under **Now and then**, about every 5 min by default; none in quiet hours or a dark
 room), a fruit appears in the corridor at its drawn time, outside the slot around
 the change - a cherry, a strawberry, an orange or an apple, 7 × 7 px - and lies
 still until the next change, whose muncher eats it on its way along (`Muncher: a
 bonus fruit (now and then)`, then `Muncher: a bonus fruit eaten` on the console).
 Until 2026-10-20 it came only at the end of a minute change.
 
-**Knock**, and the face action *trigger watchface animation*: *Power pellet*,
+**Watchface animation** (`mkn`), what the input action *trigger watchface animation*
+plays - a knock, unless the Inputs page says otherwise: *Power pellet*,
 *Last digit again* (the minutes' ones eaten and laid again), *Ghosts win*, or
 *Random each time* (one of the three). All of them start as a change of the time
 does, the muncher in from the left with both ghosts behind it, so none gives
@@ -1580,7 +1591,7 @@ stands, and a burst goes down with the wave (Peter, 2026-10-14: it had stepped d
 at once, before a shot; 2026-10-16: the cannon waited for every step down). Then
 the new time marches in. That takes about 17 s, upright as well.
 
-**Now and then**, at the pace of the extras the faces share (the **Extras** slider,
+**Now and then**, at the pace of the extras the faces share (the **How often** slider,
 about every 5 min by default) and at a random time outside the slot around the
 change, a scene leaves the time as it is: a red **saucer** crosses the lane above the digits and
 the cannon shoots it through a gap between two digits it can reach in time (upright
@@ -1591,8 +1602,8 @@ in at home and the alien turns back into its block; or, with **Waking blocks**
 (`anap`, on by default), a single block wakes as an alien for 3 s and turns back.
 Upright only the minutes shoot back, since the hours stand above them. One that has
 no room when it is due, measured by its own length - the wave's minute, info cards
-waiting, a GIF just before - is dropped, not kept. **Knock** (`akn`): what a knock, or the face action "trigger watchface
-animation", plays - *Last digit again* (the minutes' ones shot and brought back),
+waiting, a GIF just before - is dropped, not kept. **Watchface animation** (`akn`): what the input action "trigger watchface
+animation" (a knock, unless the Inputs page says otherwise) plays - *Last digit again* (the minutes' ones shot and brought back),
 *Saucer*, *Aliens shoot back*, or *Random each time* (the default); a new value
 chosen in the web app plays it once, at once or not at all (the page says when
 not). None of them starts when it could not end 3 s before the next change; GIFs
