@@ -209,8 +209,12 @@ inline bool boardBusBegin() {
   // only been tested on the S3, so it stays switched off elsewhere until the M4
   // gets a hardware test.
   #define WATCHFACE_TETRIS 1
-  // The Muncher watchface (src/muncher.h). It shares the knock with the
-  // Tetris face, so it needs that one too.
+  // The knock on the clock (src/knock.h): the LIS3DH, or on the wall clock
+  // the board's QMI8658. Its sensitivity is stored with the Tetris face's
+  // settings, so it needs that face.
+  #define KNOCK_SENSING 1
+  // The Muncher watchface (src/muncher.h). It is drawn through the Tetris
+  // face's branch of the dispatch for now, so it needs that one too.
   #define WATCHFACE_MUNCHER 1
   // The Aliens watchface (src/aliens.h), the same way.
   #define WATCHFACE_ALIENS 1
@@ -255,6 +259,8 @@ inline bool boardBusBegin() {
   #define WATCHFACE_TETRIS 0
   #define WATCHFACE_MUNCHER 0
   #define WATCHFACE_ALIENS 0
+  // No knock: the LIS3DH turns the panel only.
+  #define KNOCK_SENSING 0
   // The menu changes its picture at once, without a slide (UI concept: the
   // S class slides on the S3 only).
   #define MENU_SLIDE 0

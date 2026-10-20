@@ -38,9 +38,15 @@ Todo Concept:
 #if WATCHFACE_TETRIS
 #include "tetris_digits.h"     // generated block tables for the Tetris watchface
 #endif
+#if KNOCK_SENSING
+#if !WATCHFACE_TETRIS
+#error "The knock's sensitivity is stored with the Tetris face's settings (shk): WATCHFACE_TETRIS has to be on as well"
+#endif
+#include "knock.h"             // the knock on the clock, from its motion sensor
+#endif
 #if WATCHFACE_MUNCHER
 #if !WATCHFACE_TETRIS
-#error "The Muncher watchface uses the Tetris face's knock: WATCHFACE_TETRIS has to be on as well"
+#error "The Muncher watchface is drawn through the Tetris face's branch of drawClock(): WATCHFACE_TETRIS has to be on as well"
 #endif
 #include "muncher.h"           // the Muncher watchface's logic
 #endif
@@ -1093,7 +1099,7 @@ bool animTrigger[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [
 // second), flying, or neither. A new one is ignored until the last one has
 // landed and CLASSIC_ANIM_REST_MS have passed. An input can come again before
 // the first has played - a knock reports every event the sensor latches
-// (updateShake()), seen 2 to 7 per knock - and one that came after the second
+// (Knock::sensed()), seen 2 to 7 per knock - and one that came after the second
 // had taken the request asked for a second animation.
 enum ClassicAnim : uint8_t { CLASSIC_ANIM_IDLE, CLASSIC_ANIM_ASKED, CLASSIC_ANIM_FLYING };
 ClassicAnim classicAnim = CLASSIC_ANIM_IDLE;
@@ -1141,10 +1147,11 @@ const int8_t landYTarget[6] = {17, 17, 17, 17, 30, 30}; // HH/MM baseline 17, SS
 // rotate the display in 90 deg steps so the clock always shows the right way up.
 Adafruit_LIS3DH lis = Adafruit_LIS3DH();
 bool    accelOK = false;          // true once the LIS3DH was found on I2C
-#if BOARD_WAVESHARE_WALL
-bool    knockOK = false;          // the board's QMI8658 watches for the knock (knockSensorBegin())
+#if KNOCK_SENSING
+Knock   knock;                    // the knock (knock.h): the LIS3DH's, or the wall clock's QMI8658's
+#define knockOK knock.found()
 #else
-#define knockOK accelOK           // the LIS3DH's knock: the same chip as the rotation
+#define knockOK false             // no knock on this board
 #endif
 // Two rotations, kept apart on purpose:
 // - deviceRotation is how the panel is held: the accelerometer's reading after
@@ -1586,8 +1593,8 @@ void setup(void) {
     // the old rate it was a coin toss whether the sensor even showed it.
     lis.setDataRate(LIS3DH_DATARATE_100_HZ);
     Serial.println("LIS3DH found");
-#if WATCHFACE_TETRIS && !BOARD_WAVESHARE_WALL
-    shakeSensorBegin();   // let the sensor itself watch for a knock
+#if KNOCK_SENSING && !BOARD_WAVESHARE_WALL
+    knock.begin(Wire, ACCEL_I2C_ADDR, ACCEL_INT_PIN);   // let the sensor itself watch for a knock
 #endif
   } else {
 #if BOARD_HAS_ACCEL
@@ -1624,8 +1631,8 @@ void setup(void) {
   i2cScan();              // after the sensors: a PAJ7620U2 asleep may miss the first call
 #if BOARD_WAVESHARE_WALL
   boardBusScan();
-#if WATCHFACE_TETRIS
-  knockSensorBegin();     // the board's QMI8658; before loadFaceKeys(), which asks what was found
+#if KNOCK_SENSING
+  knock.begin(Wire1);     // the board's QMI8658; before loadFaceKeys(), which asks what was found
 #endif
 #endif
   loadFaceKeys();         // needs to know which sensors were found
@@ -1818,8 +1825,8 @@ void loop(void) {
 #endif
   if (minuteTrigger) { updateAutoDst(); } // follow the timezone's summer/winter time changes
   updateOrientation();  // rotate the display to match how the panel is held
-#if WATCHFACE_TETRIS
-  updateShake();        // a knock takes the Tetris digits apart and rebuilds them
+#if KNOCK_SENSING
+  updateKnock();        // a knock does what the Inputs page maps it to
 #endif
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
   updateScreenTimeouts();
@@ -1915,9 +1922,9 @@ void showScreen(Screen next) {
   slideDir = (prev == SCREEN_MENU   && next == SCREEN_EDITOR) ? +1
            : (prev == SCREEN_EDITOR && next == SCREEN_MENU)   ? -1 : 0;
 #endif
-#if WATCHFACE_TETRIS
+#if KNOCK_SENSING
   // A knock latched while another screen was up is old news on the face.
-  if (next == SCREEN_FACE) { shakeDiscardLatched(); }
+  if (next == SCREEN_FACE) { knock.discard(); }
 #endif
 }
 
@@ -3118,7 +3125,10 @@ const uint8_t SHAKE_STYLE_SCATTER  = 1;  // the pieces fly off and tumble
 const uint8_t SHAKE_STYLE_CLEAR    = 2;  // rows flash and vanish, bottom up
 const uint8_t SHAKE_STYLE_RANDOM   = 3;  // one of the three, drawn each time
 const uint8_t SHAKE_STYLE_COUNT    = 4;
-const uint8_t SHAKE_LEVEL_MAX      = 10;
+const uint8_t SHAKE_LEVEL_MAX      = 10;   // the knock's sensitivity, stored here (shk)
+#if KNOCK_SENSING
+static_assert(SHAKE_LEVEL_MAX == KNOCK_LEVEL_MAX, "the stored knock sensitivity and knock.h agree on its range");
+#endif
 
 struct TetrisSettings {
   uint16_t magic;
@@ -3794,207 +3804,6 @@ void drawTetrisFace() {
   for (uint8_t i = 0; i < 4; i++) { tetrisSpinDrawn += tetrisPendingTurns(i); }
 }
 
-/* ----------------------------------------------------------------------
-   Detecting the knock
-
-   Not the absolute reading: a baseline that follows the sensor slowly holds
-   gravity, and the trigger looks at how far the current sample is from it. So
-   tilting or carrying the clock does not count, while a knock stands out. All
-   integer, and the magnitudes are compared squared so there is no square root.
-   ------------------------------------------------------------------------- */
-// Measured on the device rather than guessed. Over two quiet stretches totalling
-// about 70 s the largest deviation in any one second was 780 counts - that is
-// the sensor's own noise at 100 Hz. Every deliberate interaction came out at
-// 1900 or more, knocks at 5900, a firm knock or picking the clock up at 12700.
-// So the most sensitive setting sits at roughly twice the noise, and the least
-// sensitive just above a knock on the table.
-// The sensor watches for the knock itself, and pulls its INT1 line when it sees
-// one. That is better than sampling it: between two reads we were blind for
-// 20 ms, which is long enough for a short tap to pass unnoticed, and each read
-// cost four I2C transactions. Now a knock costs one digitalRead per loop.
-//
-// The LIS3DH's own interrupt generator compares against a fixed threshold, which
-// would fire on gravity alone as soon as the clock is tilted. Its high-pass
-// filter solves that, and it is applied to the interrupt generator ONLY
-// (HP_IA1), not to the output registers (FDS stays 0) - so sensorRotation()
-// still reads gravity while the interrupt only sees what changes.
-const uint8_t LIS3DH_CTRL_REG2     = 0x21;
-const uint8_t LIS3DH_CTRL_REG3     = 0x22;
-const uint8_t LIS3DH_CTRL_REG5     = 0x24;
-const uint8_t LIS3DH_REFERENCE     = 0x26;
-const uint8_t LIS3DH_INT1_CFG      = 0x30;
-const uint8_t LIS3DH_INT1_SRC      = 0x31;
-const uint8_t LIS3DH_INT1_THS      = 0x32;
-const uint8_t LIS3DH_INT1_DURATION = 0x33;
-
-// Sensitivity 1..10 as a threshold register value. One step is 16 mg at the
-// +/-2 g range, and the levels come from the deviations measured on the device:
-// the noise floor was 780 counts and one g is 16000, so level 10 at 1500 counts
-// is 0.094 g, which is 6 steps, and level 1 at 6000 counts is 0.375 g, 23 steps.
-const uint8_t SHAKE_THS_MIN  = 6;   // level 10
-const uint8_t SHAKE_THS_STEP = 2;   // level 1 -> 24
-
-uint8_t shakeThreshold() {
-  uint8_t level = tetrisSettings.shakeLevel;
-  if (level == 0) { return 0; }
-  if (level > SHAKE_LEVEL_MAX) { level = SHAKE_LEVEL_MAX; }
-  return (uint8_t)(SHAKE_THS_MIN + (SHAKE_LEVEL_MAX - level) * SHAKE_THS_STEP);
-}
-
-void accelWriteReg(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission((uint8_t)ACCEL_I2C_ADDR);
-  Wire.write(reg);
-  Wire.write(value);
-  Wire.endTransmission();
-}
-
-uint8_t accelReadReg(uint8_t reg) {
-  Wire.beginTransmission((uint8_t)ACCEL_I2C_ADDR);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) { return 0; }
-  if (Wire.requestFrom((int)ACCEL_I2C_ADDR, 1) != 1) { return 0; }
-  return (uint8_t)Wire.read();
-}
-
-#if BOARD_WAVESHARE_WALL
-/* The wall clock's knock: the board's QMI8658 in its Wake on Motion
-   (src/imu_qmi8658.h). The chip compares every sample, at 128 Hz, with the
-   threshold and toggles INT1 (GPIO13) for each one over it - a knock comes as
-   1 to 5 edges 7-15 ms apart (measured on 2026-10-19). An interrupt counts the
-   edges, so none is lost between two passes, and updateShake() takes the first
-   of a burst as the knock. The chip decides, as the S3's LIS3DH does. */
-Qmi8658 imu;
-const uint8_t IMU_INT_PIN = 13;              // the QMI8658's INT1 (schematic, 2026-10-19)
-const unsigned long KNOCK_BURST_MS = 150;    // edges this close are the same knock
-const unsigned long KNOCK_FRESH_MS = 100;    // an edge older than this when looked at is dropped
-const unsigned long KNOCK_ARM_MS   = 300;    // after a (re)start the chip's own edges
-volatile uint32_t      knockEdges = 0;       // INT1's edges since the start
-volatile unsigned long knockEdgeAt = 0;      // millis() of the last
-uint32_t      knockEdgesSeen = 0;            // as far as updateShake() looked
-unsigned long knockLastEdgeAt = 0;           // the last edge it saw, a knock or not
-unsigned long knockArmedAt = 0;
-uint32_t      knocksSeen = 0;                // bursts taken as knocks, for the console
-
-// INT1's interrupt. A struct's member: the prototypes generated from this
-// sketch are free functions, on every board, and IRAM_ATTR exists on the
-// ESP32 only. Defined outside it: in IRAM an inline function's literals land
-// elsewhere, and the linker refuses that.
-struct KnockIsr {
-  static void edge();
-};
-void IRAM_ATTR KnockIsr::edge() {
-  knockEdges = knockEdges + 1;
-  knockEdgeAt = millis();
-}
-
-// Sensitivity 1..10 as the threshold in mg (Wake on Motion takes 1-255).
-// Measured on the wall on 2026-10-19: at rest 4-13 mg, knocks 180 mg to 3.3 g;
-// at 128 Hz 100 mg took 5 of 5 normal knocks, one of them as a single edge,
-// and nothing in two quiet minutes. Level 10 is about three times the noise,
-// level 1 the most the chip takes.
-const uint8_t KNOCK_WOM_MG[SHAKE_LEVEL_MAX + 1] = { 0, 255, 200, 160, 130, 100, 80, 64, 50, 40, 30 };
-
-uint8_t knockLevel() { return min<uint8_t>(tetrisSettings.shakeLevel, SHAKE_LEVEL_MAX); }
-
-// The sensitivity into the chip, at start-up and whenever it changes (also
-// from the live preview): a reset ends what ran, then Wake on Motion at the
-// threshold - or nothing, for 0.
-void shakeApplyThreshold() {
-  if (!knockOK) { return; }
-  bool ok = imu.begin(Wire1);
-  if (ok && knockLevel() > 0) { ok = imu.womStart(KNOCK_WOM_MG[knockLevel()], 16); }
-  knockArmedAt = millis();
-  if (!ok) { Serial.println("QMI8658: the knock did not start"); }
-}
-
-// At start-up, once the board's bus runs (and before loadFaceKeys()).
-void knockSensorBegin() {
-  pinMode(IMU_INT_PIN, INPUT);
-  if (!imu.begin(Wire1)) { Serial.println("QMI8658 not found - no knock"); return; }
-  knockOK = true;
-  attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN), KnockIsr::edge, CHANGE);
-  shakeApplyThreshold();
-  Serial.printf("QMI8658 found (revision 0x%02X): the knock by Wake on Motion over %u mg\n", imu.revision(),
-                KNOCK_WOM_MG[knockLevel()]);
-}
-
-void updateShake() {
-  if (!knockOK) { return; }
-  uint32_t edges = knockEdges;
-  if (edges == knockEdgesSeen) { return; }             // nothing happened
-  knockEdgesSeen = edges;
-  unsigned long at = knockEdgeAt;
-  bool sameKnock = knockLastEdgeAt != 0 && (long)(at - knockLastEdgeAt) < (long)KNOCK_BURST_MS;
-  knockLastEdgeAt = at;
-  if (sameKnock) { return; }
-  if ((long)(at - knockArmedAt) < (long)KNOCK_ARM_MS) { return; }   // the chip starting
-  if ((long)(millisNow - at) > (long)KNOCK_FRESH_MS) { return; }    // seen too late: now or not at all
-  knocksSeen++;
-  if (knockIsReal()) { handleInput(EV_KNOCK, 1); }
-}
-
-// Console "imu": the chip, the threshold and what it gave.
-void wallKnockReport() {
-  if (!knockOK) { Serial.println("QMI8658 not found - no knock"); return; }
-  Serial.printf("QMI8658 (revision 0x%02X): knock sensitivity %u, Wake on Motion over %u mg; INT1 %s; "
-                "%lu edges and %lu knocks since the start; bus errors %lu\n", imu.revision(), knockLevel(),
-                KNOCK_WOM_MG[knockLevel()], digitalRead(IMU_INT_PIN) == HIGH ? "high" : "low",
-                (unsigned long)knockEdges, (unsigned long)knocksSeen, (unsigned long)imu.busErrors());
-}
-#else
-// Push the current sensitivity into the sensor. Called at start-up and whenever
-// the setting changes, including from the live preview.
-void shakeApplyThreshold() {
-  if (!accelOK) { return; }
-  uint8_t ths = shakeThreshold();
-  if (ths == 0) {
-    accelWriteReg(LIS3DH_INT1_CFG, 0x00);   // no axis enabled: the line stays quiet
-    return;
-  }
-  accelWriteReg(LIS3DH_INT1_THS, ths);
-  accelWriteReg(LIS3DH_INT1_CFG, 0x2A);     // X, Y or Z above the threshold
-}
-
-void shakeSensorBegin() {
-  pinMode(ACCEL_INT_PIN, INPUT);
-  // High-pass filter on interrupt generator 1 only. HPM = 00 and the highest
-  // cutoff, so the reference follows within a fraction of a second: tilting is
-  // filtered away, a knock is not.
-  accelWriteReg(LIS3DH_CTRL_REG2, 0x01);
-  accelWriteReg(LIS3DH_INT1_DURATION, 0);   // react to the first sample over the line
-  accelWriteReg(LIS3DH_CTRL_REG3, 0x40);    // route generator 1 to the INT1 pin
-  accelWriteReg(LIS3DH_CTRL_REG5, 0x08);    // latch it until INT1_SRC is read
-  (void)accelReadReg(LIS3DH_REFERENCE);     // reset the filter
-  shakeApplyThreshold();
-  (void)accelReadReg(LIS3DH_INT1_SRC);      // start with the line clear
-}
-
-void updateShake() {
-  if (!accelOK) { return; }
-  if (digitalRead(ACCEL_INT_PIN) == LOW) { return; }   // nothing happened
-
-  // The interrupt is latched, so it has to be read away even when the knock is
-  // going to be ignored - otherwise it would fire the moment the block lifts.
-  (void)accelReadReg(LIS3DH_INT1_SRC);
-  if (knockIsReal()) { handleInput(EV_KNOCK, 1); }
-}
-#endif
-
-// Whether the sensor's latched event is worth reporting as a knock. These are
-// the reasons it fires without anyone knocking; one per line, each reading one
-// explicit state or one gate with one reason. What a knock then does is the
-// profile's business.
-bool knockIsReal() {
-  if (shakeThreshold() == 0)                           { return false; }  // switched off
-  if (anyButtonDown())                                 { return false; }  // a button press IS a knock: the
-                                                                          // switches sit 20 mm from the sensor
-  if (millisNow - lastInputAt  < INPUT_SETTLE_MS)      { return false; }  // hands still on the clock
-  if (orientCandidate != deviceRotation)               { return false; }  // a rotation is being debounced
-  if (millisNow - setupDoneAt  < KNOCK_START_QUIET_MS) { return false; }  // just plugged in
-  if (millisNow - rotatedAt    < SHAKE_SETTLE_MS)      { return false; }  // turning is not a knock
-  return true;
-}
-
 // Whether the Tetris face can be knocked apart right now - what
 // FN_FACE_ANIMATION needs on it, whichever input asked for it.
 bool knockEffectReady() {
@@ -4004,20 +3813,40 @@ bool knockEffectReady() {
   if (millisNow - shakeEndedAt < SHAKE_SETTLE_MS)      { return false; }  // the last one has only just ended
   return true;
 }
+#endif  // WATCHFACE_TETRIS
 
-// Throw away a knock the sensor has latched. updateShake() does not run while
-// the config AP is up, so a button press there - a knock as far as the sensor
-// is concerned - would otherwise still be waiting when the face comes back, and
-// fire at once. (A side effect of the old rotation block used to swallow it.)
-void shakeDiscardLatched() {
-#if BOARD_WAVESHARE_WALL
-  knockEdgesSeen = knockEdges;      // the wall's edges so far count as seen
-  knockLastEdgeAt = knockEdgeAt;
-#else
-  if (accelOK) { (void)accelReadReg(LIS3DH_INT1_SRC); }
+/* ----------------------------------------------------------------------
+   The knock: knock.h senses it; here, whether it counts, and on to the
+   inputs as EV_KNOCK. Its sensitivity is the Tetris face's setting shk.
+   ------------------------------------------------------------------------- */
+#if KNOCK_SENSING
+// Whether the sensor's knock is worth reporting. These are the reasons it
+// fires without anyone knocking; one per line, each reading one explicit
+// state or one gate with one reason. What a knock then does is the profile's
+// business.
+bool knockIsReal() {
+  if (knock.level() == 0)                              { return false; }  // switched off
+  if (anyButtonDown())                                 { return false; }  // a button press IS a knock: the
+                                                                          // switches sit 20 mm from the sensor
+  if (millisNow - lastInputAt  < INPUT_SETTLE_MS)      { return false; }  // hands still on the clock
+  if (orientCandidate != deviceRotation)               { return false; }  // a rotation is being debounced
+  if (millisNow - setupDoneAt  < KNOCK_START_QUIET_MS) { return false; }  // just plugged in
+  if (millisNow - rotatedAt    < SHAKE_SETTLE_MS)      { return false; }  // turning is not a knock
+  return true;
+}
+
+// On every pass outside the hotspot.
+void updateKnock() {
+  if (knock.sensed(millisNow) && knockIsReal()) { handleInput(EV_KNOCK, 1); }
+}
+#endif
+
+// The sensitivity setting into the sensor, wherever it changes.
+void knockFollowSetting() {
+#if KNOCK_SENSING
+  knock.setLevel(tetrisSettings.shakeLevel);
 #endif
 }
-#endif  // WATCHFACE_TETRIS
 
 /* ======================================================================
    Muncher watchface
@@ -5763,7 +5592,7 @@ void loadTetrisSettings() {
   tetrisSettings.spinMs = constrain(tetrisSettings.spinMs, TETRIS_SPIN_MIN, TETRIS_SPIN_MAX);
   if (tetrisSettings.shakeLevel > SHAKE_LEVEL_MAX) { tetrisSettings.shakeLevel = SHAKE_LEVEL_MAX; }
   if (tetrisSettings.shakeStyle >= SHAKE_STYLE_COUNT) { tetrisSettings.shakeStyle = SHAKE_STYLE_RANDOM; }
-  shakeApplyThreshold();   // the sensor, not the sketch, holds the threshold now
+  knockFollowSetting();    // the sensor, not the sketch, holds the threshold
 }
 
 void saveTetrisSettings() {
@@ -5966,9 +5795,9 @@ int8_t faceEventIndex(InputEvent ev) {
 // with the accelerometer, the gestures with the gesture sensor. (The wall clock
 // has no buttons.)
 bool faceEventFitted(InputEvent ev) {
-  // The knock is sensed by the Tetris face's code (updateShake()), so a board
-  // without it - the M4 - has no knock, accelerometer or not.
-  if (ev == EV_KNOCK) { return knockOK && WATCHFACE_TETRIS != 0; }
+  // The knock comes from knock.h, which a board without it - the M4 - does
+  // not build, accelerometer or not.
+  if (ev == EV_KNOCK) { return knockOK; }
   if (ev == EV_WAVE) { return false; }   // not read: too unreliable (updateGestures())
   if (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) { return false; }   // left out (gestureLeftOut())
   if (isGestureEvent(ev)) { return gestureOK; }
@@ -7173,7 +7002,7 @@ void stopAPMode() {
 // - "rtc" shows what the DS3231 and the board's PCF85063 hold against the
 //   clock (wallRtcReport()).
 // - "imu" shows the board's motion sensor and what it gave of the knock
-//   (wallKnockReport()).
+//   (Knock::report()).
 // - "sd" shows the microSD card and its GIFs; "sd speed" reads every GIF once
 //   and checks it; "sd remount" reads the card anew; "sd freq <kHz>" mounts
 //   it at another clock; "sd stress" reads its largest GIFs ahead in turn
@@ -7215,9 +7044,9 @@ void wallConsole() {
       wallCryptoTest(line[6] != '\0');
     } else if (strcmp(line, "rtc") == 0) {
       wallRtcReport();
-#if WATCHFACE_TETRIS
+#if KNOCK_SENSING
     } else if (strcmp(line, "imu") == 0) {
-      wallKnockReport();
+      knock.report();
 #endif
     } else if (strncmp(line, "sd", 2) == 0 && (line[2] == '\0' || line[2] == ' ')) {
       gifCardCommand(line);
@@ -7857,7 +7686,7 @@ void applyParams(const String &q) {
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
   v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
   v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
-  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); shakeApplyThreshold(); }
+  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); knockFollowSetting(); }
   v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
 #endif
 #if WATCHFACE_MUNCHER
@@ -7968,7 +7797,7 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
   v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
   v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
-  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); shakeApplyThreshold(); }
+  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); knockFollowSetting(); }
   v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
@@ -11449,7 +11278,7 @@ void apiState(Print &c) {
   hw["muncher"] = WATCHFACE_MUNCHER != 0;
   hw["aliens"] = WATCHFACE_ALIENS != 0;
   hw["accel"] = accelOK;
-  hw["knock"] = knockOK && WATCHFACE_TETRIS != 0;   // as the knock's row on the Inputs page
+  hw["knock"] = knockOK;   // as the knock's row on the Inputs page
   hw["buttons"] = BOARD_BUTTON_COUNT;
 #if BOARD_WAVESHARE_WALL
   hw["knockBy"] = "QMI8658";
