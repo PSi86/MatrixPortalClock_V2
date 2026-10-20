@@ -399,6 +399,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       <div class="sec-head"><h2>GIFs</h2><p>Now and then a GIF takes the panel; holding UP on the face plays one at once.</p></div>
       <div class="card">
         <div class="row stack"><div class="legend"><span id="gifCount"></span></div></div>
+        <div class="row stack" id="cardRow" hidden>
+          <div><div class="lbl">microSD card</div><div class="hint">While a card with GIFs is in, the clock plays them instead of the pack. After putting a card in, or changing its GIFs, read it again.</div></div>
+          <div class="ctl"><button class="btn" type="button" id="cardRead">Read the card again</button><span class="note" id="cardNote"></span></div>
+        </div>
         <div class="row stack">
           <div><div class="lbl">GIF pack</div><div class="hint">Replaces the pack on the clock with a pack file, as the GIF library or “pio run -t gifpack” builds it.</div></div>
           <div class="ctl"><button class="btn" type="button" id="packPick">Choose a file</button><input type="file" id="packFile" accept=".bin" hidden><button class="btn" type="button" id="packSend" disabled>Write onto the clock</button></div>
@@ -582,7 +586,16 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   function showGifCount() {
     var g = S.gifs, t = g.packState === 'ok' ? g.pack + ' GIFs in the GIF pack (' + g.packMaxKb + ' KB room)'
       : g.packState === 'damaged' ? 'The GIF pack is damaged and not used: no GIFs.' : 'No GIF pack yet: no GIFs. Write one below.';
+    if (g.source === 'card') {   // the wall clock with a card: its GIFs play, the pack stands by
+      t = g.card.gifs + ' GIFs from the microSD card' + (g.card.leftOut ? ' (' + g.card.leftOut + ' left out)' : '')
+        + (g.packState === 'ok' ? '; the pack’s ' + g.pack + ' stand by' : '') + '.';
+    }
     $('#gifCount').textContent = t;
+    $('#cardRow').hidden = !g.card;
+    if (g.card) {
+      $('#cardNote').textContent = g.card.reading ? 'Reading the card …'
+        : g.card.mounted ? g.card.mb + ' MB card, ' + g.card.freeMb + ' MB free.' : 'No card found.';
+    }
   }
   function enc(o) {
     return Object.keys(o).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(o[k]); }).join('&');
@@ -1283,6 +1296,13 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       toast(!r.onFace ? 'Not now: they come only over the face.'
         : r.shown ? 'The clock shows ' + r.shown + (r.shown === 1 ? ' notification' : ' notifications') + ' now.'
         : 'There is nothing to show; the clock says so.');
+    }).catch(function () { toast('The clock did not answer.'); });
+  });
+  $('#cardRead').addEventListener('click', function () {
+    api('/api/card', '').then(function () {
+      toast('The clock reads the card again.');
+      $('#cardNote').textContent = 'Reading the card …';
+      setTimeout(function () { api('/api/state').then(function (st) { S.gifs = st.gifs; showGifCount(); }).catch(function () {}); }, 5000);
     }).catch(function () { toast('The clock did not answer.'); });
   });
   $('#gifNow').addEventListener('click', function () {

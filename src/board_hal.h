@@ -1055,6 +1055,11 @@ class SettingsStore {
 #endif
 
 inline void boardSerialBegin(unsigned long baud) {
+#if defined(BOOT_WAIT_FOR_SERIAL_MS) && BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  // The debug build writes much more; with the TX timeout at 0 below, what the
+  // reader has not taken yet waits here instead of being dropped.
+  Serial.setTxBufferSize(8192);
+#endif
   Serial.begin(baud);
 #if defined(BOOT_WAIT_FOR_SERIAL_MS)
   // Debug aid (env:adafruit_matrixportal_s3_debug): hold the boot until a serial
@@ -1074,6 +1079,12 @@ inline void boardSerialBegin(unsigned long baud) {
   while (millis() < 3000) { delay(10); }
 #endif
   Serial.flush();
+#if BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT
+  // As in the release build (below): without it every write waited up to
+  // 100 ms once the console's reader had closed while the USB stayed plugged
+  // in, and the wall clock ran in slow motion (2026-10-20).
+  Serial.setTxTimeoutMs(0);
+#endif
 #elif BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT
   // The S3 console is native USB CDC. Without this, every write blocks for up
   // to 100 ms whenever the port is enumerated but nothing is reading it, which

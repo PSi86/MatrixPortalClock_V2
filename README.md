@@ -82,8 +82,10 @@ in the wall's own 192x128 LEDs.
   bus' clock; `lan on|off` the web app on the home network; for the panel
   output and the fetches `fetch`, `prio <0-5>`, `gdma`, `crypto [ext]`,
   `tlsmem int|ext`, `status test` for the band's clock status, `rtc` for
-  what the real-time clocks hold, and `imu` for the knock's sensor, threshold
-  and the edges and knocks it gave.
+  what the real-time clocks hold, `imu` for the knock's sensor, threshold
+  and the edges and knocks it gave, and `sd ...` for the microSD card.
+- **microSD card:** the GIFs come from it while one with GIFs is in (see
+  [GIFs on the wall clock's microSD card](#gifs-on-the-wall-clocks-microsd-card)).
 - **Wiring rules** from the bench: the panels' supply minus to the board's GND
   first, the supply on before the ribbon cable goes in.
 
@@ -423,6 +425,42 @@ Which GIFs fit depends on how the clock stands, `custom_gif_orientation` in
 up to 32x64, `both` those that fit one way or the other, for a clock that gets
 turned. A clock that always stands the same way then carries no GIFs it could
 never play.
+
+### GIFs on the wall clock's microSD card
+
+The wall clock plays its GIFs from a microSD card in the Waveshare board's slot
+while one with GIFs is in, and from its pack otherwise.
+
+- **The card:** FAT32 (cards up to 32 GB come so; exFAT is not read), the GIFs as
+  single files in the folder `gifs`. Up to 192x128 and 4 MB each - beyond the
+  pack's 600 KB - and up to 8000 of them; a GIF whose one loop takes more than
+  25 s is left out, as is one that cannot be read or does not open.
+- **Filling it:** with a card reader on the PC, from the GIF gallery ("write onto
+  the card") or the GIF library's `card.py`. It
+  copies the GIFs chosen for the clock, reads each one back, deletes only what it
+  put there itself, and writes the index `gifs/.index` (size, width, height, loop,
+  frames, SHA-1, name per GIF). It writes only to a card that carries the mark
+  `gifs/.matrixclock`. GIFs put into `gifs` by hand play as well.
+- **The clock never writes to the card**, so a power cut cannot damage it. It
+  mounts the card at start-up in the background (about 0.4 s for 966 GIFs: the
+  index, and one pass over the folder for the files' sizes), at 40 MHz in 1-bit
+  mode.
+- **The next GIF is read ahead** into PSRAM while no GIF plays (1.8 MB in about
+  0.7 s), so a GIF due or asked for starts at once - or not at all, when it is not
+  ready yet. The last one shown stays there for "GIF again". Each read is checked
+  against the index's SHA-1.
+- **Card pulled:** the clock notices at the next reads that fail and plays the
+  pack. Put back, it is read again by **Read the card again** (web app, GIFs;
+  `POST /api/card`) or at the next start.
+- **Console:** `sd` (the card and its GIFs), `sd speed` (every GIF read once and
+  checked), `sd remount`, `sd freq <kHz>`, `sd stress` (the largest GIFs read
+  ahead in turn).
+
+Measured on the wall clock on 2026-10-20 with a 32 GB SDHC card and 966 GIFs
+(143 MB): 1.74 MB/s at 40 MHz and 1.13 MB/s at 20 MHz, no read error, every
+SHA-1 right, and the panel output never stopped while the card was read. The
+card's DMA reads into a buffer in internal RAM, and the CPU copies from there
+into PSRAM: DMA into PSRAM is what stopped the output during TLS on 2026-10-18.
 
 ### GIF pack
 
@@ -1021,6 +1059,7 @@ form-encoded POSTs, answers are JSON:
 | `POST /api/time` | sets the time, from the phone or typed |
 | `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
 | `POST /api/gif` | plays a GIF now (on the face) |
+| `POST /api/card` | the wall clock: reads its microSD card again, as soon as no GIF plays |
 | `POST /api/pack` | a GIF pack as the body (`application/octet-stream`), written into the ffat partition (see [GIF pack](#gif-pack)) |
 | `POST /api/lan` | continuous network access on or off, a new password |
 | `POST /api/ha` | the Home Assistant link: on or off, broker, port, user, password (empty keeps the stored one) |
