@@ -44,7 +44,7 @@ Todo Concept:
 #if !WATCHFACE_TETRIS
 #error "The Muncher's settings are loaded and saved with the Tetris face's (FACE_BLOBS): WATCHFACE_TETRIS has to be on as well"
 #endif
-#include "muncher.h"           // the Muncher watchface's logic
+#include "face_muncher.h"     // the Muncher watchface
 #endif
 #if WATCHFACE_ALIENS
 #if !WATCHFACE_MUNCHER
@@ -2926,474 +2926,15 @@ void knockFollowSetting() {
 }
 
 /* ======================================================================
-   Muncher watchface
-
-   HH:MM in dots, which a muncher eats and lays anew when the time changes;
-   the logic is in src/muncher.h, here is when it moves and what the panel
-   shows. Between changes nothing moves. A change is planned backwards from
-   second 00, so the last digit is complete as the new minute begins, and it
-   is stepped by the time since it started: a screen that was on top for a
-   while, or a loop held up by a request, does not put it behind.
+   Muncher watchface (face_muncher.h): its settings, stored in a blob of
+   their own, and the face.
    ====================================================================== */
 #if WATCHFACE_MUNCHER
-
-// Settings of this watchface, in their own blob, as the Tetris ones are.
-#define MUNCHER_SETTINGS_MAGIC 0x3C1A
-#define MUNCHER_SETTINGS_REV   2   // 2 = adds pellets
-
-// What a knock, or the face action "trigger watchface animation", plays.
-// Stored values: a new one goes at the end, so "random" keeps its 2.
-const uint8_t MUNCHER_KNOCK_POWER  = 0;   // the power pellet: the ghosts turn and flee
-const uint8_t MUNCHER_KNOCK_REPLAY = 1;   // the minutes' ones eaten and laid again
-const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
-const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
-const uint8_t MUNCHER_KNOCK_COUNT  = 4;
-// The LEDs of a pellet, in the digits and the corridor: one, or more to be
-// seen better from afar (Peter, 2026-10-11) - two side by side, which makes
-// the level strokes solid lines, two one above the other, which makes the
-// upright ones solid, or a block of 2 x 2, which makes every stroke a solid
-// line 2 px thick: the digits drawn for reading first, the game kept as a
-// token. The other LEDs go right of and below the pellet's own, so a digit
-// grows by a pixel; the muncher's way stays on the pellet's own.
-const uint8_t MUNCHER_PELLETS_ONE   = 0;
-const uint8_t MUNCHER_PELLETS_WIDE  = 1;
-const uint8_t MUNCHER_PELLETS_TALL  = 2;
-const uint8_t MUNCHER_PELLETS_SOLID = 3;
-const uint8_t MUNCHER_PELLETS_COUNT = 4;
-// What a scene that ends leads to: the change to a full hour is followed by
-// the hour show. (Until 2026-10-20 a minute change could leave a bonus fruit;
-// the fruit is an extra of its own now, at its drawn time.)
-const uint8_t MUNCHER_AFTER_NOTHING = 0;
-const uint8_t MUNCHER_AFTER_HOUR    = 2;
-const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
-const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
-const unsigned long MUNCHER_KNOCK_ROOM_MS = PANEL_GUARD_BEFORE_MS;   // a knock's scene ends this long before a change starts
-// The most steps what the web app asks to see can take: a change of the
-// minutes' ones, or a knock's scene.
-const long MUNCHER_PREVIEW_STEPS = 260;
-
-struct MuncherSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  style;     // muncher::STYLE_*: how a changing digit is walked
-  uint8_t  knock;     // MUNCHER_KNOCK_*
-  uint8_t  paceMs;    // milliseconds per pixel the muncher walks
-  uint8_t  pellets;   // rev 2: MUNCHER_PELLETS_*, the LEDs of a pellet (was a spare byte, 0)
-  uint8_t  spare[1];
-};
-static_assert(sizeof(MuncherSettings) == 8, "the stored blob keeps its size");
-
-const MuncherSettings MUNCHER_DEFAULTS = {
-  MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV,
-  muncher::STYLE_MIXED,   // the whole digit when one changes, only the difference when several do
-  MUNCHER_KNOCK_RANDOM,
-  40,                     // 25 pixels a second
-  0,                      // one LED a pellet
-  { 0 }
-};
-
 MuncherSettings muncherSettings;
-
-// The Muncher settings for the web app and the store (face.h).
-const char *const MUNCHER_MST_LABELS[] = { "Mixed", "Whole digit", "Only the difference" };              // muncher::STYLE_*
-const char *const MUNCHER_MKN_LABELS[] = { "Power pellet", "Last digit again", "Random each time", "Ghosts win" };   // MUNCHER_KNOCK_*
-const char *const MUNCHER_MPEL_LABELS[] = { "One LED", "Side by side", "One above the other", "Solid" };   // MUNCHER_PELLETS_*
-static_assert(sizeof(MUNCHER_MST_LABELS) / sizeof(MUNCHER_MST_LABELS[0]) == muncher::STYLE_COUNT, "a name per change style");
-static_assert(sizeof(MUNCHER_MKN_LABELS) / sizeof(MUNCHER_MKN_LABELS[0]) == MUNCHER_KNOCK_COUNT, "a name per scene");
-static_assert(sizeof(MUNCHER_MPEL_LABELS) / sizeof(MUNCHER_MPEL_LABELS[0]) == MUNCHER_PELLETS_COUNT, "a name per pellet");
-const FaceParam MUNCHER_PARAMS[] = {
-  { "mst",   offsetof(MuncherSettings, style),   1, PARAM_CHOICE, 0,            0, muncher::STYLE_COUNT - 1,  MUNCHER_MST_LABELS },
-  { "mkn",   offsetof(MuncherSettings, knock),   1, PARAM_CHOICE, PARAM_PLAYS,  0, MUNCHER_KNOCK_COUNT - 1,   MUNCHER_MKN_LABELS },
-  { "mpace", offsetof(MuncherSettings, paceMs),  1, PARAM_RANGE,  0,            MUNCHER_PACE_MIN, MUNCHER_PACE_MAX, nullptr },
-  { "mpel",  offsetof(MuncherSettings, pellets), 1, PARAM_CHOICE, PARAM_REDRAW, 0, MUNCHER_PELLETS_COUNT - 1, MUNCHER_MPEL_LABELS },
-};
-
-// Rev 1 had a spare byte where the pellets are.
-void muncherMigrate(uint8_t *data, uint8_t rev) {
-  if (rev < 2) { ((MuncherSettings *)data)->pellets = MUNCHER_PELLETS_ONE; }
-}
-
 FaceBlob muncherBlob = { "muncher", MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV, WATCHFACE_MUNCHER_ID,
                          (uint8_t *)&muncherSettings, sizeof(MuncherSettings), (const uint8_t *)&MUNCHER_DEFAULTS,
                          MUNCHER_PARAMS, sizeof(MUNCHER_PARAMS) / sizeof(MUNCHER_PARAMS[0]), muncherMigrate };
-muncher::Face munch;
-uint8_t       muncherRotation     = 0xFF;   // rotation the layout was built for
-unsigned long muncherStartAt      = 0;      // when the planned or running scene starts
-time_t        muncherPlannedFor   = 0;      // the minute the planned change is for; 0 = none
-uint16_t      muncherPlannedDone  = 0;      // the step the planned minute change completes the time at
-uint16_t      muncherDoneSteps    = 0;      // the same for the running one, until it is logged; 0 = none
-unsigned long muncherSceneEndedAt = 0;
-uint8_t       muncherPlannedAfter = MUNCHER_AFTER_NOTHING;   // what the planned change leads to
-uint8_t       muncherAfter        = MUNCHER_AFTER_NOTHING;   // ... and the running scene
-uint16_t      muncherFruitsLogged = 0;      // bonus fruits eaten, as far as the console knows
-bool          muncherColonDrawn   = false;
-bool          muncherPreviewReq   = false;  // the web app asks to see a change
-bool          muncherKnockReq     = false;  // ... or the knock's scene
-
-void muncherStartScene(muncher::Mode mode, unsigned long at, uint8_t after = MUNCHER_AFTER_NOTHING) {
-  munch.start(mode);
-  muncherStartAt = at;
-  muncherPlannedFor = 0;
-  muncherDoneSteps = 0;   // not a planned minute change: nothing to time
-  muncherAfter = after;
-}
-
-// A bonus fruit somewhere along the corridor, of any kind, unless one lies
-// there already.
-void muncherPlaceFruit() {
-  if (munch.fruitX != muncher::NO_FRUIT) { return; }
-  int16_t slots = (munch.L.w - 20) / 4 + 1;   // the corridor's pellet places, 10 px off either end
-  munch.placeFruit(10 + 4 * (int16_t)faceRandom(slots), (uint8_t)faceRandom(muncher::FRUIT_KINDS));
-  panelDirty = true;
-}
-
-// The knock's scene, or the face action's: refused while a scene runs, just
-// after one, and when it could not end before the next change starts.
-bool muncherKnock() {
-  if (munch.mode != muncher::MODE_IDLE || munch.shown[0] == muncher::NO_DIGIT) { return false; }
-  if (millisNow - muncherSceneEndedAt < MUNCHER_KNOCK_REST_MS) { return false; }
-  uint8_t kind = muncherSettings.knock;
-  if (kind == MUNCHER_KNOCK_RANDOM) {
-    const uint8_t KINDS[3] = { MUNCHER_KNOCK_POWER, MUNCHER_KNOCK_REPLAY, MUNCHER_KNOCK_DEATH };
-    kind = KINDS[faceRandom(3)];
-  }
-  // Only against a planned change: until the face has planned one (it does
-  // on its next pass), there is nothing to measure the scene against.
-  bool planned = munch.legsPlanned() && muncherPlannedFor != 0;
-  if (!planned) { return false; }
-  unsigned long plannedStart = muncherStartAt;
-  uint16_t steps;
-  muncher::Mode mode;
-  const char *what;
-  if (kind == MUNCHER_KNOCK_POWER) {
-    steps = munch.planPower();
-    steps += 120;                      // the walk back and the ghosts, at the most
-    mode = muncher::MODE_POWER;
-    what = "the power pellet";
-  } else if (kind == MUNCHER_KNOCK_DEATH) {
-    steps = munch.planDeath();
-    steps += 140;                      // the fall, the pause and the next one's walk
-    mode = muncher::MODE_DEATH;
-    what = "the ghosts win";
-  } else {
-    uint8_t same[4];
-    memcpy(same, munch.shown, 4);
-    steps = munch.planChange(same, muncher::STYLE_ALL, 1 << 3);
-    steps += 60;                       // the walk out and the ghosts
-    mode = muncher::MODE_CHANGE;
-    what = "the minute's ones again";
-  }
-  muncherPlannedFor = 0;               // the change is planned anew afterwards
-  if (!faceFits(plannedStart, millisNow, (unsigned long)steps * muncherSettings.paceMs)) {
-    munch.show(munch.shown);           // drop the knock's walk
-    return false;
-  }
-  muncherStartScene(mode, millisNow);
-  Serial.printf("Muncher: %s\n", what);
-  return true;
-}
-
-// Nothing moving: put a time that moved on without a change right (a time
-// set by hand, a sync that corrected it, a minute the face missed), plan
-// the next change once per minute, and start it when its moment has come.
-void muncherIdle(const uint8_t now[4]) {
-  if (memcmp(munch.shown, now, 4) != 0) {
-    if (munch.shown[0] == muncher::NO_DIGIT || now[0] == muncher::NO_DIGIT) {
-      munch.show(now);                 // dashes come and go without a muncher
-      panelDirty = true;
-    } else if (munch.planChange(now, muncherSettings.style)) {
-      muncherStartScene(muncher::MODE_CHANGE, millisNow);
-    }
-    muncherPlannedFor = 0;
-    return;
-  }
-  if (now[0] == muncher::NO_DIGIT) { return; }
-  // The next change first: a knock is measured against it.
-  uint8_t sec = (uint8_t)clockSecond(localTime);
-  time_t next = localTime - sec + 60;
-  if (muncherPlannedFor != next) {
-    // To a full hour four ghosts follow the muncher, and the hour show
-    // comes after.
-    uint8_t to[4];
-    faceDigits(next, clockIsSet(), to, muncher::NO_DIGIT);
-    bool hour = clockMinute(next) == 0;
-    muncherPlannedDone = munch.planChange(to, muncherSettings.style, 0, hour ? 4 : 2);
-    muncherPlannedAfter = hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_NOTHING;
-    muncherPlannedFor = next;
-  }
-  // The start, worked out anew on every pass until the change begins: the
-  // second's beginning it is measured from is only right once a real second
-  // has begun. Measured once at planning time, the first change after a
-  // restart stood complete at :00.973 (twice on 2026-10-10): the loop's
-  // first pass after the start counts as a new second, wherever in its
-  // second it falls. A sync that moves the second, or a new pace, is
-  // followed the same way.
-  unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
-  muncherStartAt = nextMinuteAt - (unsigned long)muncherPlannedDone * muncherSettings.paceMs;
-  // What the web app asks to see waits until it can end before the next
-  // change starts, and for the rest after a scene: a preview never holds up
-  // a change of the time.
-  long room = (long)(muncherStartAt - millisNow) - (long)MUNCHER_KNOCK_ROOM_MS;
-  bool rested = millisNow - muncherSceneEndedAt >= MUNCHER_KNOCK_REST_MS;
-  long pace = muncherSettings.paceMs;
-  if (muncherPreviewReq && rested && room >= MUNCHER_PREVIEW_STEPS * pace) {
-    // A change: the minutes' ones eaten and laid again, as the knock's "last
-    // digit again" does, so the time on show stays right. Showing the last
-    // minute's digits first, as this did, set the clock back a minute for
-    // the preview's time (midnight, 2026-10-11).
-    muncherPreviewReq = false;
-    uint8_t same[4];
-    memcpy(same, now, 4);
-    if (munch.planChange(same, muncher::STYLE_ALL, 1 << 3)) { muncherStartScene(muncher::MODE_CHANGE, millisNow); }
-    muncherPlannedFor = 0;
-    return;
-  }
-  if (muncherKnockReq && rested && room >= MUNCHER_PREVIEW_STEPS * pace) {
-    muncherKnockReq = false;
-    if (muncherKnock()) { return; }
-  }
-  // Started at its planned moment even when that has passed (the face was
-  // away): stepped from there, the muncher is where it ought to be by now.
-  if (munch.legsPlanned() && (long)(millisNow - muncherStartAt) >= 0) {
-    munch.start(muncher::MODE_CHANGE);
-    muncherDoneSteps = muncherPlannedDone;
-    muncherAfter = muncherPlannedAfter;
-    muncherPlannedFor = 0;
-  }
-}
-
-// A scene is over: what it leads to. After the change to a full hour, the
-// hour show.
-void muncherSceneEnded() {
-  uint8_t after = muncherAfter;
-  muncherAfter = MUNCHER_AFTER_NOTHING;
-  muncherSceneEndedAt = millisNow;
-  panelDirty = true;
-  if (after == MUNCHER_AFTER_HOUR) {
-    munch.startHour();
-    muncherStartAt = millisNow;
-    muncherPlannedFor = 0;
-    Serial.println("Muncher: the hour show");
-  }
-}
-
-// The extra now and then (extrasUpdate()): a bonus fruit in the corridor,
-// which lies still until the next change eats it. None while a scene runs
-// or a fruit lies there already.
-bool muncherExtra() {
-  if (munch.mode != muncher::MODE_IDLE || munch.shown[0] == muncher::NO_DIGIT) { return false; }
-  if (munch.fruitX != muncher::NO_FRUIT) { return false; }
-  muncherPlaceFruit();
-  Serial.println("Muncher: a bonus fruit (now and then)");
-  return true;
-}
-
-// A sprite of 5 x 5, its rows with the leftmost pixel in bit 4, drawn round
-// its middle and turned to face (dx, dy); as drawn it faces right.
-void muncherSprite(const uint8_t rows[5], int16_t cx, int16_t cy, int8_t dx, int8_t dy, uint16_t colour) {
-  for (uint8_t r = 0; r < 5; r++) {
-    for (uint8_t c = 0; c < 5; c++) {
-      uint8_t sr = r, sc = c;
-      if (dx < 0)      { sc = 4 - c; }
-      else if (dy < 0) { sr = c; sc = 4 - r; }
-      else if (dy > 0) { sr = c; sc = r; }
-      if (rows[sr] & (0x10 >> sc)) { matrix.drawPixel(cx - 2 + c, cy - 2 + r, colour); }
-    }
-  }
-}
-
-const uint8_t MUNCH_OPEN[5]  = { 0x0E, 0x1C, 0x18, 0x1C, 0x0E };   // .###. ###.. ##... ###.. .###.
-const uint8_t MUNCH_SHUT[5]  = { 0x0E, 0x1F, 0x1F, 0x1F, 0x0E };
-const uint8_t GHOST_BODY[5]  = { 0x0E, 0x1F, 0x15, 0x1F, 0x15 };   // .###. ##### #.#.# ##### #.#.#
-const uint8_t GHOST_EYES[5]  = { 0x00, 0x00, 0x0A, 0x00, 0x00 };   // the two gaps of row 2
-// Red and pink follow the muncher; cyan and orange join them to a full hour.
-const uint8_t GHOST_RGB[muncher::GHOSTS][3] = { { 255, 0, 0 }, { 255, 184, 255 }, { 0, 255, 255 }, { 255, 184, 82 } };
-// The muncher folding up after the ghosts won, facing up: its mouth opens
-// wider and wider until nothing is left, then a little burst.
-const uint8_t MUNCH_FOLD[muncher::DEATH_FRAMES][5] = {
-  { 0x0E, 0x1F, 0x1F, 0x1F, 0x0E },   // .###. ##### ##### ##### .###.
-  { 0x0A, 0x1B, 0x1F, 0x1F, 0x0E },   // .#.#. ##.## ##### ##### .###.
-  { 0x11, 0x1B, 0x1F, 0x1F, 0x0E },   // #...# ##.## ##### ##### .###.
-  { 0x00, 0x11, 0x1B, 0x1F, 0x0E },   // ..... #...# ##.## ##### .###.
-  { 0x00, 0x00, 0x11, 0x1B, 0x0E },   // ..... ..... #...# ##.## .###.
-  { 0x00, 0x00, 0x00, 0x11, 0x0E },   // ..... ..... ..... #...# .###.
-  { 0x00, 0x0A, 0x00, 0x0A, 0x00 },   // ..... .#.#. ..... .#.#. .....
-  { 0x11, 0x00, 0x00, 0x00, 0x11 },   // #...# ..... ..... ..... #...#
-};
-
-// The hour show's giant muncher, 13 x 13, facing right; '#' lights a pixel.
-constexpr uint16_t giantRow(const char (&row)[muncher::GIANT + 1]) {
-  uint16_t bits = 0;
-  for (uint8_t i = 0; i < muncher::GIANT; i++) { bits = (uint16_t)((bits << 1) | (row[i] == '#' ? 1 : 0)); }
-  return bits;
-}
-constexpr uint16_t GIANT_OPEN[muncher::GIANT] = {
-  giantRow("....#####...."), giantRow("..#########.."), giantRow(".###########."), giantRow(".#########..."),
-  giantRow("########....."), giantRow("######......."), giantRow("#####........"), giantRow("######......."),
-  giantRow("########....."), giantRow(".#########..."), giantRow(".###########."), giantRow("..#########.."),
-  giantRow("....#####...."),
-};
-constexpr uint16_t GIANT_SHUT[muncher::GIANT] = {
-  giantRow("....#####...."), giantRow("..#########.."), giantRow(".###########."), giantRow(".###########."),
-  giantRow("#############"), giantRow("#############"), giantRow("#############"), giantRow("#############"),
-  giantRow("#############"), giantRow(".###########."), giantRow(".###########."), giantRow("..#########.."),
-  giantRow("....#####...."),
-};
-
-// The bonus fruits, 7 x 7, in muncher::FRUIT_KINDS' order: cherry,
-// strawberry, orange, apple. A letter is a colour (FRUIT_RGB), '.' nothing.
-const char *const FRUITS[muncher::FRUIT_KINDS][7] = {
-  { ".....GG", "....GG.", "..GG.G.", ".R...R.", "RRR.RRR", "RRR.RRR", ".R...R." },
-  { "..GGG..", ".RGGGR.", "RRWRWRR", "RWRRRWR", ".RRWRR.", "..RWR..", "...R..." },
-  { "...GG..", "..OGO..", ".OOOOO.", ".OOOOO.", ".OOOOO.", "..OOO..", "......." },
-  { "...BG..", "..RBR..", ".RRRRR.", ".RRRRR.", ".RRRRR.", "..R.R..", "......." },
-};
-
-uint16_t fruitColour(char c) {
-  switch (c) {
-    case 'R': return scaledColor(255, 0, 0);
-    case 'G': return scaledColor(0, 200, 0);
-    case 'W': return scaledColor(255, 255, 255);
-    case 'O': return scaledColor(255, 140, 0);
-    case 'B': return scaledColor(150, 75, 0);
-    default:  return 0;
-  }
-}
-
-// One pellet at (x, y), with the LEDs the setting adds to it.
-void muncherPellet(int16_t x, int16_t y, uint16_t colour) {
-  uint8_t p = muncherSettings.pellets;
-  matrix.drawPixel(x, y, colour);
-  if (p == MUNCHER_PELLETS_WIDE || p == MUNCHER_PELLETS_SOLID) { matrix.drawPixel(x + 1, y, colour); }
-  if (p == MUNCHER_PELLETS_TALL || p == MUNCHER_PELLETS_SOLID) { matrix.drawPixel(x, y + 1, colour); }
-  if (p == MUNCHER_PELLETS_SOLID)                              { matrix.drawPixel(x + 1, y + 1, colour); }
-}
-
-void muncherDraw(bool colonOn) {
-  const muncher::Layout &L = munch.L;
-  uint16_t dot   = scaledColor(255, 184, 151);
-  uint16_t wall  = scaledColor(40, 40, 255);
-  uint16_t eyes  = scaledColor(255, 255, 255);
-  uint16_t walls = munch.wallsWhite() ? eyes : wall;   // the hour show flashes them
-  matrix.fillScreen(0);
-  for (uint8_t i = 0; i < 4; i++) {
-    uint64_t bits = munch.dots[i];
-    for (uint8_t k = 0; k < muncher::COLS * muncher::ROWS; k++) {
-      if (bits & (1ULL << k)) {
-        muncherPellet(L.digitX[i] + 2 * (k % muncher::COLS), L.digitY[i] + 2 * (k / muncher::COLS), dot);
-      }
-    }
-  }
-  // The colon: two power pellets, 4 x 4 without their corners, on the
-  // second's beat. The one the knock's muncher ate stays away until its
-  // scene is over.
-  if (colonOn) {
-    for (uint8_t p = 0; p < 2; p++) {
-      if (munch.pelletEaten && p == L.knockPellet) { continue; }
-      matrix.fillRect(L.colonX[p] + 1, L.colonY[p], 2, 4, dot);
-      matrix.fillRect(L.colonX[p], L.colonY[p] + 1, 4, 2, dot);
-    }
-  }
-  for (int16_t x = 0; x < L.w; x++) {
-    if (!muncher::wallOpen(L, x)) { matrix.drawPixel(x, L.wallTop, walls); }
-    matrix.drawPixel(x, L.wallBottom, walls);
-  }
-  for (uint8_t k = 0; k < 32 && 2 + 4 * k < L.w; k++) {
-    if (munch.lanePellets & (1UL << k)) { muncherPellet(2 + 4 * k, L.laneY, dot); }
-  }
-  if (munch.fruitX != muncher::NO_FRUIT) {
-    const char *const *rows = FRUITS[munch.fruitKind];
-    for (uint8_t r = 0; r < 7; r++) {
-      for (uint8_t c = 0; c < 7; c++) {
-        if (rows[r][c] != '.') { matrix.drawPixel(munch.fruitX - 3 + c, L.laneY - 3 + r, fruitColour(rows[r][c])); }
-      }
-    }
-  }
-  // The ghosts under the muncher, except one caught: its white flash goes on
-  // top, or the muncher standing next to it would hide most of it.
-  uint16_t yellow = scaledColor(255, 255, 0);
-  for (uint8_t pass = 0; pass < 2; pass++) {
-    if (pass == 1 && munch.muncherOn()) {
-      muncherSprite(munch.mouthOpen() ? MUNCH_OPEN : MUNCH_SHUT, munch.mx, munch.my, munch.dx, munch.dy, yellow);
-    }
-    if (pass == 1 && munch.deathFrame() != 0xFF) {
-      muncherSprite(MUNCH_FOLD[munch.deathFrame()], munch.mx, munch.my, 1, 0, yellow);
-    }
-    for (uint8_t g = 0; g < muncher::GHOSTS; g++) {
-      const muncher::Ghost &h = munch.ghosts[g];
-      bool caught = h.mode == muncher::GHOST_CAUGHT;
-      if (h.mode == muncher::GHOST_OFF || !h.lit() || caught != (pass == 1)) { continue; }
-      // A blue one blinks white as the muncher closes in.
-      uint16_t body = caught ? eyes
-                    : (h.mode == muncher::GHOST_SCARED) ? (munch.scaredBlink(h) ? eyes : wall)
-                    : scaledColor(GHOST_RGB[g][0], GHOST_RGB[g][1], GHOST_RGB[g][2]);
-      muncherSprite(GHOST_BODY, h.x, L.laneY, 1, 0, body);
-      muncherSprite(GHOST_EYES, h.x, L.laneY, 1, 0, eyes);
-    }
-  }
-  if (munch.giantOn()) {
-    const uint16_t *rows = munch.giantMouthOpen() ? GIANT_OPEN : GIANT_SHUT;
-    int16_t half = muncher::GIANT / 2;
-    for (uint8_t r = 0; r < muncher::GIANT; r++) {
-      for (uint8_t c = 0; c < muncher::GIANT; c++) {
-        if (rows[r] & (1 << (muncher::GIANT - 1 - c))) {
-          matrix.drawPixel(munch.giantX - half + c, L.laneY - half + r, yellow);
-        }
-      }
-    }
-  }
-  faceShow();
-}
-
-// One pass of the watchface. Between changes it only repaints when what it
-// shows has changed (the colon's beat, another screen having drawn over it),
-// so an idle clock costs almost nothing, as with the Tetris face.
-void drawMuncherFace() {
-  if (screenRotation != muncherRotation) {
-    // A rotation moves everything: the time is shown as it is, at once.
-    muncherRotation = screenRotation;
-    munch.setLayout(screenIsLandscape() ? muncher::LANDSCAPE : muncher::PORTRAIT);
-    uint8_t now[4];
-    faceDigits(localTime, clockIsSet(), now, muncher::NO_DIGIT);
-    munch.show(now);
-    muncherPlannedFor = 0;
-    panelDirty = true;
-  }
-  bool moved = false;
-  if (munch.mode != muncher::MODE_IDLE) {
-    long since = (long)(millisNow - muncherStartAt);
-    if (since >= 0) {
-      uint32_t steps = (uint32_t)since / muncherSettings.paceMs;
-      moved = munch.advanceTo((uint16_t)min(steps, (uint32_t)0xFFFF));
-      if (muncherDoneSteps && (munch.stepsDone >= muncherDoneSteps || munch.mode == muncher::MODE_IDLE)) {
-        // When the new time stood complete, against the clock's own second:
-        // :00.0xx is on time.
-        Serial.printf("Muncher: the new time stands at :%02d.%03lu\n", clockSecond(localTime),
-                      millisNow - secondStartedAt);
-        muncherDoneSteps = 0;
-      }
-      if (munch.fruitsEaten != muncherFruitsLogged) {
-        muncherFruitsLogged = munch.fruitsEaten;
-        Serial.println("Muncher: a bonus fruit eaten");
-      }
-      if (munch.mode == muncher::MODE_IDLE) {
-        muncherSceneEnded();
-        if (munch.mode != muncher::MODE_IDLE) { moved = true; }
-      }
-    }
-  }
-  if (munch.mode == muncher::MODE_IDLE) {
-    uint8_t now[4];
-    faceDigits(localTime, clockIsSet(), now, muncher::NO_DIGIT);
-    muncherIdle(now);
-    if (munch.mode != muncher::MODE_IDLE) { moved = true; }
-  }
-  bool colonOn = (localTime % 2) == 0;   // 1 Hz, in step with the seconds, as on the Tetris face
-  if (!moved && !panelDirty && colonOn == muncherColonDrawn) { return; }
-  muncherDraw(colonOn);
-  muncherColonDrawn = colonOn;
-}
-
+MuncherFace muncherFace(muncherSettings);
 
 #if defined(CLOCK_DEBUG)
 // Every change of a digit walked through, at start-up: see muncher::selfTest().
@@ -3817,10 +3358,7 @@ void testFaceReset() {
   tetrisFace.testReset();
 #endif
 #if WATCHFACE_MUNCHER
-  muncherRotation = 0xFF;
-  muncherAfter = MUNCHER_AFTER_NOTHING;
-  muncherSceneEndedAt = 0;
-  muncherPreviewReq = muncherKnockReq = false;
+  muncherFace.testReset();
 #endif
 #if WATCHFACE_ALIENS
   aliensRotation = 0xFF;
@@ -3899,16 +3437,18 @@ void applyFaceParams(const String &q, bool live) {
     if (came & PARAM_REDRAW) { panelDirty = true; }
     if (came & PARAM_KNOCK)  { knockFollowSetting(); }
 #if WATCHFACE_MUNCHER
-    if (live && (came & PARAM_PLAYS) && b.face == WATCHFACE_MUNCHER_ID && settings.watchface == b.face) { muncherKnockReq = true; }
+    if (live && (came & PARAM_PLAYS) && b.face == WATCHFACE_MUNCHER_ID && settings.watchface == b.face) {
+      muncherFace.request(faceMoment(), TRIGGER_PREVIEW_ANIMATION);
+    }
 #endif
 #if WATCHFACE_ALIENS
     if (live && (came & PARAM_PLAYS) && b.face == WATCHFACE_ALIENS_ID && settings.watchface == b.face) { aliensKnockReq = true; }
 #endif
   }
   if (!live || !getParam(q, "pv").length()) { return; }
-  if (settings.watchface == WATCHFACE_TETRIS_ID) { tetrisFace.request(faceMoment(), TRIGGER_PREVIEW); }
+  if (settings.watchface == WATCHFACE_TETRIS_ID) { tetrisFace.request(faceMoment(), TRIGGER_PREVIEW_CHANGE); }
 #if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherPreviewReq = true; }
+  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherFace.request(faceMoment(), TRIGGER_PREVIEW_CHANGE); }
 #endif
 #if WATCHFACE_ALIENS
   if (settings.watchface == WATCHFACE_ALIENS_ID) { aliensPreviewReq = true; }
@@ -3943,8 +3483,8 @@ FaceNow faceMoment() {
 // runs at real time, and drawn when its picture changed or the panel no longer
 // shows it (panelDirty). In the M4's preview it is shown at most every
 // AP_PREVIEW_MS, which leaves the radio to the slow WiFiNINA web server:
-// skipped frames are stepped, not slowed down. The Muncher and Aliens faces
-// step, draw and show in one pass of their own, and repaint only on a change.
+// skipped frames are stepped, not slowed down. The Aliens face steps, draws
+// and shows in one pass of its own, and repaints only on a change.
 void faceUpdate(bool preview) {
 #if defined(CLOCK_DEBUG)
   faceDrawStart = micros();
@@ -3955,7 +3495,7 @@ void faceUpdate(bool preview) {
     case WATCHFACE_TETRIS_ID:  face = &tetrisFace; break;
 #endif
 #if WATCHFACE_MUNCHER
-    case WATCHFACE_MUNCHER_ID: drawMuncherFace(); return;
+    case WATCHFACE_MUNCHER_ID: face = &muncherFace; break;
 #endif
 #if WATCHFACE_ALIENS
     case WATCHFACE_ALIENS_ID:  drawAliensFace();  return;
@@ -4007,7 +3547,7 @@ uint8_t activeWatchface() {
   tetrisFace.enter(faceMoment(), ENTER_CHOSEN);
 #endif
 #if WATCHFACE_MUNCHER
-  muncherRotation = 0xFF;          // a fresh layout, the time shown at once
+  muncherFace.enter(faceMoment(), ENTER_CHOSEN);   // a fresh layout, the time shown at once
 #endif
 #if WATCHFACE_ALIENS
   aliensRotation = 0xFF;
@@ -5039,7 +4579,7 @@ void runFunction(InputFunction fn, uint8_t steps) {
 void faceAnimationStart() {
   if (screen != SCREEN_FACE) { return; }
 #if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherKnock(); return; }
+  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherFace.request(faceMoment(), TRIGGER_ACTION); return; }
 #endif
 #if WATCHFACE_ALIENS
   if (settings.watchface == WATCHFACE_ALIENS_ID) { aliensKnock(); return; }
@@ -8533,7 +8073,7 @@ bool faceTimeShown() {
   if (settings.watchface == WATCHFACE_TETRIS_ID) { return !tetrisFace.busy(faceMoment()); }
 #endif
 #if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) { return munch.mode == muncher::MODE_IDLE; }
+  if (settings.watchface == WATCHFACE_MUNCHER_ID) { return !muncherFace.busy(faceMoment()); }
 #endif
 #if WATCHFACE_ALIENS
   if (settings.watchface == WATCHFACE_ALIENS_ID) { return !alienFace.running; }
@@ -8712,7 +8252,7 @@ unsigned long faceLeadMs() {
 #endif
 #if WATCHFACE_MUNCHER
   if (settings.watchface == WATCHFACE_MUNCHER_ID) {
-    return muncherPlannedDone ? (unsigned long)muncherPlannedDone * muncherSettings.paceMs : 15000UL;
+    return muncherFace.leadMs();
   }
 #endif
   return 0;
@@ -8740,7 +8280,7 @@ unsigned long faceChangeIn() {
 #endif
 #if WATCHFACE_MUNCHER
   if (settings.watchface == WATCHFACE_MUNCHER_ID) {
-    if (munch.legsPlanned() && muncherPlannedFor) { long in = (long)(muncherStartAt - millisNow); return in > 0 ? (unsigned long)in : 0; }
+    if (muncherFace.planned()) { long in = (long)(muncherFace.plannedStart() - millisNow); return in > 0 ? (unsigned long)in : 0; }
     toMinute -= 15000;
   }
 #endif
@@ -8855,14 +8395,14 @@ bool extrasDue() {
 // plays it or refuses one that would run into its next change. Faces
 // without extras leave the time alone.
 void extrasUpdate() {
-  bool muncher = false, aliens = false;
+  bool onMuncher = false, onAliens = false;
 #if WATCHFACE_MUNCHER
-  muncher = settings.watchface == WATCHFACE_MUNCHER_ID;
+  onMuncher = settings.watchface == WATCHFACE_MUNCHER_ID;
 #endif
 #if WATCHFACE_ALIENS
-  aliens = settings.watchface == WATCHFACE_ALIENS_ID;
+  onAliens = settings.watchface == WATCHFACE_ALIENS_ID;
 #endif
-  if ((!muncher && !aliens) || !extrasDue()) { return; }
+  if ((!onMuncher && !onAliens) || !extrasDue()) { return; }
   extrasScheduleNext();
   if (!decorFree(0, false)) {
     Serial.println("Extra: due, the panel not free for it - dropped");
@@ -8870,10 +8410,10 @@ void extrasUpdate() {
   }
   bool played = false;
 #if WATCHFACE_MUNCHER
-  if (muncher) { played = muncherExtra(); }
+  if (onMuncher) { played = muncherFace.request(faceMoment(), TRIGGER_NOW_AND_THEN) == OUTCOME_PLAYED; }
 #endif
 #if WATCHFACE_ALIENS
-  if (aliens) { played = aliensExtra(); }
+  if (onAliens) { played = aliensExtra(); }
 #endif
   if (!played) { Serial.println("Extra: due, the face has no room for it - dropped"); }
 }
@@ -10647,7 +10187,7 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
   } else if (path == "/api/discard") {
     loadSettings();           // the stored settings, with the Tetris ones, applied at once
 #if WATCHFACE_TETRIS
-    tetrisFace.request(faceMoment(), TRIGGER_PREVIEW);   // show what was restored
+    tetrisFace.request(faceMoment(), TRIGGER_PREVIEW_CHANGE);   // show what was restored
 #endif
     sendNoContent(c);
   } else if (path == "/api/time") {

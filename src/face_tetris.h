@@ -789,7 +789,7 @@ inline bool TetrisFace::busy(const FaceNow &) const {
 // 2026-10-20; from 2026-10-12 every build refused it). A preview asked for by
 // the web app plays once the run before it has finished.
 inline FaceOutcome TetrisFace::request(const FaceNow &now, FaceTrigger why) {
-  if (why == TRIGGER_PREVIEW) {
+  if (why == TRIGGER_PREVIEW_CHANGE) {
     _previewAsked = true;
     return OUTCOME_PLAYED;
   }

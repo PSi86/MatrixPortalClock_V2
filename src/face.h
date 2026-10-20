@@ -106,9 +106,10 @@ enum FaceEnter : uint8_t {
 
 // Who asks a face for an animation (Watchface::request()).
 enum FaceTrigger : uint8_t {
-  TRIGGER_ACTION,         // the input action "trigger watchface animation": a knock, a button, a gesture
-  TRIGGER_NOW_AND_THEN,   // the shared beat "How often"
-  TRIGGER_PREVIEW,        // a setting changed in the web app
+  TRIGGER_ACTION,              // the input action "trigger watchface animation": a knock, a button, a gesture
+  TRIGGER_NOW_AND_THEN,        // the shared beat "How often"
+  TRIGGER_PREVIEW_CHANGE,      // a setting of the change was tried in the web app: show a change
+  TRIGGER_PREVIEW_ANIMATION,   // a new choice of the watchface animation: play what it picks
 };
 enum FaceOutcome : uint8_t {
   OUTCOME_NONE,       // the face offers nothing for this trigger
