@@ -10,6 +10,31 @@
 #define FACE_H
 
 #include <Arduino.h>
+#include "clock_time.h"
+
+// Optional things - an animation asked for, an extra, a GIF, info cards - end
+// this long before the time's next change starts (concept doc, tab "Panel
+// priorities", decided 2026-10-12): the change is seen from its start.
+const unsigned long FACE_GUARD_MS = 3000;
+
+// Whether something of `len` ms, starting now, ends FACE_GUARD_MS before a
+// change that starts at `startAt` (millis()). The one check every face and the
+// core ask; unsigned arithmetic survives the millis() wrap.
+inline bool faceFits(unsigned long startAt, unsigned long now, unsigned long len) {
+  return (long)(startAt - now) >= (long)(len + FACE_GUARD_MS);
+}
+
+// The four digits HH MM of a moment, d[0] the tens of the hours; `none` in
+// every place while the clock has no time, so a face shows dashes rather than
+// a time counted up from midnight.
+inline void faceDigits(time_t t, bool set, uint8_t d[4], uint8_t none) {
+  if (!set) {
+    for (uint8_t i = 0; i < 4; i++) { d[i] = none; }
+    return;
+  }
+  uint8_t h = (uint8_t)clockHour(t), m = (uint8_t)clockMinute(t);
+  d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
+}
 
 // Random numbers for the faces. A release draws them from random(), which on
 // the S3 reads the hardware generator (no randomSeed() anywhere: see

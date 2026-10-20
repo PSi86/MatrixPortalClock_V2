@@ -439,7 +439,7 @@ const uint32_t CARD_LOOP_MAX_MS = 25000;
    is due is dropped, and a random time that falls into the slot around a
    change is drawn anew.
    ====================================================================== */
-const unsigned long PANEL_GUARD_BEFORE_MS = 3000;   // optional things end this long before a change starts
+const unsigned long PANEL_GUARD_BEFORE_MS = FACE_GUARD_MS;   // optional things end this long before a change starts (face.h)
 const unsigned long PANEL_INFO_AFTER_MS   = 3000;   // messages, cards, the info round: after a change's end
 const unsigned long PANEL_DECOR_REST_MS   = 10000;  // GIFs and extras of their own accord: the plain face this long first
 const unsigned long PANEL_EXTRA_MS        = 8000;   // the longest extra of a face, about
@@ -3415,9 +3415,8 @@ void tetrisLayout() {
 // changed is rebuilt - the others keep the blocks they have already dropped.
 void tetrisPushTime() {
   if (!clockIsSet()) { return; }   // nothing to build yet; drawTetrisFace() shows dashes
-  uint8_t h = clockHour(localTime), m = clockMinute(localTime);
-  uint8_t d[4] = { (uint8_t)(h / 10), (uint8_t)(h % 10),
-                   (uint8_t)(m / 10), (uint8_t)(m % 10) };
+  uint8_t d[4];
+  faceDigits(localTime, true, d, 0xFF);
   uint8_t changeStyle = 0xFF;   // drawn once, so digits changing together match
   for (uint8_t i = 0; i < 4; i++) {
     if (shakeBusy[i]) { continue; }   // still coming apart, it will be rebuilt after
@@ -4103,16 +4102,6 @@ bool          muncherColonDrawn   = false;
 bool          muncherPreviewReq   = false;  // the web app asks to see a change
 bool          muncherKnockReq     = false;  // ... or the knock's scene
 
-// The four digits of a moment; dashes while the clock has no time.
-void muncherDigitsAt(time_t t, uint8_t d[4]) {
-  if (!clockIsSet()) {
-    for (uint8_t i = 0; i < 4; i++) { d[i] = muncher::NO_DIGIT; }
-    return;
-  }
-  uint8_t h = (uint8_t)clockHour(t), m = (uint8_t)clockMinute(t);
-  d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
-}
-
 void muncherStartScene(muncher::Mode mode, unsigned long at, uint8_t after = MUNCHER_AFTER_NOTHING) {
   munch.start(mode);
   muncherStartAt = at;
@@ -4166,9 +4155,8 @@ bool muncherKnock() {
     mode = muncher::MODE_CHANGE;
     what = "the minute's ones again";
   }
-  unsigned long needs = (unsigned long)steps * muncherSettings.paceMs + MUNCHER_KNOCK_ROOM_MS;
   muncherPlannedFor = 0;               // the change is planned anew afterwards
-  if ((long)(plannedStart - millisNow) < (long)needs) {
+  if (!faceFits(plannedStart, millisNow, (unsigned long)steps * muncherSettings.paceMs)) {
     munch.show(munch.shown);           // drop the knock's walk
     return false;
   }
@@ -4199,7 +4187,7 @@ void muncherIdle(const uint8_t now[4]) {
     // To a full hour four ghosts follow the muncher, and the hour show
     // comes after.
     uint8_t to[4];
-    muncherDigitsAt(next, to);
+    faceDigits(next, clockIsSet(), to, muncher::NO_DIGIT);
     bool hour = clockMinute(next) == 0;
     muncherPlannedDone = munch.planChange(to, muncherSettings.style, 0, hour ? 4 : 2);
     muncherPlannedAfter = hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_MINUTE;
@@ -4439,7 +4427,7 @@ void drawMuncherFace() {
     muncherRotation = screenRotation;
     munch.setLayout(screenIsLandscape() ? muncher::LANDSCAPE : muncher::PORTRAIT);
     uint8_t now[4];
-    muncherDigitsAt(localTime, now);
+    faceDigits(localTime, clockIsSet(), now, muncher::NO_DIGIT);
     munch.show(now);
     muncherPlannedFor = 0;
     panelDirty = true;
@@ -4469,7 +4457,7 @@ void drawMuncherFace() {
   }
   if (munch.mode == muncher::MODE_IDLE) {
     uint8_t now[4];
-    muncherDigitsAt(localTime, now);
+    faceDigits(localTime, clockIsSet(), now, muncher::NO_DIGIT);
     muncherIdle(now);
     if (munch.mode != muncher::MODE_IDLE) { moved = true; }
   }
@@ -4617,15 +4605,6 @@ const uint8_t ALIEN_ROW_RGB[aliens::ROWS][3] = {   // the colourful rows: magent
   { 255, 60, 200 }, { 255, 60, 200 }, { 60, 220, 255 }, { 60, 220, 255 }, { 40, 230, 60 },
 };
 
-void aliensDigitsAt(time_t t, uint8_t d[4]) {
-  if (!clockIsSet()) {
-    for (uint8_t i = 0; i < 4; i++) { d[i] = aliens::NO_DIGIT; }
-    return;
-  }
-  uint8_t h = (uint8_t)clockHour(t), m = (uint8_t)clockMinute(t);
-  d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
-}
-
 // An alien that can shoot back, drawn at random: a digit and a column with
 // a block, the lowest of which drops the bomb. Returns the scene's length.
 uint32_t aliensPlanBack() {
@@ -4690,7 +4669,7 @@ bool aliensScene(uint8_t kind, const char *why) {
     what = "the minutes' ones again";
   }
   aliensPlannedFor = 0;                          // the change is planned anew afterwards
-  if (len == 0 || (long)(plannedStart - millisNow) < (long)(len + ALIENS_KNOCK_ROOM_MS)) { return false; }
+  if (len == 0 || !faceFits(plannedStart, millisNow, len)) { return false; }
   aliensStartAt = millisNow;
   aliensLogStand = false;
   alienFace.start();
@@ -4724,7 +4703,7 @@ void aliensIdle(const uint8_t now[4]) {
   time_t next = localTime - sec + 60;
   if (aliensPlannedFor != next) {
     uint8_t to[4];
-    aliensDigitsAt(next, to);
+    faceDigits(next, clockIsSet(), to, aliens::NO_DIGIT);
     aliensPlannedStand = alienFace.planChange(to, aliensSettings.style, 0, clockMinute(next) == 0);
     aliensPlannedFor = next;
   }
@@ -4856,7 +4835,7 @@ void drawAliensFace() {
     aliensRotation = screenRotation;
     alienFace.setLayout(screenIsLandscape() ? aliens::LANDSCAPE : aliens::PORTRAIT);
     uint8_t now[4];
-    aliensDigitsAt(localTime, now);
+    faceDigits(localTime, clockIsSet(), now, aliens::NO_DIGIT);
     alienFace.show(now);
     aliensPlannedFor = 0;
     panelDirty = true;
@@ -4878,7 +4857,7 @@ void drawAliensFace() {
   }
   if (!alienFace.running) {
     uint8_t now[4];
-    aliensDigitsAt(localTime, now);
+    faceDigits(localTime, clockIsSet(), now, aliens::NO_DIGIT);
     aliensIdle(now);
   }
   bool colonOn = (localTime % 2) == 0;
@@ -9933,7 +9912,7 @@ unsigned long faceChangeIn() {
 // time's next change starts.
 bool panelFitsBeforeChange(unsigned long ms) {
   unsigned long in = faceChangeIn();
-  return in == ~0UL || in >= ms + PANEL_GUARD_BEFORE_MS;
+  return in == ~0UL || faceFits(millisNow + in, millisNow, ms);
 }
 
 // On every pass: when the face's change or scene ends.

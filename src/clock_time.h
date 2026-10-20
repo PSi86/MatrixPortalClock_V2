@@ -9,7 +9,7 @@
    The clock holds UTC, exactly as NTP delivers it. Timezone and daylight
    saving are added where the time is shown (the sketch's localTime), so
    changing either never touches the clock. The hour/minute/second helpers
-   break down whatever value they are given with gmtime_r(); pass them the
+   break down whatever value they are given as gmtime_r() would; pass them the
    local time to get the local fields.
    ------------------------------------------------------------------------- */
 #pragma once
@@ -60,6 +60,12 @@ inline long daysFromCivil(int y, unsigned m, unsigned d) {
   return era * 146097L + (long)doe - 719468L;
 }
 
-inline int clockHour(time_t t)   { struct tm tmv; gmtime_r(&t, &tmv); return tmv.tm_hour; }
-inline int clockMinute(time_t t) { struct tm tmv; gmtime_r(&t, &tmv); return tmv.tm_min; }
-inline int clockSecond(time_t t) { struct tm tmv; gmtime_r(&t, &tmv); return tmv.tm_sec; }
+// The fields of a time by arithmetic, the same as gmtime_r() gives for every
+// value (checked against it on 3.6 million, 2026-10-20) - negative ones too,
+// which the local time is before the clock is set in a zone west of UTC. The
+// faces and the second's tick ask several times on every pass, and gmtime_r()
+// works out the whole date each time.
+inline int64_t clockFloorDiv(int64_t t, int64_t d) { return t >= 0 ? t / d : -((-t + d - 1) / d); }
+inline int clockHour(time_t t)   { return (int)(clockFloorDiv(t, 3600) - clockFloorDiv(t, 86400) * 24); }
+inline int clockMinute(time_t t) { return (int)(clockFloorDiv(t, 60) - clockFloorDiv(t, 3600) * 60); }
+inline int clockSecond(time_t t) { return (int)((int64_t)t - clockFloorDiv(t, 60) * 60); }
