@@ -300,20 +300,32 @@ inline void ClassicFace::draw(Adafruit_GFX &g, const FaceNow &, const FacePaint 
   }
 }
 
-// Whether the new minute is still flying in: the first fly-in time of its
-// first second.
+// Whether its animation runs - all six digits asked to fly in at the next
+// second, or flying (K1 of the face refactor: until 2026-10-20 a GIF or a
+// card could start in the middle of it) - or the minute's first fly-in time,
+// as the rules for the panel have always counted the change.
 inline bool ClassicFace::busy(const FaceNow &now) const {
+  if (_anim != ANIM_IDLE) { return true; }
   return now.second == 0 && now.ms - now.secondAt < (unsigned long)_s.flyInTime * 10UL;
 }
 
 // The input's animation: all six digits fly in at the next second, unless
-// one is still asked for or flying, or landed less than FACE_REST_MS ago. The
-// console gets one line per animation taken, with the requests refused since
-// the one before, not one per request (a stress test of fast knocks wrote
-// over 200 lines in 30 s).
+// one is still asked for or flying, landed less than FACE_REST_MS ago, or
+// would not have landed FACE_GUARD_MS before the time's change starts - the
+// minute's digits fly in during its second :59 (K2 of the face refactor:
+// until 2026-10-20 the classic face did not look). The console gets one line
+// per animation taken, with the requests refused since the one before, not
+// one per request (a stress test of fast knocks wrote over 200 lines in
+// 30 s).
 inline FaceOutcome ClassicFace::request(const FaceNow &now, FaceTrigger why) {
   if (why != TRIGGER_ACTION) { return OUTCOME_NONE; }
-  if (_anim != ANIM_IDLE || now.ms - _animEndedAt < FACE_REST_MS) {
+  bool fits = true;
+  if (now.set) {
+    unsigned long changeAt = now.secondAt + (59UL - now.second) * 1000UL;
+    unsigned long len = now.secondAt + 1000UL - now.ms + (unsigned long)_s.flyInTime * 10UL;
+    fits = faceFits(changeAt, now.ms, len);
+  }
+  if (_anim != ANIM_IDLE || now.ms - _animEndedAt < FACE_REST_MS || !fits) {
     if (_ignored < 0xFFFF) { _ignored++; }
     return OUTCOME_REFUSED;
   }

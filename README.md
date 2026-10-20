@@ -317,8 +317,9 @@ On the S3 each input also has a tick, **closes**: a ticked input closes an alert
 or a message on the panel and goes on to the next one. The watchface animation
 is the face's own: the Tetris digits break up in the
 break-up effect, the Muncher and the Aliens play the scene their setting picks, and the classic digits all fly in at the next second as if
-every one of them changed. A new one is ignored until the running one has
-ended and 1 s has passed, on every face, so a knock that reports itself
+every one of them changed - not when they would not have landed 3 s before the
+minute's own fly-in during second :59, so a knock from :55 on does nothing
+there. A new one is ignored until the running one has ended and 1 s has passed, on every face, so a knock that reports itself
 more than once (2 to 7 times, seen) plays it once, and a fast run of knocks
 plays the next one 1 s after the last has ended; the Tetris face keeps its
 own rules besides (see the break-up effect). The page lists only
