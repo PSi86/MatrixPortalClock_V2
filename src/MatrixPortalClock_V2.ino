@@ -1214,6 +1214,22 @@ time_t localTime;   // what the panel shows: the clock's UTC plus zone and dayli
 #if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
 long testShift = 0;   // debug and test builds: seconds the panel's time is moved for a test (POST /api/test)
 #endif
+#if defined(FACE_FRAME_LOG)
+// Test builds: the test's own clock (POST /api/test virtual=1). Every pass
+// of the loop is TEST_STEP_MS, whatever it really took; the panel's time runs
+// from the scene's start, and what the scene asks for happens at its moment
+// (plan=). So the same code shows the same frames on every run, which real
+// time - a pass early or late, a request landing anywhere in a second - did
+// not give (2026-10-20: Tetris differed from the first frame).
+const unsigned long TEST_STEP_MS = 5;
+bool          testVirtualOn = false;
+unsigned long testVirtualMs = 0, testVirtualMs0 = 0;   // the test's millis(), and where its scene began
+time_t        testVirtualLocal = 0;                    // the panel's time at testVirtualMs0
+bool          testQuiet = false;                       // no notices and no info cards over the face
+struct TestStep { unsigned long atMs; char what; long arg; };   // ms after the scene's start
+TestStep      testPlan[8];
+uint8_t       testPlanCount = 0, testPlanNext = 0;
+#endif
 
 // NTP sync -----------------------------------------------------------------
 // One state instead of the flags ntpSuccess, ntpRequestActive and wifiEnabled.
@@ -1746,6 +1762,9 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
+#if defined(FACE_FRAME_LOG)
+  testPlanRun();   // a test scene's steps that are due on the test's clock
+#endif
 #if BOARD_WAVESHARE_WALL
   wallConsole();  // "black" on the USB console before a flash, test pictures
   wallOutputWatch();
@@ -2993,10 +3012,13 @@ void faceFrameDrawn() {
   uint32_t crc = faceCrc32((const uint8_t *)matrix.getBuffer(), (size_t)matrix.width() * matrix.height() * 2);
   if (crc == last) { return; }
   last = crc;
-  char line[40];
-  snprintf(line, sizeof(line), "F %02u:%02u:%02u.%03lu %08lx %u", (unsigned)hourNow, (unsigned)minuteNow,
-           (unsigned)secondNow, (unsigned long)(millisNow - secondStartedAt), (unsigned long)crc,
-           (unsigned)settings.watchface);
+  char line[56];
+  int n = snprintf(line, sizeof(line), "F %02u:%02u:%02u.%03lu %08lx %u", (unsigned)hourNow, (unsigned)minuteNow,
+                   (unsigned)secondNow, (unsigned long)(millisNow - secondStartedAt), (unsigned long)crc,
+                   (unsigned)settings.watchface);
+  if (testVirtualOn && n > 0 && n < (int)sizeof(line)) {   // and the ms into the scene, on the test's clock
+    snprintf(line + n, sizeof(line) - n, " %lu", (unsigned long)(millisNow - testVirtualMs0));
+  }
   Serial.println(line);
 #endif
 }
@@ -4767,6 +4789,61 @@ void aliensSelfTest() {
 #endif
 #endif  // WATCHFACE_ALIENS
 
+#if defined(FACE_FRAME_LOG)
+/* Test builds: a scene of tools.local/refactor starts with the face shown
+   afresh, as on a turn of the panel - the time at once, nothing running,
+   nothing asked for, every rest over - so it starts the same way on every
+   run; its steps (plan=) happen at their moment on the test's clock. */
+void testFaceReset() {
+  faceCatchUp();
+#if WATCHFACE_TETRIS
+  tetrisRotation = 0xFF;
+  shakeEndedAt = 0;
+  shakePreviewReq = false;
+#endif
+#if WATCHFACE_MUNCHER
+  muncherRotation = 0xFF;
+  muncherAfter = MUNCHER_AFTER_NOTHING;
+  muncherSceneEndedAt = 0;
+  muncherPreviewReq = muncherKnockReq = false;
+#endif
+#if WATCHFACE_ALIENS
+  aliensRotation = 0xFF;
+  aliensSceneEndedAt = 0;
+  aliensPreviewReq = aliensKnockReq = false;
+#endif
+  panelDirty = true;
+}
+
+void testPlanRun() {
+  while (testVirtualOn && testPlanNext < testPlanCount && millisNow - testVirtualMs0 >= testPlan[testPlanNext].atMs) {
+    const TestStep &s = testPlan[testPlanNext++];
+    if (s.what == 'a') { faceAnimationStart(); }                        // "trigger watchface animation"
+#if GIF_PLAYBACK
+    else if (s.what == 'e') { extrasDueAt = millisNow ? millisNow : 1; }   // an extra due now
+#endif
+    else if (s.what == 's') { testShift += s.arg; panelDirty = true; }    // the panel's time jumps
+  }
+}
+
+// plan=a2000,s8000:60,e25000: a letter, the ms after the scene's start, an argument.
+void testPlanParse(const String &plan) {
+  testPlanCount = testPlanNext = 0;
+  int from = 0;
+  while (from < (int)plan.length() && testPlanCount < sizeof(testPlan) / sizeof(testPlan[0])) {
+    int to = plan.indexOf(',', from);
+    if (to < 0) { to = plan.length(); }
+    String step = plan.substring(from, to);
+    int colon = step.indexOf(':');
+    TestStep &s = testPlan[testPlanCount++];
+    s.what = step.charAt(0);
+    s.atMs = (unsigned long)step.substring(1, colon < 0 ? step.length() : colon).toInt();
+    s.arg = colon < 0 ? 0 : step.substring(colon + 1).toInt();
+    from = to + 1;
+  }
+}
+#endif
+
 /* ----------------------------------------------------------------------
    The faces' settings: each face's blob and its table (face.h), loaded,
    saved, taken from the web app and reported the same way for all.
@@ -4965,6 +5042,13 @@ void timekeeper(void) {
   
   millisNow=millis();
   localTime=clockNow() + tzTotalOffset();   // the clock keeps UTC; the panel shows local time
+#if defined(FACE_FRAME_LOG)
+  if (testVirtualOn) {                       // the test's own clock: a pass is TEST_STEP_MS
+    testVirtualMs += TEST_STEP_MS;
+    millisNow = testVirtualMs;
+    localTime = testVirtualLocal + (time_t)((testVirtualMs - testVirtualMs0) / 1000);
+  }
+#endif
 #if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
   localTime += testShift;                    // a test's moment (POST /api/test shift=): the panel only, never the clock
 #endif
@@ -9599,6 +9683,9 @@ void infoCardsEnded() {
 // After the notices, the information: what is new as cards at once, all of
 // it in the info round; over the face only, after a GIF's end.
 void noticesUpdate() {
+#if defined(FACE_FRAME_LOG)
+  if (testQuiet) { return; }       // a test's scenes: nothing over the face (POST /api/test quiet=1)
+#endif
   bool round = infoRoundReady();   // on every pass: it keeps watch for the round's minute
   NoticeMark mark = MARK_NONE;
   bool newAlert = false, newAny = false, newInfo = false;
@@ -11666,6 +11753,22 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
 #if defined(FACE_FRAME_LOG)
     v = getParam(body, "seed");
     if (v.length()) { FaceRandom::seed((uint32_t)strtoul(v.c_str(), nullptr, 10)); }
+    // virtual=1&start=<local time>[&plan=..][&reset=1]: a scene on the test's
+    // own clock from the panel time `start`; virtual=0 back to the real one
+    // (millis then jumps: restart the clock after a test).
+    v = getParam(body, "virtual");
+    if (v == "1") {
+      testVirtualOn = true;
+      testVirtualMs = testVirtualMs0 = millisNow;
+      testVirtualLocal = (time_t)strtoll(getParam(body, "start").c_str(), nullptr, 10);
+      testShift = 0;
+      testPlanParse(getParam(body, "plan"));
+      if (getParam(body, "reset") == "1") { testFaceReset(); }
+    } else if (v == "0") {
+      testVirtualOn = false;
+      testPlanCount = testPlanNext = 0;
+    }
+    if (getParam(body, "quiet") == "1") { testQuiet = true; }
 #endif
 #if GIF_PLAYBACK
     if (getParam(body, "quiet") == "1") {
@@ -11679,6 +11782,10 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     JsonDocument d;
     d["shift"] = testShift;
     d["local"] = (long long)localTime;
+#if defined(FACE_FRAME_LOG)
+    d["virtual"] = testVirtualOn;
+    d["sceneMs"] = testVirtualOn ? (unsigned long)(millisNow - testVirtualMs0) : 0UL;
+#endif
     sendJson(c, d);
 #endif
   } else if (path == "/api/restart") {
