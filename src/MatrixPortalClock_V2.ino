@@ -92,6 +92,7 @@ class JsonObject;
 #include <esp_timer.h>
 #include "rtc_pcf85063.h"      // the board's own real-time clock
 #include "imu_qmi8658.h"       // its motion sensor, for the knock
+#include "gif_card.h"          // its microSD card, the GIFs' source while one is in
 #endif
 
 #if BAND_DATA
@@ -380,6 +381,40 @@ uint8_t      *gifPackCopy = nullptr;
 // mapped, which the flash driver does at any address (2026-10-18: three GIFs
 // read back from above 16 MB had their CRCs).
 const uint32_t GIF_PACK_MAP_LIMIT = 0x1000000;
+
+// How the GIF on show ended (gifSourceClose()): played to its end, not now
+// (it would run into the time's change, or no RAM), or broken.
+const uint8_t GIF_CLOSE_PLAYED = 0, GIF_CLOSE_NOT_NOW = 1, GIF_CLOSE_BROKEN = 2;
+
+#if BOARD_WAVESHARE_WALL
+// The wall clock's microSD card (src/gif_card.h; section "GIFs from the
+// card" at the end). A card with GIFs is the GIFs' source while it is in
+// (Peter, 2026-10-19), the pack in the flash otherwise. The source changes
+// only while no GIF plays.
+CardList      cardList;
+bool          cardMounted = false;
+bool          gifFromCard = false;
+bool          cardJobBusy = false;           // a job is with the card's task
+bool          cardRemountWanted = false;     // POST /api/card, the console, or reads that keep failing
+uint8_t       cardFetchFails = 0;            // in a row
+uint32_t      cardFreqKhz = CARD_FREQ_KHZ;
+uint32_t      cardMb = 0, cardFreeMb = 0, cardRealKhz = 0;
+uint32_t      cardSpeedStopsBefore = 0;
+// Two GIFs of the card's in PSRAM: the next one, read ahead so a GIF starts
+// at once ("now or not at all"), and the last one shown, for "GIF again".
+const uint8_t CARD_SLOT_EMPTY = 0, CARD_SLOT_FILLING = 1, CARD_SLOT_READY = 2;
+struct CardSlot { uint8_t *data; uint32_t size; int16_t index; uint8_t state; };
+CardSlot      cardSlot[2] = { { nullptr, 0, -1, CARD_SLOT_EMPTY }, { nullptr, 0, -1, CARD_SLOT_EMPTY } };
+int8_t        cardPlaying = -1, cardLastSlot = -1;
+CardResult    cardResult;                    // the task's last result, taken in gifCardUpdate()
+// Console "sd stress": the card's largest GIFs read ahead in turn, instead of
+// random ones, to watch the wall play them.
+int16_t       cardStress[16];
+uint8_t       cardStressCount = 0, cardStressAt = 0;
+// A card GIF's one loop must leave room in a minute: the faces' changes take
+// up to about 30 s of it (the Muncher's and the Aliens' from about :30).
+const uint32_t CARD_LOOP_MAX_MS = 25000;
+#endif
 #endif
 
 /* ======================================================================
@@ -1518,6 +1553,9 @@ void setup(void) {
   loadGifSettings();
   loadDecorSettings();
   gifPackLoad();
+#if BOARD_WAVESHARE_WALL
+  gifCardBegin();         // its task reads the card; until then the pack plays
+#endif
   gifGammaInit();
   gifScheduleNext();
 #endif
@@ -1788,6 +1826,9 @@ void loop(void) {
   noticesUpdate();      // a new alert or message comes up, before a GIF that is due
 #endif
 #if GIF_PLAYBACK
+#if BOARD_WAVESHARE_WALL
+  gifCardUpdate();      // the card's task: its results, and the next GIF read ahead
+#endif
   gifUpdate();          // a GIF of its own accord when one is due
 #endif
   switch (screen) {
@@ -7098,6 +7139,10 @@ void stopAPMode() {
 //   clock (wallRtcReport()).
 // - "imu" shows the board's motion sensor and what it gave of the knock
 //   (wallKnockReport()).
+// - "sd" shows the microSD card and its GIFs; "sd speed" reads every GIF once
+//   and checks it; "sd remount" reads the card anew; "sd freq <kHz>" mounts
+//   it at another clock; "sd stress" reads its largest GIFs ahead in turn
+//   (gifCardCommand()).
 void wallConsole() {
   static char line[32];
   static uint8_t len = 0;
@@ -7139,6 +7184,8 @@ void wallConsole() {
     } else if (strcmp(line, "imu") == 0) {
       wallKnockReport();
 #endif
+    } else if (strncmp(line, "sd", 2) == 0 && (line[2] == '\0' || line[2] == ' ')) {
+      gifCardCommand(line);
     }
 #if BAND_DATA
     if (strcmp(line, "status test") == 0) {
@@ -7205,6 +7252,9 @@ void wallOutputWatch() {
     }
 #else
     Serial.printf("Panel output stopped (%lu since the start); started again\n", (unsigned long)stops);
+#endif
+#if GIF_PLAYBACK
+    if (cardReading()) { Serial.println("Panel output stopped while the card was being read"); }
 #endif
   }
   matrix.restartOutput();
@@ -8413,12 +8463,24 @@ void gifScheduleNext() {
   gifDueAt = panelRandomAt(lo, hi, (unsigned long)gifSettings.seconds * 1000UL);
 }
 
-// All GIFs: the pack's, none without a pack.
+// All GIFs: the pack's, none without a pack - on the wall clock the card's
+// while it is the source.
 int16_t gifCount() {
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard) { return cardList.count; }
+#endif
   return gifPackCount;
 }
 
 bool gifFits(int16_t i) {
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard) {
+    // A card GIF the index did not describe (put there by hand) counts until
+    // it has been read; then its size and loop are known.
+    const CardGif &g = cardList.gifs[i];
+    return !g.bad && g.width <= WALL_W && g.height <= WALL_H && (g.loopMs == 0 || g.loopMs <= CARD_LOOP_MAX_MS);
+  }
+#endif
   uint16_t w = gifPack[i].width, h = gifPack[i].height;
 #if BOARD_WAVESHARE_WALL
   return w <= WALL_W && h <= WALL_H;   // the wall's LEDs, not the clock's 64x32 picture
@@ -8461,20 +8523,34 @@ void gifDrawLine(GIFDRAW *d) {
 // Shows GIF i over the face; false when it does not open.
 bool gifStart(int16_t i) {
   if (i < 0 || i >= gifCount()) { return false; }
-  const GifPackEntry &e = gifPack[i];
-  const char *name = e.name;
-  uint16_t w = e.width, h = e.height;
+  const char *name;
+  uint16_t w, h;
   const uint8_t *data;
   uint32_t size;
-  if (!gifPackOpen(e, data, size)) { return false; }
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard) {
+    if (!gifCardOpen(i, data, size)) { return false; }   // read ahead, or not at all
+    const CardGif &g = cardList.gifs[i];
+    name = g.name;
+    w = g.width;
+    h = g.height;
+  } else
+#endif
+  {
+    const GifPackEntry &e = gifPack[i];
+    name = e.name;
+    w = e.width;
+    h = e.height;
+    if (!gifPackOpen(e, data, size)) { return false; }
+  }
   gifPlayer = new (std::nothrow) GifPlayer;
-  if (!gifPlayer) { Serial.println("GIF: no RAM for the decoder"); gifPackClose(); return false; }
+  if (!gifPlayer) { Serial.println("GIF: no RAM for the decoder"); gifSourceClose(GIF_CLOSE_NOT_NOW); return false; }
   gifPlayer->decoder.begin(GIF_PALETTE_RGB888);   // gifDrawLine() reads the palette as RGB888
   if (!gifPlayer->decoder.open((uint8_t *)data, size, gifDrawLine)) {
     Serial.printf("GIF %s: does not open (%d)\n", name, gifPlayer->decoder.getLastError());
     delete gifPlayer;
     gifPlayer = nullptr;
-    gifPackClose();
+    gifSourceClose(GIF_CLOSE_BROKEN);
     return false;
   }
   gifLoopTime = gifLoopMs(data, size, gifFrames);
@@ -8487,7 +8563,7 @@ bool gifStart(int16_t i) {
     gifPlayer->decoder.close();
     delete gifPlayer;
     gifPlayer = nullptr;
-    gifPackClose();
+    gifSourceClose(GIF_CLOSE_NOT_NOW);
     return false;
   }
   gifIndex = i;
@@ -8518,17 +8594,26 @@ bool gifRequestFits() {
   return false;
 }
 
+// The GIF to play next: a random one of the pack's; of the card's the one
+// read ahead (gifCardUpdate()), -1 while none is ready.
+int16_t gifNext() {
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard) { return gifCardNext(); }
+#endif
+  return gifPick();
+}
+
 // A GIF now (FN_PLAY_GIF): on the face only, and only one that fits.
 void gifPlayNow() {
   if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
-  if (!gifStart(gifPick())) { gifScheduleNext(); }
+  if (!gifStart(gifNext())) { gifScheduleNext(); }
 }
 
 // The last GIF shown once more (FN_GIF_AGAIN): on the face only; a random one
 // when none has played yet or the last no longer fits the panel as it is held.
 void gifPlayAgain() {
   if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
-  int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifPick();
+  int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifNext();
   if (!gifStart(i)) { gifScheduleNext(); }
 }
 
@@ -8545,7 +8630,16 @@ void gifUpdate() {
     gifScheduleNext();
     return;
   }
-  if (!gifStart(gifPick())) { gifScheduleNext(); }
+  if (!gifStart(gifNext())) { gifScheduleNext(); }
+}
+
+// Lets go of the bytes of the GIF that was on show, or was about to be.
+void gifSourceClose(uint8_t how) {
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard) { gifCardClose(how); return; }
+#endif
+  (void)how;
+  gifPackClose();
 }
 
 // The GIF screen goes: the decoder closes, the face draws itself afresh, and
@@ -8556,7 +8650,7 @@ void gifEnd() {
     delete gifPlayer;
     gifPlayer = nullptr;
   }
-  gifPackClose();
+  gifSourceClose(GIF_CLOSE_PLAYED);
   matrix.setBrightness(panelBrightness());     // back to the clock's
   gifLast = gifIndex;
   gifIndex = -1;
@@ -8880,6 +8974,212 @@ void gifPackClose() {
   free(gifPackCopy);
   gifPackCopy = nullptr;
 }
+
+#if BOARD_WAVESHARE_WALL
+/* ----------------------------------------------------------------------
+   GIFs from the card (the wall clock; src/gif_card.h does the card's work in
+   a task of its own). loop() only sends it jobs and takes the results, so
+   the face never waits for the card. The next GIF is read into PSRAM ahead
+   of time, while no GIF plays; a GIF due, or asked for, starts from there at
+   once, or not at all when it is not ready yet. The last one shown stays in
+   PSRAM for "GIF again". A card GIF that cannot be read, has the wrong SHA-1
+   or does not open is left out until the card is read again.
+   ---------------------------------------------------------------------- */
+
+// At start-up: the card's task, and the card read for the first time.
+void gifCardBegin() {
+  if (!cardBegin()) { Serial.println("Card: no RAM for its task"); return; }
+  cardRemountWanted = true;
+}
+
+// (Plain types in these signatures: the prototypes generated from this
+// sketch stand on every board, where the card's types do not exist.)
+void gifCardSend(uint8_t kind, int16_t index) {
+  CardJob job = { (CardJobKind)kind, index, cardFreqKhz, index >= 0 ? &cardList.gifs[index] : nullptr };
+  if (xQueueSend(cardJobs(), &job, 0) == pdTRUE) { cardJobBusy = true; }
+}
+
+void gifCardFreeSlot(uint8_t s) {
+  heap_caps_free(cardSlot[s].data);
+  cardSlot[s] = { nullptr, 0, -1, CARD_SLOT_EMPTY };
+  if (cardLastSlot == s) { cardLastSlot = -1; }
+}
+
+// The card GIF read ahead to come next, -1 while none is ready.
+int16_t gifCardNext() {
+  for (uint8_t s = 0; s < 2; s++) {
+    if (cardSlot[s].state == CARD_SLOT_READY && s != cardLastSlot) { return cardSlot[s].index; }
+  }
+  Serial.println("GIF: the card's next one is not read yet");
+  return -1;
+}
+
+// Card GIF i's bytes, from the slot holding it; false when none does.
+bool gifCardOpen(int16_t i, const uint8_t *&data, uint32_t &size) {
+  for (uint8_t s = 0; s < 2; s++) {
+    if (cardSlot[s].state == CARD_SLOT_READY && cardSlot[s].index == i) {
+      cardPlaying = (int8_t)s;
+      data = cardSlot[s].data;
+      size = cardSlot[s].size;
+      return true;
+    }
+  }
+  return false;
+}
+
+// The card GIF on show is done with: played, it becomes the last one (and
+// the one before goes); not now, it stays ready; broken, it is left out.
+void gifCardClose(uint8_t how) {
+  if (cardPlaying < 0) { return; }
+  uint8_t s = (uint8_t)cardPlaying;
+  cardPlaying = -1;
+  if (how == GIF_CLOSE_BROKEN) {
+    cardList.gifs[cardSlot[s].index].bad = true;
+    gifCardFreeSlot(s);
+  } else if (how == GIF_CLOSE_PLAYED) {
+    if (cardLastSlot >= 0 && cardLastSlot != s) { gifCardFreeSlot((uint8_t)cardLastSlot); }
+    cardLastSlot = (int8_t)s;
+  }
+}
+
+// The card is read anew (at start-up, POST /api/card, the console, or when
+// reads keep failing): the pack is the source until it is done.
+void gifCardRemount() {
+  for (uint8_t s = 0; s < 2; s++) { gifCardFreeSlot(s); }
+  if (gifFromCard) { gifLast = -1; }
+  gifFromCard = false;
+  cardMounted = false;
+  cardListFree(cardList);
+  cardRemountWanted = false;
+  cardFetchFails = 0;
+  gifCardSend(CARD_MOUNT_JOB, -1);
+}
+
+void gifCardResult() {
+  CardResult &r = cardResult;
+  cardJobBusy = false;
+  if (r.kind == CARD_MOUNT_JOB) {
+    cardMounted = cardHandle() != nullptr;
+    cardList = r.list;
+    cardMb = r.cardMb;
+    cardFreeMb = r.freeMb;
+    cardRealKhz = r.freqKhz;
+    gifFromCard = r.ok;
+    if (gifFromCard) { gifLast = -1; }   // it was the pack's
+    Serial.printf("Card: %s, %lu ms%s\n", r.text, (unsigned long)r.ms,
+                  gifFromCard ? " - the GIFs come from the card" : cardMounted ? " - no GIFs on it, the pack plays" : "");
+    if (cardMounted) {
+      Serial.printf("Card: %lu MB, %lu MB free, %lu kHz\n", (unsigned long)cardMb, (unsigned long)cardFreeMb,
+                    (unsigned long)cardRealKhz);
+    }
+  } else if (r.kind == CARD_FETCH_JOB) {
+    int8_t s = cardSlot[0].state == CARD_SLOT_FILLING ? 0 : cardSlot[1].state == CARD_SLOT_FILLING ? 1 : -1;
+    if (s < 0 || r.index < 0 || r.index >= cardList.count) { heap_caps_free(r.data); return; }
+    CardGif &g = cardList.gifs[r.index];
+    if (!r.ok) {
+      Serial.printf("Card: %s %s - left out\n", g.name, r.text);
+      g.bad = true;
+      gifCardFreeSlot((uint8_t)s);
+      if (++cardFetchFails >= 3) { cardRemountWanted = true; }   // the card may be gone
+      return;
+    }
+    cardFetchFails = 0;
+    cardSlot[s] = { r.data, r.size, r.index, CARD_SLOT_READY };
+    g.width = r.width;
+    g.height = r.height;
+    Serial.printf("Card: %s read ahead, %lu KB in %lu ms\n", g.name, (unsigned long)(r.size / 1024),
+                  (unsigned long)r.ms);
+    if (g.loopMs == 0) { g.loopMs = gifLoopMs(r.data, r.size, g.frames); }
+    if (!gifFits(r.index)) {   // put there by hand: too large, or its loop too long
+      Serial.printf("Card: %s (%ux%u, %lu ms) does not fit the wall - left out\n", g.name, g.width, g.height,
+                    (unsigned long)g.loopMs);
+      g.bad = true;
+      gifCardFreeSlot((uint8_t)s);
+    }
+  } else {
+    double mb = r.bytes / 1e6;
+    Serial.printf("Card: read %.1f MB in %lu ms, %.2f MB/s; %lu read errors, %lu not as the index says; "
+                  "the panel output stopped %lu times meanwhile\n", mb, (unsigned long)r.ms,
+                  r.ms ? mb / (r.ms / 1000.0) : 0.0, (unsigned long)r.readErrors, (unsigned long)r.shaWrong,
+                  (unsigned long)(wallOutputStops - cardSpeedStopsBefore));
+  }
+}
+
+// Every pass: the task's result, and the next job - only while no GIF plays,
+// so the card's reads do not come on top of a GIF's frames.
+void gifCardUpdate() {
+  if (!cardResults()) { return; }
+  if (cardJobBusy && xQueueReceive(cardResults(), &cardResult, 0) == pdTRUE) { gifCardResult(); }
+  if (cardJobBusy || screen == SCREEN_GIF) { return; }
+  if (cardRemountWanted) { gifCardRemount(); return; }
+  if (!gifFromCard) { return; }
+  bool ready = false;
+  int8_t empty = -1;
+  for (uint8_t s = 0; s < 2; s++) {
+    if (cardSlot[s].state == CARD_SLOT_READY && s != cardLastSlot) { ready = true; }
+    if (cardSlot[s].state == CARD_SLOT_EMPTY && empty < 0) { empty = (int8_t)s; }
+  }
+  if (ready || empty < 0) { return; }
+  int16_t i = cardStressAt < cardStressCount ? cardStress[cardStressAt++] : gifPick();
+  if (i < 0 || (cardLastSlot >= 0 && cardSlot[cardLastSlot].index == i)) { return; }   // nothing new to read
+  cardSlot[empty] = { nullptr, 0, i, CARD_SLOT_FILLING };
+  gifCardSend(CARD_FETCH_JOB, i);
+}
+
+// Console "sd ...".
+void gifCardCommand(const char *line) {
+  unsigned khz = 0;
+  if (strcmp(line, "sd") == 0) {
+    uint16_t bad = 0, byHand = 0;
+    for (uint16_t i = 0; i < cardList.count; i++) {
+      if (cardList.gifs[i].bad) { bad++; }
+      if (!cardList.gifs[i].hasSha) { byHand++; }
+    }
+    Serial.printf("Card: %s, %u GIFs (%u not in the index, %u left out), %lu MB, %lu MB free, %lu kHz; source %s; "
+                  "slots %d/%d (index %d/%d), last %d\n", cardMounted ? "mounted" : "none", cardList.count, byHand, bad,
+                  (unsigned long)cardMb, (unsigned long)cardFreeMb, (unsigned long)cardRealKhz,
+                  gifFromCard ? "the card" : "the pack", cardSlot[0].state, cardSlot[1].state, cardSlot[0].index,
+                  cardSlot[1].index, cardLastSlot);
+  } else if (strcmp(line, "sd remount") == 0) {
+    cardRemountWanted = true;
+    Serial.println("Card: read anew as soon as no GIF plays");
+  } else if (sscanf(line, "sd freq %u", &khz) == 1 && khz >= 400 && khz <= 40000) {
+    cardFreqKhz = khz;
+    cardRemountWanted = true;
+    Serial.printf("Card: %u kHz from the next mount (now)\n", khz);
+  } else if (strcmp(line, "sd stress") == 0) {
+    // The 10 largest files, then the 4 largest 192x128 not among them.
+    if (!gifFromCard || cardJobBusy || screen == SCREEN_GIF) { Serial.println("Card: not now (no card, busy, or a GIF plays)"); return; }
+    cardStressCount = 0;
+    for (uint8_t pass = 0; pass < 2; pass++) {
+      uint8_t want = pass == 0 ? 10 : 4;
+      for (uint8_t k = 0; k < want && cardStressCount < sizeof(cardStress) / sizeof(cardStress[0]); k++) {
+        int16_t best = -1;
+        for (uint16_t i = 0; i < cardList.count; i++) {
+          const CardGif &g = cardList.gifs[i];
+          if (g.bad || (pass == 1 && (g.width != WALL_W || g.height != WALL_H))) { continue; }
+          bool taken = false;
+          for (uint8_t t = 0; t < cardStressCount; t++) { if (cardStress[t] == (int16_t)i) { taken = true; } }
+          if (!taken && (best < 0 || g.bytes > cardList.gifs[best].bytes)) { best = (int16_t)i; }
+        }
+        if (best < 0) { break; }
+        cardStress[cardStressCount++] = best;
+      }
+    }
+    cardStressAt = 0;
+    for (uint8_t s = 0; s < 2; s++) { if (cardSlot[s].state == CARD_SLOT_READY && s != cardLastSlot) { gifCardFreeSlot(s); } }
+    Serial.printf("Card: the next %u GIFs read ahead are the largest:", cardStressCount);
+    for (uint8_t t = 0; t < cardStressCount; t++) { Serial.printf(" %s", cardList.gifs[cardStress[t]].name); }
+    Serial.println();
+  } else if (strcmp(line, "sd speed") == 0) {
+    if (!cardMounted || cardJobBusy || screen == SCREEN_GIF) { Serial.println("Card: not now (no card, busy, or a GIF plays)"); return; }
+    cardSpeedList() = &cardList;
+    cardSpeedStopsBefore = wallOutputStops;
+    gifCardSend(CARD_SPEED_JOB, -1);
+    Serial.println("Card: reading every GIF once ...");
+  }
+}
+#endif
 #endif
 
 #if BAND_DATA
@@ -11200,6 +11500,18 @@ void apiState(Print &c) {
   gifs["pack"] = (gifPackState == GIF_PACK_OK) ? gifPackCount : 0;
   gifs["packState"] = gifPackState == GIF_PACK_OK ? "ok" : gifPackState == GIF_PACK_BAD ? "damaged" : "none";
   gifs["packMaxKb"] = gifPackPart ? gifPackPart->size / 1024 : 0;   // what POST /api/pack takes
+#if BOARD_WAVESHARE_WALL
+  gifs["source"] = gifFromCard ? "card" : "pack";
+  JsonObject sd = gifs["card"].to<JsonObject>();
+  sd["mounted"] = cardMounted;
+  uint16_t sdBad = 0;
+  for (uint16_t i = 0; i < cardList.count; i++) { if (cardList.gifs[i].bad) { sdBad++; } }
+  sd["gifs"] = cardList.count - sdBad;
+  sd["leftOut"] = sdBad;
+  sd["mb"] = cardMb;
+  sd["freeMb"] = cardFreeMb;
+  sd["reading"] = cardRemountWanted || (cardJobBusy && !cardMounted);
+#endif
 #endif
 
   JsonObject wifi = d["wifi"].to<JsonObject>();
@@ -11323,6 +11635,9 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   free(gifPack);
   gifPack = nullptr;
   gifPackCount = 0;
+#if BOARD_WAVESHARE_WALL
+  if (!gifFromCard)   // the card's GIFs stay as they are
+#endif
   gifLast = -1;   // it may have been a pack GIF the new pack does not have
   Serial.printf("GIF pack: receiving %u GIFs, %u KB\n", h.count, (unsigned)(h.size / 1024));
 
@@ -11559,6 +11874,15 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     d["playing"] = onFace && screen == SCREEN_GIF;
     d["busy"] = busy;
     sendJson(c, d);
+#if BOARD_WAVESHARE_WALL
+  } else if (path == "/api/card") {
+    // The card read anew - a card put in, or GIFs changed on it - as soon
+    // as no GIF plays; the pack plays meanwhile.
+    cardRemountWanted = true;
+    JsonDocument d;
+    d["reading"] = true;
+    sendJson(c, d);
+#endif
 #endif
 #if BAND_DATA
   } else if (path == "/api/messages") {
