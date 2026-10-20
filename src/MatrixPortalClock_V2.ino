@@ -6527,7 +6527,7 @@ void gifDrawLine(GIFDRAW *d) {
 }
 
 // Shows GIF i over the face; false when it does not open.
-bool gifStart(int16_t i) {
+bool gifStart(int16_t i, bool ownAccord) {
   if (i < 0 || i >= gifCount()) { return false; }
   const char *name;
   uint16_t w, h;
@@ -6562,10 +6562,15 @@ bool gifStart(int16_t i) {
   gifLoopTime = gifLoopMs(data, size, gifFrames);
   uint32_t playMs = gifSettings.seconds * 1000UL;
   gifLoopsPlanned = (gifLoopTime > 0 && gifLoopTime <= playMs) ? (uint16_t)(playMs / gifLoopTime) : 1;
-  // Its whole loops end before the time's next change, or it does not start.
+  // Its whole loops end before the time's next change - and, of its own
+  // accord, ROUND_GIF_GAP_MS before an info round - or it does not start.
+  // Checked once, against what it plays (K6 of the face refactor: until
+  // 2026-10-20 a GIF of its own accord was checked against the seconds set
+  // first, which let one through whose loops ran longer, and held one back
+  // whose loops were shorter).
   uint32_t lenMs = gifLoopTime > 0 ? min<uint32_t>((uint32_t)gifLoopsPlanned * gifLoopTime, GIF_PLAY_MAX_MS) : playMs;
-  if (!panelFitsBeforeChange(lenMs)) {
-    Serial.printf("GIF %s: its %lu ms would run into the time's change, dropped\n", name, (unsigned long)lenMs);
+  if (!panelFitsBeforeChange(lenMs) || (ownAccord && roundNextIn() < lenMs + ROUND_GIF_GAP_MS)) {
+    Serial.printf("GIF %s: its %lu ms have no room before the time's change, dropped\n", name, (unsigned long)lenMs);
     gifPlayer->decoder.close();
     delete gifPlayer;
     gifPlayer = nullptr;
@@ -6612,7 +6617,7 @@ int16_t gifNext() {
 // A GIF now (FN_PLAY_GIF): on the face only, and only one that fits.
 void gifPlayNow() {
   if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
-  if (!gifStart(gifNext())) { gifScheduleNext(); }
+  if (!gifStart(gifNext(), false)) { gifScheduleNext(); }
 }
 
 // The last GIF shown once more (FN_GIF_AGAIN): on the face only; a random one
@@ -6620,23 +6625,24 @@ void gifPlayNow() {
 void gifPlayAgain() {
   if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
   int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifNext();
-  if (!gifStart(i)) { gifScheduleNext(); }
+  if (!gifStart(i, false)) { gifScheduleNext(); }
 }
 
 // A GIF of its own accord once it is due: now, or not at all when the panel
 // is not free for it (decorFree()) - it does not wait (Peter, 2026-10-12);
 // GIFs that waited all came at once when the wait ended, right after the
-// time's change.
+// time's change. What does not depend on its length is looked at before it
+// is opened; its whole loops when they are known (gifStart()).
 void gifUpdate() {
   if (screen == SCREEN_GIF) { return; }   // one on show; the next is drawn at its end
   if (!gifSettings.randomOn || gifCount() == 0) { return; }
   if ((long)(millisNow - gifDueAt) < 0) { return; }
-  if (screen != SCREEN_FACE || !decorFree((unsigned long)gifSettings.seconds * 1000UL, true)) {
+  if (screen != SCREEN_FACE || !decorFree(0, true)) {
     Serial.println("GIF: due, the panel not free for it - dropped");
     gifScheduleNext();
     return;
   }
-  if (!gifStart(gifNext())) { gifScheduleNext(); }
+  if (!gifStart(gifNext(), true)) { gifScheduleNext(); }
 }
 
 // Lets go of the bytes of the GIF that was on show, or was about to be.
@@ -9836,12 +9842,13 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
   } else if (path == "/api/gif") {
     bool onFace = (screen == SCREEN_FACE);
     // Not during the face's change or a scene of it, nor into the next change:
-    // then it is dropped, not kept (Peter, 2026-10-12).
-    bool busy = onFace && (!faceTimeShown() || !panelFitsBeforeChange((unsigned long)gifSettings.seconds * 1000UL));
+    // then it is dropped, not kept (Peter, 2026-10-12). Whether it played says
+    // why not: on the face, with GIFs to play, it found no room.
     if (onFace) { gifPlayNow(); }
+    bool playing = onFace && screen == SCREEN_GIF;
     JsonDocument d;
-    d["playing"] = onFace && screen == SCREEN_GIF;
-    d["busy"] = busy;
+    d["playing"] = playing;
+    d["busy"] = onFace && !playing && gifCount() > 0;
     sendJson(c, d);
 #if BOARD_WAVESHARE_WALL
   } else if (path == "/api/card") {
