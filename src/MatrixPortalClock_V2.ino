@@ -3150,7 +3150,33 @@ const TetrisSettings TETRIS_DEFAULTS = {
 };
 
 TetrisSettings tetrisSettings;
-SettingsStore<TetrisSettings> tetrisStore;
+
+// The Tetris settings for the web app and the store (face.h). shk, the knock's
+// sensitivity, is kept here, where it has always been stored.
+const char *const TETRIS_SHS_LABELS[] = { "Collapse", "Scatter", "Clear rows", "Random each time" };   // by value: SHAKE_STYLE_*
+static_assert(sizeof(TETRIS_SHS_LABELS) / sizeof(TETRIS_SHS_LABELS[0]) == SHAKE_STYLE_COUNT, "a name per break-up effect");
+const FaceParam TETRIS_PARAMS[] = {
+  { "tdrop", offsetof(TetrisSettings, dropMs),     1, PARAM_RANGE,  0,           TETRIS_DROP_MIN, TETRIS_DROP_MAX,       nullptr },
+  { "tspin", offsetof(TetrisSettings, spinMs),     2, PARAM_RANGE,  0,           TETRIS_SPIN_MIN, TETRIS_SPIN_MAX,       nullptr },
+  { "shk",   offsetof(TetrisSettings, shakeLevel), 1, PARAM_RANGE,  PARAM_KNOCK, 0,               SHAKE_LEVEL_MAX,       nullptr },
+  { "shs",   offsetof(TetrisSettings, shakeStyle), 1, PARAM_CHOICE, 0,           0,               SHAKE_STYLE_COUNT - 1, TETRIS_SHS_LABELS },
+};
+
+// A blob of an older revision, the same idea as the main settings: rev 1 only
+// had dropMs and spinMs, and the read left the rest zeroed, so the fields
+// added since get an explicit value and what was set stays.
+void tetrisMigrate(uint8_t *data, uint8_t rev) {
+  TetrisSettings &t = *(TetrisSettings *)data;
+  if (rev < 2) {
+    t.shakeLevel = TETRIS_DEFAULTS.shakeLevel;
+    t.shakeStyle = TETRIS_DEFAULTS.shakeStyle;
+  }
+  if (rev < 3) { t.unusedRev3 = 0; }
+}
+
+FaceBlob tetrisBlob = { "tetris", TETRIS_SETTINGS_MAGIC, TETRIS_SETTINGS_REV, WATCHFACE_TETRIS_ID,
+                        (uint8_t *)&tetrisSettings, sizeof(TetrisSettings), (const uint8_t *)&TETRIS_DEFAULTS,
+                        TETRIS_PARAMS, sizeof(TETRIS_PARAMS) / sizeof(TETRIS_PARAMS[0]), tetrisMigrate };
 
 // State of one of the four digits.
 struct TetrisDigit {
@@ -3916,7 +3942,29 @@ const MuncherSettings MUNCHER_DEFAULTS = {
 };
 
 MuncherSettings muncherSettings;
-SettingsStore<MuncherSettings> muncherStore;
+
+// The Muncher settings for the web app and the store (face.h).
+const char *const MUNCHER_MST_LABELS[] = { "Mixed", "Whole digit", "Only the difference" };              // muncher::STYLE_*
+const char *const MUNCHER_MKN_LABELS[] = { "Power pellet", "Last digit again", "Random each time", "Ghosts win" };   // MUNCHER_KNOCK_*
+const char *const MUNCHER_MPEL_LABELS[] = { "One LED", "Side by side", "One above the other", "Solid" };   // MUNCHER_PELLETS_*
+static_assert(sizeof(MUNCHER_MST_LABELS) / sizeof(MUNCHER_MST_LABELS[0]) == muncher::STYLE_COUNT, "a name per change style");
+static_assert(sizeof(MUNCHER_MKN_LABELS) / sizeof(MUNCHER_MKN_LABELS[0]) == MUNCHER_KNOCK_COUNT, "a name per scene");
+static_assert(sizeof(MUNCHER_MPEL_LABELS) / sizeof(MUNCHER_MPEL_LABELS[0]) == MUNCHER_PELLETS_COUNT, "a name per pellet");
+const FaceParam MUNCHER_PARAMS[] = {
+  { "mst",   offsetof(MuncherSettings, style),   1, PARAM_CHOICE, 0,            0, muncher::STYLE_COUNT - 1,  MUNCHER_MST_LABELS },
+  { "mkn",   offsetof(MuncherSettings, knock),   1, PARAM_CHOICE, PARAM_PLAYS,  0, MUNCHER_KNOCK_COUNT - 1,   MUNCHER_MKN_LABELS },
+  { "mpace", offsetof(MuncherSettings, paceMs),  1, PARAM_RANGE,  0,            MUNCHER_PACE_MIN, MUNCHER_PACE_MAX, nullptr },
+  { "mpel",  offsetof(MuncherSettings, pellets), 1, PARAM_CHOICE, PARAM_REDRAW, 0, MUNCHER_PELLETS_COUNT - 1, MUNCHER_MPEL_LABELS },
+};
+
+// Rev 1 had a spare byte where the pellets are.
+void muncherMigrate(uint8_t *data, uint8_t rev) {
+  if (rev < 2) { ((MuncherSettings *)data)->pellets = MUNCHER_PELLETS_ONE; }
+}
+
+FaceBlob muncherBlob = { "muncher", MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV, WATCHFACE_MUNCHER_ID,
+                         (uint8_t *)&muncherSettings, sizeof(MuncherSettings), (const uint8_t *)&MUNCHER_DEFAULTS,
+                         MUNCHER_PARAMS, sizeof(MUNCHER_PARAMS) / sizeof(MUNCHER_PARAMS[0]), muncherMigrate };
 muncher::Face munch;
 uint8_t       muncherRotation     = 0xFF;   // rotation the layout was built for
 unsigned long muncherStartAt      = 0;      // when the planned or running scene starts
@@ -4296,46 +4344,6 @@ void drawMuncherFace() {
   muncherColonDrawn = colonOn;
 }
 
-void loadMuncherSettings() {
-  muncherStore.begin("muncher");
-  muncherStore.read(muncherSettings);
-  if (muncherSettings.magic != MUNCHER_SETTINGS_MAGIC) {
-    muncherSettings = MUNCHER_DEFAULTS;   // written with the next save
-  } else if (muncherSettings.rev < 2) {
-    muncherSettings.pellets = MUNCHER_PELLETS_ONE;   // rev 1 had a spare byte there; written with the next save
-  }
-  if (muncherSettings.style >= muncher::STYLE_COUNT) { muncherSettings.style = muncher::STYLE_MIXED; }
-  if (muncherSettings.knock >= MUNCHER_KNOCK_COUNT)  { muncherSettings.knock = MUNCHER_KNOCK_RANDOM; }
-  if (muncherSettings.pellets >= MUNCHER_PELLETS_COUNT) { muncherSettings.pellets = MUNCHER_PELLETS_ONE; }
-  muncherSettings.paceMs = constrain(muncherSettings.paceMs, MUNCHER_PACE_MIN, MUNCHER_PACE_MAX);
-}
-
-void saveMuncherSettings() {
-  muncherSettings.magic = MUNCHER_SETTINGS_MAGIC;
-  muncherSettings.rev   = MUNCHER_SETTINGS_REV;
-  muncherStore.write(muncherSettings);
-}
-
-// The web app's Muncher controls, live or saved; a changed knock shows its
-// scene, and the page's pv says a control asked to see a change.
-void applyMuncherParams(const String &q, bool live) {
-  String v;
-  v = getParam(q, "mst");   if (v.length()) { muncherSettings.style = constrain(v.toInt(), 0, muncher::STYLE_COUNT - 1); }
-  v = getParam(q, "mpace"); if (v.length()) { muncherSettings.paceMs = constrain(v.toInt(), MUNCHER_PACE_MIN, MUNCHER_PACE_MAX); }
-  v = getParam(q, "mpel");
-  if (v.length()) {
-    uint8_t pellets = constrain(v.toInt(), 0, MUNCHER_PELLETS_COUNT - 1);
-    if (pellets != muncherSettings.pellets) { panelDirty = true; }   // the face redraws at once
-    muncherSettings.pellets = pellets;
-  }
-  v = getParam(q, "mkn");
-  if (v.length()) {
-    uint8_t knock = constrain(v.toInt(), 0, MUNCHER_KNOCK_COUNT - 1);
-    if (live && knock != muncherSettings.knock && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherKnockReq = true; }
-    muncherSettings.knock = knock;
-  }
-  if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherPreviewReq = true; }
-}
 
 #if defined(CLOCK_DEBUG)
 // Every change of a digit walked through, at start-up: see muncher::selfTest().
@@ -4410,7 +4418,43 @@ const AliensSettings ALIENS_DEFAULTS = {
 };
 
 AliensSettings aliensSettings;
-SettingsStore<AliensSettings> aliensStore;
+
+// The Aliens settings for the web app and the store (face.h).
+const char *const ALIENS_AST_LABELS[] = { "Mixed", "Whole digit", "Only the difference" };                     // aliens::STYLE_*
+const char *const ALIENS_ACOL_LABELS[] = { "White", "Coloured rows" };                                         // ALIENS_COLOURS_*
+const char *const ALIENS_AKN_LABELS[] = { "Last digit again", "Saucer", "Aliens shoot back", "Random each time" };   // ALIENS_KNOCK_*
+const char *const ALIENS_ANAP_LABELS[] = { "Off", "Now and then" };
+static_assert(sizeof(ALIENS_AST_LABELS) / sizeof(ALIENS_AST_LABELS[0]) == aliens::STYLE_COUNT, "a name per change style");
+static_assert(sizeof(ALIENS_ACOL_LABELS) / sizeof(ALIENS_ACOL_LABELS[0]) == ALIENS_COLOURS_COUNT, "a name per colouring");
+static_assert(sizeof(ALIENS_AKN_LABELS) / sizeof(ALIENS_AKN_LABELS[0]) == ALIENS_KNOCK_COUNT, "a name per scene");
+const FaceParam ALIENS_PARAMS[] = {
+  { "ast",  offsetof(AliensSettings, style),   1, PARAM_CHOICE, 0,            0, aliens::STYLE_COUNT - 1,  ALIENS_AST_LABELS },
+  { "acol", offsetof(AliensSettings, colours), 1, PARAM_CHOICE, PARAM_REDRAW, 0, ALIENS_COLOURS_COUNT - 1, ALIENS_ACOL_LABELS },
+  { "akn",  offsetof(AliensSettings, knock),   1, PARAM_CHOICE, PARAM_PLAYS,  0, ALIENS_KNOCK_COUNT - 1,   ALIENS_AKN_LABELS },
+  { "anap", offsetof(AliensSettings, nap),     1, PARAM_FLAG,   0,            0, 1,                        ALIENS_ANAP_LABELS },
+};
+
+// An older blob: the trial build's (rev 1: look, style, idle, colours after
+// the rev) keeps its change and its colours; rev 2 gets the knock's default,
+// rev 3 the waking blocks'.
+void aliensMigrate(uint8_t *data, uint8_t rev) {
+  AliensSettings &a = *(AliensSettings *)data;
+  if (rev < 2) {
+    AliensSettings was = ALIENS_DEFAULTS;
+    was.style = data[4];
+    was.colours = data[6];
+    a = was;
+  } else if (rev < 3) {
+    a.knock = ALIENS_DEFAULTS.knock;
+    a.nap = ALIENS_DEFAULTS.nap;
+  } else if (rev < 4) {
+    a.nap = ALIENS_DEFAULTS.nap;
+  }
+}
+
+FaceBlob aliensBlob = { "aliens", ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, WATCHFACE_ALIENS_ID,
+                        (uint8_t *)&aliensSettings, sizeof(AliensSettings), (const uint8_t *)&ALIENS_DEFAULTS,
+                        ALIENS_PARAMS, sizeof(ALIENS_PARAMS) / sizeof(ALIENS_PARAMS[0]), aliensMigrate };
 aliens::Face  alienFace;
 uint8_t       aliensRotation     = 0xFF;    // rotation the layout was built for
 unsigned long aliensStartAt      = 0;       // when the planned or running scene starts
@@ -4707,54 +4751,6 @@ void drawAliensFace() {
   aliensDraw(colonOn, sceneMs);
 }
 
-void loadAliensSettings() {
-  aliensStore.begin("aliens");
-  aliensStore.read(aliensSettings);
-  if (aliensSettings.magic != ALIENS_SETTINGS_MAGIC) {
-    aliensSettings = ALIENS_DEFAULTS;   // written with the next save
-  } else if (aliensSettings.rev < 2) {
-    // The trial build's bytes: look, style, idle, colours after the rev.
-    const uint8_t *b = (const uint8_t *)&aliensSettings;
-    AliensSettings was = ALIENS_DEFAULTS;
-    was.style = b[4];
-    was.colours = b[6];
-    aliensSettings = was;
-  } else if (aliensSettings.rev < 3) {
-    aliensSettings.knock = ALIENS_DEFAULTS.knock;
-    aliensSettings.nap = ALIENS_DEFAULTS.nap;
-  } else if (aliensSettings.rev < 4) {
-    aliensSettings.nap = ALIENS_DEFAULTS.nap;
-  }
-  if (aliensSettings.nap > 1) { aliensSettings.nap = 1; }
-  if (aliensSettings.style >= aliens::STYLE_COUNT)     { aliensSettings.style = aliens::STYLE_MIXED; }
-  if (aliensSettings.colours >= ALIENS_COLOURS_COUNT)  { aliensSettings.colours = ALIENS_COLOURS_ARCADE; }
-  if (aliensSettings.knock >= ALIENS_KNOCK_COUNT)      { aliensSettings.knock = ALIENS_DEFAULTS.knock; }
-}
-
-void saveAliensSettings() {
-  aliensSettings.magic = ALIENS_SETTINGS_MAGIC;
-  aliensSettings.rev   = ALIENS_SETTINGS_REV;
-  aliensStore.write(aliensSettings);
-}
-
-// The web app's Aliens controls, live or saved; the page's pv asks to see a
-// change (choosing the face in the picker sends it), a new knock its scene.
-void applyAliensParams(const String &q, bool live) {
-  String v;
-  uint8_t colours = aliensSettings.colours;
-  v = getParam(q, "ast");   if (v.length()) { aliensSettings.style = constrain(v.toInt(), 0, aliens::STYLE_COUNT - 1); }
-  v = getParam(q, "acol");  if (v.length()) { aliensSettings.colours = constrain(v.toInt(), 0, ALIENS_COLOURS_COUNT - 1); }
-  if (colours != aliensSettings.colours) { panelDirty = true; }   // the face redraws at once
-  v = getParam(q, "anap");  if (v.length()) { aliensSettings.nap = v.toInt() ? 1 : 0; }
-  v = getParam(q, "akn");
-  if (v.length()) {
-    uint8_t knock = constrain(v.toInt(), 0, ALIENS_KNOCK_COUNT - 1);
-    if (live && knock != aliensSettings.knock && settings.watchface == WATCHFACE_ALIENS_ID) { aliensKnockReq = true; }
-    aliensSettings.knock = knock;
-  }
-  if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_ALIENS_ID) { aliensPreviewReq = true; }
-}
-
 #if defined(CLOCK_DEBUG)
 void aliensSelfTest() {
   aliens::Face f;
@@ -4770,6 +4766,63 @@ void aliensSelfTest() {
 }
 #endif
 #endif  // WATCHFACE_ALIENS
+
+/* ----------------------------------------------------------------------
+   The faces' settings: each face's blob and its table (face.h), loaded,
+   saved, taken from the web app and reported the same way for all.
+   ------------------------------------------------------------------------- */
+#if WATCHFACE_TETRIS
+FaceBlob *const FACE_BLOBS[] = {
+  &tetrisBlob,
+#if WATCHFACE_MUNCHER
+  &muncherBlob,
+#endif
+#if WATCHFACE_ALIENS
+  &aliensBlob,
+#endif
+};
+const uint8_t FACE_BLOB_COUNT = sizeof(FACE_BLOBS) / sizeof(FACE_BLOBS[0]);
+SettingsBlobStore faceStores[FACE_BLOB_COUNT];
+
+void loadFaceSettings() {
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobLoad(*FACE_BLOBS[i], faceStores[i]); }
+  knockFollowSetting();    // the sensor, not the sketch, holds the threshold
+}
+
+void saveFaceSettings() {
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobSave(*FACE_BLOBS[i], faceStores[i]); }
+}
+
+// The web app's face settings, live or to be saved. A setting that redraws
+// redraws, the knock's sensitivity goes to the sensor, and - live, on the
+// face shown - a new watchface animation plays once, and pv asks to see what
+// a control changed. The page says outright when such a control was used:
+// comparing the values instead, as this did at first, was unreliable, since
+// the updates sent while a slider was dragged had already pushed the final
+// value across, and the release looked like no change at all.
+void applyFaceParams(const String &q, bool live) {
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) {
+    FaceBlob &b = *FACE_BLOBS[i];
+    uint8_t came = faceBlobApply(b, [&q](const char *key) { return getParam(q, key); });
+    if (came & PARAM_REDRAW) { panelDirty = true; }
+    if (came & PARAM_KNOCK)  { knockFollowSetting(); }
+#if WATCHFACE_MUNCHER
+    if (live && (came & PARAM_PLAYS) && b.face == WATCHFACE_MUNCHER_ID && settings.watchface == b.face) { muncherKnockReq = true; }
+#endif
+#if WATCHFACE_ALIENS
+    if (live && (came & PARAM_PLAYS) && b.face == WATCHFACE_ALIENS_ID && settings.watchface == b.face) { aliensKnockReq = true; }
+#endif
+  }
+  if (!live || !getParam(q, "pv").length()) { return; }
+  if (settings.watchface == WATCHFACE_TETRIS_ID) { shakePreviewReq = true; }
+#if WATCHFACE_MUNCHER
+  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherPreviewReq = true; }
+#endif
+#if WATCHFACE_ALIENS
+  if (settings.watchface == WATCHFACE_ALIENS_ID) { aliensPreviewReq = true; }
+#endif
+}
+#endif
 
 // Draw the current clock state to the panel. This is the expensive part (clears
 // the framebuffer, prints all six digits and pushes via matrix.show()). In the M4's
@@ -5554,53 +5607,10 @@ void loadSettings() {
     Serial.print("Settings: stored layout migrated to rev "); Serial.println(SETTINGS_REV);
   }
 #if WATCHFACE_TETRIS
-  loadTetrisSettings();
-#endif
-#if WATCHFACE_MUNCHER
-  loadMuncherSettings();
-#endif
-#if WATCHFACE_ALIENS
-  loadAliensSettings();
+  loadFaceSettings();   // the faces' own blobs
 #endif
   applySettings();
 }
-
-#if WATCHFACE_TETRIS
-// The Tetris watchface keeps its settings in a blob of its own, so the main one
-// never has to grow. Same shape of migration: the magic says "mine", the
-// revision says how much of it is filled in.
-void loadTetrisSettings() {
-  tetrisStore.begin("tetris");
-  tetrisStore.read(tetrisSettings);
-  if (tetrisSettings.magic != TETRIS_SETTINGS_MAGIC) {
-    tetrisSettings = TETRIS_DEFAULTS;
-    saveTetrisSettings();
-    Serial.println("Tetris settings: defaults written to flash");
-  } else if (tetrisSettings.rev < TETRIS_SETTINGS_REV) {
-    // Migration ladder, same idea as the main settings. A rev 1 blob only had
-    // dropMs and spinMs; the read left the rest zeroed, so give the fields added
-    // since an explicit value and keep what the user had set.
-    if (tetrisSettings.rev < 2) {
-      tetrisSettings.shakeLevel = TETRIS_DEFAULTS.shakeLevel;
-      tetrisSettings.shakeStyle = TETRIS_DEFAULTS.shakeStyle;
-    }
-    if (tetrisSettings.rev < 3) { tetrisSettings.unusedRev3 = 0; }
-    saveTetrisSettings();
-    Serial.print("Tetris settings: migrated to rev "); Serial.println(TETRIS_SETTINGS_REV);
-  }
-  tetrisSettings.dropMs = constrain(tetrisSettings.dropMs, TETRIS_DROP_MIN, TETRIS_DROP_MAX);
-  tetrisSettings.spinMs = constrain(tetrisSettings.spinMs, TETRIS_SPIN_MIN, TETRIS_SPIN_MAX);
-  if (tetrisSettings.shakeLevel > SHAKE_LEVEL_MAX) { tetrisSettings.shakeLevel = SHAKE_LEVEL_MAX; }
-  if (tetrisSettings.shakeStyle >= SHAKE_STYLE_COUNT) { tetrisSettings.shakeStyle = SHAKE_STYLE_RANDOM; }
-  knockFollowSetting();    // the sensor, not the sketch, holds the threshold
-}
-
-void saveTetrisSettings() {
-  tetrisSettings.magic = TETRIS_SETTINGS_MAGIC;
-  tetrisSettings.rev   = TETRIS_SETTINGS_REV;
-  tetrisStore.write(tetrisSettings);
-}
-#endif
 
 // UI settings from flash; the defaults on a clock that never had them, which
 // are only written once something is changed. Fields an older revision did
@@ -7684,16 +7694,9 @@ void applyParams(const String &q) {
   v = getParam(q, "dst");    if (v.length()) { settings.dst = constrain(v.toInt(), DST_WINTER, DST_AUTO); }
 #if WATCHFACE_TETRIS
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
-  v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
-  v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
-  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); knockFollowSetting(); }
-  v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
 #endif
-#if WATCHFACE_MUNCHER
-  applyMuncherParams(q, false);
-#endif
-#if WATCHFACE_ALIENS
-  applyAliensParams(q, false);
+#if WATCHFACE_TETRIS
+  applyFaceParams(q, false);   // the faces' own settings (face.h)
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "speed");  if (v.length()) { settings.flyInTime  = flyInUnits(v.toInt()); }   // ms
@@ -7795,10 +7798,6 @@ void applyLiveParams(const String &q) {
   String v;
 #if WATCHFACE_TETRIS
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
-  v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
-  v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
-  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); knockFollowSetting(); }
-  v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "autob");  if (v.length()) { settings.autoBright = (v == "on") ? 1 : 0; } // updateBrightness() re-seeds the fade
@@ -7810,18 +7809,7 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
   v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
 #if WATCHFACE_TETRIS
-  // The page says outright when a control that changes the Tetris face has been
-  // used, and that is what asks for a run. Comparing the values instead, as this
-  // did at first, was unreliable: the updates sent while a slider was being
-  // dragged had already pushed the final value across, so the release looked
-  // like no change at all and nothing was shown.
-  if (getParam(q, "pv").length() && settings.watchface == WATCHFACE_TETRIS_ID) { shakePreviewReq = true; }
-#endif
-#if WATCHFACE_MUNCHER
-  applyMuncherParams(q, true);
-#endif
-#if WATCHFACE_ALIENS
-  applyAliensParams(q, true);
+  applyFaceParams(q, true);    // the faces' own settings, and what the page asks to see
 #endif
 }
 
@@ -11118,22 +11106,7 @@ void apiState(Print &c) {
   JsonArray dirs = s["dirs"].to<JsonArray>();
   for (uint8_t i = 0; i < 6; i++) { dirs.add(settings.dir[i]); }
 #if WATCHFACE_TETRIS
-  s["tdrop"] = tetrisSettings.dropMs;
-  s["tspin"] = tetrisSettings.spinMs;
-  s["shk"] = tetrisSettings.shakeLevel;
-  s["shs"] = tetrisSettings.shakeStyle;
-#endif
-#if WATCHFACE_MUNCHER
-  s["mst"] = muncherSettings.style;
-  s["mkn"] = muncherSettings.knock;
-  s["mpace"] = muncherSettings.paceMs;
-  s["mpel"] = muncherSettings.pellets;
-#endif
-#if WATCHFACE_ALIENS
-  s["ast"] = aliensSettings.style;
-  s["acol"] = aliensSettings.colours;
-  s["akn"] = aliensSettings.knock;
-  s["anap"] = aliensSettings.nap;
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobJson(*FACE_BLOBS[i], s); }   // tdrop .. anap
 #endif
   s["autob"] = settings.autoBright != 0;
   s["bright"] = settings.brightness;
@@ -11227,43 +11200,13 @@ void apiState(Print &c) {
       if (faceActionOffered(a, e.event)) { offered.add(a); }
     }
   }
-  JsonArray shs = lists["shs"].to<JsonArray>();   // by value: SHAKE_STYLE_*
-  shs.add("Collapse");
-  shs.add("Scatter");
-  shs.add("Clear rows");
-  shs.add("Random each time");
-#if WATCHFACE_MUNCHER
-  JsonArray mst = lists["mst"].to<JsonArray>();   // by value: muncher::STYLE_*
-  mst.add("Mixed");
-  mst.add("Whole digit");
-  mst.add("Only the difference");
-  JsonArray mkn = lists["mkn"].to<JsonArray>();   // by value: MUNCHER_KNOCK_*
-  mkn.add("Power pellet");
-  mkn.add("Last digit again");
-  mkn.add("Random each time");
-  mkn.add("Ghosts win");
-  JsonArray mpel = lists["mpel"].to<JsonArray>();   // by value: MUNCHER_PELLETS_*
-  mpel.add("One LED");
-  mpel.add("Side by side");
-  mpel.add("One above the other");
-  mpel.add("Solid");
-#endif
-#if WATCHFACE_ALIENS
-  JsonArray ast = lists["ast"].to<JsonArray>();       // by value: aliens::STYLE_*
-  ast.add("Mixed");
-  ast.add("Whole digit");
-  ast.add("Only the difference");
-  JsonArray acol = lists["acol"].to<JsonArray>();     // by value: ALIENS_COLOURS_*
-  acol.add("White");
-  acol.add("Coloured rows");
-  JsonArray akn = lists["akn"].to<JsonArray>();     // by value: ALIENS_KNOCK_*
-  akn.add("Last digit again");
-  akn.add("Saucer");
-  akn.add("Aliens shoot back");
-  akn.add("Random each time");
-  JsonArray anap = lists["anap"].to<JsonArray>();   // by value: 0 off, 1 on
-  anap.add("Off");
-  anap.add("Now and then");
+#if WATCHFACE_TETRIS
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) {   // the faces' choices by value: shs, mst .. anap
+    faceBlobLists(*FACE_BLOBS[i], [&lists](const char *key, const char *const *labels, uint8_t n) {
+      JsonArray a = lists[key].to<JsonArray>();
+      for (uint8_t k = 0; k < n; k++) { a.add(labels[k]); }
+    });
+  }
 #endif
 #if GIF_PLAYBACK
   JsonArray dxr = lists["dxr"].to<JsonArray>();   // by value: the extras' slider, DECOR_EXTRAS_MINUTES
@@ -11594,13 +11537,7 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
   setDstMode(settings.dst);   // a new zone's daylight-saving rule counts at once
   saveSettings();
 #if WATCHFACE_TETRIS
-  saveTetrisSettings();
-#endif
-#if WATCHFACE_MUNCHER
-  saveMuncherSettings();
-#endif
-#if WATCHFACE_ALIENS
-  saveAliensSettings();
+  saveFaceSettings();
 #endif
   saveUiSettings();
   saveFaceKeys();

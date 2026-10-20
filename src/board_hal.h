@@ -959,36 +959,44 @@ class PanelCanvas : public GFXcanvas16 {
 
 // The key lets a build keep more than one blob side by side in the same
 // namespace. It defaults to the one the clock has always used, so existing
-// settings stay exactly where they are.
-template <typename T>
-class SettingsStore {
+// settings stay exactly where they are. A blob of bytes; SettingsStore<T>
+// below is the same for a struct, and the faces' settings (face.h) use this
+// one through their tables.
+class SettingsBlobStore {
  public:
   void begin(const char *key = "settings") {
     _key = key;
     _prefs.begin("matrixclock", false);
   }
 
-  // Reads the stored blob. A blob SHORTER than the struct is accepted and the
-  // rest left zeroed - that is a layout from an earlier firmware, which
-  // loadSettings() then migrates by revision. Anything longer comes from a
-  // NEWER firmware and is refused, leaving the destination zeroed so the
-  // caller's magic check falls back to the factory defaults.
-  bool read(T &dst) {
-    memset(&dst, 0, sizeof(T));
+  // Reads the stored blob. A blob SHORTER than `size` is accepted and the
+  // rest left zeroed - that is a layout from an earlier firmware, which the
+  // loader then migrates by revision. Anything longer comes from a NEWER
+  // firmware and is refused, leaving the destination zeroed so the caller's
+  // magic check falls back to the factory defaults.
+  bool read(void *dst, size_t size) {
+    memset(dst, 0, size);
     size_t stored = _prefs.getBytesLength(_key);
-    if (stored == 0 || stored > sizeof(T)) { return false; }
-    if (_prefs.getBytes(_key, &dst, sizeof(T)) != stored) {
-      memset(&dst, 0, sizeof(T));
+    if (stored == 0 || stored > size) { return false; }
+    if (_prefs.getBytes(_key, dst, size) != stored) {
+      memset(dst, 0, size);
       return false;
     }
     return true;
   }
 
-  void write(T &src) { _prefs.putBytes(_key, &src, sizeof(T)); }
+  void write(const void *src, size_t size) { _prefs.putBytes(_key, src, size); }
 
  private:
   Preferences _prefs;
   const char *_key = "settings";
+};
+
+template <typename T>
+class SettingsStore : public SettingsBlobStore {
+ public:
+  bool read(T &dst) { return SettingsBlobStore::read(&dst, sizeof(T)); }
+  void write(T &src) { SettingsBlobStore::write(&src, sizeof(T)); }
 };
 
 #else // BOARD_MATRIXPORTAL_M4
