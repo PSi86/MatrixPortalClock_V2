@@ -113,6 +113,7 @@ class TetrisFace : public Watchface {
   bool update(const FaceNow &now) override;
   void draw(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) override;
   bool busy(const FaceNow &now) const override;
+  bool offers(FaceTrigger why) const override { return why == TRIGGER_ACTION || why == TRIGGER_PREVIEW_CHANGE; }
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override;
 
 #if defined(FACE_FRAME_LOG)

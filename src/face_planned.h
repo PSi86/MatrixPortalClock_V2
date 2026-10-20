@@ -23,6 +23,8 @@ class PlannedFace : public Watchface {
   void enter(const FaceNow &, FaceEnter why) override {
     if (why == ENTER_CHOSEN) { _rotation = 0xFF; }
   }
+  // Scenes for an input, now and then, and both previews.
+  bool offers(FaceTrigger) const override { return true; }
 
  protected:
   // The minute after the one on show, and when it begins (millis()).

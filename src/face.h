@@ -132,6 +132,8 @@ class Watchface {
   virtual void draw(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) = 0;
   // Whether the time's change is under way: the picture moves for it.
   virtual bool busy(const FaceNow &now) const = 0;
+  // Whether it has anything for a trigger: an extra now and then, a preview.
+  virtual bool offers(FaceTrigger why) const = 0;
   // An animation asked for.
   virtual FaceOutcome request(const FaceNow &now, FaceTrigger why) = 0;
 

@@ -53,7 +53,7 @@ Todo Concept:
 #if !GIF_PLAYBACK
 #error "The Aliens watchface takes the panel by the rules that come with the GIF playback: GIF_PLAYBACK has to be on as well"
 #endif
-#include "aliens.h"            // the Aliens watchface's logic
+#include "face_aliens.h"      // the Aliens watchface
 #endif
 
 #include <math.h>              // powf() for perceptual brightness fade
@@ -1081,6 +1081,9 @@ uint8_t BufferedWriter::_buf[2000];
 // The classic watchface (face_classic.h), on every board, with its settings
 // inside the clock's.
 ClassicFace classicFace(settings.classic);
+// The face of a watchface number. Declared here: the prototypes Arduino
+// generates leave out a function that returns a reference.
+Watchface &faceFor(uint8_t id);
 
 // Orientation handling -----------------------------------------------------
 // The MatrixPortal M4 has an onboard LIS3DH accelerometer. We read gravity and
@@ -2965,370 +2968,16 @@ void muncherSelfTest() {
 #endif
 #endif  // WATCHFACE_MUNCHER
 
+/* ======================================================================
+   Aliens watchface (face_aliens.h): its settings, stored in a blob of their
+   own, and the face.
+   ====================================================================== */
 #if WATCHFACE_ALIENS
-// The Aliens watchface (src/aliens.h, concept doc "Aliens: draft"). Its
-// settings are in a blob of their own (NVS "aliens"), as the Muncher's are.
-#define ALIENS_SETTINGS_MAGIC 0xA11E
-#define ALIENS_SETTINGS_REV   4   // 1 = the trial build with four looks, 2 = without them, 3 = adds knock, 4 = nap
-
-// The digits are blocks of 3 x 3 with a gap, and only the blocks a change
-// takes wake as aliens: digits of aliens could not be read as a time (Peter,
-// 2026-10-11, after small aliens, wide aliens and solid cells on the panel).
-// White aliens with a green cannon, as the arcade's overlay, or the rows in
-// colours of their own.
-const uint8_t ALIENS_COLOURS_ARCADE = 0;
-const uint8_t ALIENS_COLOURS_ROWS   = 1;
-const uint8_t ALIENS_COLOURS_COUNT  = 2;
-// What a knock, or the face action "trigger watchface animation", plays.
-const uint8_t ALIENS_KNOCK_REPLAY = 0;   // the minutes' ones shot and marching in again
-const uint8_t ALIENS_KNOCK_SAUCER = 1;   // a saucer, shot by the cannon
-const uint8_t ALIENS_KNOCK_BACK   = 2;   // an alien shoots back and hits the cannon
-const uint8_t ALIENS_KNOCK_RANDOM = 3;   // one of the others, drawn each time
-const uint8_t ALIENS_KNOCK_COUNT  = 4;
-// Not a knock's choice: a block waking for a moment, one of the extras that
-// come now and then at the pace the faces share (decorSettings.extras) when
-// its option is on (Peter, 2026-10-12).
-const uint8_t ALIENS_EXTRA_NAP = 4;
-const unsigned long ALIENS_KNOCK_ROOM_MS = PANEL_GUARD_BEFORE_MS;   // a scene ends this long before a change starts
-const unsigned long ALIENS_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
-const unsigned long ALIENS_PREVIEW_MS    = 15000;  // the longest a scene asked for takes: the minutes' ones shot and back
-
-struct AliensSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  style;     // aliens::STYLE_*: how a changing digit goes
-  uint8_t  colours;   // ALIENS_COLOURS_*
-  uint8_t  knock;     // rev 3: ALIENS_KNOCK_* (was a spare byte, 0)
-  uint8_t  nap;       // rev 4: 1 = a block wakes for a moment now and then (was a spare byte, 0)
-  uint8_t  spare[1];
-};
-static_assert(sizeof(AliensSettings) == 8, "the stored blob keeps its size");
-
-const AliensSettings ALIENS_DEFAULTS = {
-  ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, aliens::STYLE_MIXED, ALIENS_COLOURS_ARCADE, ALIENS_KNOCK_RANDOM, 1, { 0 }
-};
-
 AliensSettings aliensSettings;
-
-// The Aliens settings for the web app and the store (face.h).
-const char *const ALIENS_AST_LABELS[] = { "Mixed", "Whole digit", "Only the difference" };                     // aliens::STYLE_*
-const char *const ALIENS_ACOL_LABELS[] = { "White", "Coloured rows" };                                         // ALIENS_COLOURS_*
-const char *const ALIENS_AKN_LABELS[] = { "Last digit again", "Saucer", "Aliens shoot back", "Random each time" };   // ALIENS_KNOCK_*
-const char *const ALIENS_ANAP_LABELS[] = { "Off", "Now and then" };
-static_assert(sizeof(ALIENS_AST_LABELS) / sizeof(ALIENS_AST_LABELS[0]) == aliens::STYLE_COUNT, "a name per change style");
-static_assert(sizeof(ALIENS_ACOL_LABELS) / sizeof(ALIENS_ACOL_LABELS[0]) == ALIENS_COLOURS_COUNT, "a name per colouring");
-static_assert(sizeof(ALIENS_AKN_LABELS) / sizeof(ALIENS_AKN_LABELS[0]) == ALIENS_KNOCK_COUNT, "a name per scene");
-const FaceParam ALIENS_PARAMS[] = {
-  { "ast",  offsetof(AliensSettings, style),   1, PARAM_CHOICE, 0,            0, aliens::STYLE_COUNT - 1,  ALIENS_AST_LABELS },
-  { "acol", offsetof(AliensSettings, colours), 1, PARAM_CHOICE, PARAM_REDRAW, 0, ALIENS_COLOURS_COUNT - 1, ALIENS_ACOL_LABELS },
-  { "akn",  offsetof(AliensSettings, knock),   1, PARAM_CHOICE, PARAM_PLAYS,  0, ALIENS_KNOCK_COUNT - 1,   ALIENS_AKN_LABELS },
-  { "anap", offsetof(AliensSettings, nap),     1, PARAM_FLAG,   0,            0, 1,                        ALIENS_ANAP_LABELS },
-};
-
-// An older blob: the trial build's (rev 1: look, style, idle, colours after
-// the rev) keeps its change and its colours; rev 2 gets the knock's default,
-// rev 3 the waking blocks'.
-void aliensMigrate(uint8_t *data, uint8_t rev) {
-  AliensSettings &a = *(AliensSettings *)data;
-  if (rev < 2) {
-    AliensSettings was = ALIENS_DEFAULTS;
-    was.style = data[4];
-    was.colours = data[6];
-    a = was;
-  } else if (rev < 3) {
-    a.knock = ALIENS_DEFAULTS.knock;
-    a.nap = ALIENS_DEFAULTS.nap;
-  } else if (rev < 4) {
-    a.nap = ALIENS_DEFAULTS.nap;
-  }
-}
-
 FaceBlob aliensBlob = { "aliens", ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, WATCHFACE_ALIENS_ID,
                         (uint8_t *)&aliensSettings, sizeof(AliensSettings), (const uint8_t *)&ALIENS_DEFAULTS,
                         ALIENS_PARAMS, sizeof(ALIENS_PARAMS) / sizeof(ALIENS_PARAMS[0]), aliensMigrate };
-aliens::Face  alienFace;
-uint8_t       aliensRotation     = 0xFF;    // rotation the layout was built for
-unsigned long aliensStartAt      = 0;       // when the planned or running scene starts
-time_t        aliensPlannedFor   = 0;       // the minute the planned change is for; 0 = none
-uint32_t      aliensPlannedStand = 0;       // ms from its start until the new time stands
-bool          aliensLogStand     = false;   // the running scene is the time's change: log when it stands
-unsigned long aliensSceneEndedAt = 0;
-bool          aliensPreviewReq   = false;   // the web app asks to see a change
-bool          aliensKnockReq     = false;   // ... or the knock's scene
-uint32_t      aliensDrawnKey     = 0;       // what the panel shows, to repaint only on a change
-
-// The sprites, '#' lit; the alien in two frames, so it marches, and the hit
-// cannon's wreck in two, so it flickers.
-const char *const ALIEN_SMALL[2][3] = { { "#.#", "###", "#.#" }, { ".#.", "###", "#.#" } };
-const char *const ALIEN_CANNON[3]   = { "..#..", ".###.", "#####" };
-const char *const ALIEN_WRECK[2][3] = { { "#...#", ".#.#.", "#.#.#" }, { ".#.#.", "#...#", ".###." } };
-const char *const ALIEN_BURST[3]    = { "#.#", ".#.", "#.#" };
-const char *const ALIEN_SAUCER[3]   = { "..###..", ".#####.", "#.#.#.#" };
-const char *const ALIEN_SAUCER_BURST[2][3] = { { "#..#..#", ".#.#.#.", "#.#.#.#" }, { ".#.#.#.", "#.###.#", ".#...#." } };
-const uint8_t ALIEN_ROW_RGB[aliens::ROWS][3] = {   // the colourful rows: magenta, cyan, green
-  { 255, 60, 200 }, { 255, 60, 200 }, { 60, 220, 255 }, { 60, 220, 255 }, { 40, 230, 60 },
-};
-
-// An alien that can shoot back, drawn at random: a digit and a column with
-// a block, the lowest of which drops the bomb. Returns the scene's length.
-uint32_t aliensPlanBack() {
-  uint8_t first = (uint8_t)faceRandom(4 * aliens::COLS);
-  for (uint8_t n = 0; n < 4 * aliens::COLS; n++) {
-    uint8_t o = (first + n) % (4 * aliens::COLS);
-    uint32_t len = alienFace.planBack(o / aliens::COLS, o % aliens::COLS);
-    if (len) { return len; }
-  }
-  return 0;
-}
-
-// A block that wakes for a moment, drawn at random among the lit ones.
-// Returns the scene's length.
-uint32_t aliensPlanNap() {
-  const uint8_t cells = aliens::COLS * aliens::ROWS;
-  uint8_t first = (uint8_t)faceRandom(4 * cells);
-  for (uint8_t n = 0; n < 4 * cells; n++) {
-    uint8_t o = (first + n) % (4 * cells);
-    uint32_t len = alienFace.planNap(o / cells, o % cells);
-    if (len) { return len; }
-  }
-  return 0;
-}
-
-// The extra of this time: a saucer, an alien shooting back, or - with the
-// option on - a block waking for a moment.
-uint8_t aliensExtraKind() {
-  uint8_t k = (uint8_t)faceRandom(aliensSettings.nap ? 3 : 2);
-  return k == 0 ? ALIENS_KNOCK_SAUCER : k == 1 ? ALIENS_KNOCK_BACK : ALIENS_EXTRA_NAP;
-}
-
-// A scene between changes - the minutes' ones shot and marching in again
-// (the time on show stays right), a saucer, an alien shooting back, a block
-// waking - for a knock, the web app, and now and then. Refused while a scene
-// runs, just after one, and when it could not end before the next change
-// starts: then it is dropped, not kept.
-bool aliensScene(uint8_t kind, const char *why) {
-  if (alienFace.running || alienFace.shown[0] == aliens::NO_DIGIT) { return false; }
-  if (millisNow - aliensSceneEndedAt < ALIENS_KNOCK_REST_MS) { return false; }
-  if (aliensPlannedFor == 0) { return false; }   // the next change is planned on the face's next pass
-  if (kind == ALIENS_KNOCK_RANDOM) {
-    const uint8_t KINDS[3] = { ALIENS_KNOCK_REPLAY, ALIENS_KNOCK_SAUCER, ALIENS_KNOCK_BACK };
-    kind = KINDS[faceRandom(3)];
-  }
-  unsigned long plannedStart = aliensStartAt;
-  uint32_t len;
-  const char *what;
-  if (kind == ALIENS_KNOCK_SAUCER) {
-    len = alienFace.planSaucer(faceRandom(2) == 0, (uint8_t)faceRandom(3));
-    what = "a saucer";
-  } else if (kind == ALIENS_KNOCK_BACK) {
-    len = aliensPlanBack();
-    what = "an alien shoots back";
-  } else if (kind == ALIENS_EXTRA_NAP) {
-    len = aliensPlanNap();
-    what = "a block wakes";
-  } else {
-    uint8_t same[4];
-    memcpy(same, alienFace.shown, 4);
-    len = alienFace.planChange(same, aliens::STYLE_ALL, 1 << 3) ? alienFace.endMs : 0;
-    what = "the minutes' ones again";
-  }
-  aliensPlannedFor = 0;                          // the change is planned anew afterwards
-  if (len == 0 || !faceFits(plannedStart, millisNow, len)) { return false; }
-  aliensStartAt = millisNow;
-  aliensLogStand = false;
-  alienFace.start();
-  Serial.printf("Aliens: %s (%s)\n", what, why);
-  return true;
-}
-
-// The knock's scene, or the face action's.
-bool aliensKnock() { return aliensScene(aliensSettings.knock, "a knock"); }
-
-// The extra now and then (extrasUpdate()), measured by its own length
-// against the next change.
-bool aliensExtra() { return aliensScene(aliensExtraKind(), "now and then"); }
-
-// Nothing moving: put a time right that moved on without a change, plan the
-// next change once a minute - backwards from the minute, worked out anew on
-// every pass from the second's beginning, as the Muncher's; to a full hour
-// the wave - and start it when its moment has come. In between, what the
-// web app asks for.
-void aliensIdle(const uint8_t now[4]) {
-  if (memcmp(alienFace.shown, now, 4) != 0) {
-    if (alienFace.shown[0] == aliens::NO_DIGIT || now[0] == aliens::NO_DIGIT) {
-      alienFace.show(now);               // dashes come and go without a fight
-      panelDirty = true;
-    } else if (alienFace.planChange(now, aliensSettings.style)) {
-      aliensStartAt = millisNow;
-      aliensLogStand = false;
-      alienFace.start();
-    }
-    aliensPlannedFor = 0;
-    return;
-  }
-  if (now[0] == aliens::NO_DIGIT) { return; }
-  uint8_t sec = (uint8_t)clockSecond(localTime);
-  time_t next = localTime - sec + 60;
-  if (aliensPlannedFor != next) {
-    uint8_t to[4];
-    faceDigits(next, clockIsSet(), to, aliens::NO_DIGIT);
-    aliensPlannedStand = alienFace.planChange(to, aliensSettings.style, 0, clockMinute(next) == 0);
-    aliensPlannedFor = next;
-  }
-  unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
-  aliensStartAt = nextMinuteAt - aliensPlannedStand;
-  // What the web app asks to see waits until it can end before the next
-  // change starts, and for the rest after a scene, as with the Muncher. A
-  // scene tried returns either way: one refused has taken the face's plan,
-  // and the change is planned anew on the next pass, before its start is
-  // looked at - else the refused scene would start as the time's change.
-  long room = (long)(aliensStartAt - millisNow) - (long)ALIENS_KNOCK_ROOM_MS;
-  bool rested = millisNow - aliensSceneEndedAt >= ALIENS_KNOCK_REST_MS;
-  if (aliensPreviewReq && rested && room >= (long)ALIENS_PREVIEW_MS) {
-    aliensPreviewReq = false;
-    aliensScene(ALIENS_KNOCK_REPLAY, "the web app's preview");
-    return;
-  }
-  if (aliensKnockReq && rested && room >= (long)ALIENS_PREVIEW_MS) {
-    aliensKnockReq = false;
-    aliensScene(aliensSettings.knock, "the web app's knock");
-    return;
-  }
-  // Started at its planned moment even when that has passed (the face was
-  // away): from there, everything is where it ought to be by now.
-  if (aliensPlannedStand && (long)(millisNow - aliensStartAt) >= 0) {
-    aliensLogStand = true;
-    aliensPlannedFor = 0;
-    alienFace.start();
-    if (alienFace.scene == aliens::SCENE_WAVE) { Serial.println("Aliens: the hour's wave"); }
-  }
-}
-
-uint16_t aliensColour(uint8_t row) {
-  if (aliensSettings.colours == ALIENS_COLOURS_ROWS) {
-    return scaledColor(ALIEN_ROW_RGB[row][0], ALIEN_ROW_RGB[row][1], ALIEN_ROW_RGB[row][2]);
-  }
-  return scaledColor(235, 235, 235);
-}
-
-// A sprite's '#' pixels at (x, y); the panel clips what lies off it.
-void aliensArt(const char *const *rows, uint8_t n, int16_t x, int16_t y, uint16_t colour) {
-  for (uint8_t r = 0; r < n; r++) {
-    for (uint8_t c = 0; rows[r][c]; c++) {
-      if (rows[r][c] == '#') { matrix.drawPixel(x + c, y + r, colour); }
-    }
-  }
-}
-
-// A cell at (x, y): an alien in its march frame, or a block.
-void aliensCell(int16_t x, int16_t y, uint8_t r, uint8_t c, bool alien, uint8_t frame, uint16_t colour) {
-  if (alien) { aliensArt(ALIEN_SMALL[(frame + r + c) & 1], 3, x, y, colour); }
-  else       { matrix.fillRect(x, y, aliens::CELL - 1, aliens::CELL - 1, colour); }
-}
-
-// The panel at `sceneMs` into the running scene (0 between scenes); the
-// woken aliens step their legs and sway - the wave lower by the rows it has
-// stepped down - the arriving ones only step.
-void aliensDraw(bool colonOn, uint32_t sceneMs) {
-  const aliens::Layout &L = alienFace.L;
-  uint8_t frame = aliens::Face::marchFrame(sceneMs);
-  matrix.fillScreen(0);
-  for (uint8_t i = 0; i < 4; i++) {
-    for (uint8_t k = 0; k < aliens::COLS * aliens::ROWS; k++) {
-      uint8_t r = k / aliens::COLS, c = k % aliens::COLS;
-      int16_t x = L.digitX[i] + aliens::CELL * c;
-      if (alienFace.cells[i] & (1 << k)) {
-        bool awake = alienFace.running && (alienFace.awake[i] & (1 << k));
-        int16_t dx = awake ? alienFace.sway(i, k, sceneMs) : 0;
-        int16_t dy = awake ? aliens::CELL * alienFace.drop : 0;
-        aliensCell(x + dx, L.digitY[i] + aliens::CELL * r + dy, r, c, awake, frame, aliensColour(r));
-      }
-      if (alienFace.arriving[i] & (1 << k)) {
-        // On the way down; behind a block that stays where it would cover one.
-        int16_t y = L.digitY[i] + aliens::CELL * ((int8_t)r + alienFace.arriveRow);
-        if (alienFace.blockAt(x, y)) { continue; }
-        aliensCell(x, y, r, c, true, frame, aliensColour(r));
-      }
-    }
-  }
-  uint16_t white = scaledColor(235, 235, 235), orange = scaledColor(255, 140, 0);
-  if (colonOn) {
-    for (uint8_t p = 0; p < 2; p++) { matrix.fillRect(L.colonX[p], L.colonY[p], 2, 2, white); }
-  }
-  if (alienFace.saucerOn) { aliensArt(ALIEN_SAUCER, 3, alienFace.saucerX, 0, scaledColor(255, 30, 60)); }
-  if (alienFace.cannonOn) { aliensArt(ALIEN_CANNON, 3, alienFace.cannonX, L.cannonY, scaledColor(40, 230, 60)); }
-  if (alienFace.wreckOn) {
-    aliensArt(ALIEN_WRECK[alienFace.wreckFrame], 3, alienFace.cannonX, L.cannonY,
-              alienFace.wreckFrame ? orange : scaledColor(40, 230, 60));
-  }
-  if (alienFace.shotOn) {
-    matrix.drawPixel(alienFace.shotX, alienFace.shotY, white);
-    matrix.drawPixel(alienFace.shotX, alienFace.shotY + 1, white);
-  }
-  if (alienFace.bombOn) {
-    uint16_t yellow = scaledColor(255, 230, 0);
-    matrix.drawPixel(alienFace.bombX, alienFace.bombY, yellow);
-    matrix.drawPixel(alienFace.bombX, alienFace.bombY + 1, yellow);
-  }
-  if (alienFace.burstOn && alienFace.burstWide) {   // the saucer's, flickering in two frames
-    uint8_t b = (uint8_t)((sceneMs / aliens::BLINK_STEP_MS) & 1);
-    aliensArt(ALIEN_SAUCER_BURST[b], 3, alienFace.burstX, alienFace.burstY, b ? scaledColor(255, 30, 60) : orange);
-  } else if (alienFace.burstOn) {
-    aliensArt(ALIEN_BURST, 3, alienFace.burstX, alienFace.burstY, orange);
-  }
-  faceShow();
-}
-
-// One pass of the watchface: it repaints only when what it shows has
-// changed (a step of a scene, the aliens' march, the colon's beat), as the
-// others. Between scenes the blocks stand still.
-void drawAliensFace() {
-  if (screenRotation != aliensRotation) {
-    aliensRotation = screenRotation;
-    alienFace.setLayout(screenIsLandscape() ? aliens::LANDSCAPE : aliens::PORTRAIT);
-    uint8_t now[4];
-    faceDigits(localTime, clockIsSet(), now, aliens::NO_DIGIT);
-    alienFace.show(now);
-    aliensPlannedFor = 0;
-    panelDirty = true;
-  }
-  uint32_t sceneMs = 0;
-  if (alienFace.running) {
-    long since = (long)(millisNow - aliensStartAt);
-    if (since >= 0) {
-      sceneMs = (uint32_t)since;
-      alienFace.at(sceneMs);
-      if (aliensLogStand && sceneMs >= alienFace.standMs) {
-        // When the new time stood complete, against the clock's own second.
-        Serial.printf("Aliens: the new time stands at :%02d.%03lu\n", clockSecond(localTime),
-                      millisNow - secondStartedAt);
-        aliensLogStand = false;
-      }
-      if (!alienFace.running) { aliensSceneEndedAt = millisNow; panelDirty = true; }
-    }
-  }
-  if (!alienFace.running) {
-    uint8_t now[4];
-    faceDigits(localTime, clockIsSet(), now, aliens::NO_DIGIT);
-    aliensIdle(now);
-  }
-  bool colonOn = (localTime % 2) == 0;
-  if (!alienFace.running) { sceneMs = 0; }
-  // What the picture depends on, folded into one number (FNV-1a).
-  uint32_t key = 2166136261u;
-  auto fold = [&key](uint32_t v) { for (uint8_t b = 0; b < 4; b++) { key = (key ^ (uint8_t)(v >> (8 * b))) * 16777619u; } };
-  const aliens::Face &f = alienFace;
-  fold(f.running); fold((uint16_t)f.cannonX | (uint32_t)f.cannonOn << 16 | (uint32_t)f.wreckOn << 17 | (uint32_t)f.wreckFrame << 18);
-  fold(f.shotOn ? (uint16_t)f.shotY : 0xFFFF); fold(f.bombOn ? (uint16_t)f.bombY : 0xFFFF);
-  fold(f.burstOn ? (uint16_t)f.burstX | (uint32_t)(uint16_t)f.burstY << 16 : 0xFFFFFFFF);
-  fold(f.saucerOn ? (uint16_t)f.saucerX : 0xFFFF); fold((uint8_t)f.arriveRow | (uint16_t)(uint8_t)f.drop << 8);
-  fold(f.burstWide ? sceneMs / aliens::BLINK_STEP_MS % 2 : 2);   // the saucer's burst flickers
-  for (uint8_t i = 0; i < 4; i++) { fold(f.cells[i]); fold(f.awake[i]); fold(f.arriving[i]); }
-  fold(colonOn); fold(sceneMs / aliens::MARCH_MS % 4);   // the march: the legs' frame and the sway
-  if (key == aliensDrawnKey && !panelDirty) { return; }
-  aliensDrawnKey = key;
-  aliensDraw(colonOn, sceneMs);
-}
+AliensFace aliensFace(aliensSettings);
 
 #if defined(CLOCK_DEBUG)
 void aliensSelfTest() {
@@ -3361,9 +3010,7 @@ void testFaceReset() {
   muncherFace.testReset();
 #endif
 #if WATCHFACE_ALIENS
-  aliensRotation = 0xFF;
-  aliensSceneEndedAt = 0;
-  aliensPreviewReq = aliensKnockReq = false;
+  aliensFace.testReset();
 #endif
   panelDirty = true;
 }
@@ -3436,23 +3083,12 @@ void applyFaceParams(const String &q, bool live) {
     uint8_t came = faceBlobApply(b, [&q](const char *key) { return getParam(q, key); });
     if (came & PARAM_REDRAW) { panelDirty = true; }
     if (came & PARAM_KNOCK)  { knockFollowSetting(); }
-#if WATCHFACE_MUNCHER
-    if (live && (came & PARAM_PLAYS) && b.face == WATCHFACE_MUNCHER_ID && settings.watchface == b.face) {
-      muncherFace.request(faceMoment(), TRIGGER_PREVIEW_ANIMATION);
+    if (live && (came & PARAM_PLAYS) && settings.watchface == b.face) {
+      faceFor(b.face).request(faceMoment(), TRIGGER_PREVIEW_ANIMATION);
     }
-#endif
-#if WATCHFACE_ALIENS
-    if (live && (came & PARAM_PLAYS) && b.face == WATCHFACE_ALIENS_ID && settings.watchface == b.face) { aliensKnockReq = true; }
-#endif
   }
   if (!live || !getParam(q, "pv").length()) { return; }
-  if (settings.watchface == WATCHFACE_TETRIS_ID) { tetrisFace.request(faceMoment(), TRIGGER_PREVIEW_CHANGE); }
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherFace.request(faceMoment(), TRIGGER_PREVIEW_CHANGE); }
-#endif
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) { aliensPreviewReq = true; }
-#endif
+  faceFor(settings.watchface).request(faceMoment(), TRIGGER_PREVIEW_CHANGE);
 }
 #endif
 
@@ -3483,34 +3119,38 @@ FaceNow faceMoment() {
 // runs at real time, and drawn when its picture changed or the panel no longer
 // shows it (panelDirty). In the M4's preview it is shown at most every
 // AP_PREVIEW_MS, which leaves the radio to the slow WiFiNINA web server:
-// skipped frames are stepped, not slowed down. The Aliens face steps, draws
-// and shows in one pass of its own, and repaints only on a change.
+// skipped frames are stepped, not slowed down.
 void faceUpdate(bool preview) {
 #if defined(CLOCK_DEBUG)
   faceDrawStart = micros();
 #endif
-  Watchface *face = &classicFace;
-  switch (activeWatchface()) {
-#if WATCHFACE_TETRIS
-    case WATCHFACE_TETRIS_ID:  face = &tetrisFace; break;
-#endif
-#if WATCHFACE_MUNCHER
-    case WATCHFACE_MUNCHER_ID: face = &muncherFace; break;
-#endif
-#if WATCHFACE_ALIENS
-    case WATCHFACE_ALIENS_ID:  drawAliensFace();  return;
-#endif
-    default: break;   // the classic face
-  }
+  Watchface &face = faceFor(activeWatchface());
   FaceNow now = faceMoment();
-  bool changed = face->update(now);
+  bool changed = face.update(now);
   if (preview) {
     if (millisNow - apClockLast < AP_PREVIEW_MS) { return; }
     apClockLast = millisNow;
   }
   if (!changed && !panelDirty) { return; }
-  face->draw(matrix, now, FacePaint{effectiveBrightness});
+  face.draw(matrix, now, FacePaint{effectiveBrightness});
   faceShow();
+}
+
+// The face of a watchface number (Settings::watchface); the classic one for
+// any this build does not have.
+Watchface &faceFor(uint8_t id) {
+  switch (id) {
+#if WATCHFACE_TETRIS
+    case WATCHFACE_TETRIS_ID:  return tetrisFace;
+#endif
+#if WATCHFACE_MUNCHER
+    case WATCHFACE_MUNCHER_ID: return muncherFace;
+#endif
+#if WATCHFACE_ALIENS
+    case WATCHFACE_ALIENS_ID:  return aliensFace;
+#endif
+    default:                   return classicFace;
+  }
 }
 
 // A face has drawn its picture: the marks go over it - the status pixel, the
@@ -3536,22 +3176,16 @@ void faceShow() {
 
 // The watchface to draw. It can change at runtime (the config page previews the
 // choice live), and only the visible face is stepped, so whichever takes over is
-// resynchronised here: the classic one comes up to the time (faceCatchUp());
-// the Tetris one rebuilds its layout and drops its digits again.
+// resynchronised here: the panel turned as it is held and the classic face
+// up to the time (faceCatchUp()), and the face chosen told so - the Tetris
+// one rebuilds its layout and drops its digits again, the Muncher and the
+// Aliens show the time at once.
 uint8_t activeWatchface() {
   static uint8_t shown = 0xFF;
   if (settings.watchface == shown) { return shown; }
   shown = settings.watchface;
   faceCatchUp();
-#if WATCHFACE_TETRIS
-  tetrisFace.enter(faceMoment(), ENTER_CHOSEN);
-#endif
-#if WATCHFACE_MUNCHER
-  muncherFace.enter(faceMoment(), ENTER_CHOSEN);   // a fresh layout, the time shown at once
-#endif
-#if WATCHFACE_ALIENS
-  aliensRotation = 0xFF;
-#endif
+  faceFor(shown).enter(faceMoment(), ENTER_CHOSEN);
   panelDirty = true;               // the other face's picture is still on the panel
   return shown;
 }
@@ -4573,21 +4207,12 @@ void runFunction(InputFunction fn, uint8_t steps) {
 }
 
 // FN_FACE_ANIMATION, on the face only: the watchface's own animation, each
-// face deciding whether it plays now. The Tetris digits break up in the
-// break-up effect (TetrisFace::request()); the classic digits all fly in at
-// the next second (ClassicFace::request()).
+// face deciding whether it plays now (Watchface::request()): the classic
+// digits all fly in at the next second, the Tetris digits break up, the
+// Muncher and the Aliens play the scene their setting picks.
 void faceAnimationStart() {
   if (screen != SCREEN_FACE) { return; }
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherFace.request(faceMoment(), TRIGGER_ACTION); return; }
-#endif
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) { aliensKnock(); return; }
-#endif
-#if WATCHFACE_TETRIS
-  if (settings.watchface == WATCHFACE_TETRIS_ID) { tetrisFace.request(faceMoment(), TRIGGER_ACTION); return; }
-#endif
-  classicFace.request(faceMoment(), TRIGGER_ACTION);
+  faceFor(settings.watchface).request(faceMoment(), TRIGGER_ACTION);
 }
 
 void holdStep(InputFunction fn) {
@@ -8069,16 +7694,7 @@ uint8_t noticesShowAgain() {
 // it: the classic face's fly-in of the new minute, the Tetris blocks, the
 // muncher's walk and hour show.
 bool faceTimeShown() {
-#if WATCHFACE_TETRIS
-  if (settings.watchface == WATCHFACE_TETRIS_ID) { return !tetrisFace.busy(faceMoment()); }
-#endif
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) { return !muncherFace.busy(faceMoment()); }
-#endif
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) { return !alienFace.running; }
-#endif
-  return !classicFace.busy(faceMoment());
+  return !faceFor(settings.watchface).busy(faceMoment());
 }
 
 // On every pass: a round's minute begins, and whether its round starts now -
@@ -8248,7 +7864,7 @@ unsigned long noticeNewMs() {
 // random times only; faceChangeIn() is what counts.
 unsigned long faceLeadMs() {
 #if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) { return aliensPlannedStand ? aliensPlannedStand : 15000UL; }
+  if (settings.watchface == WATCHFACE_ALIENS_ID) { return aliensFace.leadMs(); }
 #endif
 #if WATCHFACE_MUNCHER
   if (settings.watchface == WATCHFACE_MUNCHER_ID) {
@@ -8274,7 +7890,7 @@ unsigned long faceChangeIn() {
   long toMinute = (long)(secondStartedAt + (60UL - secondNow) * 1000UL - millisNow);
 #if WATCHFACE_ALIENS
   if (settings.watchface == WATCHFACE_ALIENS_ID) {
-    if (aliensPlannedFor && aliensPlannedStand) { long in = (long)(aliensStartAt - millisNow); return in > 0 ? (unsigned long)in : 0; }
+    if (aliensFace.planned()) { long in = (long)(aliensFace.plannedStart() - millisNow); return in > 0 ? (unsigned long)in : 0; }
     toMinute -= 15000;
   }
 #endif
@@ -8395,27 +8011,16 @@ bool extrasDue() {
 // plays it or refuses one that would run into its next change. Faces
 // without extras leave the time alone.
 void extrasUpdate() {
-  bool onMuncher = false, onAliens = false;
-#if WATCHFACE_MUNCHER
-  onMuncher = settings.watchface == WATCHFACE_MUNCHER_ID;
-#endif
-#if WATCHFACE_ALIENS
-  onAliens = settings.watchface == WATCHFACE_ALIENS_ID;
-#endif
-  if ((!onMuncher && !onAliens) || !extrasDue()) { return; }
+  Watchface &face = faceFor(settings.watchface);
+  if (!face.offers(TRIGGER_NOW_AND_THEN) || !extrasDue()) { return; }
   extrasScheduleNext();
   if (!decorFree(0, false)) {
     Serial.println("Extra: due, the panel not free for it - dropped");
     return;
   }
-  bool played = false;
-#if WATCHFACE_MUNCHER
-  if (onMuncher) { played = muncherFace.request(faceMoment(), TRIGGER_NOW_AND_THEN) == OUTCOME_PLAYED; }
-#endif
-#if WATCHFACE_ALIENS
-  if (onAliens) { played = aliensExtra(); }
-#endif
-  if (!played) { Serial.println("Extra: due, the face has no room for it - dropped"); }
+  if (face.request(faceMoment(), TRIGGER_NOW_AND_THEN) != OUTCOME_PLAYED) {
+    Serial.println("Extra: due, the face has no room for it - dropped");
+  }
 }
 
 void loadDecorSettings() {
