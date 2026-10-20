@@ -650,8 +650,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   // settings and the rule cannot hold.
   function keysOk() {
     var ok = false, any = false;
-    S.lists.events.forEach(function (e, i) {
-      if (e.fitted) { any = true; if (cur.keys[i] === S.lists.menuAction) { ok = true; } }
+    S.lists.events.forEach(function (e, i) {   // e.menu: a fitted input that counts here (no knock without buttons)
+      if (e.menu) { any = true; if (cur.keys[i] === S.lists.menuAction) { ok = true; } }
     });
     return ok || !any;
   }
@@ -766,11 +766,11 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     if (!sel.dataset.bound) { sel.dataset.bound = 1; sel.addEventListener('change', function () { cur.tz = +sel.value; changed(); }); }
   }
   function fillInputs() {
-    var found = $('#found'), chips = ['UP', 'DOWN'];
+    var found = $('#found'), chips = S.hw.buttons ? ['UP', 'DOWN'] : [];
     found.innerHTML = '';
     var add = function (t, off) { var c = document.createElement('span'); c.className = 'chip' + (off ? ' off' : ''); c.textContent = t; found.appendChild(c); };
     chips.forEach(function (t) { add(t, false); });
-    add(S.hw.accel ? 'Knock (accelerometer)' : 'No accelerometer', !S.hw.accel);
+    add(S.hw.knock ? 'Knock (' + (S.hw.knockBy || 'accelerometer') + ')' : 'No knock sensor', !S.hw.knock);
     add(S.hw.gesture ? ('Gesture sensor' + (S.hw.gestureInt ? ', INT line' : ', asked every 50 ms')) : 'No gesture sensor', !S.hw.gesture);
     var prof = $('#prof');
     prof.innerHTML = '';
@@ -871,7 +871,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       });
     }
     // The knock's sensitivity: an input setting, kept with the Tetris settings.
-    $('#shkRow').hidden = !(S.hw.tetris && S.hw.accel);
+    $('#shkRow').hidden = !S.hw.knock;
     if (S.hw.tetris) { setRange('shk', 'shk', '', function (v) { return v === 0 ? 'off' : v; }); }
     // Brightness
     setCheck('autob', 'autob', showAuto, true, false);

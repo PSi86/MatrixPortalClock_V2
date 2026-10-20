@@ -56,8 +56,18 @@ in the wall's own 192x128 LEDs.
 - **Flash:** two app slots of 3 MB, 26,496 KB for the GIF pack from 0x610000
   (`partitions_wallclock.csv`). GIFs above the first 16 MB of the flash are read
   into PSRAM instead of mapped, since the core maps only 16 MB.
-- **Inputs:** none fitted yet; the clock is set up in the web app, which is on
-  the home network from the start (on clocks without buttons). The hotspot opens
+- **Knock:** from the board's QMI8658 motion sensor, by its Wake on Motion: the
+  chip compares every sample (128 Hz) with a threshold and toggles its INT1
+  (GPIO13) for each one over it, and an interrupt counts the edges - the chip
+  decides, as the S3's LIS3DH does. The knock sensitivity 1-10 sets the
+  threshold from 255 mg down to 30 mg (6: 80 mg); at rest the sensor reads 4-13
+  mg, knocks on a panel 180 mg to 3 g (measured 2026-10-19). A knock never
+  counts as the input that has to open the menu on this clock without
+  buttons, so it does not stop the web app from saving. The chip's tap engine
+  answers its commands but reports nothing on this board.
+- **Inputs:** no buttons, and no gesture sensor yet; the clock is set up in
+  the web app, which is on the home network from the start (on clocks without
+  buttons). The hotspot opens
   by itself when no home WiFi is stored, and stays open; and when a stored one
   has not joined for 2 minutes, for 5 minutes, after which the clock tries the
   WiFi again. The I2C sensors (DS3231, BH1750, PAJ7620) go on IO45/IO46 (SDA,
@@ -71,8 +81,9 @@ in the wall's own 192x128 LEDs.
   `test off` a panel in white to measure the current; `bus <divider>` the panel
   bus' clock; `lan on|off` the web app on the home network; for the panel
   output and the fetches `fetch`, `prio <0-5>`, `gdma`, `crypto [ext]`,
-  `tlsmem int|ext`, `status test` for the band's clock status, and `rtc` for
-  what the real-time clocks hold.
+  `tlsmem int|ext`, `status test` for the band's clock status, `rtc` for
+  what the real-time clocks hold, and `imu` for the knock's sensor, threshold
+  and the edges and knocks it gave.
 - **Wiring rules** from the bench: the panels' supply minus to the board's GND
   first, the supply on before the ribbon cable goes in.
 
