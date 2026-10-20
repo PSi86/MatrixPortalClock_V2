@@ -2940,7 +2940,7 @@ void muncherSelfTest() {
                 longest, millis() - t0);
   if (!ok) { Serial.printf(", first wrong: %u", failed); }
   Serial.println();
-  // Where the knock's scene catches the ghosts, and how long it takes.
+  // Where the power pellet's scene catches the ghosts, and how long it takes.
   const muncher::Layout *layouts[2] = { &muncher::LANDSCAPE, &muncher::PORTRAIT };
   for (uint8_t l = 0; l < 2; l++) {
     uint8_t d[4] = { 1, 2, 3, 4 };
@@ -2950,7 +2950,7 @@ void muncherSelfTest() {
     f.start(muncher::MODE_POWER);
     uint16_t n = 0;
     while (f.mode != muncher::MODE_IDLE && n < 3000) { f.advanceTo(++n); }
-    Serial.printf("Muncher knock scene, %s: %u caught", l ? "upright" : "landscape", f.caughtCount);
+    Serial.printf("Muncher power pellet scene, %s: %u caught", l ? "upright" : "landscape", f.caughtCount);
     for (uint8_t g = 0; g < f.caughtCount; g++) { Serial.printf(" at x %d", f.caughtX[g]); }
     Serial.printf(", %u steps\n", n);
   }

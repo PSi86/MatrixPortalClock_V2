@@ -15,9 +15,10 @@
    is four dots long, so the walk with the fewest segments is the shortest.
 
    Two ways through a digit (STYLE_*): the whole old digit eaten and then
-   the new one walked, or only the segments that differ. A knock plays a
-   scene of its own: the muncher eats a power pellet of the colon, the
-   ghosts turn and flee, and the one it catches flashes white and is gone.
+   the new one walked, or only the segments that differ. The watchface
+   animation (a knock, by default) plays a scene of its own: the muncher
+   eats a power pellet of the colon, the ghosts turn and flee, and the one
+   it catches flashes white and is gone.
 
    Everything here counts in steps of one pixel; the sketch says how long a
    step is and asks advanceTo() to catch up with the time.
@@ -110,9 +111,9 @@ struct Layout {
   int16_t wallTop, wallBottom;         // the corridor's walls
   int16_t hubX[4];                     // where the way up to a digit leaves the corridor
   uint8_t entry[4];                    // the corner of the digit that way reaches
-  int16_t knockX;                      // where the way to the power pellet leaves it
-  uint8_t knockPellet;                 // the pellet the muncher eats on a knock
-  int16_t knockAtX, knockAtY;          // where it stands to eat it
+  int16_t powerX;                      // where the way to the power pellet leaves it
+  uint8_t powerPellet;                 // the colon's pellet the power pellet's muncher eats
+  int16_t powerAtX, powerAtY;          // where it stands to eat it
 };
 
 // 64 x 32: HH:MM in one line, the corridor below; the way up to a digit is
@@ -135,7 +136,7 @@ inline int16_t nodeY(const Layout &L, uint8_t i, uint8_t node) { return L.digitY
 // Whether x is in an opening of the corridor's upper wall: as wide as the
 // muncher, so two openings never leave a single pixel of wall between them.
 inline bool wallOpen(const Layout &L, int16_t x) {
-  if (x >= L.knockX - 2 && x <= L.knockX + 2) { return true; }
+  if (x >= L.powerX - 2 && x <= L.powerX + 2) { return true; }
   for (uint8_t i = 0; i < 4; i++) {
     if (x >= L.hubX[i] - 2 && x <= L.hubX[i] + 2) { return true; }
   }
@@ -150,11 +151,11 @@ struct Leg { int16_t x, y; uint8_t act, digit; };
 const uint8_t MAX_LEGS = 112;
 
 enum Style : uint8_t { STYLE_MIXED, STYLE_ALL, STYLE_DIFF, STYLE_COUNT };   // stored values
-// CHANGE: a change of the time. POWER and DEATH: the knock's scenes, the
+// CHANGE: a change of the time. POWER and DEATH: the watchface animation's scenes, the
 // power pellet and the ghosts winning. HOUR: the show after the full hour.
 enum Mode : uint8_t { MODE_IDLE, MODE_CHANGE, MODE_POWER, MODE_HOUR, MODE_DEATH };
 // FOLLOW: behind the muncher along the corridor. CLOSE: closing in on the
-// opening the knock's muncher went up, one ghost on either side. SCARED:
+// opening the power pellet's muncher went up, one ghost on either side. SCARED:
 // blue after the power pellet. CAUGHT: its flash, then gone.
 enum GhostMode : uint8_t { GHOST_OFF, GHOST_FOLLOW, GHOST_CLOSE, GHOST_SCARED, GHOST_CAUGHT };
 // Two ghosts follow the muncher, four at the change to a full hour.
@@ -171,7 +172,7 @@ const uint8_t HOUR_FLASH_STEPS = 6;        // steps for each half of one
 const uint8_t HOUR_PAUSE_STEPS = 15;       // between the two chases
 const uint8_t GIANT = 13;                  // the giant muncher's size
 const int16_t CHASE_GAP = 9;               // chaser behind chased, middle to middle
-// The ghosts win (a knock): the muncher turns back and runs into the ghost
+// The ghosts win (a watchface animation): the muncher turns back and runs into the ghost
 // behind it; everything stands still for a moment, the ghosts vanish, the
 // muncher folds up and is gone, and after a pause a new one walks through.
 const uint8_t DEATH_FREEZE = 12;           // steps standing still on contact
@@ -183,7 +184,7 @@ const uint8_t DEATH_TURN = 16;             // how far it turns back at most
 // whose muncher eats it on its way along.
 const int16_t NO_FRUIT = -100;
 const uint8_t FRUIT_KINDS = 4;             // cherry, strawberry, orange, apple (the sketch draws them)
-// The knock's scene starts as a change of the time does, the muncher in
+// The power pellet's scene starts as a change of the time does, the muncher in
 // from the left and both ghosts behind it, so it does not give itself away
 // before the muncher turns up to the power pellet. Then the ghosts close in
 // on the opening, the first passing under it to the far side, as if the
@@ -219,7 +220,7 @@ class Face {
   uint8_t target[4] = { NO_DIGIT, NO_DIGIT, NO_DIGIT, NO_DIGIT };   // what a change leaves
   uint64_t dots[4]  = { 0, 0, 0, 0 };          // the dots on show
   uint32_t lanePellets = 0;                    // corridor pellets, bit k at x = 2 + 4k
-  bool pelletEaten = false;                    // the knock's power pellet is gone
+  bool pelletEaten = false;                    // the scene's power pellet is gone
   Mode mode = MODE_IDLE;
   int16_t mx = START_X, my = 0;                // the muncher's middle
   int8_t dx = 1, dy = 0;                       // the way it faces
@@ -294,7 +295,7 @@ class Face {
     return done;
   }
 
-  // The knock's scene the ghosts win: as far as the power pellet's opening,
+  // The scene the ghosts win: as far as the power pellet's opening,
   // as the power pellet scene goes, then back to the left into the ghost
   // behind it (stepOnce()). Returns the steps up to the turn.
   uint16_t planDeath() {
@@ -303,14 +304,14 @@ class Face {
     planGhosts = 2;
     for (uint8_t i = 0; i < 4; i++) { target[i] = shown[i]; targetDots[i] = dotsOf(segsOf(shown[i])); }
     px = START_X; py = L.laneY;
-    leg(L.knockX, L.laneY, ACT_WALK, 0);
+    leg(L.powerX, L.laneY, ACT_WALK, 0);
     uint16_t turn = steps;
-    leg(L.knockX - DEATH_TURN, L.laneY, ACT_WALK, 0);
+    leg(L.powerX - DEATH_TURN, L.laneY, ACT_WALK, 0);
     pathSteps = steps;
     return turn;
   }
 
-  // The knock's scene: up to the power pellet and back down; from there it
+  // The power pellet's scene: up to the pellet and back down; from there it
   // goes after the ghosts and out to the right (stepOnce()). Returns the
   // steps up to the pellet.
   uint16_t planPower() {
@@ -319,20 +320,20 @@ class Face {
     planGhosts = 2;
     for (uint8_t i = 0; i < 4; i++) { target[i] = shown[i]; targetDots[i] = dotsOf(segsOf(shown[i])); }
     px = START_X; py = L.laneY;
-    leg(L.knockX, L.laneY, ACT_WALK, 0);
-    leg(L.knockX, L.knockAtY, ACT_WALK, 0);
-    leg(L.knockAtX, L.knockAtY, ACT_WALK, 0);
+    leg(L.powerX, L.laneY, ACT_WALK, 0);
+    leg(L.powerX, L.powerAtY, ACT_WALK, 0);
+    leg(L.powerAtX, L.powerAtY, ACT_WALK, 0);
     // The pellet goes with whichever leg reaches it: in landscape it stands
     // right above the opening, and the leg across to it has no length.
     legs[legCount - 1].act = ACT_PELLET;
     uint16_t pellet = steps;
-    leg(L.knockX, L.knockAtY, ACT_WALK, 0);
-    leg(L.knockX, L.laneY, ACT_WALK, 0);
+    leg(L.powerX, L.powerAtY, ACT_WALK, 0);
+    leg(L.powerX, L.laneY, ACT_WALK, 0);
     pathSteps = steps;
     return pellet;
   }
 
-  // Start what was planned: a change, or one of the knock's scenes.
+  // Start what was planned: a change, or one of the watchface animation's scenes.
   void start(Mode m) {
     if (legCount == 0) { return; }
     mode = m;
@@ -496,7 +497,7 @@ class Face {
     return false;
   }
 
-  // The knock's scene after its walk: towards the nearest blue ghost, the
+  // The power pellet's scene after its walk: towards the nearest blue ghost, the
   // one on the left first when both are as near; with none left, out to
   // the right.
   void chase() {
@@ -622,7 +623,7 @@ class Face {
         }
       }
     }
-    // The knock's muncher leaves on its own, after the ghosts or after its fall.
+    // The scene's muncher leaves on its own, after the ghosts or after its fall.
     bool out = (mode != MODE_POWER && mode != MODE_DEATH) || mx > L.w + 2;
     if (deathStep == 0 && legAt >= legCount &&
         ((out && ghostsGone()) || stepsDone > pathSteps + AFTER_WALK_MAX)) { finish(); }
@@ -633,7 +634,7 @@ class Face {
     for (uint8_t g = 0; g < GHOSTS; g++) {
       Ghost &h = ghosts[g];
       if (h.mode != GHOST_FOLLOW && h.mode != GHOST_CLOSE) { continue; }
-      h.flee = (h.x < L.knockX) ? -1 : 1;    // away from the opening, on its own side
+      h.flee = (h.x < L.powerX) ? -1 : 1;    // away from the opening, on its own side
       h.mode = GHOST_SCARED;
     }
   }
@@ -644,11 +645,11 @@ class Face {
       switch (h.mode) {
         case GHOST_FOLLOW: {
           if (mode == MODE_POWER && my != L.laneY) {
-            // The knock's muncher has gone up to the pellet: the first ghost
+            // The scene's muncher has gone up to the pellet: the first ghost
             // goes on under the opening to its far side, the second takes
             // the near side, each its gap away from it.
             h.mode = GHOST_CLOSE;
-            h.to = (g == 0) ? L.knockX + GHOST_GAP[0] : L.knockX - GHOST_GAP[0];
+            h.to = (g == 0) ? L.powerX + GHOST_GAP[0] : L.powerX - GHOST_GAP[0];
             break;
           }
           // On the muncher's track, some steps behind it, and never closer to
@@ -704,7 +705,7 @@ class Face {
   }
 };
 
-// Whether a knock's scene starts as a change of the minutes' ones does: the
+// Whether a scene of the watchface animation starts as a change of the minutes' ones does: the
 // muncher and both ghosts in the same places, step by step, until the
 // muncher turns (up to the power pellet, or back towards the ghosts).
 inline bool sameStart(Face &f, Mode m) {

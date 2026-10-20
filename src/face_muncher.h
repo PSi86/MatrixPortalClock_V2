@@ -446,7 +446,7 @@ inline void MuncherFace::draw(Adafruit_GFX &g, const FaceNow &, const FacePaint 
   // scene is over.
   if (_colonOn) {
     for (uint8_t p = 0; p < 2; p++) {
-      if (_m.pelletEaten && p == L.knockPellet) { continue; }
+      if (_m.pelletEaten && p == L.powerPellet) { continue; }
       g.fillRect(L.colonX[p] + 1, L.colonY[p], 2, 4, dot);
       g.fillRect(L.colonX[p], L.colonY[p] + 1, 4, 2, dot);
     }

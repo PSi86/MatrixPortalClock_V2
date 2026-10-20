@@ -213,10 +213,11 @@ inline bool boardBusBegin() {
   // the board's QMI8658. Its sensitivity is stored with the Tetris face's
   // settings, so it needs that face.
   #define KNOCK_SENSING 1
-  // The Muncher watchface (src/muncher.h). It is drawn through the Tetris
-  // face's branch of the dispatch for now, so it needs that one too.
+  // The Muncher watchface (src/face_muncher.h). Its settings are loaded and
+  // saved with the Tetris face's (FACE_BLOBS), so it needs that one too.
   #define WATCHFACE_MUNCHER 1
-  // The Aliens watchface (src/aliens.h), the same way.
+  // The Aliens watchface (src/face_aliens.h), the same way; it comes after
+  // the Muncher's number.
   #define WATCHFACE_ALIENS 1
   // Moving between the menu list and an editor slides the picture sideways.
   #define MENU_SLIDE 1

@@ -1,11 +1,14 @@
 // What the watchfaces share (concept doc, tab "Watchface animations").
 //
-// The four faces - classic, Tetris, Muncher, Aliens - are being moved behind
-// one interface, Watchface below, step by step, with the panel kept as it was
-// at every step. The core hands a face the moment (FaceNow), how to colour
-// (FacePaint) and the canvas; a face keeps everything about its own picture.
-// Also here: the tools that prove the panel stayed as it was - random numbers
-// a test build can repeat, and a checksum of a frame.
+// The four faces - classic, Tetris, Muncher, Aliens - sit behind one
+// interface, Watchface below, each in a header of its own (face_classic.h,
+// face_tetris.h, face_muncher.h, face_aliens.h; face_planned.h for what the
+// Muncher and the Aliens share). The core hands a face the moment (FaceNow),
+// how to colour (FacePaint) and the canvas; a face keeps everything about its
+// own picture and decides itself what it plays when. Also here: the tools
+// that proved the panel stayed as it was while the faces moved in here
+// (2026-10-20) - random numbers a test build can repeat, and a checksum of a
+// frame.
 //
 // It is built on every board, the M4 too, so it keeps to C++11.
 #ifndef FACE_H
