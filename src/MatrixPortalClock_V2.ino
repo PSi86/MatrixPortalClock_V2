@@ -1223,6 +1223,9 @@ long testShift = 0;   // debug and test builds: seconds the panel's time is move
 // not give (2026-10-20: Tetris differed from the first frame).
 const unsigned long TEST_STEP_MS = 5;
 bool          testVirtualOn = false;
+bool          testVirtualStart = false;                // asked for: the next pass begins the scene
+uint8_t       testVirtualReset = 0;                    // ... with the face shown afresh
+uint32_t      testVirtualSeed = 1;
 unsigned long testVirtualMs = 0, testVirtualMs0 = 0;   // the test's millis(), and where its scene began
 time_t        testVirtualLocal = 0;                    // the panel's time at testVirtualMs0
 bool          testQuiet = false;                       // no notices and no info cards over the face
@@ -5043,6 +5046,15 @@ void timekeeper(void) {
   millisNow=millis();
   localTime=clockNow() + tzTotalOffset();   // the clock keeps UTC; the panel shows local time
 #if defined(FACE_FRAME_LOG)
+  bool testBegins = testVirtualStart;        // a scene begins on this pass, before anything draws
+  if (testBegins) {
+    testVirtualStart = false;
+    testVirtualOn = true;
+    testVirtualMs = testVirtualMs0 = millisNow;
+    testShift = 0;
+    FaceRandom::seed(testVirtualSeed);
+    secondNow = minuteNow = hourNow = 0xFF;  // its second, minute and hour all begin now
+  }
   if (testVirtualOn) {                       // the test's own clock: a pass is TEST_STEP_MS
     testVirtualMs += TEST_STEP_MS;
     millisNow = testVirtualMs;
@@ -5051,6 +5063,9 @@ void timekeeper(void) {
 #endif
 #if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
   localTime += testShift;                    // a test's moment (POST /api/test shift=): the panel only, never the clock
+#endif
+#if defined(FACE_FRAME_LOG)
+  if (testBegins && testVirtualReset) { testFaceReset(); }   // the face afresh, at the scene's time
 #endif
 
   if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; secondStartedAt=millisNow; }
@@ -11757,13 +11772,13 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     // own clock from the panel time `start`; virtual=0 back to the real one
     // (millis then jumps: restart the clock after a test).
     v = getParam(body, "virtual");
-    if (v == "1") {
-      testVirtualOn = true;
-      testVirtualMs = testVirtualMs0 = millisNow;
+    if (v == "1") {   // taken on the next pass, so the face sees nothing of this one's real time
+      testVirtualStart = true;
       testVirtualLocal = (time_t)strtoll(getParam(body, "start").c_str(), nullptr, 10);
-      testShift = 0;
+      testVirtualReset = getParam(body, "reset") == "1";
+      String s = getParam(body, "seed");
+      testVirtualSeed = s.length() ? (uint32_t)strtoul(s.c_str(), nullptr, 10) : 1;
       testPlanParse(getParam(body, "plan"));
-      if (getParam(body, "reset") == "1") { testFaceReset(); }
     } else if (v == "0") {
       testVirtualOn = false;
       testPlanCount = testPlanNext = 0;
