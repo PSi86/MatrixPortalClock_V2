@@ -435,7 +435,8 @@ while one with GIFs is in, and from its pack otherwise.
   single files in the folder `gifs`. Up to 192x128 and 4 MB each - beyond the
   pack's 600 KB - and up to 8000 of them; a GIF whose one loop takes more than
   25 s is left out, as is one that cannot be read or does not open.
-- **Filling it:** the GIF library's `card.py` with a card reader on the PC. It
+- **Filling it:** with a card reader on the PC, from the GIF gallery ("write onto
+  the card") or the GIF library's `card.py`. It
   copies the GIFs chosen for the clock, reads each one back, deletes only what it
   put there itself, and writes the index `gifs/.index` (size, width, height, loop,
   frames, SHA-1, name per GIF). It writes only to a card that carries the mark
