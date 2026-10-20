@@ -116,6 +116,10 @@ class TetrisFace : public Watchface {
   bool offers(FaceTrigger why) const override { return why == TRIGGER_ACTION || why == TRIGGER_PREVIEW_CHANGE; }
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override;
 
+  // How long the watchface animation takes at most now: the break-up, the
+  // empty beat, and the rebuild of the time on show at the drop pace.
+  unsigned long animationMs(const FaceNow &now) const;
+
 #if defined(FACE_FRAME_LOG)
   // Test builds: a scene starts with the face afresh - a new layout and drop,
   // no rest after an effect.
@@ -140,7 +144,9 @@ class TetrisFace : public Watchface {
   static const int16_t  BREAKUP_GRAVITY     = 10;      // added to the fall speed each step, 1/16 px
   static const uint8_t  ROW_FLASH_STEPS = 3;       // steps a row stays lit before it goes
   static const uint16_t HOLD_MS     = 300;     // beat of empty space before it builds again
-  static const uint16_t ANIMATION_MS          = 6000;    // the watchface animation: a break-up and the build after it, about
+  // The longest break-up, measured on the PC (tools.local/refactor/host,
+  // 2026-10-20): rows cleared take 0.9 s, the others up to 0.6 s upright.
+  static const uint16_t BREAKUP_MAX_MS        = 900;
   // All of this is per digit, not per display: the animation takes all four apart
   // at once, but a minute change only replaces the digits that actually
   // changed, and those have to come apart on their own while the rest stand
@@ -765,15 +771,48 @@ inline void TetrisFace::draw(Adafruit_GFX &g, const FaceNow &now, const FacePain
   _spinDrawn = allPendingTurns(now.ms);
 }
 
-// Whether the digits are coming apart or blocks are still falling.
-inline bool TetrisFace::busy(const FaceNow &) const {
-  return breakingUp() || !_settled;
+// Whether the digits are coming apart, a digit waits in the empty beat to be
+// built, or blocks are still falling. (K7 of the face refactor: until
+// 2026-10-20 the face counted as at rest in the beat, and something could
+// start in it.)
+inline bool TetrisFace::busy(const FaceNow &now) const {
+  if (breakingUp() || !_settled) { return true; }
+  if (now.set) {
+    for (uint8_t i = 0; i < 4; i++) { if (_digits[i].value > 9) { return true; } }
+  }
+  return false;
+}
+
+// The break-up, the empty beat and the rebuild of the time on show: the
+// slowest of its four digits, each with the longest of its tilings, since
+// the rebuild draws one at random - a piece takes a step for every cell it
+// falls, and one to land. (K7 of the face refactor: until 2026-10-20 a flat
+// 6 s, while it takes up to 10 s at the default drop pace and 33 s at the
+// slowest.)
+inline unsigned long TetrisFace::animationMs(const FaceNow &now) const {
+  uint8_t d[4];
+  faceDigits(now.local, true, d, 0xFF);
+  uint16_t most = 0;
+  for (uint8_t i = 0; i < 4; i++) {
+    uint8_t v = d[i];
+    if (v > 9) { continue; }
+    int drop = (i < 2) ? _dropHour : _dropMin;
+    for (uint8_t var = 0; var < TETRIS_VARIANTS_PER_DIGIT[v]; var++) {
+      uint16_t steps = 0;
+      for (uint8_t p = 0; p < TETRIS_PIECES_PER_DIGIT[v]; p++) {
+        uint16_t rec = pieceAt(v, var, p);
+        steps += TETRIS_PIECE_TOP(rec) + (TETRIS_SIZE[TETRIS_PIECE_ORIENT(rec)] & 0x0F) + drop;
+      }
+      if (steps > most) { most = steps; }
+    }
+  }
+  return (unsigned long)BREAKUP_MAX_MS + HOLD_MS + (unsigned long)most * _s.dropMs;
 }
 
 // The input's animation: all four digits come apart and are built anew -
 // unless they are coming apart already, the last effect ended less than
-// FACE_REST_MS ago, or the break-up and the build after it would not end
-// FACE_GUARD_MS before the next minute's change starts. A build under way,
+// FACE_REST_MS ago, or the break-up and the build after it (animationMs())
+// would not end FACE_GUARD_MS before the next minute's change starts. A build under way,
 // the minute change's too, may be smashed: only the time before the change
 // is kept free, so the change starts from a clean picture (Peter,
 // 2026-10-20; from 2026-10-12 every build refused it). The web app's
@@ -783,7 +822,7 @@ inline FaceOutcome TetrisFace::request(const FaceNow &now, FaceTrigger why) {
   if (why != TRIGGER_ACTION && why != TRIGGER_PREVIEW_CHANGE) { return OUTCOME_NONE; }
   if (breakingUp() || now.ms - _breakUpEndedAt < FACE_REST_MS) { return OUTCOME_REFUSED; }
   unsigned long changeAt = now.secondAt + (60UL - now.second) * 1000UL;   // the next minute's start
-  if (now.set && !faceFits(changeAt, now.ms, ANIMATION_MS)) { return OUTCOME_REFUSED; }
+  if (now.set && !faceFits(changeAt, now.ms, animationMs(now))) { return OUTCOME_REFUSED; }
   breakUpAll(now.ms);
   return OUTCOME_PLAYED;
 }

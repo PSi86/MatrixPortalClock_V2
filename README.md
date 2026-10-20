@@ -1397,7 +1397,8 @@ so is everything around it: the release, steadying the clock, letting go of a
 held button. A knock the sensor latched while the config AP was up is
 discarded when the face comes back. Digits still being built can be knocked
 apart again, the minute change's too; only the time just before a change is
-kept free: a knock whose break-up and rebuild (about 6 s) would not end 3 s
+kept free: a knock whose break-up and rebuild - worked out from the drop pace and the
+digits' tilings: up to 10 s at the default 70 ms, 33 s at the slowest - would not end 3 s
 before the next minute starts does nothing, so the change always starts from a
 clean picture. The reasons the sensor fires without a real knock sit together
 in `knockIsReal()`, the reasons the face cannot be knocked apart right now in
