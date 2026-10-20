@@ -1068,9 +1068,9 @@ form-encoded POSTs, answers are JSON:
 | `GET /api/state` | settings, the lists the page offers, hardware found, WiFi, system |
 | `GET /api/status` | brightness, light, time and its source, rotation, screen, the info band's sources and items, the Home Assistant link (the page asks every 2 s) |
 | `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
-| `POST /api/live` | tries settings live, in RAM only |
+| `POST /api/live` | tries settings live, in RAM only; when a preview was asked for (`pv=1`, or a new watchface animation), `{"preview": "played"}` or `"refused"` - it plays now or not at all |
 | `POST /api/save` | stores everything the page shows |
-| `POST /api/discard` | puts the stored settings back |
+| `POST /api/discard` | puts the stored settings back, and the face shows them as a preview (the same answer) |
 | `POST /api/time` | sets the time, from the phone or typed |
 | `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
 | `POST /api/gif` | plays a GIF now (on the face) |
@@ -1264,7 +1264,8 @@ Classic on both boards, Tetris, Muncher and Aliens on the S3. It previews live, 
 choice can be judged on the panel before saving.
 
 **Classic** (default) shows `HH MM SS` with the six flying digits. This is the
-face the clock has always had; nothing about it changed.
+face the clock has always had. Since 2026-10-20 its flights are placed by the
+time since their second began, and it draws only when a digit has moved.
 
 **Tetris** shows `HH:MM` built up from falling tetromino blocks. Only the digits
 that actually change are rebuilt, so at a minute change the rest of the display
@@ -1629,6 +1630,46 @@ apart, a step down only with two rows empty below, and at least one), the saucer
 from either side to each gap, and every alien that can shoot back: the shot meets
 the saucer, the bomb meets the cannon, the time stays.
 
+### How the faces are built
+
+Each face is a class of its own in a header - `src/face_classic.h`,
+`face_tetris.h`, `face_muncher.h`, `face_aliens.h` - behind one interface,
+`Watchface` in `src/face.h` (since 2026-10-20; before, the sketch asked at about
+30 places which face was on, and the Muncher and the Aliens were near copies of
+each other). The core keeps the time, the screens and the rules for who takes
+the panel. It hands a face the moment (`FaceNow`: the time, the ticks, the panel
+as it is turned), how to colour (`FacePaint`) and the canvas, and asks it:
+
+| | what the face does or says |
+|---|---|
+| `enter()` | it comes onto the panel: chosen, shown again after a screen on top, the panel turned |
+| `update()` | one pass: it steps what moves, by the time; whether its picture changed - only then is it drawn |
+| `draw()` | its picture, without the marks the core puts over it (status pixel, hotspot mark, notices, an input's feedback) |
+| `busy()` | whether its change of the time or a scene runs: nothing optional starts then |
+| `changeSpan()` | how long before a minute its change starts and how long after it goes on, the full hour's included: the rules keep that free |
+| `offers()`, `request()` | an animation asked for - the input action "trigger watchface animation", now and then, the web app's preview - played now or refused |
+
+The Muncher and the Aliens share `face_planned.h`: they plan their change
+backwards from the minute, work its start out anew on every pass from the
+second's beginning, start it at its moment even when that has passed, and log
+when the new time stood (`... the new time stands at :00.0xx`). Each face also
+keeps a table of its own settings (`FaceParam`: the web app's key, where it sits
+in the face's blob, its range), through which one piece of code loads, checks,
+takes from the web app and reports them all.
+
+The same rules for every face: an animation asked for plays at once or not at
+all, and not when it would not end 3 s before the face's next change; after one,
+the next waits 1 s; now and then, the core first looks at quiet hours, a dark
+room, the face at rest and information waiting, and the face then at the length
+of its extra; a preview in the web app plays now or the page says it cannot.
+
+A **test build** (the release env with `-DFACE_FRAME_LOG`) logs every frame a
+face draws as a checksum (`F hh:mm:ss.mmm crc face ms`) and has `POST /api/test`,
+which runs the panel on a clock of its own - 5 ms a pass, from a given time -
+so two builds show the same frames when nothing has changed. That is how the
+move of the faces into their headers was checked to leave the panel as it was;
+the scripts for it are not part of the repository.
+
 ## Animation timing
 
 The **fly-in time** is how long every flight of the classic face takes, in ms
@@ -1643,15 +1684,14 @@ The Tetris watchface has its own pair of settings instead (see above); the
 fly-in time does not apply to it.
 
 On the S3 the loop runs in step with the panel refresh (about 200 Hz):
-`show()` waits out one refresh period after the previous frame, and the fly-in
-time is turned into whole refreshes at the rate the face's loop really had in its
-last second. A flight's pixels are spread evenly over them, so a step stays on
-the panel for one refresh or the next whole number, never drifting. Drawing a
-frame and handing it over takes well under a refresh period, so the S3 has
-plenty of headroom. With a fixed millisecond loop, as before, the loop drifted
-against the refresh and single steps stayed on screen for 1, 2 or 3 refreshes,
-which showed as a slight judder. The M4's loop runs every 10 ms (until
-2026-10-08 every "speed" ms).
+`show()` waits out one refresh period after the previous frame. A flight is
+placed by the time since its second began, its pixels spread evenly over the
+fly-in time, and the face is drawn on a pass where a digit has moved - a loop
+held up for a moment (a web request) does not slow a flight, the next pass puts
+it where it ought to be. Until 2026-10-20 the fly-in time was turned into the
+passes the loop had had in the second before, and the face was drawn on every
+pass, about 200 times a second. The M4's loop runs every 10 ms (until 2026-10-08
+every "speed" ms).
 
 ### Panel driver
 
