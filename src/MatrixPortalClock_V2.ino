@@ -3991,7 +3991,6 @@ const uint8_t MUNCHER_KNOCK_REPLAY = 1;   // the minutes' ones eaten and laid ag
 const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
 const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
 const uint8_t MUNCHER_KNOCK_COUNT  = 4;
-const uint8_t MUNCHER_FRUIT_ONE_IN = 5;   // without the extras' shared pace: a bonus fruit after one minute change in this many
 // The LEDs of a pellet, in the digits and the corridor: one, or more to be
 // seen better from afar (Peter, 2026-10-11) - two side by side, which makes
 // the level strokes solid lines, two one above the other, which makes the
@@ -4209,14 +4208,10 @@ void muncherSceneEnded() {
     muncherPlannedFor = 0;
     Serial.println("Muncher: the hour show");
   } else if (after == MUNCHER_AFTER_MINUTE) {
-#if GIF_PLAYBACK
-    if (extrasDue()) {
+    if (extrasDue()) {   // the Muncher is built only with GIF playback, which has the extras
       extrasScheduleNext();
       if (!decorQuiet()) { muncherPlaceFruit(); }
     }
-#else
-    if (random(MUNCHER_FRUIT_ONE_IN) == 0) { muncherPlaceFruit(); }
-#endif
   }
 }
 
@@ -7640,9 +7635,6 @@ void serveClient(WiFiClient &client, bool lan) {
     applySettings();            // the runtime copies: animation speed, sync time
     setDstMode(settings.dst);   // a new zone's daylight-saving rule counts at once
     saveSettings();
-#if WATCHFACE_TETRIS
-    saveTetrisSettings();
-#endif
     saveUiSettings();
     // NTP sync switched off: a sync that is due or about to start is dropped,
     // and stopAPMode() below then leaves the radio off.
@@ -7689,9 +7681,6 @@ void serveClient(WiFiClient &client, bool lan) {
     // in RAM.
     loadSettings();
     sendNoContent(out);
-#if WATCHFACE_TETRIS
-    shakePreviewReq = true;   // show what was restored
-#endif
   } else if (path == "/inputs") {
     sendInputsPage(out);
   } else if (path == "/keys") {
@@ -8025,46 +8014,6 @@ void sendFormPage(Print &c) {
   printOption(c, settings.dst, DST_WINTER, "Standard / winter time");
   c.println("</select>");
 
-#if WATCHFACE_TETRIS
-  // Watchface (live, so the choice can be judged on the panel before saving).
-  c.println("<label>Watchface</label><select name=wf onchange=\"liveNow(1)\">");
-  printOption(c, settings.watchface, WATCHFACE_CLASSIC,   "Classic (flying digits, HH MM SS)");
-  printOption(c, settings.watchface, WATCHFACE_TETRIS_ID, "Tetris (falling blocks, HH:MM)");
-  c.println("</select>");
-
-  // Tetris pace: how fast the blocks come down, and how busily they turn on the
-  // way. Separate settings because they are separate things to look at.
-  c.print("<label>Tetris drop (ms per block row; higher = slower)</label>");
-  c.print("<input type=range min="); c.print(TETRIS_DROP_MIN);
-  c.print(" max="); c.print(TETRIS_DROP_MAX);
-  c.print(" name=tdrop value="); c.print(tetrisSettings.dropMs);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value\" onchange=\"this.nextElementSibling.value=this.value;liveNow(1)\">");
-  c.print("<output>"); c.print(tetrisSettings.dropMs); c.println("</output>");
-
-  c.print("<label>Tetris turn (ms between quarter turns; higher = calmer)</label>");
-  c.print("<input type=range min="); c.print(TETRIS_SPIN_MIN);
-  c.print(" max="); c.print(TETRIS_SPIN_MAX);
-  c.print(" step=10 name=tspin value="); c.print(tetrisSettings.spinMs);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value\" onchange=\"this.nextElementSibling.value=this.value;liveNow(1)\">");
-  c.print("<output>"); c.print(tetrisSettings.spinMs); c.println("</output>");
-
-  // Knock the clock and the digits come apart. 0 switches it off.
-  c.print("<label>Shake sensitivity (0 = off, 10 = reacts to a light tap)</label>");
-  c.print("<input type=range min=0 max="); c.print(SHAKE_LEVEL_MAX);
-  c.print(" name=shk value="); c.print(tetrisSettings.shakeLevel);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value==0?'off':this.value\" onchange=\"this.nextElementSibling.value=this.value==0?'off':this.value;liveNow(1)\">");
-  c.print("<output>");
-  if (tetrisSettings.shakeLevel == 0) { c.print("off"); } else { c.print(tetrisSettings.shakeLevel); }
-  c.println("</output>");
-
-  c.println("<label>Break-up effect (when the time changes a digit, and for the shortcut)</label><select name=shs onchange=\"liveNow(1)\">");
-  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_RANDOM,   "Random each time");
-  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_COLLAPSE, "Collapse (the stack gives way)");
-  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_SCATTER,  "Scatter (pieces fly off)");
-  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_CLEAR,    "Clear rows (bottom up)");
-  c.println("</select>");
-#endif
-
   // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
   // around the sensor value (128 = neutral, lower = darker, higher = brighter).
   c.print("<label>Brightness (0-255; auto mode: 128 = neutral)</label>");
@@ -8230,11 +8179,7 @@ void sendFormPage(Print &c) {
 
   c.println("function _send(p){var g=function(n){return document.getElementsByName(n)[0].value;};");
   c.println("var ab=document.getElementsByName('autob')[0].checked?'on':'off';");
-#if WATCHFACE_TETRIS
-  c.println("var wf='&wf='+g('wf')+'&tdrop='+g('tdrop')+'&tspin='+g('tspin')+'&shk='+g('shk')+'&shs='+g('shs');");
-#else
-  c.println("var wf='';");   // no watchface selector in this build
-#endif
+  c.println("var wf='';");   // no watchface selector on this page: the M4 has the classic face only
   c.println("fetch('/live?bright='+g('bright')+'&autob='+ab+'&luxd='+g('luxd')+'&luxb='+g('luxb')+'&brmin='+g('brmin')+'&brmax='+g('brmax')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))+wf+(p?'&pv=1':'')).catch(function(){});}");
   // Nothing is sent while a slider is being dragged - only the readout beside it
   // follows. A value is taken over when the slider is let go of or a point on it
