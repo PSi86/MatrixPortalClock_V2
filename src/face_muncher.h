@@ -163,6 +163,7 @@ class MuncherFace : public PlannedFace {
   void startScene(muncher::Mode mode, unsigned long at, uint8_t after = AFTER_NOTHING);
   void placeFruit();
   bool playScene(const FaceNow &now, uint8_t kind);
+  static muncher::Mode planScene(muncher::Face &f, uint8_t kind, const char *&what);
   bool extra(const FaceNow &now);
   void idle(const FaceNow &now, const uint8_t d[4]);
   void sceneEnded(const FaceNow &now);
@@ -210,36 +211,44 @@ inline bool MuncherFace::playScene(const FaceNow &now, uint8_t kind) {
   // Only against a planned change: until the face has planned one (it does
   // on its next pass), there is nothing to measure the scene against.
   if (!planned()) { return false; }
-  unsigned long plannedStart = _startAt;
-  uint16_t steps;
-  muncher::Mode mode;
+  // How long it takes, exactly: planned and walked to its end on a copy -
+  // muncher.h draws no random numbers, so the copy goes as the scene will
+  // (K3 of the face refactor: until 2026-10-20 it was the walk plus a margin
+  // of 60 to 140 steps). Refused, the copy is dropped, and the change's plan
+  // stays as it was; until then a refused scene had taken its place.
   const char *what;
-  if (kind == MUNCHER_ANIM_POWER) {
-    steps = _m.planPower();
-    steps += 120;                      // the walk back and the ghosts, at the most
-    mode = muncher::MODE_POWER;
-    what = "the power pellet";
-  } else if (kind == MUNCHER_ANIM_DEATH) {
-    steps = _m.planDeath();
-    steps += 140;                      // the fall, the pause and the next one's walk
-    mode = muncher::MODE_DEATH;
-    what = "the ghosts win";
-  } else {
-    uint8_t same[4];
-    memcpy(same, _m.shown, 4);
-    steps = _m.planChange(same, muncher::STYLE_ALL, 1 << 3);
-    steps += 60;                       // the walk out and the ghosts
-    mode = muncher::MODE_CHANGE;
-    what = "the minute's ones again";
+  muncher::Mode mode;
+  uint16_t steps = 0;
+  {
+    muncher::Face f = _m;   // about 1 KB on the stack, only while it is walked
+    mode = planScene(f, kind, what);
+    f.start(mode);
+    while (f.mode != muncher::MODE_IDLE && steps < 3000) { f.advanceTo(++steps); }
   }
-  _plannedFor = 0;                     // the change is planned anew afterwards
-  if (!faceFits(plannedStart, now.ms, (unsigned long)steps * _s.paceMs)) {
-    _m.show(_m.shown);                 // drop the animation's walk
-    return false;
-  }
+  if (!faceFits(_startAt, now.ms, (unsigned long)steps * _s.paceMs)) { return false; }
+  planScene(_m, kind, what);           // the same plan, now for the face
   startScene(mode, now.ms);
   Serial.printf("Muncher: %s\n", what);
   return true;
+}
+
+// Plan the scene of `kind` on `f`: its mode, and what the console calls it.
+inline muncher::Mode MuncherFace::planScene(muncher::Face &f, uint8_t kind, const char *&what) {
+  if (kind == MUNCHER_ANIM_POWER) {
+    f.planPower();
+    what = "the power pellet";
+    return muncher::MODE_POWER;
+  }
+  if (kind == MUNCHER_ANIM_DEATH) {
+    f.planDeath();
+    what = "the ghosts win";
+    return muncher::MODE_DEATH;
+  }
+  uint8_t same[4];
+  memcpy(same, f.shown, 4);
+  f.planChange(same, muncher::STYLE_ALL, 1 << 3);
+  what = "the minute's ones again";
+  return muncher::MODE_CHANGE;
 }
 
 // The extra now and then: a bonus fruit in the corridor, which lies still
