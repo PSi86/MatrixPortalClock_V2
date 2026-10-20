@@ -124,7 +124,6 @@ class AliensFace : public PlannedFace {
 #endif
 
  private:
-  static const unsigned long REST_MS = 1000;   // after a scene, before an animation asked for counts again
   static const unsigned long PREVIEW_MS    = 15000;  // the longest a scene asked for takes: the minutes' ones shot and back
 
   uint32_t planBack();
@@ -185,7 +184,7 @@ inline uint8_t AliensFace::extraKind() {
 // starts: then it is dropped, not kept.
 inline bool AliensFace::scene(const FaceNow &now, uint8_t kind, const char *why) {
   if (_a.running || _a.shown[0] == aliens::NO_DIGIT) { return false; }
-  if (now.ms - _sceneEndedAt < REST_MS) { return false; }
+  if (now.ms - _sceneEndedAt < FACE_REST_MS) { return false; }
   if (_plannedFor == 0) { return false; }   // the next change is planned on the face's next pass
   if (kind == ALIENS_ANIM_RANDOM) {
     const uint8_t KINDS[3] = { ALIENS_ANIM_REPLAY, ALIENS_ANIM_SAUCER, ALIENS_ANIM_BACK };
@@ -249,7 +248,7 @@ inline void AliensFace::idle(const FaceNow &now, const uint8_t d[4]) {
   // and the change is planned anew on the next pass, before its start is
   // looked at - else the refused scene would start as the time's change.
   long r = room(now);
-  bool rest = rested(now, REST_MS);
+  bool rest = rested(now, FACE_REST_MS);
   if (_previewAsked && rest && r >= (long)PREVIEW_MS) {
     _previewAsked = false;
     scene(now, ALIENS_ANIM_REPLAY, "the web app's preview");

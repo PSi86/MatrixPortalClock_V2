@@ -316,12 +316,12 @@ notifications (S3, see [Alerts, messages and info](#alerts-messages-and-info-on-
 On the S3 each input also has a tick, **closes**: a ticked input closes an alert
 or a message on the panel and goes on to the next one. The watchface animation
 is the face's own: the Tetris digits break up in the
-break-up effect, the muncher plays its knock scene, and the classic digits all fly in at the next second as if
-every one of them changed. On the classic face a new one is ignored until the
-running one has landed and 0.3 s have passed, so a knock that reports itself
+break-up effect, the Muncher and the Aliens play the scene their setting picks, and the classic digits all fly in at the next second as if
+every one of them changed. A new one is ignored until the running one has
+ended and 1 s has passed, on every face, so a knock that reports itself
 more than once (2 to 7 times, seen) plays it once, and a fast run of knocks
-plays the next one just after the last has landed; the Tetris face keeps its
-own rules (see the break-up effect). The page lists only
+plays the next one 1 s after the last has ended; the Tetris face keeps its
+own rules besides (see the break-up effect). The page lists only
 the inputs found. The profile chosen there keeps the menu, the hotspot screen
 and the start; choosing it fills the face with its own rows to begin with, and
 nothing set means the profile's rows. Saving is refused unless an input found
@@ -1378,8 +1378,8 @@ so level 10 is 6 steps and level 1 is 24.
 
 Nothing is triggered while another screen owns the panel (the menu, an editor,
 a banner), in the config AP, for
-the first three seconds after start-up, for 1.2 s after a rotation or after an
-effect has run, while the digits are already coming apart, **while a button is
+the first three seconds after start-up, for 1.2 s after a rotation, for 1 s
+after an effect has run (the rest every face keeps after its animation), while the digits are already coming apart, **while a button is
 held, and for 3 s after a button was last pressed or let go** — the switches sit
 next to the sensor, so a button press is a knock as far as it is concerned, and
 so is everything around it: the release, steadying the clock, letting go of a

@@ -160,7 +160,6 @@ class MuncherFace : public PlannedFace {
   // fruit; the fruit is an extra of its own now, at its drawn time.)
   static const uint8_t AFTER_NOTHING = 0;
   static const uint8_t AFTER_HOUR    = 2;
-  static const unsigned long REST_MS = 1000;   // after a scene, before an animation asked for counts again
   // The most steps what the web app asks to see can take: a change of the
   // minutes' ones, or the watchface animation's scene.
   static const long PREVIEW_STEPS = 260;
@@ -207,7 +206,7 @@ inline void MuncherFace::placeFruit() {
 // after one, and when it could not end before the next change starts.
 inline bool MuncherFace::playAnimation(const FaceNow &now) {
   if (_m.mode != muncher::MODE_IDLE || _m.shown[0] == muncher::NO_DIGIT) { return false; }
-  if (now.ms - _sceneEndedAt < REST_MS) { return false; }
+  if (now.ms - _sceneEndedAt < FACE_REST_MS) { return false; }
   uint8_t kind = _s.animation;
   if (kind == MUNCHER_ANIM_RANDOM) {
     const uint8_t KINDS[3] = { MUNCHER_ANIM_POWER, MUNCHER_ANIM_REPLAY, MUNCHER_ANIM_DEATH };
@@ -293,7 +292,7 @@ inline void MuncherFace::idle(const FaceNow &now, const uint8_t d[4]) {
   // change starts, and for the rest after a scene: a preview never holds up
   // a change of the time.
   long r = room(now);
-  bool rest = rested(now, REST_MS);
+  bool rest = rested(now, FACE_REST_MS);
   long pace = _s.paceMs;
   if (_previewAsked && rest && r >= PREVIEW_STEPS * pace) {
     // A change: the minutes' ones eaten and laid again, as the animation "last

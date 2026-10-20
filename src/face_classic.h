@@ -65,12 +65,10 @@ class ClassicFace : public Watchface {
  private:
   // The animation on request: asked for (all six fly in at the next second),
   // flying, or neither. A new one is refused until the last one has landed
-  // and REST_MS have passed. An input can come again before the first has
-  // played - a knock reports every event the sensor latches, seen 2 to 7 per
-  // knock - and one that came after the second had taken the request asked
-  // for a second animation.
+  // and FACE_REST_MS have passed. An input can come again before the first
+  // has played, and one that came after the second had taken the request
+  // asked for a second animation.
   enum Anim : uint8_t { ANIM_IDLE, ANIM_ASKED, ANIM_FLYING };
-  static const unsigned long REST_MS = 300;
 
   void digits(const FaceNow &now);
   uint16_t flightPasses(const FaceNow &now) const;
@@ -309,13 +307,13 @@ inline bool ClassicFace::busy(const FaceNow &now) const {
 }
 
 // The input's animation: all six digits fly in at the next second, unless
-// one is still asked for or flying, or landed less than REST_MS ago. The
+// one is still asked for or flying, or landed less than FACE_REST_MS ago. The
 // console gets one line per animation taken, with the requests refused since
 // the one before, not one per request (a stress test of fast knocks wrote
 // over 200 lines in 30 s).
 inline FaceOutcome ClassicFace::request(const FaceNow &now, FaceTrigger why) {
   if (why != TRIGGER_ACTION) { return OUTCOME_NONE; }
-  if (_anim != ANIM_IDLE || now.ms - _animEndedAt < REST_MS) {
+  if (_anim != ANIM_IDLE || now.ms - _animEndedAt < FACE_REST_MS) {
     if (_ignored < 0xFFFF) { _ignored++; }
     return OUTCOME_REFUSED;
   }

@@ -20,6 +20,13 @@
 // priorities", decided 2026-10-12): the change is seen from its start.
 const unsigned long FACE_GUARD_MS = 3000;
 
+// After an animation of a face has ended, the next one asked for waits this
+// long (Peter, 2026-10-20: one rest for every face; it was 0.3 s on the
+// classic face, 1.2 s on the Tetris one and 1 s on the Muncher and the
+// Aliens). A knock reports itself more than once - the sensor latches 2 to 7
+// events per knock - and without a rest one knock could play two.
+const unsigned long FACE_REST_MS = 1000;
+
 // Whether something of `len` ms, starting now, ends FACE_GUARD_MS before a
 // change that starts at `startAt` (millis()). The one check every face and the
 // core ask; unsigned arithmetic survives the millis() wrap.
