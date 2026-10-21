@@ -1245,20 +1245,7 @@ inline uint8_t netStaStatus() { return (uint8_t)WiFi.status(); }
 inline int8_t  netStaRssi()   { return (int8_t)WiFi.RSSI(); }
 
 inline bool netApHasStation() { return WiFi.softAPgetStationNum() > 0; }
-inline bool netApHealthy()    { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
 inline IPAddress netApIP()    { return WiFi.softAPIP(); }
-
-// Read timeout for one HTTP client, in milliseconds.
-inline void netClientTimeoutMs(WiFiClient &c, uint16_t ms) {
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-  c.setTimeout(ms);         // 3.x: NetworkClient uses Stream's millisecond timeout
-#else
-  // 2.x: WiFiClient::setTimeout() takes SECONDS (it feeds SO_RCVTIMEO), so the
-  // millisecond read timeout has to be set on the Stream base separately.
-  c.setTimeout(1);
-  c.Stream::setTimeout(ms);
-#endif
-}
 
 // Next pending HTTP connection. accept() is the 3.x name (available() is
 // deprecated there); in 2.x both are the same function.

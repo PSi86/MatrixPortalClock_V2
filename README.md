@@ -1113,6 +1113,20 @@ any user name). Five wrong passwords in a row lock the check for 30 s (HTTP
 Home Assistant link does), and switching one on without a stored WiFi or
 without continuous access says that it needs both.
 
+**How the clock answers** (since 2026-10-21): beside its loop, a piece per
+pass, so an open page no longer makes the running text or the flying digits
+jump. Up to four connections are served at a time. A request is read as far
+as it has arrived; once it is in, its answer is built whole in RAM and handed
+to the network without waiting, at most 2,920 bytes a pass; the connection is
+closed a pass later. A connection that has not sent its request within 2 s,
+or whose form or answer moves no byte for 5 s, is dropped (browsers open
+connections in case they need them). Measured on the MatrixPortal S3 (debug
+build) with the page's requests - the panel every 200 ms, the status every
+2 s: the longest time between two passes of the loop was 6.4 ms, against
+4.6 ms without the page and 42 ms before, when every request held the loop
+until it was answered. Only a GIF pack's upload still holds the loop while it
+is written, with its progress on the panel.
+
 **The interface** — the page uses nothing else, so tools can too. Writes are
 form-encoded POSTs, answers are JSON:
 
