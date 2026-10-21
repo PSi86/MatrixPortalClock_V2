@@ -1814,6 +1814,15 @@ the same) costs nothing. Blue's steps are also why a fade at the dark end shows
 jumps: between brightness 30 and 70 there are about 8 steps of light, +47 % from
 26 to 27 and +29 % from 40 to 41.
 
+On the wall clock a new brightness goes through the picture a few rows a pass
+(`retintStep()`): four of the canvas's rows or twelve of the band's, from what
+the wall shows. Written all at once it held the loop 42 ms (the canvas 28.4 ms
+writing its LEDs and 1.4 ms writing the cache back to PSRAM, the band 10.8 and
+1.2 ms; measured 2026-10-22). Now a step takes 11 passes of at most 5.7 ms, and
+in a fast fade of single steps the longest gap between two passes went from 48 ms
+to 10 ms, with none over 20 ms instead of 51 in 12 s. Meanwhile a row is at most
+one step of light behind the others.
+
 Two more settings matter on the MatrixPortal S3 (`PanelCanvas` in
 `src/board_hal.h`):
 
