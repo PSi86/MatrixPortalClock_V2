@@ -8326,9 +8326,18 @@ void feedRetrySelfTest() {
 }
 #endif
 
-// A result back from the fetch task.
+// A result back from the fetch task. A fetch takes seconds: one for a place
+// left meanwhile, or of a source switched off meanwhile, is dropped whole -
+// its items, its place name and its time, after which the new place would
+// have waited a whole interval (applyFeedParams() has it due at once).
 void feedApply(const FeedResult &res) {
   if (res.feed >= FEED_COUNT) { return; }
+  bool here = feedSettings.located && res.lat == feedSettings.lat && res.lon == feedSettings.lon;
+  if (!here || !feedOn(res.feed)) {
+    Console.printf("Info band: %s result dropped, %s since its fetch began\n", FEEDS[res.feed].name,
+                  here ? "switched off" : "the place changed");
+    return;
+  }
   FeedRun &r = feedRuns[res.feed];
   r.status = res.status;
   r.ms     = res.ms;
