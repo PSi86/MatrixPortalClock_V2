@@ -105,9 +105,11 @@ inline void haTopics(const char *id) {
 }
 
 // Waits up to a second for the loop, which empties the queue on every pass;
-// what it does not take in that time is lost, and counted.
-inline void haPost(const HaIn &m) {
-  if (xQueueSend(haLink().in, &m, pdMS_TO_TICKS(1000)) != pdTRUE) { haLink().lost++; }
+// what it does not take in that time is lost, and counted. The worker's
+// answers wait as long as it takes: after a lost "stopped" the loop would
+// wait for it, and never start the link again, until a restart.
+inline void haPost(const HaIn &m, TickType_t wait = pdMS_TO_TICKS(1000)) {
+  if (xQueueSend(haLink().in, &m, wait) != pdTRUE) { haLink().lost++; }
 }
 
 // Online and the discovery configs, all retained: on every connect, and
@@ -243,13 +245,13 @@ inline void haWorker(void *) {
       case HA_CMD_START:
         memset(&m, 0, sizeof(m));
         m.kind = haClientStart() ? HA_IN_STARTED : HA_IN_START_FAILED;
-        haPost(m);
+        haPost(m, portMAX_DELAY);
         break;
       case HA_CMD_STOP:
         haClientStop(c.connected != 0);
         memset(&m, 0, sizeof(m));
         m.kind = HA_IN_STOPPED;
-        haPost(m);
+        haPost(m, portMAX_DELAY);
         break;
       case HA_CMD_SEND:
         if (l.client) {

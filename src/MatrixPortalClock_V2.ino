@@ -9595,8 +9595,11 @@ void haApply(const HaIn &m) {
     else { haState = HA_OFF; Console.println("Home Assistant: link stopped"); }
     return;
   }
-  // The client's: none counts once its stop was asked for.
-  if (haPhase != HA_PHASE_STARTING && haPhase != HA_PHASE_RUNNING) { return; }
+  // The client's: none counts once its stop was asked for, nor once new
+  // settings came (haChanged until the next start): what it had queued
+  // before the next pass asks for the stop would otherwise bring back the
+  // items switching the link off took away.
+  if ((haPhase != HA_PHASE_STARTING && haPhase != HA_PHASE_RUNNING) || haChanged) { return; }
   switch (m.kind) {
     case HA_IN_CONNECTED:
       haState   = HA_UP;
