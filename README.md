@@ -96,19 +96,25 @@ differently from the ESP32-S3's and had caused much of the WiFi trouble, so it w
 dropped before the web server and WiFi work that followed.
 
 - **Last commit with M4 support: `ae18faf`** (2026-10-21 16:51, the merge of
-  PR #60, full hash `ae18fafc511a73d1493db4fd62185ed6d0807ab9`). It still builds
-  for the M4 (checked on 2026-10-21: 134,680 bytes of 466,944), but was not
-  tried on the M4 hardware. Every commit after it builds for the two ESP32-S3
-  boards only.
-- **The M4 clock itself runs `2c1194f`** (2026-10-10, the merge of PR #43).
+  PR #60, full hash `ae18fafc511a73d1493db4fd62185ed6d0807ab9`). It builds for
+  the M4 (135,712 bytes of 466,944) and was tested on the M4 on 2026-10-21,
+  without a panel: a build of it with the console switched on
+  (`-D CLOCK_CONSOLE=1`) ran for 10 minutes without a restart, its loop
+  answering a console command every minute; it found its LIS3DH, joined the
+  WiFi through the NINA and took the time over NTP. Every commit after it
+  builds for the two ESP32-S3 boards only.
+- **The M4 clock runs `ae18faf`'s release build** since that test: it answered
+  pings during its first sync and took a second upload over USB. Before, it ran
+  `2c1194f` (2026-10-10, the merge of PR #43).
 - What the M4 build had at `ae18faf`: the Classic face only, the old config
   page written line by line instead of the web app, no GIFs, no info band data,
   no Home Assistant link; buttons UP D2 and DOWN D3; the panel driven by
   Adafruit Protomatter; WiFi and NTP through nina-fw 3.3.0 with WiFiNINA 2.0.1,
   whose AP is always at `192.168.4.1`; the settings in one 8 KB flash block per
   blob from 0x76000 to 0x7E000 (FlashStorage_SAMD).
-- To build or flash it again, check out that commit and use its environment;
-  for the upload the board goes into its UF2 bootloader by a double reset first:
+- To build or flash it again, check out that commit and use its environment.
+  The upload resets the board into its bootloader by itself, also from the
+  release build, which has no console; a double reset is the fallback:
   ```
   git checkout ae18faf
   pio run -e adafruit_matrix_portal_m4 -t upload
