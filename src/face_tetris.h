@@ -13,8 +13,6 @@
 // The palette is six hues exactly 60 degrees apart. Because the classes are a
 // proper colouring and the mapping is injective, touching pieces can never end
 // up within 60 degrees of each other - no run-time check needed.
-//
-// S3 and wall clock only; it keeps to C++11 like the rest of the faces.
 #ifndef FACE_TETRIS_H
 #define FACE_TETRIS_H
 

@@ -4,7 +4,7 @@
    Replaces the Time library (TimeLib 1.6.1, unmaintained since 2021), which
    declares its own time_t and does not compile against picolibc (the default
    C library from ESP-IDF 6 on). Only the C library's <time.h> is used here, so
-   it builds the same with newlib and picolibc, on the M4 and on the S3.
+   it builds the same with newlib and picolibc.
 
    The clock holds UTC, exactly as NTP delivers it. Timezone and daylight
    saving are added where the time is shown (the sketch's localTime), so

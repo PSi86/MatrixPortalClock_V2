@@ -12,8 +12,7 @@
    The sketch remembers which sensors were found at earlier starts (its
    "sensors" record). One of those missing now turns the status pixel red, the
    start says SENSOR, and the web app lists it, with "Forget" for a sensor the
-   clock no longer has. The M4 has no flash block for the record, so it
-   remembers nothing and reports none missing.
+   clock no longer has.
    ---------------------------------------------------------------------- */
 #ifndef SENSORS_H
 #define SENSORS_H
@@ -56,9 +55,7 @@ inline uint16_t sensorsSupported() {
 #endif
 #if BOARD_WAVESHARE_WALL
   m |= 1 << SENSOR_BOARD_RTC;
-#if KNOCK_SENSING
   m |= 1 << SENSOR_MOTION;
-#endif
 #endif
   return m;
 }

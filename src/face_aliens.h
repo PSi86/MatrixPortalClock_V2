@@ -4,8 +4,6 @@
 // (PlannedFace) as the Muncher's change; to a full hour the whole time goes as
 // a wave. Between changes the blocks stand still, but for the scenes now and
 // then and those an input asks for.
-//
-// S3 and wall clock only.
 #ifndef FACE_ALIENS_H
 #define FACE_ALIENS_H
 

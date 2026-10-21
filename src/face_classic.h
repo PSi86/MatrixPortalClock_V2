@@ -2,8 +2,6 @@
 // changes flies in from its side during the second before, while the one it
 // replaces flies out the other way, and lands as the second begins; asked for
 // an animation, all six fly in at the next second.
-//
-// It is built on every board, the M4 too, so it keeps to C++11.
 #ifndef FACE_CLASSIC_H
 #define FACE_CLASSIC_H
 

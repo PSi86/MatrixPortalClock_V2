@@ -8,9 +8,9 @@
 
    The rules every profile has to keep are checked here when the firmware is
    built (static_assert at the end), so a profile that would lock the user out
-   never reaches a clock. Written for C++11 (the M4 builds with -std=gnu++11),
-   which is why the checks are single-expression recursive constexpr
-   functions. They live in a header because the .ino preprocessor writes a
+   never reaches a clock. The checks are single-expression recursive constexpr
+   functions, as C++11 had them (the M4, dropped on 2026-10-21, built with
+   -std=gnu++11). They live in a header because the .ino preprocessor writes a
    plain prototype for every function in the sketch, which a constexpr
    definition would then contradict.
    ------------------------------------------------------------------------- */

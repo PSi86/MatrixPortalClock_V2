@@ -5,8 +5,6 @@
 // complete as the new minute begins, and it is stepped by the time since it
 // started: a screen that was on top for a while, or a loop held up by a
 // request, does not put it behind.
-//
-// S3 and wall clock only.
 #ifndef FACE_MUNCHER_H
 #define FACE_MUNCHER_H
 
