@@ -966,26 +966,48 @@ const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persis
 
 // Ambient light sensor -----------------------------------------------------
 // External BH1750 on I2C (default address 0x23). When enabled it drives the
-// master brightness once per second via a configurable lux->brightness mapping.
+// master brightness via a configurable lux->brightness mapping.
+//
+// Until 2026-10-21 a 10 s moving average of one reading a second set the
+// target: a lamp switched on showed half its change after about 5 s and 90 %
+// after 9 s (tools.local/dimming/dim_sim.py on the S3's logged light). Now the
+// sensor is read five times a second, and the median of the last LUX_MEDIAN
+// readings is filtered in log units: a hand in front of the sensor for up to
+// about 1.2 s (a gesture) changes nothing, a real change shows half after
+// 1.6 to 2.7 s and 90 % after 2.3 to 4.1 s, the same on and off.
 BH1750FVI     lightMeter(BH1750FVI_DEFAULT_ADDRESS); // I2C address 0x23 (ADDR pin low)
 bool          luxOK = false;     // true once the BH1750 was found on I2C
-unsigned long luxLast = 0;       // last light-sensor poll (1 Hz throttle)
+unsigned long luxLast = 0;       // last light-sensor poll
+unsigned long luxPrintedAt = 0;  // last Lux console line (one a second)
 float         lastLux = -1.0f;   // most recent UNFILTERED lux reading (web UI), -1 = none yet
-float         luxAvg = -1.0f;    // its 10 s moving average, -1 = none yet (the dark room)
-// Moving average of the lux readings so brightness changes are gentle, not
-// jumpy. At the 1 Hz sampling rate a 10-sample window equals a 10 s average.
-const uint8_t LUX_AVG_SAMPLES = 10;
-float         luxHistory[LUX_AVG_SAMPLES]; // ring buffer of recent lux readings
-uint8_t       luxHistIdx = 0;              // next write position
-uint8_t       luxHistCount = 0;            // valid samples (ramps up to LUX_AVG_SAMPLES)
-// The averaged lux sets a brightness TARGET once per second; the actual master
-// brightness is eased toward it every frame so the change is a continuous fade
-// instead of a once-per-second step.
-uint8_t       autoBrightTarget = 128;       // sensor brightness the fade is easing toward
-float         autoBrightCurrent = 128.0f;   // smoothly-eased brightness (sub-unit precision)
-bool          autoBrightInit = false;       // false until the fade has been seeded
-unsigned long autoFadeLastMs = 0;           // last fade step time
-const float   AUTOBRIGHT_TAU_MS = 1200.0f;  // fade time constant (~1.2 s to 63% of a step)
+float         luxAvg = -1.0f;    // the filtered light (below), -1 = none yet (the dark room)
+const unsigned long LUX_READ_MS = 200;     // the sensor has a new value every ~120 ms (setContHighRes())
+const uint8_t LUX_MEDIAN = 13;             // readings in the median: 2.6 s
+const float   LUX_TAU_MS = 1000.0f;        // the median's log, filtered with this time constant
+const float   LUX_LN_FLOOR = 0.5f;         // lx: 0 has no log; the sensor's steps are 0.83 lx
+float         luxRecent[LUX_MEDIAN];       // ring buffer of the last readings
+uint8_t       luxRecentIdx = 0;            // next write position
+uint8_t       luxRecentCount = 0;          // valid readings (ramps up to LUX_MEDIAN)
+float         luxLn = 0.0f;                // the filtered log of the light
+unsigned long luxLnAt = 0;                 // millis() of its last reading
+// The filtered light sets a brightness TARGET; the master brightness moves
+// towards it on every pass in log units, so a fade looks equally fast at
+// every level: at most AUTOBRIGHT_RATE, slowing over its last part
+// (AUTOBRIGHT_END_MS), and only once the target is AUTOBRIGHT_BAND away, so a
+// light that only wavers moves nothing. The panel takes a new value at most
+// every AUTOBRIGHT_STEP_MS: on the S3 every brightness whose tables differ
+// writes two whole frames (3.65 ms each), on the wall clock one (about 40 ms).
+uint8_t       autoBrightTarget = 128;        // sensor brightness the fade moves toward
+float         autoBrightLn = 0.0f;           // the brightness now, in log units (sub-unit precision)
+bool          autoBrightMoving = false;      // a fade under way
+bool          autoBrightInit = false;        // false until the fade has been seeded
+unsigned long autoFadeLastMs = 0;            // last fade step time
+unsigned long autoBrightShownAt = 0;         // millis() the panel last took a new value
+const float   AUTOBRIGHT_RATE = 1.0f;        // log units a second at most: a factor of e (2.7)
+const float   AUTOBRIGHT_END_MS = 300.0f;    // the fade's slower end
+const float   AUTOBRIGHT_BAND = 0.04f;       // 4 %: what the target must move to start a fade
+const float   AUTOBRIGHT_SETTLED = 0.004f;   // 0.4 %: a fade is over
+const unsigned long AUTOBRIGHT_STEP_MS = 40; // the panel's new value at most this often
 // Brightness actually used for rendering. In manual mode it equals
 // settings.brightness (absolute). In auto-brightness mode settings.brightness is
 // instead a RELATIVE trim around the sensor value (128 = neutral, 0 = much
@@ -1915,32 +1937,52 @@ uint8_t mapLuxToBrightness(float lux) {
   return (uint8_t)constrain(v, 0, 255);
 }
 
+// The median of the last readings (luxRecent).
+float luxMedian() {
+  float v[LUX_MEDIAN];
+  memcpy(v, luxRecent, sizeof(v));
+  for (uint8_t i = 1; i < luxRecentCount; i++) {   // insertion sort, at most 13
+    float x = v[i];
+    int8_t j = (int8_t)i - 1;
+    while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; }
+    v[j + 1] = x;
+  }
+  return v[luxRecentCount / 2];
+}
+
 // Resolve the brightness used for ALL rendering (clock, boot, AP info, banner)
 // with one shared rule, so every screen shows the same brightness as the clock.
 // Manual mode / no sensor: the absolute setting. Auto-brightness: the sensor's
-// 10 s moving average, mapped, trimmed by settings.brightness (128 = neutral) and
-// clamped to >= Min, then eased smoothly. Call once per frame in every path.
+// filtered light (above), mapped, trimmed by settings.brightness (128 =
+// neutral) and clamped to >= Min, then faded to. Call once per frame in every
+// path.
 void updateBrightness() {
-  // Sample the raw ambient light at ~1 Hz whenever a sensor is present, in BOTH
-  // modes, so the config UI can always show the live lux value. The first call is
-  // forced (luxLast == 0) so the very first frame, e.g. boot, has a real reading.
-  // In auto mode the same reading also feeds the 10 s moving average + mapping.
-  if (luxOK && (luxLast == 0 || millisNow - luxLast >= 1000)) {
+  // Sample the raw ambient light whenever a sensor is present, in BOTH modes, so
+  // the config UI can always show the live lux value. The first call is forced
+  // (luxLast == 0) so the very first frame, e.g. boot, has a real reading. In
+  // auto mode the same reading also feeds the filter and the mapping.
+  if (luxOK && (luxLast == 0 || millisNow - luxLast >= LUX_READ_MS)) {
     luxLast = millisNow;
     float lux = lightMeter.getLux();
     if (lightMeter.getError() == BH1750FVI_OK) {     // skip failed I2C reads
       lastLux = lux;                                 // unfiltered reading shown in the web UI
-      luxHistory[luxHistIdx] = lux;
-      luxHistIdx = (luxHistIdx + 1) % LUX_AVG_SAMPLES;
-      if (luxHistCount < LUX_AVG_SAMPLES) { luxHistCount++; }
-      float sum = 0;
-      for (uint8_t i = 0; i < luxHistCount; i++) { sum += luxHistory[i]; }
-      float avgLux = sum / luxHistCount;
-      luxAvg = avgLux;
-      autoBrightTarget = mapLuxToBrightness(avgLux);
-      if (consoleLevel >= 2) {   // a running figure (console.h)
-        Console.print("Lux "); Console.print(lux); Console.print(" avg "); Console.print(avgLux);
-        Console.print(" -> sensor "); Console.println(autoBrightTarget);
+      luxRecent[luxRecentIdx] = lux;
+      luxRecentIdx = (luxRecentIdx + 1) % LUX_MEDIAN;
+      if (luxRecentCount < LUX_MEDIAN) { luxRecentCount++; }
+      float ln = logf(max(luxMedian(), LUX_LN_FLOOR));
+      if (luxAvg < 0) {
+        luxLn = ln;                                  // the first reading: no fade from nothing
+      } else {
+        luxLn += (ln - luxLn) * (1.0f - expf(-(float)(millisNow - luxLnAt) / LUX_TAU_MS));
+      }
+      luxLnAt = millisNow;
+      luxAvg = expf(luxLn);
+      autoBrightTarget = mapLuxToBrightness(luxAvg);
+      if (consoleLevel >= 2 && millisNow - luxPrintedAt >= 1000) {   // a running figure (console.h)
+        luxPrintedAt = millisNow;
+        Console.print("Lux "); Console.print(lux); Console.print(" avg "); Console.print(luxAvg);
+        Console.print(" -> sensor "); Console.print(autoBrightTarget);
+        Console.print(" now "); Console.println(effectiveBrightness);
       }
     }
   }
@@ -1948,21 +1990,39 @@ void updateBrightness() {
   uint8_t before = effectiveBrightness;
   if (!brightnessIsTrim()) {            // manual mode (or no sensor)
     effectiveBrightness = settings.brightness;
-    autoBrightInit = false;             // re-seed the ease when auto resumes
+    autoBrightInit = false;             // re-seed the fade when auto resumes
   } else {
     // Relative trim around the sensor value: settings.brightness 128 = neutral,
     // 0 = much darker, 255 = ~2x brighter. Min brightness is a hard floor.
     float relTarget = (float)autoBrightTarget * (float)settings.brightness / 128.0f;
     if (relTarget > 255.0f)              { relTarget = 255.0f; }
     if (relTarget < settings.brightMin)  { relTarget = settings.brightMin; }
+    float target = logf(max(relTarget, 1.0f));
 
-    // Ease toward the trimmed target (frame-rate independent) for a smooth fade;
-    // seeded to the target on the first call to avoid a jump.
-    if (!autoBrightInit) { autoBrightCurrent = relTarget; autoBrightInit = true; autoFadeLastMs = millisNow; }
+    // Seeded to the target on the first call to avoid a jump.
+    if (!autoBrightInit) {
+      autoBrightLn = target;
+      autoBrightMoving = false;
+      autoBrightInit = true;
+      autoFadeLastMs = millisNow;
+      autoBrightShownAt = millisNow - AUTOBRIGHT_STEP_MS;
+    }
     float dt = (float)(millisNow - autoFadeLastMs);
     autoFadeLastMs = millisNow;
-    autoBrightCurrent += (relTarget - autoBrightCurrent) * (1.0f - expf(-dt / AUTOBRIGHT_TAU_MS));
-    effectiveBrightness = (uint8_t)lroundf(autoBrightCurrent);
+    float off = target - autoBrightLn;
+    if (!autoBrightMoving && fabsf(off) > AUTOBRIGHT_BAND) { autoBrightMoving = true; }
+    if (autoBrightMoving) {
+      float step = min(AUTOBRIGHT_RATE * dt / 1000.0f, fabsf(off) * (1.0f - expf(-dt / AUTOBRIGHT_END_MS)));
+      autoBrightLn += off > 0 ? step : -step;
+      if (fabsf(target - autoBrightLn) < AUTOBRIGHT_SETTLED) { autoBrightMoving = false; }
+    }
+    if (millisNow - autoBrightShownAt >= AUTOBRIGHT_STEP_MS) {
+      autoBrightShownAt = millisNow;
+      long b = lroundf(expf(autoBrightLn));
+      // A Min of 0 lets the sensor switch the panel dark: at the fade's end.
+      if (relTarget < 0.5f && b <= 1) { b = 0; }
+      effectiveBrightness = (uint8_t)constrain(b, 0L, 255L);
+    }
   }
   if (effectiveBrightness != before) {
     matrix.setBrightness(panelBrightness());     // the panel dims as a whole
