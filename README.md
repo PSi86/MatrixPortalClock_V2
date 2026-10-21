@@ -1,36 +1,32 @@
 # MatrixPortalClock V2
 
-LED matrix clock with animated digits for the **Adafruit MatrixPortal S3** (ESP32-S3)
-and the **Adafruit MatrixPortal M4** (SAMD51 + WiFiNINA), and as a wall clock on the
-**Waveshare ESP32-S3-RGB-Matrix** board with six 64x64 panels.
+LED matrix clock with animated digits for the **Adafruit MatrixPortal S3** (ESP32-S3),
+and as a wall clock on the **Waveshare ESP32-S3-RGB-Matrix** board with six 64x64
+panels. The **Adafruit MatrixPortal M4** was supported until 2026-10-21: the last
+commit that builds for it is **ae18faf** (see [MatrixPortal M4](#matrixportal-m4)).
 Fetches the time from the local network via NTP and offers a WiFi configuration mode.
 
 ## Hardware targets
 
-One code base, three boards. `src/board_hal.h` holds everything that differs between
-them - matrix and button pins, the WiFi/NTP calls, the settings storage and the
-reset instruction - so the sketch itself is board independent.
+One code base, two boards, both ESP32-S3. `src/board_hal.h` holds everything that
+differs between them - matrix and button pins, the panel driver's setup, the board's
+own I2C bus - so the sketch itself is board independent.
 
-| | MatrixPortal S3 | MatrixPortal M4 | Wall clock |
-|---|---|---|---|
-| PlatformIO env | `adafruit_matrixportal_s3` (default) | `adafruit_matrix_portal_m4` | `waveshare_wallclock` |
-| Board | Adafruit MatrixPortal S3 | Adafruit MatrixPortal M4 | Waveshare ESP32-S3-RGB-Matrix |
-| MCU | ESP32-S3, 8 MB flash | SAMD51, 512 KB flash | ESP32-S3 (WROOM-2-N32R16V), 32 MB flash, 16 MB PSRAM |
-| Panel | one 64x32 | one 64x32 | six 64x64, 192x128 (three across, two down) |
-| Arduino core | Arduino-ESP32 3.3.11 on ESP-IDF 5.5 (pioarduino platform) | Adafruit SAMD (`atmelsam` 8.3.0) | as the S3 |
-| WiFi | on-chip | WiFiNINA co-processor over SPI | on-chip |
-| NTP | lwIP SNTP client | the NINA firmware's own SNTP | as the S3 |
-| Settings stored in | NVS partition (0x9000) | flash block at 0x7E000 | NVS partition (0x9000) |
-| Buttons | UP GPIO6 (`BUTTON_UP`), DOWN GPIO7 (`BUTTON_DOWN`) | UP D2, DOWN D3 | none (the web app; gestures later) |
-| Upload | esptool over the chip's USB-Serial-JTAG, no buttons | UF2 bootloader (double reset) | as the S3 |
+| | MatrixPortal S3 | Wall clock |
+|---|---|---|
+| PlatformIO env | `adafruit_matrixportal_s3` (default) | `waveshare_wallclock` |
+| Board | Adafruit MatrixPortal S3 | Waveshare ESP32-S3-RGB-Matrix |
+| MCU | ESP32-S3, 8 MB flash | ESP32-S3 (WROOM-2-N32R16V), 32 MB flash, 16 MB PSRAM |
+| Panel | one 64x32 | six 64x64, 192x128 (three across, two down) |
+| Arduino core | Arduino-ESP32 3.3.11 on ESP-IDF 5.5 (pioarduino platform) | as the S3 |
+| WiFi | on-chip | on-chip |
+| NTP | lwIP SNTP client | as the S3 |
+| Settings stored in | NVS partition (0x9000) | NVS partition (0x9000) |
+| Buttons | UP GPIO6 (`BUTTON_UP`), DOWN GPIO7 (`BUTTON_DOWN`) | none (the web app, the gesture sensor) |
+| Upload | esptool over the chip's USB-Serial-JTAG, no buttons | as the S3 |
 
-The S3 was added because the M4's WiFiNINA link kept causing WiFi trouble; on the S3
-the radio sits on the main MCU, which also lets the AP config page preview the clock at
-the full frame rate instead of 5 fps. The onboard LIS3DH accelerometer (I2C `0x19`) and the external
-BH1750 light sensor are identical on both boards.
-
-**Caution on the S3:** `D2` is the matrix clock line, not the UP button - the M4's
-button pin cannot be carried over.
+**Caution on the MatrixPortal S3:** `D2` is the matrix clock line, not a button
+(on the M4 it was UP).
 
 ### Wall clock
 
@@ -92,14 +88,44 @@ in the wall's own 192x128 LEDs.
 - **Wiring rules** from the bench: the panels' supply minus to the board's GND
   first, the supply on before the ribbon cable goes in.
 
+### MatrixPortal M4
+
+The **Adafruit MatrixPortal M4** (SAMD51, WiFi through a WiFiNINA co-processor
+over SPI) was a supported board until 2026-10-21. Its WiFi worked completely
+differently from the ESP32-S3's and had caused much of the WiFi trouble, so it was
+dropped before the web server and WiFi work that followed.
+
+- **Last commit with M4 support: `ae18faf`** (2026-10-21 16:51, the merge of
+  PR #60, full hash `ae18fafc511a73d1493db4fd62185ed6d0807ab9`). It still builds
+  for the M4 (checked on 2026-10-21: 134,680 bytes of 466,944), but was not
+  tried on the M4 hardware. Every commit after it builds for the two ESP32-S3
+  boards only.
+- **The M4 clock itself runs `2c1194f`** (2026-10-10, the merge of PR #43).
+- What the M4 build had at `ae18faf`: the Classic face only, the old config
+  page written line by line instead of the web app, no GIFs, no info band data,
+  no Home Assistant link; buttons UP D2 and DOWN D3; the panel driven by
+  Adafruit Protomatter; WiFi and NTP through nina-fw 3.3.0 with WiFiNINA 2.0.1,
+  whose AP is always at `192.168.4.1`; the settings in one 8 KB flash block per
+  blob from 0x76000 to 0x7E000 (FlashStorage_SAMD).
+- To build or flash it again, check out that commit and use its environment;
+  for the upload the board goes into its UF2 bootloader by a double reset first:
+  ```
+  git checkout ae18faf
+  pio run -e adafruit_matrix_portal_m4 -t upload
+  ```
+  Its packages (`atmelsam` 8.3.0 and the ARM toolchain) are still in the
+  project's core dir, `~/.platformio-pioarduino`.
+
 ## Features
 
-- **Three watchfaces**, selectable on the config page:
+- **Four watchfaces**, selectable on the config page:
   - *Classic* — six animated digits `HH MM SS` (fly-in, direction configurable per digit)
   - *Tetris* — `HH:MM` built up from falling tetromino blocks, and knocking the
-    clock throws them apart and rebuilds them (S3 only)
+    clock throws them apart and rebuilds them
   - *Muncher* — `HH:MM` in dots, which a muncher eats and lays anew at a change
-    of the time, two ghosts behind it (S3 only)
+    of the time, two ghosts behind it
+  - *Aliens* — `HH:MM` in blocks: at a change of the time a cannon shoots the
+    old digit away and the new one marches in, all four as a wave at the full hour
 - **Automatic orientation** via the onboard accelerometer: the display rotates in
   90° steps to match how the panel is held (both portrait and both landscape
   positions)
@@ -136,44 +162,41 @@ in the wall's own 192x128 LEDs.
   address and what answers on the I2C bus, and **Forget** for a sensor the
   clock no longer has. (On 2026-10-21 the MatrixPortal S3 came up once without
   its LIS3DH, stuck in portrait until the next start; the cause is not known.)
-  The M4 has no flash block for the record, so it remembers none and reports
-  none missing
 - **Automatic summer/winter time** for every timezone in the menu (rules from the
   IANA tz database), or a fixed summer or winter time
 - **On-screen menu** with the UP and DOWN buttons: brightness, auto brightness,
   timezone, daylight saving, the config hotspot and, with a real-time clock, the
   time and date, set on the clock itself without WiFi (see
   [Menu and buttons](#menu-and-buttons))
-- **AP config page** (`http://4.3.2.1`, M4: `http://192.168.4.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, fly-in time, colors, fly-in directions, NTP sync time, GIFs (S3), the info band's place and sources (S3) and the **home WiFi**; on a page of its own the input profile and what
+- **AP config page** (`http://4.3.2.1`): watchface, Tetris drop and turn pace, knock sensitivity and effect, timezone, daylight saving (automatic / summer / winter), brightness, fly-in time, colors, fly-in directions, NTP sync time, GIFs, the info band's place and sources and the **home WiFi**; on a page of its own the input profile and what
   buttons, knock and gestures do on the face (see [Face shortcuts](#face-shortcuts))
-- **Web app** (S3): the settings page as an app, through the hotspot and, with
+- **Web app**: the settings page as an app, through the hotspot and, with
   continuous network access, on the home network behind a password (see
-  [Web app and the home network](#web-app-and-the-home-network-s3))
+  [Web app and the home network](#web-app-and-the-home-network))
 - All settings, the home WiFi included, are stored outside the program image, so
-  they survive a restart **and a firmware re-upload** (S3: the NVS partition, which
-  a normal upload does not touch - `pio run -t erase` does; M4: one 8 KB flash
-  block each at the top of the flash, from 0x76000 up)
+  they survive a restart **and a firmware re-upload** (the NVS partition, which
+  a normal upload does not touch - `pio run -t erase` does)
 - Recovery: the config hotspot is in the menu from the first second, also
   without the home WiFi; holding UP during boot opens it as well
-- **GIFs** (S3): now and then a GIF takes the panel for a few seconds, and holding
+- **GIFs**: now and then a GIF takes the panel for a few seconds, and holding
   UP on the face plays one at once (see [GIF playback](#gif-playback))
 - **Gesture sensor (optional):** with a PAJ7620U2 on the I2C bus, swipes and
   push work the menu next to the buttons, or instead of them (see
   [Gesture sensor](#gesture-sensor-paj7620u2))
-- **Info band data** (S3, wall clock): the weather, the air quality and the DWD
+- **Info band data**: the weather, the air quality and the DWD
   weather warnings for a place, fetched over HTTPS, and what Home Assistant
   sends (see [Info band data](#info-band-data))
 - **Info band** (wall clock): the 192x32 below the face shows the items one
   after the other with their icons, and what the clock works out itself - the
   date, sunrise and sunset, the moon, the clock change, its own status (see
   [The info band on the wall clock](#the-info-band-on-the-wall-clock))
-- **Alerts, messages and info** (S3): a weather warning from `moderate` on, or
+- **Alerts, messages and info**: a weather warning from `moderate` on, or
   an item from Home Assistant marked as an alert, comes up once as a banner
   with its icon, large and in colour; a message from Home Assistant runs
   through as text; the weather and the other information come as info cards,
   once when new and in an info round on the clock's time (every 15 minutes at
   :00, :15, :30 and :45). A mark in a corner of the face stays while there are
-  alerts or messages, and everything can be shown again (see [Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel-s3))
+  alerts or messages, and everything can be shown again (see [Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel))
 
 ## Setup
 
@@ -246,12 +269,6 @@ in the wall's own 192x128 LEDs.
    `SENSOR` for 2 s: a sensor found at an earlier start is missing (web app,
    System).
 
-   For the MatrixPortal M4, select its environment and put the board into the
-   bootloader via **double reset** first:
-   ```
-   pio run -e adafruit_matrix_portal_m4 -t upload
-   ```
-
    For the **wall clock**, switch the panels dark first (`POST /api/black`, see
    [Wall clock](#wall-clock)), then upload as on the S3; esptool resets the
    board by itself:
@@ -271,13 +288,12 @@ in the wall's own 192x128 LEDs.
 
 ## Menu and buttons
 
-Two buttons operate the clock: **UP** (S3: GPIO6, M4: D2) and **DOWN** (S3:
-GPIO7, M4: D3). They keep their printed meaning in every orientation.
+Two buttons operate the MatrixPortal S3: **UP** (GPIO6) and **DOWN** (GPIO7). They keep their printed meaning in every orientation.
 
 | On the clock face | |
 |---|---|
 | UP or DOWN short, DOWN held | open the menu |
-| UP held | play random GIF (S3) |
+| UP held | play random GIF |
 | UP held during boot | open the config hotspot, even without the home WiFi |
 
 | In the menu and its editors | |
@@ -311,8 +327,7 @@ moves five steps, so the 16 brightness steps and the 26 zones are quick to cross
 A value is written to flash only when it is saved and differs from the stored
 one; leaving an editor any other way puts the stored value back. The menu closes
 by itself after 20 s without input. On the S3 the picture slides sideways
-between the list and an editor, deeper to the left (`MENU_SLIDE` in
-`board_hal.h`); the M4 changes it at once.
+between the list and an editor, deeper to the left.
 
 Saving a new zone or daylight-saving mode shows a 3 s **banner** with the
 resulting time and its offset from UTC, orange while summer time is in effect
@@ -350,7 +365,7 @@ a gesture sensor), each to one of: nothing, open the menu, play random GIF, play
 last GIF again (both S3), trigger watchface animation, toggle auto brightness
 on / off, toggle daylight saving: auto, summer, winter, toggle hotspot on / off,
 fade brightness while held (held buttons only), show gesture hints, show
-notifications (S3, see [Alerts, messages and info](#alerts-messages-and-info-on-the-panel-s3)).
+notifications (see [Alerts, messages and info](#alerts-messages-and-info-on-the-panel)).
 On the S3 each input also has a tick, **closes**: a ticked input closes an alert
 or a message on the panel and goes on to the next one. The watchface animation
 is the face's own: the Tetris digits break up in the
@@ -371,7 +386,7 @@ for a second one. The hint a hand coming near shows follows the shortcuts.
 
 The shortcuts are stored as codes that a later firmware never renumbers
 (`FACE_EVENTS` and `FACE_ACTIONS` in `src/input_map.h`, checked at build time),
-in a blob of their own (S3: NVS key `keys`, M4: the flash block at 0x78000).
+in a blob of their own (NVS key `keys`).
 
 ## Who takes the panel
 
@@ -524,7 +539,7 @@ on your PATH, `pio` does instead of the full path. A firmware upload leaves the
 pack alone; `pio run -t erase` wipes it.
 
 **Over the home network** (with continuous network access on, see
-[Web app and the home network](#web-app-and-the-home-network-s3)), no cable:
+[Web app and the home network](#web-app-and-the-home-network)), no cable:
 
     $env:GIF_PACK_HOST = 'matrixclock-xxxxxx.local'; $env:GIF_PACK_PASSWORD = '<the clock's password>'
     & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -d '<project folder>' -e adafruit_matrixportal_s3 -t sendgifs
@@ -580,7 +595,7 @@ deflated one into PSRAM with the inflate in the chip's ROM before it plays.
 The wall clock shows these items in its info band below the face (see
 [The info band on the wall clock](#the-info-band-on-the-wall-clock)); the
 MatrixPortal S3, which has no room for a band, shows them over its face (see
-[Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel-s3)).
+[Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel)).
 The web app's section **Info** lists what the clock knows, and the console what
 was fetched.
 
@@ -627,7 +642,7 @@ The code is in `src/band_data.h` (the items, the two sources, the fetch task)
 and at the end of the sketch (when the sources are due, the items, the config
 page section).
 
-## Home Assistant link (S3)
+## Home Assistant link
 
 Everything the clock does not fetch itself comes from Home Assistant, over MQTT
 through the broker Home Assistant runs (the Mosquitto add-on). The client is the
@@ -905,7 +920,7 @@ the message topic. It is an item for its seconds, an hour unless it says; the
 clock keeps up to four, and a fifth takes the oldest one's place (an urgent
 one's only when all four are urgent). On the 64x32 clock its text runs through,
 and with `"level": "alert"` its icon comes first (see
-[Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel-s3)). The
+[Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel)). The
 Message entity sends the text alone, so its messages are information.
 
 - **Retained items:** the broker keeps them, so a clock that starts or comes
@@ -933,7 +948,7 @@ Message entity sends the text alone, so its messages are information.
 The code is in `src/ha_link.h` (the client, its task and the topics) and at the
 end of the sketch (when it runs, what arrives, the card's part).
 
-## Alerts, messages and info on the panel (S3)
+## Alerts, messages and info on the panel
 
 The 64x32 clock has no room for the info band, so its items come over the face
 as banners: the alerts - the DWD warnings from `moderate` on, and the items Home
@@ -1075,12 +1090,11 @@ The band is drawn in `bandUpdate()` at the end of the sketch into a picture of
 its own and written onto the wall by `PanelCanvas::showBand()` in
 `src/board_hal.h`, which writes only what changed.
 
-## Web app and the home network (S3)
+## Web app and the home network
 
 The S3 serves its settings as a web app: one page (`webui/index.html`, gzipped
 into the firmware at build time by `scripts/embed_webui.py`) that talks to the
-clock over a JSON interface. The M4 keeps the page it writes line by line (see
-[AP configuration](#ap-configuration)).
+clock over a JSON interface.
 
 | | Through the hotspot | On the home network |
 |---|---|---|
@@ -1130,32 +1144,23 @@ point; holding UP closes it again and returns to the normal clock:
 |---|---|
 | SSID | `MatrixClock` |
 | Password | `clock1234` |
-| Config page | `http://4.3.2.1` (M4: `http://192.168.4.1`) |
+| Config page | `http://4.3.2.1` |
 
 A built-in **captive portal** (DNS hijack + portal page) makes the config page pop
 up automatically on most phones right after connecting to the AP. If it does not,
 open the config page address manually.
 
-The S3 deliberately uses a *public* address (4.3.2.1, same as WLED) for the AP.
+The clock deliberately uses a *public* address (4.3.2.1, same as WLED) for the AP.
 Current Android versions skip their captive-portal check when its host name
 resolves to a private address such as 192.168.4.1 and then report "connected
 without internet" instead of "sign in to network". The address only exists
 inside the clock's own isolated access point.
 
-**M4: open `http://192.168.4.1`.** The M4's WiFi co-processor runs Adafruit's
-nina-fw 3.3.0, which starts its AP with `WiFi.AP.create()` and offers no command
-to set the AP's address (its `setIPconfig` only configures the station). So the
-M4's AP is always 192.168.4.1, the web UI answers there, and Android shows no
-sign-in prompt for it. The firmware still asks for 4.3.2.1, and the info screen
-and the DNS answers show that address, which is wrong on this board (left as it
-is for now; new clocks are built on the S3).
-
 The matrix shows SSID, password and IP **immediately** when the AP opens (before
 the radio has finished coming up, so there is no frozen display), in landscape
 orientation, until a client connects; after that it switches to the live clock
 preview so that **brightness, colors and the fly-in time preview live** while you
-change them in the web UI (at the full frame rate on the S3, 5 fps on the M4 - every
-WiFiNINA socket write is an SPI round trip there). In the preview a small blue
+change them in the web UI, at the full frame rate. In the preview a small blue
 square blinks in the top right corner: the hotspot is still up, and only holding
 UP (close it) works. Once no client has been connected for 5 s, the info screen
 comes back. The timezone is chosen from a dropdown. "Save"
@@ -1199,7 +1204,7 @@ stays visible at any brightness instead of disappearing.
 
 ## Orientation
 
-The onboard **LIS3DH** accelerometer (present on both boards, I2C `0x19`) detects
+The MatrixPortal S3's onboard **LIS3DH** accelerometer (I2C `0x19`) detects
 gravity and rotates the display in 90° increments so the clock is always upright:
 
 - **Portrait** (32 wide × 64 tall): the hours/minutes/seconds digits are stacked
@@ -1301,7 +1306,7 @@ real change, build with `-D DST_TEST_UTC=<utc seconds>` in addition to
 ## Watchfaces
 
 The **watchface** setting on the config page switches between the clock faces:
-Classic on both boards, Tetris, Muncher and Aliens on the S3. It previews live, so the
+Classic, Tetris, Muncher and Aliens, on both clocks. It previews live, so the
 choice can be judged on the panel before saving.
 
 **Classic** (default) shows `HH MM SS` with the six flying digits. This is the
@@ -1473,10 +1478,6 @@ The **digit and trail colors do not apply** to this face. The master brightness
 The face only repaints while blocks are falling or when something visible changes
 (colon, brightness, button indicator), so an idle Tetris clock costs almost no CPU.
 
-The face is switched on for the S3 only (`WATCHFACE_TETRIS` in `board_hal.h`).
-Nothing in it is board specific any more, but it has not been tested on the M4,
-whose config page therefore has no watchface selector.
-
 ### Muncher
 
 **Muncher** shows `HH:MM` as dots on a seven-segment grid, 5 × 9 dots 2 px
@@ -1594,7 +1595,7 @@ out right, and where the knock's scene caught its ghosts.
 
 ### Aliens
 
-**Aliens** (S3; after Space Invaders, with a plain name and pixel art of its own)
+**Aliens** (after Space Invaders, with a plain name and pixel art of its own)
 shows `HH:MM` in blocks of 3 × 3 px with a gap, on a grid of 3 × 5 cells of
 4 × 4 px a digit - 12 × 20 px, the Tetris size - with a green cannon at the
 bottom. Upright the hours stand above the minutes and the cannon below them.
@@ -1748,17 +1749,15 @@ fly-in time, and the face is drawn on a pass where a digit has moved - a loop
 held up for a moment (a web request) does not slow a flight, the next pass puts
 it where it ought to be. Until 2026-10-20 the fly-in time was turned into the
 passes the loop had had in the second before, and the face was drawn on every
-pass, about 200 times a second. The M4's loop runs every 10 ms (until 2026-10-08
-every "speed" ms).
+pass, about 200 times a second.
 
 ### Panel driver
 
-The S3 drives the panel with ESP32-HUB75-MatrixPanel-DMA, the M4 with Adafruit
-Protomatter (5 bit planes). The clock draws into a 16-bit canvas on both; on the
-S3, `show()` hands the pixels that changed to the DMA driver, which keeps its own
-frame buffer at 8 bits per colour. Protomatter dims by scaling the colours and
-loses levels at low brightness (six bit planes did not help: it draws into
-RGB565 and only green gains a level).
+The clock drives the panel with ESP32-HUB75-MatrixPanel-DMA. It draws into a
+16-bit canvas, and `show()` hands the pixels that changed to the DMA driver, which
+keeps its own frame buffer at 8 bits per colour. Adafruit Protomatter, which the
+S3 used before, dims by scaling the colours and loses levels at low brightness (six
+bit planes did not help: it draws into RGB565 and only green gains a level).
 
 The S3 dims through the colour values at the full OE time, not through the OE
 time as the driver would. The panel's LED drivers need a minimum on-time per
@@ -1912,8 +1911,7 @@ everything works as before.
 - The sync interval is counted in the clock's calendar days since the last good
   sync, so the sync time of the day it runs out counts, whatever time of day
   that sync was made. Stored with the UI settings (`syncDays`).
-- When the last good sync was is stored too (S3: NVS key `ntp`, M4: the flash
-  block at 0x76000), written at every sync while a DS3231 is there, so a
+- When the last good sync was is stored too (NVS key `ntp`), written at every sync while a DS3231 is there, so a
   restart neither syncs by itself nor starts the interval anew. A stored sync
   later than the RTC's time (an RTC set back) is not taken, and the clock
   syncs at start-up.
@@ -1964,13 +1962,13 @@ GPIO header:
 
 Resolved automatically by PlatformIO from `platformio.ini`.
 
-Both boards: Adafruit GFX, Adafruit BusIO, Adafruit LIS3DH, Adafruit Unified
+Both clocks: Adafruit GFX, Adafruit BusIO, Adafruit LIS3DH, Adafruit Unified
 Sensor, BH1750FVI_RT (Rob Tillaart), RTClib (Adafruit, for the DS3231), RevEng
 PAJ7620 (Aaron S. Crandall, for the gesture sensor). All versions are pinned.
 
 Panel driver: ESP32-HUB75-MatrixPanel-DMA (mrfaptastic) on the MatrixPortal S3,
-built with `NO_CIE1931` so colours and brightness stay linear as before; Adafruit
-Protomatter on the MatrixPortal M4.
+built with `NO_CIE1931` so colours and brightness stay linear as before; on the
+wall clock a copy of it in `lib/hub75-dma-wall`.
 
 Timekeeping lives in `src/clock_time.h` and only uses the C library's `<time.h>`.
 It replaced the Time library (TimeLib), which is unmaintained since 2021 and does
@@ -1978,9 +1976,8 @@ not build against picolibc, the default C library from ESP-IDF 6 on. The clock
 keeps UTC, exactly as NTP delivers it; the timezone and daylight saving are added
 only where the time is shown, so changing either never touches the clock.
 
-MatrixPortal M4 only: WiFiNINA, FlashStorage_SAMD. On the S3 the WiFi stack, the
-NVS settings storage, HTTPClient and the TLS client come from the ESP32 Arduino
-core; ArduinoJson (Benoit Blanchon) reads the info band's sources.
+The WiFi stack, the NVS settings storage, HTTPClient and the TLS client come from
+the ESP32 Arduino core; ArduinoJson (Benoit Blanchon) reads the info band's sources.
 
 The Tetris watchface needs no library. Its block tables are generated by
 `scripts/gen_tetris_digits.py` into `src/tetris_digits.h` (a generated file — do
@@ -2037,7 +2034,7 @@ page has TinyUF2's combined image (erase the flash, write it at 0x0) and the
 shipped demo as a UF2; CircuitPython for the board is on
 [circuitpython.org](https://circuitpython.org/board/adafruit_matrixportal_s3/).
 
-## Toolchain (S3)
+## Toolchain
 
 PlatformIO's own `espressif32` platform still ships Arduino-ESP32 2.0.17, built on
 ESP-IDF 4.4, which has been end-of-life (no bug or security fixes) since July 2024.
@@ -2046,9 +2043,8 @@ unmodified Arduino-ESP32 releases for PlatformIO (the same core the Arduino IDE
 installs). Two things to know on the build machine:
 
 - This project keeps its PlatformIO platforms and packages in its own core dir,
-  `~/.platformio-pioarduino` (`core_dir` in `platformio.ini`), about 7 GB for
-  both boards (pioarduino alone is about 6 GB, mostly prebuilt ESP-IDF libraries
-  for every ESP32 chip and the toolchain).
+  `~/.platformio-pioarduino` (`core_dir` in `platformio.ini`), about 6 GB, mostly
+  pioarduino's prebuilt ESP-IDF libraries for every ESP32 chip and the toolchain.
   pioarduino deletes every other Arduino-ESP32 framework version in the packages
   dir it runs in and sets up its own Python env there; in the shared
   `~/.platformio` that would break the other ESP32 projects on the machine.

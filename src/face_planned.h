@@ -7,8 +7,6 @@
 // start it at its moment even when that has passed, step it by the time since
 // it started, and log when the new time stood ("the new time stands at
 // :00.0xx" is on time).
-//
-// S3 and wall clock only.
 #ifndef FACE_PLANNED_H
 #define FACE_PLANNED_H
 

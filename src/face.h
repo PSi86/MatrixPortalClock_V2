@@ -9,8 +9,6 @@
 // that proved the panel stayed as it was while the faces moved in here
 // (2026-10-20) - random numbers a test build can repeat, and a checksum of a
 // frame.
-//
-// It is built on every board, the M4 too, so it keeps to C++11.
 #ifndef FACE_H
 #define FACE_H
 
@@ -80,17 +78,11 @@ struct FacePaint {
 
   uint16_t color(uint8_t r, uint8_t g, uint8_t b) const { return color(r, g, b, bright); }
   uint16_t color(uint8_t r, uint8_t g, uint8_t b, uint8_t at) const {
-#if PANEL_DRIVER_DMA
     if (at >= bright || bright == 0) { return rgb565(r, g, b); }
     uint16_t panel = bright;
     return rgb565(((uint16_t)r * at + panel / 2) / panel,
                   ((uint16_t)g * at + panel / 2) / panel,
                   ((uint16_t)b * at + panel / 2) / panel);
-#else
-    return rgb565(((uint16_t)r * at + 127) / 255,
-                  ((uint16_t)g * at + 127) / 255,
-                  ((uint16_t)b * at + 127) / 255);
-#endif
   }
   // A colour that never dims below VISIBLE_MIN, so it cannot quantise to
   // black at a very low brightness: the hotspot's details, the Tetris colon.
@@ -300,8 +292,8 @@ inline long faceRandom(long howbig) { return random(howbig); }
 inline long faceRandom(long howsmall, long howbig) { return random(howsmall, howbig); }
 #endif
 
-// CRC-32 (the zip polynomial) with a table of 16, a nibble at a time: small
-// enough for the M4, and about 0.15 ms for a 64x32 frame on the S3.
+// CRC-32 (the zip polynomial) with a table of 16, a nibble at a time: about
+// 0.15 ms for a 64x32 frame.
 inline uint32_t faceCrc32(const uint8_t *p, size_t n) {
   static const uint32_t T[16] = {
     0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC, 0x76DC4190, 0x6B6B51F4, 0x4DB26158, 0x5005713C,

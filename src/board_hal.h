@@ -1,7 +1,6 @@
 /* ----------------------------------------------------------------------
    Hardware abstraction for the supported clock boards:
 
-     Adafruit MatrixPortal M4   SAMD51 + WiFiNINA (ESP32 co-processor over SPI)
      Adafruit MatrixPortal S3   ESP32-S3, WiFi on the main MCU
      Waveshare ESP32-S3-RGB-Matrix, the wall clock: ESP32-S3 with six 64x64
                                 panels as one 192x128 wall
@@ -18,36 +17,27 @@
 /* ======================================================================
    Board detection
    ====================================================================== */
+// The MatrixPortal S3 and the wall clock run the same ESP32-S3 code: WiFi,
+// settings, console, panel driver. Only their pins and panels differ. (The
+// MatrixPortal M4 was dropped on 2026-10-21; the last commit that builds for
+// it is ae18faf, README "MatrixPortal M4".)
 #if defined(ARDUINO_ADAFRUIT_MATRIXPORTAL_ESP32S3)
   #define BOARD_MATRIXPORTAL_S3 1
-  #define BOARD_MATRIXPORTAL_M4 0
   #define BOARD_WAVESHARE_WALL  0
 #elif defined(ARDUINO_WAVESHARE_ESP32S3_RGB_MATRIX)
   #define BOARD_MATRIXPORTAL_S3 0
-  #define BOARD_MATRIXPORTAL_M4 0
   #define BOARD_WAVESHARE_WALL  1
-#elif defined(_VARIANT_MATRIXPORTAL_M4_)
-  #define BOARD_MATRIXPORTAL_S3 0
-  #define BOARD_MATRIXPORTAL_M4 1
-  #define BOARD_WAVESHARE_WALL  0
 #else
-  #error "Unsupported board - build env:adafruit_matrixportal_s3, env:waveshare_wallclock or env:adafruit_matrix_portal_m4"
+  #error "Unsupported board - build env:adafruit_matrixportal_s3 or env:waveshare_wallclock"
 #endif
-// The MatrixPortal S3 and the wall clock run the same ESP32-S3 code: WiFi,
-// settings, console, panel driver. Only their pins and panels differ.
-#define BOARD_ESP32S3 (BOARD_MATRIXPORTAL_S3 || BOARD_WAVESHARE_WALL)
 
 // The board and its panel in LEDs, as the web app and Home Assistant name them.
 #if BOARD_WAVESHARE_WALL
   #define BOARD_NAME "Waveshare ESP32-S3-RGB-Matrix"
   #define BOARD_PANEL_W 192
   #define BOARD_PANEL_H 128
-#elif BOARD_MATRIXPORTAL_S3
-  #define BOARD_NAME "MatrixPortal S3"
-  #define BOARD_PANEL_W 64
-  #define BOARD_PANEL_H 32
 #else
-  #define BOARD_NAME "MatrixPortal M4"
+  #define BOARD_NAME "MatrixPortal S3"
   #define BOARD_PANEL_W 64
   #define BOARD_PANEL_H 32
 #endif
@@ -66,9 +56,9 @@
   #define MATRIX_LATCH_PIN  47
   #define MATRIX_OE_PIN     14
 
-  // UP and DOWN buttons. CAUTION: D2 - the M4's UP button - is the matrix CLOCK
-  // line on this board, so the pins have to move. Neither button has an external
-  // pull-up on the S3; pressing pulls the input low, hence INPUT_PULLUP.
+  // UP and DOWN buttons. CAUTION: D2 is the matrix CLOCK line on this board.
+  // Neither button has an external pull-up; pressing pulls the input low,
+  // hence INPUT_PULLUP.
   #define UP_BUTTON_PIN     PIN_BUTTON_UP     // GPIO6
   #define DOWN_BUTTON_PIN   PIN_BUTTON_DOWN   // GPIO7
   #define BOARD_BUTTON_COUNT 2
@@ -89,19 +79,6 @@
   // left for UP and DOWN. Its input is the gesture sensor (decided 2026-10-05).
   #define BOARD_BUTTON_COUNT 0
 
-#else // BOARD_MATRIXPORTAL_M4
-
-  #define MATRIX_RGB_PINS   {7, 8, 9, 10, 11, 12}
-  #define MATRIX_ADDR_PINS  {17, 18, 19, 20, 21}
-  #define MATRIX_CLOCK_PIN  14
-  #define MATRIX_LATCH_PIN  15
-  #define MATRIX_OE_PIN     16
-
-  // UP button = D2, DOWN button = D3, both active LOW (INPUT_PULLUP).
-  #define UP_BUTTON_PIN     2
-  #define DOWN_BUTTON_PIN   3
-  #define BOARD_BUTTON_COUNT 2
-
 #endif
 
 #if BOARD_WAVESHARE_WALL
@@ -114,7 +91,7 @@
   // The rotation the clock draws in without an accelerometer: landscape.
   #define BOARD_DEFAULT_ROTATION 0
 #else
-  // Button feedback LED: the red user LED on D13, same pin on both boards.
+  // Button feedback LED: the red user LED on D13.
   #define BOARD_HAS_FEEDBACK_LED 1
   #define FEEDBACK_LED_PIN LED_BUILTIN
   #define BOARD_HAS_ACCEL 1
@@ -180,13 +157,11 @@ inline bool boardBusBegin() {
 #define AP_IP_ADDR 4, 3, 2, 1
 
 /* ======================================================================
-   Frame pacing, and the clock preview while a config-AP client is connected
+   Panel refresh and frame pacing
    ====================================================================== */
-#if BOARD_ESP32S3
-  // Panel driver: ESP32-HUB75-MatrixPanel-DMA (PanelCanvas below), 8 bits per
-  // colour, dimmed through the OE time. Protomatter, which the S3 used before,
-  // draws into RGB565 and dims by scaling the colours, which costs levels.
-  #define PANEL_DRIVER_DMA 1
+// The panel driver is ESP32-HUB75-MatrixPanel-DMA (PanelCanvas below), 8 bits
+// per colour, dimmed through the OE time. Protomatter, which the S3 used
+// before, draws into RGB565 and dims by scaling the colours, which costs levels.
 #if BOARD_WAVESHARE_WALL
   // The refresh rate of the wall's six panels at 8 bits with the bus at 16 MHz
   // (show() reckons it from the driver at the start), and the rate the pacing assumes.
@@ -196,44 +171,12 @@ inline bool boardBusBegin() {
   // the rate the pacing below assumes.
   #define PANEL_HZ_TYPICAL 200
 #endif
-  // Drawing and handing over a frame takes a few ms on the S3, less than one
-  // panel refresh. So the loop runs in step with the panel: show() waits out a
-  // refresh period after the previous frame, and the animation moves one pixel
-  // every whole number of refreshes, which keeps every step equally long. A
-  // fixed millisecond loop drifts against the refresh and shows steps for 1, 2
-  // or 3 refreshes instead.
-  #define PANEL_PACED_LOOP 1
-  // The ESP32-S3 serves the page from its own RAM over lwIP, so the preview
-  // runs at the full frame rate without getting in the web server's way.
-  #define AP_PREVIEW_INTERVAL_MS 0
-  // The Tetris watchface. Nothing in it is board specific any more, but it has
-  // only been tested on the S3, so it stays switched off elsewhere until the M4
-  // gets a hardware test.
-  #define WATCHFACE_TETRIS 1
-  // The knock on the clock (src/knock.h): the LIS3DH, or on the wall clock
-  // the board's QMI8658. Its sensitivity is stored with the Tetris face's
-  // settings, so it needs that face.
-  #define KNOCK_SENSING 1
-  // The Muncher watchface (src/face_muncher.h). Its settings are loaded and
-  // saved with the Tetris face's (FACE_BLOBS), so it needs that one too.
-  #define WATCHFACE_MUNCHER 1
-  // The Aliens watchface (src/face_aliens.h), the same way; it comes after
-  // the Muncher's number.
-  #define WATCHFACE_ALIENS 1
-  // Moving between the menu list and an editor slides the picture sideways.
-  #define MENU_SLIDE 1
-  // GIFs now and then in place of the face, from the GIF pack in the ffat
-  // partition (scripts/gif_pack.py), drawn at 8 bits per colour straight into
-  // the panel driver.
-  #define GIF_PLAYBACK 1
-  // The info band's data: weather and warnings fetched over HTTPS
-  // (src/band_data.h).
-  #define BAND_DATA 1
-  // The settings as a web app (webui/index.html) on a JSON interface; the M4
-  // keeps the page the sketch writes line by line.
-  #define WEBUI_APP 1
-  // The link to Home Assistant over MQTT (src/ha_link.h).
-  #define HA_LINK 1
+// Drawing and handing over a frame takes a few ms, less than one panel
+// refresh. So the loop runs in step with the panel: show() waits out a refresh
+// period after the previous frame, and the animation moves one pixel every
+// whole number of refreshes, which keeps every step equally long. A fixed
+// millisecond loop drifts against the refresh and shows steps for 1, 2 or 3
+// refreshes instead.
 #if BOARD_WAVESHARE_WALL
   // No LIS3DH, so no INT1 line of its: the LIS3DH's knock code is not built
   // here. The knock comes from the QMI8658's INT1 on GPIO13 (knockSensorBegin()).
@@ -245,45 +188,14 @@ inline bool boardBusBegin() {
   // together with U3.IO15, U3 being the ESP32-S3. INT2 is on no net at all.
   #define ACCEL_INT_PIN 15
 #endif
-#else
-  // Panel driver: Protomatter, five bit planes.
-  #define PANEL_DRIVER_DMA 0
-  #define MATRIX_BIT_DEPTH 5
-  // The M4 keeps its fixed millisecond loop time.
-  #define PANEL_PACED_LOOP 0
-  // Every WiFiNINA socket write is an SPI round trip to the co-processor (and
-  // is further slowed by the matrix refresh interrupt), so the preview has to
-  // stay at 5 fps to leave the radio enough CPU to serve a page at all.
-  #define AP_PREVIEW_INTERVAL_MS 200
-  // Untested on this board, so only the classic watchface exists here. Turning
-  // it on also needs the AP preview to keep respecting AP_PREVIEW_INTERVAL_MS,
-  // or the Tetris face would out-draw what WiFiNINA can serve around.
-  #define WATCHFACE_TETRIS 0
-  #define WATCHFACE_MUNCHER 0
-  #define WATCHFACE_ALIENS 0
-  // No knock: the LIS3DH turns the panel only.
-  #define KNOCK_SENSING 0
-  // The menu changes its picture at once, without a slide (UI concept: the
-  // S class slides on the S3 only).
-  #define MENU_SLIDE 0
-  // No GIFs: they are for the S3 boards (UI concept, GIF playback).
-  #define GIF_PLAYBACK 0
-  // No info band data: it is for the S3 boards (src/band_data.h).
-  #define BAND_DATA 0
-  // The page the sketch writes line by line; the web app is for the S3.
-  #define WEBUI_APP 0
-  // No Home Assistant link: what it brings is for the info band.
-  #define HA_LINK 0
-#endif
 
 /* ======================================================================
-   Panel driver (S3)
+   Panel driver
 
    The clock draws into a 16-bit canvas, as it did with Protomatter, and
    show() hands every finished frame to ESP32-HUB75-MatrixPanel-DMA, which
    keeps its own frame buffer at 8 bits per colour. getBuffer(), setRotation()
-   and the rest of the canvas behave as before. The M4 keeps Protomatter,
-   whose object is built in the sketch.
+   and the rest of the canvas behave as before.
 
    Brightness goes through the colour values, at the full OE time. Dimming
    through the OE time, as the driver does, cuts the LEDs' on-time, and the
@@ -301,7 +213,6 @@ inline bool boardBusBegin() {
    the brightness changes. A canvas colour is a share of the panel's light:
    255 is the colour at the current brightness, 128 half of that.
    ====================================================================== */
-#if PANEL_DRIVER_DMA
 #include <Adafruit_GFX.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 
@@ -941,23 +852,14 @@ class PanelCanvas : public GFXcanvas16 {
   uint8_t   _order[3][256];
   uint8_t   _lut[3][256] = {};    // canvas value -> driver value, per colour
 };
-#endif
 
 /* ======================================================================
    Settings persistence
 
-   S3: NVS, through the Preferences library. The nvs partition sits at 0x9000
-       and is not part of the images esptool writes on an upload (bootloader,
-       partition table, otadata, app, UF2 bootloader), so the settings survive
-       a re-flash.
-   M4: a FIXED address in the top 8 KB block of the 512 KB flash, OUTSIDE the
-       program image. The upload (bossac --write --offset 0x4000, no --erase)
-       only touches the sketch region from 0x4000 up, so this block is left
-       alone. The FlashStorage() macro instead reserves a zero-initialised
-       array *inside* the image, which every upload overwrites - that was why
-       all settings reset to defaults on each flash.
+   NVS, through the Preferences library. The nvs partition sits at 0x9000 and
+   is not part of the images esptool writes on an upload (bootloader, partition
+   table, otadata, app, UF2 bootloader), so the settings survive a re-flash.
    ====================================================================== */
-#if BOARD_ESP32S3
 
 #include <Preferences.h>
 
@@ -1003,60 +905,6 @@ class SettingsStore : public SettingsBlobStore {
   void write(T &src) { SettingsBlobStore::write(&src, sizeof(T)); }
 };
 
-#else // BOARD_MATRIXPORTAL_M4
-
-#include <FlashStorage_SAMD.h>
-
-// One 8 KB erase block per blob, counted down from the top of the 512 KB flash.
-// The SAMD51 erases flash a whole block at a time, so two blobs sharing a block
-// would rewrite each other on every save - a new WiFi password would rewrite
-// the settings, and a power cut at that moment could cost them.
-#define SETTINGS_FLASH_ADDR 0x0007E000UL   // the settings, where they have always been
-#define UI_FLASH_ADDR       0x0007C000UL   // UI settings
-#define WIFI_FLASH_ADDR     0x0007A000UL   // home WiFi credentials
-#define KEYS_FLASH_ADDR     0x00078000UL   // face shortcuts
-#define NTP_FLASH_ADDR      0x00076000UL   // when the last NTP sync was
-// The program has to end below the lowest of these. platformio.ini caps its
-// size (board_upload.maximum_size = 0x76000 - 0x4000), so a sketch that grew
-// into them would fail to build instead of being overwritten by a save.
-
-// The block of a key; 0 for a key that has none.
-inline uint32_t settingsFlashAddr(const char *key) {
-  if (strcmp(key, "settings") == 0) { return SETTINGS_FLASH_ADDR; }
-  if (strcmp(key, "ui") == 0)       { return UI_FLASH_ADDR; }
-  if (strcmp(key, "wifi") == 0)     { return WIFI_FLASH_ADDR; }
-  if (strcmp(key, "keys") == 0)     { return KEYS_FLASH_ADDR; }
-  if (strcmp(key, "ntp") == 0)      { return NTP_FLASH_ADDR; }
-  return 0;
-}
-
-template <typename T>
-class SettingsStore {
- public:
-  void begin(const char *key = "settings") {
-    _addr = settingsFlashAddr(key);
-    if (_addr == 0) { Console.print("No flash block for the key "); Console.println(key); }
-  }
-
-  // A key without a block reads as all zero, which the caller's magic check
-  // takes for "nothing stored", and is never written: no flash gets erased
-  // that is not ours.
-  bool read(T &dst) {
-    if (_addr == 0) { memset(&dst, 0, sizeof(T)); return false; }
-    FlashStorageClass<T>((const void *)_addr).read(dst);
-    return true;
-  }
-  void write(T &src) {
-    if (_addr == 0) { return; }
-    FlashStorageClass<T>((const void *)_addr).write(src);
-  }
-
- private:
-  static_assert(sizeof(T) <= 8192, "Settings must fit in one 8 KB flash block");
-  uint32_t _addr = 0;
-};
-
-#endif
 
 /* ======================================================================
    Serial console
@@ -1077,11 +925,11 @@ inline void boardSerialBegin(unsigned long baud) {
   // A release build has no console (console.h): nothing is started on the
   // USB serial. The S3's USB-Serial-JTAG still takes uploads, in hardware.
   (void)baud;
-#if BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT && !ARDUINO_USB_MODE
+#if ARDUINO_USB_CDC_ON_BOOT && !ARDUINO_USB_MODE
   Serial.enableReboot(false);   // TinyUSB's CDC: as below
 #endif
 #else
-#if defined(BOOT_WAIT_FOR_SERIAL_MS) && BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+#if defined(BOOT_WAIT_FOR_SERIAL_MS) && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
   // The debug build writes much more; with the TX timeout at 0 below, what the
   // reader has not taken yet waits here instead of being dropped.
   Serial.setTxBufferSize(8192);
@@ -1094,7 +942,6 @@ inline void boardSerialBegin(unsigned long baud) {
   for (unsigned long t0 = millis(); !Serial && millis() - t0 < BOOT_WAIT_FOR_SERIAL_MS; ) { delay(10); }
   Serial.setDebugOutput(true);
   Serial.printf("boot: serial attached after %lu ms\n", millis());
-#if BOARD_ESP32S3
   // Why did the previous run end? (1 power-on, 2 reset pin, 3 software,
   // 4 panic, 5 int. watchdog, 6 task watchdog, 7 other watchdog, 9 brownout)
   Serial.printf("boot: reset reason %d\n", (int)esp_reset_reason());
@@ -1103,15 +950,14 @@ inline void boardSerialBegin(unsigned long baud) {
   // reset -> UF2 mode. Staying here a while lets a crash further on reboot into
   // the app again, so its reset reason gets printed above.
   while (millis() < 3000) { delay(10); }
-#endif
   Serial.flush();
-#if BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT
+#if ARDUINO_USB_CDC_ON_BOOT
   // As in the release build (below): without it every write waited up to
   // 100 ms once the console's reader had closed while the USB stayed plugged
   // in, and the wall clock ran in slow motion (2026-10-20).
   Serial.setTxTimeoutMs(0);
 #endif
-#elif BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT
+#elif ARDUINO_USB_CDC_ON_BOOT
   // The S3 console is native USB CDC. Without this, every write blocks for up
   // to 100 ms whenever the port is enumerated but nothing is reading it, which
   // would stutter the animation as soon as the clock is plugged into a PC.
@@ -1143,7 +989,6 @@ inline void boardSerialBegin(unsigned long baud) {
 // normal power-up, "BUTTON" the reset button; "BROWN" (supply voltage dipped),
 // "PANIC" (crash) and the watchdogs point at a real problem.
 inline const char *boardResetReasonText() {
-#if BOARD_ESP32S3
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:  return "POWER";
     case ESP_RST_EXT:      return "BUTTON";
@@ -1156,17 +1001,6 @@ inline const char *boardResetReasonText() {
     case ESP_RST_DEEPSLEEP: return "SLEEP";
     default:               return "OTHER";
   }
-#else
-  // SAMD51 reset cause register (RSTC->RCAUSE), one bit per source.
-  uint8_t cause = RSTC->RCAUSE.reg;
-  if (cause & RSTC_RCAUSE_POR)    { return "POWER"; }
-  if (cause & RSTC_RCAUSE_EXT)    { return "BUTTON"; }
-  if (cause & RSTC_RCAUSE_SYST)   { return "SOFT"; }
-  if (cause & RSTC_RCAUSE_WDT)    { return "WDT"; }
-  if (cause & RSTC_RCAUSE_BODCORE) { return "BROWN"; }
-  if (cause & RSTC_RCAUSE_BODVDD) { return "BROWN"; }
-  return "OTHER";
-#endif
 }
 
 /* ======================================================================
@@ -1176,26 +1010,17 @@ inline const char *boardResetReasonText() {
 // through the UF2 bootloader (which swallows the reset reason). The clock
 // writes a stage while starting and clears it once it has run for a while;
 // a value left behind therefore names the step the previous run died in.
-// M4: no breadcrumb, its settings block is a single fixed struct.
 inline void boardBootStageWrite(uint8_t stage) {
-#if BOARD_ESP32S3
   Preferences p;
   if (p.begin("matrixclock", false)) { p.putUChar("bootstage", stage); p.end(); }
-#else
-  (void)stage;
-#endif
 }
 
 inline uint8_t boardBootStageRead() {
-#if BOARD_ESP32S3
   Preferences p;
   if (!p.begin("matrixclock", true)) { return 0; }
   uint8_t stage = p.getUChar("bootstage", 0);
   p.end();
   return stage;
-#else
-  return 0;
-#endif
 }
 
 // True for the two harmless causes, so a normal start shows no extra screen.
@@ -1208,24 +1033,18 @@ inline bool boardResetWasNormal() {
    Reboot
    ====================================================================== */
 inline void boardReset() {
-#if BOARD_ESP32S3
   ESP.restart();
-#else
-  NVIC_SystemReset();
-#endif
 }
 
 /* ======================================================================
    WiFi / NTP
 
-   The M4 talks to a WiFiNINA co-processor that runs its own SNTP client, so
-   WiFi.getTime() is all there is. The S3 runs lwIP itself: SNTP is started
-   explicitly and a sync notification tells us when a *fresh* timestamp landed.
+   lwIP runs on the ESP32-S3 itself: SNTP is started explicitly and a sync
+   notification tells us when a *fresh* timestamp landed.
    (Asking whether time() merely looks plausible would not do - the system clock
    keeps running across a radio power cycle, so it would happily hand back a
    day-old, drifted value instead of a new reading.)
    ====================================================================== */
-#if BOARD_ESP32S3
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -1450,109 +1269,3 @@ inline void netPrintRadioInfo() {
   Console.println(ESP.getSdkVersion());
 }
 
-#else // BOARD_MATRIXPORTAL_M4
-
-#include <SPI.h>
-#include <WiFiNINA.h>
-#include <Arduino_SpiNINA.h>   // SpiDrv: the co-processor's reset line, see netRadioOff()
-
-inline void netRadioInit() {
-  WiFi.status();  // first SPI transaction wakes the co-processor
-  delay(1000);    // ...and it needs a moment before it answers reliably
-}
-
-inline void netNtpRequestFresh() {} // the NINA firmware re-syncs on its own
-
-inline void netStaBegin(const char *ssid, const char *pass) {
-  WiFi.setTimeout(100);     // non-blocking begin: don't stall the clock while it joins
-  WiFi.begin(ssid, pass);
-}
-
-inline bool netStaConnected() { return WiFi.status() == WL_CONNECTED; }
-
-inline void netDnsSettle() {}   // the NINA looks names up on its own
-
-// Radio off, for real: the co-processor is held in reset. WiFi.end() cannot do
-// it - it only calls WiFiDrv::wifiDriverDeinit(), an empty function in WiFiNINA
-// 2.0.1 - so the NINA kept its station joined, or its AP beaconing with nobody
-// serving it. The next WiFi call brings it back by itself: Arduino_SpiNINA's
-// WAIT_FOR_SLAVE_SELECT runs SpiDrv::begin(), which releases the reset and
-// waits 750 ms for the module to boot - clearing its static-IP flag as well.
-inline void netRadioOff() { SpiDrv::end(); }
-
-inline void netSntpStop() {}        // the NINA firmware runs its own SNTP client
-
-inline uint32_t netNtpEpoch() { return (uint32_t)WiFi.getTime(); }
-
-inline bool netApBegin(const char *ssid, const char *pass) {
-  WiFi.end();
-  delay(100);
-  // The NINA firmware applies a stored static config to the AP when it starts
-  // (AP_START handler). All four values have to be given: its setIPconfig
-  // command takes ip/gateway/mask exactly as sent, so the shorter WiFi.config()
-  // overloads would hand the AP a 0.0.0.0 netmask. dns = the AP itself.
-  const IPAddress apAddr(AP_IP_ADDR);
-  WiFi.config(apAddr, apAddr, apAddr, IPAddress(255, 255, 255, 0));
-  WiFi.beginAP(ssid, pass);
-  unsigned long t0 = millis();
-  while (millis() - t0 < 6000) { // wait for the radio (a station may rejoin instantly)
-    uint8_t st = WiFi.status();
-    if (st == WL_AP_LISTENING || st == WL_AP_CONNECTED) { return true; }
-    delay(100);
-  }
-  return false;
-}
-
-// Leaving AP mode. The NINA's AP itself only ends with what the caller does
-// next: netStaBegin() switches the module to station mode, netRadioOff() holds
-// it in reset - one of the two has to follow. Here the AP's static address is
-// dropped first: the NINA keeps its "static IP" flag across modes and begin()
-// then skips DHCP, which would leave the clock in the home WiFi without an
-// address (no NTP).
-inline void netApEnd() {
-  const IPAddress none(0, 0, 0, 0);
-  WiFi.config(none, none, none, none);
-}
-
-// Scan for networks in range (the NINA scans as a station). Blocks for the
-// scan. Returns how many it found; netScanResult() reads them.
-inline int netScan() {
-  WiFi.disconnect();   // a join under way would get in the scan's way, as on the S3
-  return WiFi.scanNetworks();
-}
-inline void netScanResult(int i, char *ssid, size_t size, int8_t &rssi, bool &open) {
-  const char *s = WiFi.SSID((uint8_t)i);
-  strncpy(ssid, s ? s : "", size - 1);
-  ssid[size - 1] = '\0';
-  rssi = (int8_t)WiFi.RSSI((uint8_t)i);
-  open = (WiFi.encryptionType((uint8_t)i) == ENC_TYPE_NONE);
-}
-inline void netScanDone() {}
-
-// The station's state (wl_status_t: WL_NO_SSID_AVAIL, WL_CONNECT_FAILED, ...)
-// and, once connected, its signal.
-inline uint8_t netStaStatus() { return WiFi.status(); }
-inline int8_t  netStaRssi()   { return (int8_t)WiFi.RSSI(); }
-
-inline bool netApHasStation() { return WiFi.status() == WL_AP_CONNECTED; }
-inline bool netApHealthy() {
-  uint8_t st = WiFi.status();
-  return (st == WL_AP_LISTENING || st == WL_AP_CONNECTED);
-}
-inline IPAddress netApIP() { return WiFi.localIP(); }
-
-inline void netClientTimeoutMs(WiFiClient &c, uint16_t ms) { c.setTimeout(ms); }
-
-// Keep available() here: in WiFiNINA it only hands out a client once its request
-// bytes have arrived, while accept() returns every new connection immediately -
-// over the slow SPI link that would turn late requests into empty ones.
-inline WiFiClient netServerAccept(WiFiServer &s) { return s.available(); }
-
-inline void netPrintRadioInfo() {
-  String fv = WiFi.firmwareVersion();
-  Console.print("NINA FW: ");
-  Console.println(fv);
-  if (fv < WIFI_FIRMWARE_LATEST_VERSION) { Console.println("Please upgrade the firmware"); }
-}
-
-#endif
