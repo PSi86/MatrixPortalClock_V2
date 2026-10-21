@@ -75,9 +75,12 @@ in the wall's own 192x128 LEDs.
 - **Real-time clock:** the board's own PCF85063, with a coin cell in its socket
   J4 if wanted, and a DS3231 on the GPIO header before it (see
   [The wall clock's own real-time clock](#the-wall-clocks-own-real-time-clock-pcf85063)).
-- **Console** (USB, 115200 baud, DTR and RTS low): `black` switches the panels
-  dark until the next start - before every upload, since the ROM bootloader
-  leaves the last row pair lit at full duty; `test <panel> <brightness>` and
+- **Panels dark before an upload:** `POST /api/black` (the web app's
+  interface, in every build) switches the panels dark until the next start -
+  before every upload, since the ROM bootloader leaves the last row pair lit at
+  full duty. The debug build's console has it as `black`.
+- **Console** (debug build only, see [Console](#console); USB, 115200 baud,
+  DTR and RTS low): `black`, `test <panel> <brightness>` and
   `test off` a panel in white to measure the current; `bus <divider>` the panel
   bus' clock; `lan on|off` the web app on the home network; for the panel
   output and the fetches `fetch`, `prio <0-5>`, `gdma`, `crypto [ext]`,
@@ -201,10 +204,27 @@ in the wall's own 192x128 LEDs.
    [Flash layout](#flash-layout-s3)); a board still on Adafruit's TinyUF2 layout
    is moved over once, as described there.
 
-   **Console:** `pio device monitor` (115200 baud) on the same port. Open it with
-   DTR and RTS low, as `platformio.ini` sets for the monitor
-   (`monitor_dtr = 0`, `monitor_rts = 0`): a tool that opens the port with both
-   raised - pyserial's default - restarts the clock.
+   **Console:** only the debug builds have one (`adafruit_matrixportal_s3_debug`,
+   `waveshare_wallclock_debug`) and the test builds; the release builds write
+   nothing and take no commands (since 2026-10-21). `pio device monitor` (115200
+   baud) on the same port. Open it with DTR and RTS low, as `platformio.ini` sets
+   for the monitor (`monitor_dtr = 0`, `monitor_rts = 0`): a tool that opens the
+   port with both raised - pyserial's default - restarts the clock.
+
+   <a id="console"></a>**Log levels** of the debug build (`CLOCK_LOG`, 1 unless
+   built otherwise; the console's `log 1` or `log 2` changes it until the next
+   start):
+
+   | Level | What the console shows |
+   |---|---|
+   | 1 | the start, the sensors, errors and changes of state: the WiFi, the time, Home Assistant, fetches, GIFs, inputs; of the core's own lines only its errors |
+   | 2 | and the running figures: the light every second, the frames and the face's passes every second or two (`frames`, `show:`, `face N:`), the RAM every 30 s |
+   | 3 | and the core's WiFi and HTTP lines, which the core builds in or leaves out as it is compiled: `$env:PLATFORMIO_BUILD_FLAGS = '-UCORE_DEBUG_LEVEL -DCORE_DEBUG_LEVEL=4 -DCLOCK_LOG=2'` before `pio run -e ..._debug` |
+
+   Its commands on every board: `log 1|2`, `fetch` (every source of the info
+   band due now), `lan on|off` (the web app on the home network); the wall
+   clock's own are in [Wall clock](#wall-clock). A release build with
+   `-DCLOCK_CONSOLE=1` has the console as well.
 
    **Power:** WiFi transmit bursts are the clock's highest current draw. At the
    core's default transmit power of 19.5 dBm the S3 reset while joining the
@@ -230,14 +250,14 @@ in the wall's own 192x128 LEDs.
    pio run -e adafruit_matrix_portal_m4 -t upload
    ```
 
-   For the **wall clock**, switch the panels dark first (console `black`, see
+   For the **wall clock**, switch the panels dark first (`POST /api/black`, see
    [Wall clock](#wall-clock)), then upload as on the S3; esptool resets the
    board by itself:
    ```
    pio run -e waveshare_wallclock -t upload --upload-port <port>
    ```
-   `waveshare_wallclock_debug` is the same with the debug output (frame and
-   memory statistics, the self-tests at start-up). The GIF pack goes on as on
+   `waveshare_wallclock_debug` is the same with the console (the self-tests
+   at start-up; the frame and memory statistics at log level 2). The GIF pack goes on as on
    the S3, from the GIF gallery or with `-t uploadgifs` (192x128 GIFs at most).
 
 3. NTP on the S3 uses `pool.ntp.org` / `time.nist.gov`. If the clock has no internet
@@ -1088,6 +1108,7 @@ form-encoded POSTs, answers are JSON:
 | `POST /api/live` | tries settings live, in RAM only; when a preview was asked for (`pv=1`, or a new watchface animation), `{"preview": "played"}` or `"refused"` - it plays now or not at all |
 | `POST /api/save` | stores everything the page shows |
 | `POST /api/discard` | puts the stored settings back, and the face shows them as a preview (the same answer) |
+| `POST /api/black` | the wall clock: its panels dark until the next start, before an upload |
 | `POST /api/time` | sets the time, from the phone or typed |
 | `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
 | `POST /api/sensor-forget` | `id=<sensor>` (`accel`, `light`, `rtc`, `gesture`, `boardRtc`, `motion`, as `hw.sensors` in `/api/state` lists them): a sensor this clock no longer has is no longer reported missing |

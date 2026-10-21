@@ -1466,8 +1466,8 @@ void updateAutoDst() {
   if (active == dstAutoActive) { return; }
   dstAutoActive = active;
   time_t local = clockNow() + tzTotalOffset();
-  Serial.print(active ? "DST auto -> summer, clock " : "DST auto -> winter, clock ");
-  Serial.print(clockHour(local)); Serial.print(':'); Serial.println(clockMinute(local));
+  Console.print(active ? "DST auto -> summer, clock " : "DST auto -> winter, clock ");
+  Console.print(clockHour(local)); Console.print(':'); Console.println(clockMinute(local));
 }
 
 #if defined(CLOCK_DEBUG)
@@ -1505,10 +1505,10 @@ void dstSelfTest() {
   for (const Check &c : checks) {
     total++;
     if (dstActiveAt(tzRule(c.off), (time_t)c.utc) == c.dst) { ok++; continue; }
-    Serial.print("DST self-test FAIL offset "); Serial.print(c.off);
-    Serial.print(" utc "); Serial.println(c.utc);
+    Console.print("DST self-test FAIL offset "); Console.print(c.off);
+    Console.print(" utc "); Console.println(c.utc);
   }
-  Serial.print("DST self-test: "); Serial.print(ok); Serial.print('/'); Serial.print(total); Serial.println(" ok");
+  Console.print("DST self-test: "); Console.print(ok); Console.print('/'); Console.print(total); Console.println(" ok");
 }
 #endif
 
@@ -1516,6 +1516,9 @@ void dstSelfTest() {
 
 void setup(void) {
   boardSerialBegin(115200);
+#if BOARD_ESP32S3 && !CLOCK_CONSOLE
+  esp_log_level_set("*", ESP_LOG_NONE);   // and nothing of ESP-IDF's own from here on (console.h)
+#endif
 
   // Boot breadcrumb: what the previous run reached before it ended (see
   // board_hal.h). Read it first, then mark this run as "started".
@@ -1566,15 +1569,15 @@ void setup(void) {
     // 100 Hz, not 10: a knock lasts about as long as one 10 Hz sample, so at
     // the old rate it was a coin toss whether the sensor even showed it.
     lis.setDataRate(LIS3DH_DATARATE_100_HZ);
-    Serial.println("LIS3DH found");
+    Console.println("LIS3DH found");
 #if KNOCK_SENSING && !BOARD_WAVESHARE_WALL
     knock.begin(Wire, ACCEL_I2C_ADDR, ACCEL_INT_PIN);   // let the sensor itself watch for a knock
 #endif
   } else {
 #if BOARD_HAS_ACCEL
-    Serial.println("LIS3DH not found - orientation locked to portrait");
+    Console.println("LIS3DH not found - orientation locked to portrait");
 #else
-    Serial.println("No LIS3DH on this board - the clock stays in landscape");
+    Console.println("No LIS3DH on this board - the clock stays in landscape");
 #endif
   }
 
@@ -1588,14 +1591,14 @@ void setup(void) {
   });
   luxOK = sensorTries[SENSOR_LIGHT] != 0;
   if (luxOK) {
-    Serial.println("BH1750 found");
+    Console.println("BH1750 found");
   } else {
-    Serial.println("BH1750 not found - auto-brightness disabled");
+    Console.println("BH1750 not found - auto-brightness disabled");
   }
 
 #if BOARD_WAVESHARE_WALL
   // The board's own bus, for its PCF85063 (and its motion sensor).
-  if (!boardBusBegin()) { Serial.println("Board I2C bus did not start"); }
+  if (!boardBusBegin()) { Console.println("Board I2C bus did not start"); }
 #endif
   // DS3231 real-time clock on the same bus: the time at once, if it has one,
   // and with it when the last NTP sync was.
@@ -1623,15 +1626,15 @@ void setup(void) {
   matrix.setTextWrap(false);      // Allow text off edge
 #if PANEL_DRIVER_DMA
   bool matrixOk = matrix.begin();
-  Serial.println(matrixOk ? "Panel driver started" : "Panel driver FAILED");
+  Console.println(matrixOk ? "Panel driver started" : "Panel driver FAILED");
 #if defined(CLOCK_DEBUG)
   debugMemoryLog();
 #endif
   matrix.setBrightness(panelBrightness());     // the canvas colours are shares of it
 #else
   ProtomatterStatus matrixstatus = matrix.begin();
-  Serial.print("Protomatter status: ");
-  Serial.println((int)matrixstatus);
+  Console.print("Protomatter status: ");
+  Console.println((int)matrixstatus);
   bool matrixOk = (matrixstatus == PROTOMATTER_OK);
 #endif
   matrix.setRotation(BOARD_DEFAULT_ROTATION);
@@ -1647,14 +1650,14 @@ void setup(void) {
   // Why did the previous run end? Shown on the panel for 2 s when it was not a
   // normal power-up or reset button, so a crash is visible without a console
   // (e.g. while the clock runs on a power supply).
-  Serial.print("Reset reason: "); Serial.println(boardResetReasonText());
+  Console.print("Reset reason: "); Console.println(boardResetReasonText());
   if (!boardResetWasNormal()) {
     bootStatus(boardResetReasonText());
     delay(2000);
   }
   // The previous run did not get far enough to clear its breadcrumb.
   if (prevBootStage != BOOT_STAGE_CLEAR) {
-    Serial.print("Previous boot died in stage "); Serial.println(prevBootStage);
+    Console.print("Previous boot died in stage "); Console.println(prevBootStage);
     char msg[8];
     snprintf(msg, sizeof(msg), "DIED%u", (unsigned)prevBootStage);
     bootStatus(msg);
@@ -1693,7 +1696,7 @@ void setup(void) {
   // the only way to set the clock up, so it opens and stays open.
   if (!apActive && !gestureOK && !wifiStored()) {
     startAPMode();
-    Serial.println("No input fitted and no home WiFi stored: the hotspot stays open");
+    Console.println("No input fitted and no home WiFi stored: the hotspot stays open");
   }
 #endif
 
@@ -1705,12 +1708,12 @@ void setup(void) {
   // has not run out: then the sync waits for the sync time it falls due at.
   if (!ntpSyncOn()) {
     setSyncState(SYNC_IDLE);
-    Serial.println("NTP sync off - the clock runs on its real-time clock");
+    Console.println("NTP sync off - the clock runs on its real-time clock");
   } else if (ntpSyncedAt != 0 && !syncDueAt(clockNow())) {
     setSyncState(SYNC_IDLE);
     long offset = tzTotalOffset();
     long ago = (long)((clockNow() + offset) / 86400) - (long)((ntpSyncedAt + offset) / 86400);
-    Serial.printf("NTP sync not due - the last one was %ld day(s) ago, one every %u days\n",
+    Console.printf("NTP sync not due - the last one was %ld day(s) ago, one every %u days\n",
                   ago, (unsigned)uiSettings.syncDays);
   } else if (!apActive && wifiStored()) {
     netRadioInit();
@@ -1718,7 +1721,7 @@ void setup(void) {
     boardBootStageWrite(BOOT_STAGE_WIFI);   // the radio's first transmit burst comes now
     stationUpdate();                        // the sync wants the station: the join starts
   } else if (!apActive) {
-    Serial.println("No home WiFi stored - set one on the config page");
+    Console.println("No home WiFi stored - set one on the config page");
   }
   // The boot screens are done; the config AP, if it was opened above, keeps its own.
   if (screen == SCREEN_BOOT) { setScreen(SCREEN_FACE); }
@@ -1730,11 +1733,13 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
+#if CLOCK_CONSOLE
+  consoleCommands();   // the console's commands, in builds with a console (console.h)
+#endif
 #if defined(FACE_FRAME_LOG)
   testPlanRun();   // a test scene's steps that are due on the test's clock
 #endif
 #if BOARD_WAVESHARE_WALL
-  wallConsole();  // "black" on the USB console before a flash, test pictures
   wallOutputWatch();
   if (matrix.testing()) { delay(5); return; }   // a test picture stands: the clock draws nothing
 #endif
@@ -1958,10 +1963,10 @@ void updateScreenTimeouts() {
       break;
     case SCREEN_MENU:
     case SCREEN_EDITOR:
-      if (inputIdleFor(MENU_IDLE_MS)) { Serial.println("Menu timed out"); setScreen(SCREEN_FACE); }
+      if (inputIdleFor(MENU_IDLE_MS)) { Console.println("Menu timed out"); setScreen(SCREEN_FACE); }
       break;
     case SCREEN_GESTURE_TEST:
-      if (millisNow - gestureTestAt >= GESTURE_TEST_MS) { Serial.println("Gesture test: timed out"); gestureTestStop(); }
+      if (millisNow - gestureTestAt >= GESTURE_TEST_MS) { Console.println("Gesture test: timed out"); gestureTestStop(); }
       break;
 #if GIF_PLAYBACK
     case SCREEN_GIF:
@@ -2085,7 +2090,7 @@ void updateOrientation() {
   if (wanted == orientCandidate) { if (orientStable < 255) { orientStable++; } }
   else { orientCandidate = wanted; orientStable = 1; }
   if (wanted != deviceRotation && orientStable >= ORIENT_DEBOUNCE) {
-    Serial.print("Orientation -> rotation "); Serial.println(wanted);
+    Console.print("Orientation -> rotation "); Console.println(wanted);
     deviceRotation = wanted;
     rotatedAt = millisNow;   // turning is not a knock
     followDeviceRotation();
@@ -2143,8 +2148,10 @@ void updateBrightness() {
       float avgLux = sum / luxHistCount;
       luxAvg = avgLux;
       autoBrightTarget = mapLuxToBrightness(avgLux);
-      Serial.print("Lux "); Serial.print(lux); Serial.print(" avg "); Serial.print(avgLux);
-      Serial.print(" -> sensor "); Serial.println(autoBrightTarget);
+      if (consoleLevel >= 2) {   // a running figure (console.h)
+        Console.print("Lux "); Console.print(lux); Console.print(" avg "); Console.print(avgLux);
+        Console.print(" -> sensor "); Console.println(autoBrightTarget);
+      }
     }
   }
 
@@ -2244,7 +2251,7 @@ void brightnessKeep() {
   if (settings.brightness == brightSaved) { return; }
   brightSaved = settings.brightness;
   saveSettings();
-  Serial.print("Brightness set to "); Serial.println(settings.brightness);
+  Console.print("Brightness set to "); Console.println(settings.brightness);
 }
 
 // Draw a short text centred in the current rotation's canvas. Used by the boot
@@ -2741,7 +2748,8 @@ void debugMemoryLog() {
   static unsigned long last = 0;
   if (last != 0 && millisNow - last < 30000) { return; }
   last = millisNow ? millisNow : 1;
-  Serial.printf("RAM: internal free %u, lowest %u, largest block %u; PSRAM free %u\n",
+  if (consoleLevel < 2) { return; }   // a running figure (console.h)
+  Console.printf("RAM: internal free %u, lowest %u, largest block %u; PSRAM free %u\n",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
@@ -2757,13 +2765,15 @@ void apLoopStats(uint32_t webUs, uint32_t panelUs) {
   webSum += webUs;     if (webUs > webMax)     { webMax = webUs; }
   panelSum += panelUs; if (panelUs > panelMax) { panelMax = panelUs; }
   if (millis() - since < 2000) { return; }
-  Serial.printf("AP loop: %lu passes, web avg %lu max %lu us, panel avg %lu max %lu us, "
-                "RAM free %u (min %u, largest %u)\n",
-                (unsigned long)passes, (unsigned long)(webSum / passes), (unsigned long)webMax,
-                (unsigned long)(panelSum / passes), (unsigned long)panelMax,
-                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  if (consoleLevel >= 2) {   // a running figure (console.h)
+    Console.printf("AP loop: %lu passes, web avg %lu max %lu us, panel avg %lu max %lu us, "
+                  "RAM free %u (min %u, largest %u)\n",
+                  (unsigned long)passes, (unsigned long)(webSum / passes), (unsigned long)webMax,
+                  (unsigned long)(panelSum / passes), (unsigned long)panelMax,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  }
   passes = webSum = webMax = panelSum = panelMax = 0;
   since = millis();
 }
@@ -2774,10 +2784,12 @@ void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
   f.drawSum += drawUs; if (drawUs > f.drawMax) { f.drawMax = drawUs; }
   f.showSum += showUs; if (showUs > f.showMax) { f.showMax = showUs; }
   if (millis() - f.since < 1000) { return; }
-  Serial.printf("frames %lu/s panel %lu Hz draw avg %lu max %lu us show avg %lu max %lu us\n",
-                (unsigned long)f.frames, (unsigned long)panelHz,
-                (unsigned long)(f.drawSum / f.frames), (unsigned long)f.drawMax,
-                (unsigned long)(f.showSum / f.frames), (unsigned long)f.showMax);
+  if (consoleLevel >= 2) {   // a running figure (console.h)
+    Console.printf("frames %lu/s panel %lu Hz draw avg %lu max %lu us show avg %lu max %lu us\n",
+                  (unsigned long)f.frames, (unsigned long)panelHz,
+                  (unsigned long)(f.drawSum / f.frames), (unsigned long)f.drawMax,
+                  (unsigned long)(f.showSum / f.frames), (unsigned long)f.showMax);
+  }
   f = FrameStats{};
   f.since = millis();
 }
@@ -2791,8 +2803,10 @@ void facePassStats(uint32_t us) {
   passes++;
   sum += us; if (us > most) { most = us; }
   if (millis() - since < 2000) { return; }
-  Serial.printf("face %u: %lu passes, avg %lu max %lu us, %lu frames\n", (unsigned)settings.watchface,
-                (unsigned long)passes, (unsigned long)(sum / passes), (unsigned long)most, (unsigned long)faceDraws);
+  if (consoleLevel >= 2) {   // a running figure (console.h)
+    Console.printf("face %u: %lu passes, avg %lu max %lu us, %lu frames\n", (unsigned)settings.watchface,
+                  (unsigned long)passes, (unsigned long)(sum / passes), (unsigned long)most, (unsigned long)faceDraws);
+  }
   passes = sum = most = faceDraws = 0;
   since = millis();
 }
@@ -2822,7 +2836,7 @@ void faceFrameDrawn() {
   if (testVirtualOn && n > 0 && n < (int)sizeof(line)) {   // and the ms into the scene, on the test's clock
     snprintf(line + n, sizeof(line) - n, " %lu", (unsigned long)(millisNow - testVirtualMs0));
   }
-  Serial.println(line);
+  Console.println(line);
 #endif
 }
 #endif
@@ -2957,10 +2971,10 @@ void muncherSelfTest() {
   uint16_t longest = 0, failed = 0;
   unsigned long t0 = millis();
   bool ok = muncher::selfTest(f, longest, failed);
-  Serial.printf("Muncher self-test: %s, longest digit walk %u steps, %lu ms", ok ? "all changes right" : "FAILED",
+  Console.printf("Muncher self-test: %s, longest digit walk %u steps, %lu ms", ok ? "all changes right" : "FAILED",
                 longest, millis() - t0);
-  if (!ok) { Serial.printf(", first wrong: %u", failed); }
-  Serial.println();
+  if (!ok) { Console.printf(", first wrong: %u", failed); }
+  Console.println();
   // Where the power pellet's scene catches the ghosts, and how long it takes.
   const muncher::Layout *layouts[2] = { &muncher::LANDSCAPE, &muncher::PORTRAIT };
   for (uint8_t l = 0; l < 2; l++) {
@@ -2971,9 +2985,9 @@ void muncherSelfTest() {
     f.start(muncher::MODE_POWER);
     uint16_t n = 0;
     while (f.mode != muncher::MODE_IDLE && n < 3000) { f.advanceTo(++n); }
-    Serial.printf("Muncher power pellet scene, %s: %u caught", l ? "upright" : "landscape", f.caughtCount);
-    for (uint8_t g = 0; g < f.caughtCount; g++) { Serial.printf(" at x %d", f.caughtX[g]); }
-    Serial.printf(", %u steps\n", n);
+    Console.printf("Muncher power pellet scene, %s: %u caught", l ? "upright" : "landscape", f.caughtCount);
+    for (uint8_t g = 0; g < f.caughtCount; g++) { Console.printf(" at x %d", f.caughtX[g]); }
+    Console.printf(", %u steps\n", n);
   }
 }
 #endif
@@ -2997,11 +3011,11 @@ void aliensSelfTest() {
   uint16_t failed = 0;
   unsigned long t0 = millis();
   bool ok = aliens::selfTest(f, longest, longestScene, failed);   // every change, the wave, the saucer, shooting back, a nap
-  Serial.printf("Aliens self-test: %s, longest change %lu ms, longest scene between changes %lu ms, %lu ms",
+  Console.printf("Aliens self-test: %s, longest change %lu ms, longest scene between changes %lu ms, %lu ms",
                 ok ? "all changes and scenes right" : "FAILED", (unsigned long)longest, (unsigned long)longestScene,
                 millis() - t0);
-  if (!ok) { Serial.printf(", first wrong: %u", failed); }
-  Serial.println();
+  if (!ok) { Console.printf(", first wrong: %u", failed); }
+  Console.println();
 }
 #endif
 #endif  // WATCHFACE_ALIENS
@@ -3325,16 +3339,16 @@ void setClockTo(time_t utc, TimeSource source) {
 // PAJ7620U2 (0x73). A sensor that is not found can so be told from one the
 // bus does not see at all.
 void i2cScan() {
-  Serial.print("I2C bus:");
+  Console.print("I2C bus:");
   uint8_t n = 0;
   for (uint8_t a = 0x08; a < 0x78; a++) {
     Wire.beginTransmission(a);
     if (Wire.endTransmission() != 0) { continue; }
     i2cFound[a / 8] |= (uint8_t)(1 << (a % 8));
-    Serial.printf(" 0x%02X", a);
+    Console.printf(" 0x%02X", a);
     n++;
   }
-  Serial.println(n ? "" : " nothing answers");
+  Console.println(n ? "" : " nothing answers");
 }
 
 #if BOARD_WAVESHARE_WALL
@@ -3342,7 +3356,7 @@ void i2cScan() {
 // parts answer - the codecs 0x18 and 0x40, the PCF85063 0x51, the QMI8658
 // 0x6B, the SHTC3 0x70.
 void boardBusScan() {
-  Serial.print("Board I2C bus:");
+  Console.print("Board I2C bus:");
   uint8_t n = 0;
   for (uint8_t a = 0x08; a < 0x78; a++) {
     uint8_t err;
@@ -3353,10 +3367,10 @@ void boardBusScan() {
     }
     if (err != 0) { continue; }
     i2cBoardFound[a / 8] |= (uint8_t)(1 << (a % 8));
-    Serial.printf(" 0x%02X", a);
+    Console.printf(" 0x%02X", a);
     n++;
   }
-  Serial.println(n ? "" : " nothing answers");
+  Console.println(n ? "" : " nothing answers");
 }
 #endif
 
@@ -3386,7 +3400,7 @@ void sensorsCheck() {
 #endif
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     if (sensorsMissing & (1 << i)) {
-      Serial.printf("%s missing - found at an earlier start; the web app can forget it\n", SENSOR_KINDS[i].chip);
+      Console.printf("%s missing - found at an earlier start; the web app can forget it\n", SENSOR_KINDS[i].chip);
     }
   }
 }
@@ -3409,7 +3423,7 @@ bool sensorForget(const String &key) {
 #if BAND_ON_PANEL
       bandLocalDone = false;   // and the band's status line
 #endif
-      Serial.printf("%s forgotten\n", SENSOR_KINDS[i].chip);
+      Console.printf("%s forgotten\n", SENSOR_KINDS[i].chip);
     }
     return true;
   }
@@ -3439,38 +3453,38 @@ void rtcBegin() {
   if (dsOK) {
     dsLost = rtc.lostPower();
     if (!dsLost) { dsUtc = rtcRead(); dsLost = (dsUtc == 0); }
-    Serial.println(dsLost ? "DS3231 found, but it has no time" : "DS3231 found");
+    Console.println(dsLost ? "DS3231 found, but it has no time" : "DS3231 found");
   } else {
-    Serial.println("DS3231 not found");
+    Console.println("DS3231 not found");
   }
   time_t pcfUtc = 0;
   sensorTries[SENSOR_BOARD_RTC] = sensorBegin(SENSOR_BOARD_RTC, []() { return pcf.begin(Wire1); });
   if (sensorTries[SENSOR_BOARD_RTC]) {
-    Serial.printf("PCF85063 found: Control_1 0x%02X, Control_2 0x%02X, Offset %d, %s\n", pcf.control1(),
+    Console.printf("PCF85063 found: Control_1 0x%02X, Control_2 0x%02X, Offset %d, %s\n", pcf.control1(),
                   pcf.control2(), pcf.offset(), pcf.kept() ? "holds a time of this clock's" : "holds no time of this clock's");
     if (pcf.kept()) { pcfUtc = pcf.read(); }
     if (pcfUtc == 0) {
       // Lost power, or never set by this clock: started afresh, set with the next time.
-      if (!pcf.reset()) { Serial.println("PCF85063: the reset failed"); }
+      if (!pcf.reset()) { Console.println("PCF85063: the reset failed"); }
     } else if (!pcf.clkoutOff()) {
-      Serial.println("PCF85063: CLKOUT did not switch off");
+      Console.println("PCF85063: CLKOUT did not switch off");
     }
   } else {
-    Serial.println("PCF85063 not found");
+    Console.println("PCF85063 not found");
   }
   rtcOK = dsOK || pcf.found();
   if (dsUtc != 0) {
     rtcChip = RTC_CHIP_DS3231;
     setClockTo(dsUtc, TIME_RTC);
     if (pcf.found() && pcfUtc == 0) { pcfSet(dsUtc); }   // the PCF85063 takes the DS3231's
-    Serial.print("Clock set from the DS3231: UTC "); Serial.println((long)dsUtc);
+    Console.print("Clock set from the DS3231: UTC "); Console.println((long)dsUtc);
   } else if (pcfUtc != 0) {
     rtcChip = RTC_CHIP_PCF85063;
     setClockTo(pcfUtc, TIME_RTC);
-    Serial.print("Clock set from the PCF85063: UTC "); Serial.println((long)pcfUtc);
+    Console.print("Clock set from the PCF85063: UTC "); Console.println((long)pcfUtc);
   } else {
     rtcChip = dsOK ? RTC_CHIP_DS3231 : pcf.found() ? RTC_CHIP_PCF85063 : RTC_CHIP_NONE;
-    if (rtcOK) { Serial.println("No real-time clock has a time - none until NTP or a time set by hand"); }
+    if (rtcOK) { Console.println("No real-time clock has a time - none until NTP or a time set by hand"); }
   }
   rtcLostPower = rtcOK && !clockIsSet();
   rtcSync = dsOK && !dsLost;
@@ -3484,7 +3498,7 @@ void rtcWrite(time_t utc) {
   if (dsOK) {
     rtc.adjust(DateTime((uint32_t)utc));
     dsLost = false;
-    Serial.println("DS3231 set");
+    Console.println("DS3231 set");
   }
   if (pcf.found()) { pcfSet(utc); }
   rtcChip = dsOK ? RTC_CHIP_DS3231 : RTC_CHIP_PCF85063;
@@ -3505,20 +3519,20 @@ void pcfSet(time_t utc) {
     pcfStore.read(rec);
     if (rec.magic == PCF_RECORD_MAGIC && (int64_t)rec.setAt >= UTC_PLAUSIBLE_FROM && (time_t)rec.setAt < utc) {
       long since = (long)(utc - (time_t)rec.setAt);
-      Serial.printf("PCF85063: %+ld s from the new time, %.1f h after it was set (%+.0f ppm)\n", apart,
+      Console.printf("PCF85063: %+ld s from the new time, %.1f h after it was set (%+.0f ppm)\n", apart,
                     since / 3600.0f, apart * 1e6f / since);
     } else {
-      Serial.printf("PCF85063: %+ld s from the new time\n", apart);
+      Console.printf("PCF85063: %+ld s from the new time\n", apart);
     }
     if (timeSource == TIME_NTP && apart >= -PCF_KEEP_S && apart <= PCF_KEEP_S) {
-      Serial.println("PCF85063 left running");
+      Console.println("PCF85063 left running");
       return;
     }
   }
-  if (!pcf.write(utc)) { Serial.println("PCF85063: not set, the bus failed"); return; }
+  if (!pcf.write(utc)) { Console.println("PCF85063: not set, the bus failed"); return; }
   PcfRecord rec = { PCF_RECORD_MAGIC, 1, 0, (uint32_t)utc };
   pcfStore.write(rec);
-  Serial.println("PCF85063 set");
+  Console.println("PCF85063 set");
 }
 
 // Once a minute, half way through it: the clock counts on millis(), whose
@@ -3533,7 +3547,7 @@ void rtcFollow() {
   long apart = (long)(utc - clockNow());
   if (apart >= -1 && apart <= 1) { return; }
   setClockTo(utc, TIME_RTC);
-  Serial.print("Clock pulled back to the DS3231 by "); Serial.print(apart); Serial.println(" s");
+  Console.print("Clock pulled back to the DS3231 by "); Console.print(apart); Console.println(" s");
 }
 
 // Console "rtc": what each real-time clock holds against the clock.
@@ -3541,20 +3555,20 @@ void wallRtcReport() {
   time_t now = clockIsSet() ? clockNow() : 0;
   if (dsOK) {
     time_t t = dsLost ? 0 : rtcRead();
-    Serial.printf("DS3231: %s\n", t ? (String("UTC ") + (long)t + ", " + (long)(t - now) + " s from the clock").c_str()
+    Console.printf("DS3231: %s\n", t ? (String("UTC ") + (long)t + ", " + (long)(t - now) + " s from the clock").c_str()
                                     : "no time");
   } else {
-    Serial.println("DS3231: not found");
+    Console.println("DS3231: not found");
   }
   if (pcf.found()) {
     time_t t = pcf.kept() ? pcf.read() : 0;
-    Serial.printf("PCF85063: %s; Control_1 0x%02X, Control_2 0x%02X\n",
+    Console.printf("PCF85063: %s; Control_1 0x%02X, Control_2 0x%02X\n",
                   t ? (String("UTC ") + (long)t + ", " + (long)(t - now) + " s from the clock").c_str() : "no time",
                   pcf.control1(), pcf.control2());
   } else {
-    Serial.println("PCF85063: not found");
+    Console.println("PCF85063: not found");
   }
-  Serial.printf("Time counts from: %s; NTP waits for its interval: %s\n", rtcOK ? rtcChipName() : "none",
+  Console.printf("Time counts from: %s; NTP waits for its interval: %s\n", rtcOK ? rtcChipName() : "none",
                 rtcSync ? "yes" : "no, daily");
 }
 #else
@@ -3565,20 +3579,20 @@ void wallRtcReport() {
 void rtcBegin() {
   sensorTries[SENSOR_RTC] = sensorBegin(SENSOR_RTC, []() { return rtc.begin(&Wire); });
   rtcOK = sensorTries[SENSOR_RTC] != 0;
-  if (!rtcOK) { Serial.println("DS3231 not found - no real-time clock"); return; }
+  if (!rtcOK) { Console.println("DS3231 not found - no real-time clock"); return; }
   if (rtc.lostPower()) {
     rtcLostPower = true;
-    Serial.println("DS3231 found, but it lost power - no time until NTP or a time set by hand");
+    Console.println("DS3231 found, but it lost power - no time until NTP or a time set by hand");
     return;
   }
   time_t utc = rtcRead();
   if (utc == 0) {
     rtcLostPower = true;   // running, but not with a time of this century: as good as none
-    Serial.println("DS3231 found, but its time is not plausible");
+    Console.println("DS3231 found, but its time is not plausible");
     return;
   }
   setClockTo(utc, TIME_RTC);
-  Serial.print("DS3231 found, clock set from it: UTC "); Serial.println((long)utc);
+  Console.print("DS3231 found, clock set from it: UTC "); Console.println((long)utc);
 }
 #endif
 
@@ -3596,7 +3610,7 @@ void rtcWrite(time_t utc) {
   if (!rtcOK || (int64_t)utc < UTC_PLAUSIBLE_FROM || (int64_t)utc > UTC_PLAUSIBLE_TO) { return; }
   rtc.adjust(DateTime((uint32_t)utc));
   rtcLostPower = false;
-  Serial.println("DS3231 set");
+  Console.println("DS3231 set");
 }
 
 // Once a minute, half way through it: the clock counts on millis(), whose
@@ -3610,7 +3624,7 @@ void rtcFollow() {
   long apart = (long)(utc - clockNow());
   if (apart >= -1 && apart <= 1) { return; }
   setClockTo(utc, TIME_RTC);
-  Serial.print("Clock pulled back to the DS3231 by "); Serial.print(apart); Serial.println(" s");
+  Console.print("Clock pulled back to the DS3231 by "); Console.print(apart); Console.println(" s");
 }
 #endif
 
@@ -3712,7 +3726,7 @@ bool wifiStored() {
 
 // Start joining the home WiFi, or start again. Never waits for it.
 void stationJoin() {
-  Serial.print("Joining WiFi "); Serial.println(wifiCreds.ssid);
+  Console.print("Joining WiFi "); Console.println(wifiCreds.ssid);
   netStaBegin(wifiCreds.ssid, wifiCreds.pass);   // also arms a fresh NTP sync
   joinAskedAt  = millisNow;
   stationState = STA_JOINING;
@@ -3729,7 +3743,7 @@ void stationUpdate() {
     if (stationState != STA_OFF) {
       if (stationState == STA_JOINING) { noteJoinFailed(); }   // read before the radio goes
       netRadioOff();
-      Serial.println("Disabled Wifi");
+      Console.println("Disabled Wifi");
       stationState = STA_OFF;
     }
     return;
@@ -3741,7 +3755,7 @@ void stationUpdate() {
   joinPolledAt = millisNow;
   if (stationState == STA_JOINING) {
     if (netStaConnected()) {
-      Serial.println("Connected to WiFi");
+      Console.println("Connected to WiFi");
       printWifiStatus();
       netDnsSettle();   // before stationUp(): what looks names up waits for it (board_hal.h)
       if (!bootStageCleared) { boardBootStageWrite(BOOT_STAGE_RUN); }
@@ -3754,7 +3768,7 @@ void stationUpdate() {
       stationJoin();   // not joined after all this time: start the join again
     }
   } else if (!netStaConnected()) {
-    Serial.println("WiFi connection lost");
+    Console.println("WiFi connection lost");
     stationJoin();
   }
 }
@@ -3785,7 +3799,7 @@ void ntpAsk() {
   syncLastAsk = millisNow;
   time_t utc = netNtpEpoch();
   if (utc == 0) {
-    Serial.println("NTP failed");
+    Console.println("NTP failed");
     setSyncState(SYNC_RETRY_WAIT);
     return;
   }
@@ -3802,11 +3816,11 @@ void ntpAsk() {
   if (wifiStored() && !wifiCreds.verified) {   // the first sync over this WiFi: a known-good config now
     wifiCreds.verified = 1;
     saveWifiCreds();
-    Serial.println("WiFi: config works, stored as known good");
+    Console.println("WiFi: config works, stored as known good");
   }
-  Serial.println("NTP success");
-  Serial.print("NTP offset: ");
-  Serial.println(drift);
+  Console.println("NTP success");
+  Console.print("NTP offset: ");
+  Console.println(drift);
   netSntpStop();
   setSyncState(SYNC_IDLE);   // the radio goes off unless the info band still needs it
 }
@@ -3834,7 +3848,7 @@ void syncSchedule() {
     }
     // Still idle means the early wake-up was missed, e.g. because the config AP
     // was up a minute ago; the station joins now instead of failing until tomorrow.
-    Serial.println("Renew NTP sync");
+    Console.println("Renew NTP sync");
     setSyncState(SYNC_JOINING);
   }
 }
@@ -3846,7 +3860,7 @@ void timeSync_WifiLib() {
   // An attempt that has not worked out within SYNC_ATTEMPT_MS: with a time on
   // the clock it is not worth keeping the radio on, so pause and try later.
   if (syncAttempting(syncState) && clockIsSet() && millisNow - syncAttemptSince >= SYNC_ATTEMPT_MS) {
-    Serial.println("NTP sync did not work out - trying again in 10 min");
+    Console.println("NTP sync did not work out - trying again in 10 min");
     setSyncState(SYNC_PAUSED);
   }
   switch (syncState) {
@@ -3867,7 +3881,7 @@ void timeSync_WifiLib() {
       // after boot although the WiFi was connected. A station that has dropped
       // out has to join again first.
       if (millisNow - syncLastAsk > NTP_RETRY_MS) {
-        Serial.println("NTP Retry");
+        Console.println("NTP Retry");
         setSyncState(stationUp() ? SYNC_FETCHING : SYNC_JOINING);
       }
       break;
@@ -3882,22 +3896,22 @@ void timeSync_WifiLib() {
 // The M4's WiFiNINA adds the AP-mode values 8 = listening, 9 = station joined
 // (and returns 255 when the SPI reply to the co-processor timed out).
 void printWifiStatus() {
-  Serial.print("WiFi Status: ");
-  Serial.println(WiFi.status());
+  Console.print("WiFi Status: ");
+  Console.println(WiFi.status());
 
   // print the SSID of the network you're attached to:
-  Serial.print("SSID: ");
-  Serial.println(WiFi.SSID());
+  Console.print("SSID: ");
+  Console.println(WiFi.SSID());
 
   // print your board's IP address:
   IPAddress ip = WiFi.localIP();
-  Serial.print("IP Address: ");
-  Serial.println(ip);
+  Console.print("IP Address: ");
+  Console.println(ip);
 
   // print the received signal strength:
   long rssi = WiFi.RSSI();
-  Serial.print("signal strength (dBm): ");
-  Serial.println(rssi);
+  Console.print("signal strength (dBm): ");
+  Console.println(rssi);
 }
 
 /* ======================================================================
@@ -3916,7 +3930,7 @@ void loadSettings() {
   if (settings.magic != SETTINGS_MAGIC) {
     settings = DEFAULTS;
     saveSettings();
-    Serial.println("Settings: defaults written to flash");
+    Console.println("Settings: defaults written to flash");
   } else if (settings.settingsRev < SETTINGS_REV) {
     // Migration ladder. A rev 0 blob was written when settingsRev and watchface
     // were still struct padding, so do not read a meaning into what is in them -
@@ -3927,7 +3941,7 @@ void loadSettings() {
     // 32 px in landscape: that times 32 is the time it took then.
     if (settings.settingsRev < 2) { settings.classic.flyInTime = flyInUnits((long)settings.classic.flyInTime * 32); }
     saveSettings();   // stamps the new revision
-    Serial.print("Settings: stored layout migrated to rev "); Serial.println(SETTINGS_REV);
+    Console.print("Settings: stored layout migrated to rev "); Console.println(SETTINGS_REV);
   }
 #if WATCHFACE_TETRIS
   loadFaceSettings();   // the faces' own blobs
@@ -3947,7 +3961,7 @@ void loadUiSettings() {
   if (uiSettings.inputProfile >= INPUT_PROFILE_COUNT) { uiSettings.inputProfile = 0; }
   if (uiSettings.syncDays > SYNC_DAYS_MAX) { uiSettings.syncDays = UI_DEFAULTS.syncDays; }
   uiSettings.gestureMount &= 3;
-  Serial.print("Input profile: "); Serial.println(INPUT_PROFILES[uiSettings.inputProfile].name);
+  Console.print("Input profile: "); Console.println(INPUT_PROFILES[uiSettings.inputProfile].name);
 }
 
 void saveUiSettings() {
@@ -3973,7 +3987,7 @@ void loadWifiCreds() {
   strncpy(wifiCreds.pass, SECRET_PASS, sizeof(wifiCreds.pass) - 1);
   if (wifiStored()) {
     saveWifiCreds();
-    Serial.println("WiFi: the credentials of the build were copied into flash");
+    Console.println("WiFi: the credentials of the build were copied into flash");
   }
 #endif
 }
@@ -3992,7 +4006,7 @@ void forgetWifi() {
   wifiCreds.verified = 0;
   saveWifiCreds();
   joinOutcome = JOIN_NOT_TRIED;
-  Serial.println("WiFi: forgotten");
+  Console.println("WiFi: forgotten");
 }
 
 // Write current settings to flash.
@@ -4187,11 +4201,11 @@ void loadFaceKeys() {
       memcpy(faceKeys, codes, sizeof(codes));
       faceKeysOwn = true;
     } else {
-      Serial.println("Face shortcuts: with the inputs found none opens the menu - the profile's apply");
+      Console.println("Face shortcuts: with the inputs found none opens the menu - the profile's apply");
     }
   }
-  Serial.print("Face shortcuts: ");
-  Serial.println(faceKeysOwn ? "set on the Inputs page" : "the profile's");
+  Console.print("Face shortcuts: ");
+  Console.println(faceKeysOwn ? "set on the Inputs page" : "the profile's");
 }
 
 void saveFaceKeys() {
@@ -4301,7 +4315,7 @@ void holdStep(InputFunction fn) {
 void holdEnd(InputFunction fn) {
   if (fn == FN_BRIGHT_FADE) {   // keep the faded brightness
     saveSettings();
-    Serial.print("Brightness set to "); Serial.println(settings.brightness);
+    Console.print("Brightness set to "); Console.println(settings.brightness);
   }
 }
 
@@ -4450,11 +4464,11 @@ void updateInput() {
 void gestureBegin() {
   sensorTries[SENSOR_GESTURE] = sensorBegin(SENSOR_GESTURE, []() { return gestureSensor.begin(&Wire) != 0; });
   gestureOK = sensorTries[SENSOR_GESTURE] != 0;
-  if (!gestureOK) { Serial.println("PAJ7620U2 not found - no gestures"); return; }
+  if (!gestureOK) { Console.println("PAJ7620U2 not found - no gestures"); return; }
   gestureTune(true);
   if (GESTURE_INT >= 0) { pinMode((uint8_t)GESTURE_INT, INPUT_PULLUP); }
-  Serial.print("PAJ7620U2 found, read ");
-  Serial.println(GESTURE_INT >= 0 ? "on its INT line" : "by asking it every 50 ms");
+  Console.print("PAJ7620U2 found, read ");
+  Console.println(GESTURE_INT >= 0 ? "on its INT line" : "by asking it every 50 ms");
 }
 
 // A gesture of the sensor as an event. A swipe's direction is turned into the
@@ -4523,7 +4537,7 @@ void updateGestures() {
     uint8_t dbg[2] = { 0, 0 };
     gestureReadRegs(0xB6, dbg, 2);
     if (r43 || r44 || dbg[0] != b6Last || dbg[1] != b7Last) {
-      Serial.printf("Gesture raw: 0x43=%02X 0x44=%02X 0xB6=%u waves %u aborts %u, %lu ms after the last\n", r43, r44,
+      Console.printf("Gesture raw: 0x43=%02X 0x44=%02X 0xB6=%u waves %u aborts %u, %lu ms after the last\n", r43, r44,
                     dbg[0], dbg[1] & 0x0F, (dbg[1] >> 4) & 0x07, millisNow - rawAt);
       rawAt = millisNow;
       if ((dbg[1] & 0x0F) != (b7Last & 0x0F)) { panelDirty = true; }
@@ -4551,12 +4565,12 @@ void updateGestures() {
   if (gestureAt) { n = snprintf(after, sizeof(after), ", %lu ms after the last", millisNow - gestureAt); }
   if (r43 & (r43 - 1)) { snprintf(after + n, sizeof(after) - n, ", 0x43=%02X", r43); }
   if (why) {
-    Serial.printf("Gesture: %s - left out, %s%s (sensor %s, turned %u, panel %u)\n", label, why, after,
+    Console.printf("Gesture: %s - left out, %s%s (sensor %s, turned %u, panel %u)\n", label, why, after,
                   gestureRawName(g), uiSettings.gestureMount, screenRotation);
     if (screen == SCREEN_GESTURE_TEST) { gestureTestCount++; panelDirty = true; }
     return;
   }
-  Serial.printf("Gesture: %s%s (sensor %s, turned %u, panel %u)\n", label, after, gestureRawName(g),
+  Console.printf("Gesture: %s%s (sensor %s, turned %u, panel %u)\n", label, after, gestureRawName(g),
                 uiSettings.gestureMount, screenRotation);
   gestureLastEv = (uint8_t)ev;
   gestureAt   = millisNow;
@@ -4584,7 +4598,7 @@ void updateApproach() {
     if (!objectNearSince) { objectNearSince = millisNow; }
     if (!approachReported && millisNow - objectNearSince >= APPROACH_MS) {
       approachReported = true;
-      Serial.printf("Gesture sensor: a hand near for %lu ms\n", millisNow - objectNearSince);
+      Console.printf("Gesture sensor: a hand near for %lu ms\n", millisNow - objectNearSince);
       handleInput(EV_APPROACH, 1);
     }
   } else {
@@ -4677,7 +4691,7 @@ void gestureTune(bool on) {
   gestureWriteReg(0xCF, on ? 0x62 : 0x64);
   gestureWriteReg(0x91, on ? 0x0C : 0x06);
   gestureTuned = on;
-  Serial.printf("Gesture sensor: %s\n", on ? "wave settings of the datasheet v1.5 (0xCF=0x62, 0x91=0x0C)"
+  Console.printf("Gesture sensor: %s\n", on ? "wave settings of the datasheet v1.5 (0xCF=0x62, 0x91=0x0C)"
                                            : "wave settings of the library (0xCF=0x64, 0x91=0x06)");
 }
 
@@ -4710,14 +4724,14 @@ bool gestureTestStart() {
   gestureSeenCount = 0;
   gestureNearAt    = 0;
   openScreen(SCREEN_GESTURE_TEST);
-  Serial.println("Gesture test: on");
+  Console.println("Gesture test: on");
   return true;
 }
 
 void gestureTestStop() {
   if (screen != SCREEN_GESTURE_TEST) { return; }
   closeScreen();
-  Serial.println("Gesture test: off");
+  Console.println("Gesture test: off");
 }
 
 // While the test is up: what the sensor sees in front of it, every
@@ -4802,14 +4816,14 @@ bool gestureHeldAtBoot() {
     if (!near) { delay(30); }
   }
   if (!near) { return false; }
-  Serial.print("Gesture sensor: something near at boot, brightness ");
-  Serial.print(gestureSensor.getObjectBrightness());
-  Serial.print(", size "); Serial.println(gestureSensor.getObjectSize());
+  Console.print("Gesture sensor: something near at boot, brightness ");
+  Console.print(gestureSensor.getObjectBrightness());
+  Console.print(", size "); Console.println(gestureSensor.getObjectSize());
   bootStatus("HOLD");
   for (unsigned long t0 = millis(); millis() - t0 < APPROACH_BOOT_MS; ) {
     delay(50);
     if (!gestureSensor.isObjectInView()) {
-      Serial.println("Gesture sensor: gone again");
+      Console.println("Gesture sensor: gone again");
       bootStatus("CLOCK");
       return false;
     }
@@ -4818,11 +4832,11 @@ bool gestureHeldAtBoot() {
   for (unsigned long t0 = millis(); millis() - t0 < APPROACH_LET_GO_MS; ) {
     delay(50);
     if (!gestureSensor.isObjectInView()) {
-      Serial.println("Gesture sensor: let go - the hotspot opens");
+      Console.println("Gesture sensor: let go - the hotspot opens");
       return true;
     }
   }
-  Serial.println("Gesture sensor: still near after the hold - an object, not a hand: the clock starts as usual");
+  Console.println("Gesture sensor: still near after the hold - an object, not a hand: the clock starts as usual");
   bootStatus("CLOCK");
   return false;
 }
@@ -4985,7 +4999,7 @@ void timeEditorCommit() {
   time_t local = (time_t)daysFromCivil(editTime[TF_YEAR], editTime[TF_MONTH], editTime[TF_DAY]) * 86400
                + editTime[TF_HOUR] * 3600L + editTime[TF_MINUTE] * 60L;
   setClockTo(localToUtc(local), TIME_MANUAL);
-  Serial.println("Time set in the menu");
+  Console.println("Time set in the menu");
   closeScreen();
   showTimeBanner();
 }
@@ -5045,7 +5059,7 @@ void editorCommit() {
       settings.tzOffset = TZONES[editIndex].off;
       setDstMode(settings.dst);   // Auto follows the new zone's rule at once
       saveSettings();
-      Serial.print("Timezone -> "); Serial.println(settings.tzOffset);
+      Console.print("Timezone -> "); Console.println(settings.tzOffset);
       showTimeBanner();
       break;
     case ITEM_DST:
@@ -5053,7 +5067,7 @@ void editorCommit() {
       if (!changed) { break; }
       setDstMode(DST_OPTIONS[editIndex]);
       saveSettings();
-      Serial.print("DST mode -> "); Serial.println(settings.dst);
+      Console.print("DST mode -> "); Console.println(settings.dst);
       showTimeBanner();
       break;
     default:
@@ -5125,14 +5139,14 @@ void cycleDstMode() {
   uint8_t r, g, b;
   dstColour(r, g, b);
   showBanner((settings.dst == DST_AUTO) ? "auto" : (settings.dst == DST_SUMMER) ? "summer" : "winter", nullptr, r, g, b);
-  Serial.print("DST mode -> "); Serial.println(settings.dst);
+  Console.print("DST mode -> "); Console.println(settings.dst);
 }
 
 // Toggle the BH1750 auto-brightness on/off and save it.
 void toggleAutoBright() {
   settings.autoBright = settings.autoBright ? 0 : 1;
   saveSettings();
-  Serial.print("Auto-brightness -> "); Serial.println(settings.autoBright);
+  Console.print("Auto-brightness -> "); Console.println(settings.autoBright);
 }
 
 // FN_TOGGLE_AUTO (Classic: 2x on the face), where nothing on the screen shows
@@ -5180,13 +5194,13 @@ void apRadioUp() {
   apWatchdogLast = millis(); // fresh grace period before the watchdog polls again
   apLastActivity = millis();
   apBadStatus = 0;
-  Serial.print("AP "); Serial.print(up ? "up" : "NOT up");
-  Serial.print(" at "); Serial.println(apIP);
+  Console.print("AP "); Console.print(up ? "up" : "NOT up");
+  Console.print(" at "); Console.println(apIP);
 }
 
 void startAPMode() {
   if (apActive) { return; }
-  Serial.println("Starting config AP...");
+  Console.println("Starting config AP...");
   apActive = true;
   millisNow = millis();
   // The hotspot takes the radio: a sync attempt under way is cut off, and a
@@ -5212,7 +5226,7 @@ void scanNetworks() {
   int found = netScan();
   seenCount = 0;
   scanFailed = (found < 0);
-  if (scanFailed) { Serial.print("WiFi scan failed: "); Serial.println(found); }
+  if (scanFailed) { Console.print("WiFi scan failed: "); Console.println(found); }
   for (int i = 0; i < found; i++) {
     SeenNetwork net;
     netScanResult(i, net.ssid, sizeof(net.ssid), net.rssi, net.open);
@@ -5236,7 +5250,7 @@ void scanNetworks() {
       SeenNetwork t = seenNetworks[j]; seenNetworks[j] = seenNetworks[j - 1]; seenNetworks[j - 1] = t;
     }
   }
-  Serial.print("WiFi scan: "); Serial.print(seenCount); Serial.println(" networks");
+  Console.print("WiFi scan: "); Console.print(seenCount); Console.println(" networks");
 }
 
 // Close the hotspot (BACK on its screen, or 3x with Classic clicks): leave
@@ -5244,7 +5258,7 @@ void scanNetworks() {
 // down differs per board, see netApEnd() in board_hal.h.
 void stopAPMode() {
   if (!apActive) { return; }
-  Serial.println("Stopping config AP...");
+  Console.println("Stopping config AP...");
   apActive = false;
 #if BOARD_BUTTON_COUNT == 0
   apAutoCloseAt = 0;
@@ -5259,32 +5273,76 @@ void stopAPMode() {
   if (syncStateDue(syncState)) { setSyncState(SYNC_JOINING); }
   if (radioUsers && wifiStored()) {
     stationJoin();
-    Serial.println("Enabled Wifi for a pending sync or the info band");
+    Console.println("Enabled Wifi for a pending sync or the info band");
   } else {
     netRadioOff();
     stationState = STA_OFF;
-    Serial.println("Disabled Wifi");
+    Console.println("Disabled Wifi");
   }
   setScreen(SCREEN_FACE); // back to the normal clock, in the current orientation
 }
 
+#if CLOCK_CONSOLE
+// The console's commands, in builds with a console (console.h; a release
+// build takes none):
+// - "log 1" / "log 2": the log level until the next start (console.h).
+// - "fetch" makes every source of the info band due now (weather, warnings
+//   over HTTPS), to watch the panel output while they are fetched.
+// - "lan on" / "lan off" switch the web app on the home network, as its
+//   switch on the hotspot's page does (with the password set there).
+// On the wall clock also its own (wallCommand()).
+void consoleCommands() {
+  static char line[32];
+  static uint8_t len = 0;
+  while (Console.available() > 0) {
+    char c = (char)Console.read();
+    if (c != '\n' && c != '\r') {
+      if (len < sizeof(line) - 1) { line[len++] = c; }
+      continue;
+    }
+    line[len] = '\0';
+    len = 0;
+    unsigned level = 0;
+    if (sscanf(line, "log %u", &level) == 1 && level >= 1 && level <= 2) {
+      consoleLevel = (uint8_t)level;
+      Console.printf("Log level %u until the next start\n", level);
+    }
+#if BAND_DATA
+    if (strcmp(line, "fetch") == 0) {
+      for (uint8_t f = 0; f < FEED_COUNT; f++) { feedRuns[f].dueAt = millisNow; }
+      Console.println("Info band: every source due now");
+    }
+#endif
+#if WEBUI_APP
+    bool lanOn = strcmp(line, "lan on") == 0;
+    if (lanOn || strcmp(line, "lan off") == 0) {
+      lanSettings.on = lanOn ? 1 : 0;
+      saveLanSettings();
+      lanWantRadio();
+      Console.printf("Web app on the home network: %s\n", lanOn ? "on" : "off");
+    }
+#endif
 #if BOARD_WAVESHARE_WALL
-// The wall clock's USB console, which has no buttons to reach the hotspot with
-// once it runs:
-// - "black" switches the panels dark until the next start. A flash resets the
+    wallCommand(line);
+#endif
+  }
+}
+#endif
+
+#if BOARD_WAVESHARE_WALL
+#if CLOCK_CONSOLE
+// The wall clock's own commands on the console (consoleCommands()):
+// - "black" switches the panels dark until the next start, as POST /api/black
+//   does in every build. A flash resets the
 //   chip in the middle of a refresh, and with nobody driving the panels the row
 //   pair they show then may stay lit at full duty while it runs (bench rule of
 //   2026-10-17: the picture black before every flash).
-// - "lan on" / "lan off" switch the web app on the home network, as its
-//   switch on the hotspot's page does (with the password set there).
 // - "test <panel> <brightness>" shows a test picture to measure the panels'
 //   current with: that panel (1-3 the top row from the left, 4-6 the bottom
 //   row; 0 none) in the clock's white at that brightness, the rest dark. The
 //   clock stands still meanwhile; "test off" gives the wall back.
 // - "bus <divider>" sets the panel bus to 160 MHz / divider while it runs,
 //   to judge faster clocks than the driver's 13.3 MHz by eye.
-// - "fetch" makes every source of the info band due now (weather, warnings
-//   over HTTPS), to watch the panel output while they are fetched.
 // - "prio <0-5>" sets the panel output's DMA channel priority among the
 //   GDMA channels (PANEL_DMA_PRIORITY from the start), until the next start.
 // - "gdma" lists every GDMA channel's peripheral, priority and weight.
@@ -5304,80 +5362,55 @@ void stopAPMode() {
 //   and checks it; "sd remount" reads the card anew; "sd freq <kHz>" mounts
 //   it at another clock; "sd stress" reads its largest GIFs ahead in turn
 //   (gifCardCommand()).
-void wallConsole() {
-  static char line[32];
-  static uint8_t len = 0;
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
-    if (c != '\n' && c != '\r') {
-      if (len < sizeof(line) - 1) { line[len++] = c; }
-      continue;
-    }
-    line[len] = '\0';
-    if (strcmp(line, "black") == 0) {
-      matrix.holdDark();
-      Serial.println("Panels dark until the next start");
-    }
-    unsigned panel = 0, bright = 0, div = 0, prio = 0;
-    if (strcmp(line, "test off") == 0) {
-      matrix.endTestPicture();
-      matrix.setBrightness(panelBrightness());
-      panelDirty = true;
-      Serial.println("Test picture off");
-    } else if (sscanf(line, "test %u %u", &panel, &bright) == 2 && panel <= 6 && bright <= 255) {
-      matrix.testPicture((uint8_t)panel, (uint8_t)bright);
-      Serial.printf("Test picture: panel %u white at brightness %u (the cap is %u), the rest dark\n",
-                    panel, bright, (unsigned)PANEL_BRIGHT_CAP);
-    } else if (sscanf(line, "bus %u", &div) == 1 && div >= 8 && div <= 32) {
-      matrix.setBusDivider((uint8_t)div);
-      Serial.printf("Panel bus: 160 MHz / %u = %u kHz, refresh %lu Hz\n", div, 160000U / div,
-                    (unsigned long)matrix.refreshRate());
-    } else if (sscanf(line, "prio %u", &prio) == 1 && prio <= 5) {
-      bool ok = matrix.setDmaPriority((uint8_t)prio);
-      Serial.printf("Panel output: DMA priority %u %s\n", prio, ok ? "set" : "NOT set");
-    } else if (strcmp(line, "gdma") == 0) {
-      wallGdmaList();
-    } else if (strcmp(line, "crypto") == 0 || strcmp(line, "crypto ext") == 0) {
-      wallCryptoTest(line[6] != '\0');
-    } else if (strcmp(line, "rtc") == 0) {
-      wallRtcReport();
-#if KNOCK_SENSING
-    } else if (strcmp(line, "imu") == 0) {
-      knock.report();
-#endif
-    } else if (strncmp(line, "sd", 2) == 0 && (line[2] == '\0' || line[2] == ' ')) {
-      gifCardCommand(line);
-    }
-#if BAND_DATA
-    if (strcmp(line, "status test") == 0) {
-      bandStatusTestAt = millisNow ? millisNow : 1;
-      bandLocalDone = false;   // worked out anew at once
-      Serial.println("Band: the clock status for 2 min, as if the time sync were failing");
-    }
-    bool tlsInt = strcmp(line, "tlsmem int") == 0;
-    if (tlsInt || strcmp(line, "tlsmem ext") == 0) {
-      feedTlsInternal() = tlsInt;
-      Serial.printf("TLS memory: %s first\n", tlsInt ? "internal RAM" : "PSRAM");
-    }
-#endif
-#if BAND_DATA
-    if (strcmp(line, "fetch") == 0) {
-      for (uint8_t f = 0; f < FEED_COUNT; f++) { feedRuns[f].dueAt = millisNow; }
-      Serial.println("Info band: every source due now");
-    }
-#endif
-#if WEBUI_APP
-    bool lanOn = strcmp(line, "lan on") == 0;
-    if (lanOn || strcmp(line, "lan off") == 0) {
-      lanSettings.on = lanOn ? 1 : 0;
-      saveLanSettings();
-      lanWantRadio();
-      Serial.printf("Web app on the home network: %s\n", lanOn ? "on" : "off");
-    }
-#endif
-    len = 0;
+void wallCommand(const char *line) {
+  if (strcmp(line, "black") == 0) {
+    matrix.holdDark();
+    Console.println("Panels dark until the next start");
   }
+  unsigned panel = 0, bright = 0, div = 0, prio = 0;
+  if (strcmp(line, "test off") == 0) {
+    matrix.endTestPicture();
+    matrix.setBrightness(panelBrightness());
+    panelDirty = true;
+    Console.println("Test picture off");
+  } else if (sscanf(line, "test %u %u", &panel, &bright) == 2 && panel <= 6 && bright <= 255) {
+    matrix.testPicture((uint8_t)panel, (uint8_t)bright);
+    Console.printf("Test picture: panel %u white at brightness %u (the cap is %u), the rest dark\n",
+                  panel, bright, (unsigned)PANEL_BRIGHT_CAP);
+  } else if (sscanf(line, "bus %u", &div) == 1 && div >= 8 && div <= 32) {
+    matrix.setBusDivider((uint8_t)div);
+    Console.printf("Panel bus: 160 MHz / %u = %u kHz, refresh %lu Hz\n", div, 160000U / div,
+                  (unsigned long)matrix.refreshRate());
+  } else if (sscanf(line, "prio %u", &prio) == 1 && prio <= 5) {
+    bool ok = matrix.setDmaPriority((uint8_t)prio);
+    Console.printf("Panel output: DMA priority %u %s\n", prio, ok ? "set" : "NOT set");
+  } else if (strcmp(line, "gdma") == 0) {
+    wallGdmaList();
+  } else if (strcmp(line, "crypto") == 0 || strcmp(line, "crypto ext") == 0) {
+    wallCryptoTest(line[6] != '\0');
+  } else if (strcmp(line, "rtc") == 0) {
+    wallRtcReport();
+#if KNOCK_SENSING
+  } else if (strcmp(line, "imu") == 0) {
+    knock.report();
+#endif
+  } else if (strncmp(line, "sd", 2) == 0 && (line[2] == '\0' || line[2] == ' ')) {
+    gifCardCommand(line);
+  }
+#if BAND_DATA
+  if (strcmp(line, "status test") == 0) {
+    bandStatusTestAt = millisNow ? millisNow : 1;
+    bandLocalDone = false;   // worked out anew at once
+    Console.println("Band: the clock status for 2 min, as if the time sync were failing");
+  }
+  bool tlsInt = strcmp(line, "tlsmem int") == 0;
+  if (tlsInt || strcmp(line, "tlsmem ext") == 0) {
+    feedTlsInternal() = tlsInt;
+    Console.printf("TLS memory: %s first\n", tlsInt ? "internal RAM" : "PSRAM");
+  }
+#endif
 }
+#endif
 
 // The panel output stops for good when the DMA cannot read the frame buffer
 // out of PSRAM fast enough: the clock runs on and the wall stays dark (bus at
@@ -5395,7 +5428,7 @@ void wallOutputWatch() {
   if (!seenRunning) {
     if (!toldNever && millisNow > 15000) {
       toldNever = true;
-      Serial.println("Panel output: never seen running - the watch does nothing");
+      Console.println("Panel output: never seen running - the watch does nothing");
     }
     return;
   }
@@ -5405,17 +5438,17 @@ void wallOutputWatch() {
   if (stops <= 20 || stops % 100 == 0) {
 #if BAND_DATA
     if (feedBusy) {
-      Serial.printf("Panel output stopped (%lu since the start), a fetch running for %lu ms; started again\n",
+      Console.printf("Panel output stopped (%lu since the start), a fetch running for %lu ms; started again\n",
                     (unsigned long)stops, millisNow - feedSentAt);
     } else {
-      Serial.printf("Panel output stopped (%lu since the start), no fetch running (the last %lu ms ago); started again\n",
+      Console.printf("Panel output stopped (%lu since the start), no fetch running (the last %lu ms ago); started again\n",
                     (unsigned long)stops, millisNow - feedSentAt);
     }
 #else
-    Serial.printf("Panel output stopped (%lu since the start); started again\n", (unsigned long)stops);
+    Console.printf("Panel output stopped (%lu since the start); started again\n", (unsigned long)stops);
 #endif
 #if GIF_PLAYBACK
-    if (cardReading()) { Serial.println("Panel output stopped while the card was being read"); }
+    if (cardReading()) { Console.println("Panel output stopped while the card was being read"); }
 #endif
   }
   matrix.restartOutput();
@@ -5429,13 +5462,13 @@ void wallGdmaList() {
                                       "ADC_DAC", "RMT" };
   for (uint8_t i = 0; i < 5; i++) {
     unsigned o = GDMA.channel[i].out.peri_sel.sel, n = GDMA.channel[i].in.peri_sel.sel;
-    Serial.printf("GDMA %u: out %-7s priority %u weight %2u, L2 FIFO code %u | in %-7s priority %u weight %2u\n", i,
+    Console.printf("GDMA %u: out %-7s priority %u weight %2u, L2 FIFO code %u | in %-7s priority %u weight %2u\n", i,
                   o < 10 ? PERI[o] : "-", (unsigned)GDMA.channel[i].out.pri.tx_pri,
                   (unsigned)GDMA.channel[i].out.weight.tx_weight, (unsigned)GDMA.sram_size[i].out.out_size,
                   n < 10 ? PERI[n] : "-", (unsigned)GDMA.channel[i].in.pri.rx_pri,
                   (unsigned)GDMA.channel[i].in.weight.rx_weight);
   }
-  Serial.printf("GDMA: priority arbitration %s\n", GDMA.misc_conf.arb_pri_dis ? "OFF" : "on");
+  Console.printf("GDMA: priority arbitration %s\n", GDMA.misc_conf.arb_pri_dis ? "OFF" : "on");
 }
 
 // Console "crypto": what the crypto engine does during a TLS handshake, on
@@ -5456,7 +5489,7 @@ void wallCryptoTest(bool external) {
   if (!in || !out) {
     heap_caps_free(in);
     heap_caps_free(out);
-    Serial.println("Crypto test: not enough RAM");
+    Console.println("Crypto test: not enough RAM");
     return;
   }
   for (size_t i = 0; i < N; i++) { in[i] = (uint8_t)(i * 7); }
@@ -5483,7 +5516,7 @@ void wallCryptoTest(bool external) {
   heap_caps_free(in);
   heap_caps_free(out);
   double mb = (double)N * ROUNDS / 1e6;
-  Serial.printf("Crypto test (%s): SHA-256 %lu us (%.2f MB/s), AES-128-CTR %lu us (%.2f MB/s), %u x 16 KB each; "
+  Console.printf("Crypto test (%s): SHA-256 %lu us (%.2f MB/s), AES-128-CTR %lu us (%.2f MB/s), %u x 16 KB each; "
                 "panel output stopped %lu times meanwhile\n", external ? "PSRAM" : "internal RAM",
                 (unsigned long)(t1 - t0), mb / ((t1 - t0) / 1e6), (unsigned long)(t2 - t1), mb / ((t2 - t1) / 1e6),
                 (unsigned)ROUNDS, (unsigned long)(wallOutputStops - stopsBefore));
@@ -5500,7 +5533,7 @@ void apFallback() {
   if (joinTroubleSince == 0) { joinTroubleSince = millisNow ? millisNow : 1; return; }
   if (millisNow - joinTroubleSince < AP_FALLBACK_MS) { return; }
   joinTroubleSince = 0;
-  Serial.println("The home WiFi does not connect: the hotspot opens for 5 minutes");
+  Console.println("The home WiFi does not connect: the hotspot opens for 5 minutes");
   startAPMode();
   apAutoCloseAt = millis() + AP_AUTO_OPEN_MS;
   if (apAutoCloseAt == 0) { apAutoCloseAt = 1; }
@@ -5514,7 +5547,7 @@ void apAutoClose() {
   if (millisNow - apAutoCheckLast < 1000) { return; }
   apAutoCheckLast = millisNow;
   if (netApHasStation()) { return; }
-  Serial.println("Hotspot: its time after the start is over");
+  Console.println("Hotspot: its time after the start is over");
   stopAPMode();
 }
 #endif
@@ -5535,11 +5568,11 @@ void apWatchdog() {
     return;
   }
   apBadStatus++;
-  Serial.print("AP watchdog: radio reports no AP without traffic (");
-  Serial.print(apBadStatus); Serial.println("x)");
+  Console.print("AP watchdog: radio reports no AP without traffic (");
+  Console.print(apBadStatus); Console.println("x)");
   if (apBadStatus < AP_BAD_STATUS_LIMIT) { return; }
   apBadStatus = 0;
-  Serial.println("AP watchdog: restarting AP");
+  Console.println("AP watchdog: restarting AP");
   apRadioUp();
   // Any station is gone after the restart, and the address may have changed:
   // back to the info screen, redrawn either way.
@@ -5901,7 +5934,7 @@ void handleSetTime(Print &out, const String &query) {
       return;
     }
     setClockTo((time_t)t, TIME_PHONE);
-    Serial.print("Time set from a phone: "); Serial.println((unsigned long)t);
+    Console.print("Time set from a phone: "); Console.println((unsigned long)t);
     sendPlainText(out, timeStatusText().c_str());
     return;
   }
@@ -5915,7 +5948,7 @@ void handleSetTime(Print &out, const String &query) {
   }
   time_t local = (time_t)daysFromCivil(y, mo, d) * 86400 + h * 3600 + mi * 60;
   setClockTo(localToUtc(local), TIME_MANUAL);
-  Serial.println("Time set by hand");
+  Console.println("Time set by hand");
   sendMessagePage(out, "Time set", timeStatusText().c_str());
 }
 #endif
@@ -6023,7 +6056,7 @@ String applyWifiForm(const String &body) {
     wifiCreds.verified = 0;          // a new config until a sync has worked over it
     joinOutcome = JOIN_NOT_TRIED;   // whatever happened, happened with the network before
   }
-  Serial.print("WiFi: stored "); Serial.println(wifiCreds.ssid);
+  Console.print("WiFi: stored "); Console.println(wifiCreds.ssid);
   return "";
 }
 
@@ -6514,9 +6547,9 @@ void loadGifSettings() {
     gifStore.write(gifSettings);
   }
   gifSettingsCheck();
-  Serial.printf("GIFs: %s, every %u to %u min for %u s\n", gifSettings.randomOn ? "random on" : "random off",
+  Console.printf("GIFs: %s, every %u to %u min for %u s\n", gifSettings.randomOn ? "random on" : "random off",
                 gifSettings.minMinutes, gifSettings.maxMinutes, gifSettings.seconds);
-  Serial.printf("GIFs: at least %u bright and %u.%u times the clock's\n", gifSettings.minBright,
+  Console.printf("GIFs: at least %u bright and %u.%u times the clock's\n", gifSettings.minBright,
                 gifSettings.brightTimes / 10, gifSettings.brightTimes % 10);
 }
 
@@ -6641,10 +6674,10 @@ bool gifStart(int16_t i, bool ownAccord) {
     if (!gifPackOpen(e, data, size)) { return false; }
   }
   gifPlayer = new (std::nothrow) GifPlayer;
-  if (!gifPlayer) { Serial.println("GIF: no RAM for the decoder"); gifSourceClose(GIF_CLOSE_NOT_NOW); return false; }
+  if (!gifPlayer) { Console.println("GIF: no RAM for the decoder"); gifSourceClose(GIF_CLOSE_NOT_NOW); return false; }
   gifPlayer->decoder.begin(GIF_PALETTE_RGB888);   // gifDrawLine() reads the palette as RGB888
   if (!gifPlayer->decoder.open((uint8_t *)data, size, gifDrawLine)) {
-    Serial.printf("GIF %s: does not open (%d)\n", name, gifPlayer->decoder.getLastError());
+    Console.printf("GIF %s: does not open (%d)\n", name, gifPlayer->decoder.getLastError());
     delete gifPlayer;
     gifPlayer = nullptr;
     gifSourceClose(GIF_CLOSE_BROKEN);
@@ -6661,7 +6694,7 @@ bool gifStart(int16_t i, bool ownAccord) {
   // whose loops were shorter).
   uint32_t lenMs = gifLoopTime > 0 ? min<uint32_t>((uint32_t)gifLoopsPlanned * gifLoopTime, GIF_PLAY_MAX_MS) : playMs;
   if (!panelFitsBeforeChange(lenMs) || (ownAccord && roundNextIn() < lenMs + ROUND_GIF_GAP_MS)) {
-    Serial.printf("GIF %s: its %lu ms have no room before the time's change, dropped\n", name, (unsigned long)lenMs);
+    Console.printf("GIF %s: its %lu ms have no room before the time's change, dropped\n", name, (unsigned long)lenMs);
     gifPlayer->decoder.close();
     delete gifPlayer;
     gifPlayer = nullptr;
@@ -6680,7 +6713,7 @@ bool gifStart(int16_t i, bool ownAccord) {
   gifRotation = matrix.getRotation();
   gifShownAt = millisNow;
   gifNextFrameAt = millisNow;
-  Serial.printf("GIF: %s (%ux%u), %u x %lu ms, brightness %u (clock %u)\n", name, w, h,
+  Console.printf("GIF: %s (%ux%u), %u x %lu ms, brightness %u (clock %u)\n", name, w, h,
                 gifLoopsPlanned, (unsigned long)gifLoopTime, panelBrightness(), effectiveBrightness);
   openScreen(SCREEN_GIF);
   return true;
@@ -6692,7 +6725,7 @@ bool gifStart(int16_t i, bool ownAccord) {
 // after the time's change.
 bool gifRequestFits() {
   if (faceTimeShown()) { return true; }
-  Serial.println("GIF: asked for during the face's change or scene, dropped");
+  Console.println("GIF: asked for during the face's change or scene, dropped");
   return false;
 }
 
@@ -6729,7 +6762,7 @@ void gifUpdate() {
   if (!gifSettings.randomOn || gifCount() == 0) { return; }
   if ((long)(millisNow - gifDueAt) < 0) { return; }
   if (screen != SCREEN_FACE || !decorFree(0, true)) {
-    Serial.println("GIF: due, the panel not free for it - dropped");
+    Console.println("GIF: due, the panel not free for it - dropped");
     gifScheduleNext();
     return;
   }
@@ -6803,7 +6836,7 @@ void gifRender() {
   uint32_t us = micros() - t0;
   frames++; sumUs += us; if (us > maxUs) { maxUs = us; }
   if (millis() - since >= 2000) {
-    Serial.printf("GIF onto the wall: %lu frames, avg %lu max %lu us\n", (unsigned long)frames,
+    Console.printf("GIF onto the wall: %lu frames, avg %lu max %lu us\n", (unsigned long)frames,
                   (unsigned long)(sumUs / frames), (unsigned long)maxUs);
     frames = sumUs = maxUs = 0;
     since = millis();
@@ -6848,7 +6881,7 @@ void drawGif() {
     // start (gifStart()) are not done, so a GIF is never cut off in the middle.
     gifLoops++;
     if (gifLoops >= gifLoopsPlanned) {
-      Serial.printf("GIF: %u whole loops of %lu ms in %lu ms\n", gifLoops, (unsigned long)gifLoopTime,
+      Console.printf("GIF: %u whole loops of %lu ms in %lu ms\n", gifLoops, (unsigned long)gifLoopTime,
                     millisNow - gifShownAt);
       closeScreen();
       return;
@@ -6863,7 +6896,7 @@ void drawGif() {
   }
   int delayMs = 0;
   int more = gifPlayer->decoder.playFrame(false, &delayMs);   // 0: this was the last frame, it still gets shown
-  if (more < 0) { Serial.printf("GIF decode error %d\n", gifPlayer->decoder.getLastError()); }
+  if (more < 0) { Console.printf("GIF decode error %d\n", gifPlayer->decoder.getLastError()); }
   // The last frame is the last one gifLoopMs() found: with more blocks after
   // it (a comment, other data) AnimatedGIF reports more frames and then hands
   // out an empty one, which would stand for 100 ms with the last frame's
@@ -6933,25 +6966,25 @@ void gifPackLoad() {
   GifPackHeader h;
   if (!gifPackPart || esp_partition_read(gifPackPart, 0, &h, sizeof(h)) != ESP_OK
       || memcmp(h.magic, "CLKGPACK", sizeof(h.magic)) != 0) {
-    Serial.println("GIF pack: none");
+    Console.println("GIF pack: none");
     return;
   }
   gifPackState = GIF_PACK_BAD;
   uint32_t indexBytes = (uint32_t)h.count * sizeof(GifPackEntry);
   uint32_t dataFrom = sizeof(h) + indexBytes;
   if (h.version != 1 || h.count == 0 || h.count > GIF_PACK_COUNT_MAX || h.size > gifPackPart->size || dataFrom > h.size) {
-    Serial.println("GIF pack: damaged header");
+    Console.println("GIF pack: damaged header");
     return;
   }
   GifPackEntry *index = (GifPackEntry *)heap_caps_malloc(indexBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!index) { index = (GifPackEntry *)malloc(indexBytes); }
   if (!index) {
-    Serial.println("GIF pack: no RAM for the index");
+    Console.println("GIF pack: no RAM for the index");
     return;
   }
   if (esp_partition_read(gifPackPart, sizeof(h), index, indexBytes) != ESP_OK
       || esp_rom_crc32_le(0, (const uint8_t *)index, indexBytes) != h.indexCrc) {
-    Serial.println("GIF pack: damaged index");
+    Console.println("GIF pack: damaged index");
     free(index);
     return;
   }
@@ -6961,7 +6994,7 @@ void gifPackLoad() {
     bool codecOK = e.codec == GIF_PACK_DEFLATED || (e.codec == GIF_PACK_STORED && e.gifSize == e.size);
     if (!codecOK || e.size == 0 || e.offset < dataFrom || e.offset > h.size || e.size > h.size - e.offset
         || e.gifSize > GIF_PACK_GIF_MAX) {
-      Serial.printf("GIF pack: damaged entry %u\n", n);
+      Console.printf("GIF pack: damaged entry %u\n", n);
       free(index);
       return;
     }
@@ -6969,7 +7002,7 @@ void gifPackLoad() {
   gifPack = index;
   gifPackCount = h.count;
   gifPackState = GIF_PACK_OK;
-  Serial.printf("GIF pack: %u GIFs, %u KB; %u KB PSRAM free\n", gifPackCount, (unsigned)(h.size / 1024),
+  Console.printf("GIF pack: %u GIFs, %u KB; %u KB PSRAM free\n", gifPackCount, (unsigned)(h.size / 1024),
                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 }
 
@@ -7008,7 +7041,7 @@ bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size) {
   if (gifPackMappable(e)) {
     const void *mapped = nullptr;
     if (esp_partition_mmap(gifPackPart, e.offset, e.size, ESP_PARTITION_MMAP_DATA, &mapped, &gifPackMap) != ESP_OK) {
-      Serial.printf("GIF %s: cannot map it\n", e.name);
+      Console.printf("GIF %s: cannot map it\n", e.name);
       return false;
     }
     gifPackMapped = true;
@@ -7016,14 +7049,14 @@ bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size) {
   } else {
     read = (uint8_t *)heap_caps_malloc(e.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!read || esp_partition_read(gifPackPart, e.offset, read, e.size) != ESP_OK) {
-      Serial.printf("GIF %s: cannot read it\n", e.name);
+      Console.printf("GIF %s: cannot read it\n", e.name);
       free(read);
       return false;
     }
     stored = read;
   }
   if (esp_rom_crc32_le(0, stored, e.size) != e.crc) {
-    Serial.printf("GIF %s: damaged in the pack\n", e.name);
+    Console.printf("GIF %s: damaged in the pack\n", e.name);
     free(read);
     gifPackClose();
     return false;
@@ -7045,13 +7078,13 @@ bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size) {
                                            TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
     ok = status == TINFL_STATUS_DONE && out == e.gifSize;
     if (ok) {
-      Serial.printf("GIF %s: inflated %u -> %u bytes in %lu ms\n", e.name, (unsigned)e.size, (unsigned)e.gifSize,
+      Console.printf("GIF %s: inflated %u -> %u bytes in %lu ms\n", e.name, (unsigned)e.size, (unsigned)e.gifSize,
                     millis() - started);
     } else {
-      Serial.printf("GIF %s: does not inflate (%d)\n", e.name, (int)status);
+      Console.printf("GIF %s: does not inflate (%d)\n", e.name, (int)status);
     }
   } else {
-    Serial.printf("GIF %s: no PSRAM to inflate it\n", e.name);
+    Console.printf("GIF %s: no PSRAM to inflate it\n", e.name);
   }
   free(inflator);
   if (gifPackMapped) {   // the stored bytes are done with
@@ -7091,7 +7124,7 @@ void gifPackClose() {
 
 // At start-up: the card's task, and the card read for the first time.
 void gifCardBegin() {
-  if (!cardBegin()) { Serial.println("Card: no RAM for its task"); return; }
+  if (!cardBegin()) { Console.println("Card: no RAM for its task"); return; }
   cardRemountWanted = true;
 }
 
@@ -7113,7 +7146,7 @@ int16_t gifCardNext() {
   for (uint8_t s = 0; s < 2; s++) {
     if (cardSlot[s].state == CARD_SLOT_READY && s != cardLastSlot) { return cardSlot[s].index; }
   }
-  Serial.println("GIF: the card's next one is not read yet");
+  Console.println("GIF: the card's next one is not read yet");
   return -1;
 }
 
@@ -7169,10 +7202,10 @@ void gifCardResult() {
     cardRealKhz = r.freqKhz;
     gifFromCard = r.ok;
     if (gifFromCard) { gifLast = -1; }   // it was the pack's
-    Serial.printf("Card: %s, %lu ms%s\n", r.text, (unsigned long)r.ms,
+    Console.printf("Card: %s, %lu ms%s\n", r.text, (unsigned long)r.ms,
                   gifFromCard ? " - the GIFs come from the card" : cardMounted ? " - no GIFs on it, the pack plays" : "");
     if (cardMounted) {
-      Serial.printf("Card: %lu MB, %lu MB free, %lu kHz\n", (unsigned long)cardMb, (unsigned long)cardFreeMb,
+      Console.printf("Card: %lu MB, %lu MB free, %lu kHz\n", (unsigned long)cardMb, (unsigned long)cardFreeMb,
                     (unsigned long)cardRealKhz);
     }
   } else if (r.kind == CARD_FETCH_JOB) {
@@ -7180,7 +7213,7 @@ void gifCardResult() {
     if (s < 0 || r.index < 0 || r.index >= cardList.count) { heap_caps_free(r.data); return; }
     CardGif &g = cardList.gifs[r.index];
     if (!r.ok) {
-      Serial.printf("Card: %s %s - left out\n", g.name, r.text);
+      Console.printf("Card: %s %s - left out\n", g.name, r.text);
       g.bad = true;
       gifCardFreeSlot((uint8_t)s);
       if (++cardFetchFails >= 3) { cardRemountWanted = true; }   // the card may be gone
@@ -7190,18 +7223,18 @@ void gifCardResult() {
     cardSlot[s] = { r.data, r.size, r.index, CARD_SLOT_READY };
     g.width = r.width;
     g.height = r.height;
-    Serial.printf("Card: %s read ahead, %lu KB in %lu ms\n", g.name, (unsigned long)(r.size / 1024),
+    Console.printf("Card: %s read ahead, %lu KB in %lu ms\n", g.name, (unsigned long)(r.size / 1024),
                   (unsigned long)r.ms);
     if (g.loopMs == 0) { g.loopMs = gifLoopMs(r.data, r.size, g.frames); }
     if (!gifFits(r.index)) {   // put there by hand: too large, or its loop too long
-      Serial.printf("Card: %s (%ux%u, %lu ms) does not fit the wall - left out\n", g.name, g.width, g.height,
+      Console.printf("Card: %s (%ux%u, %lu ms) does not fit the wall - left out\n", g.name, g.width, g.height,
                     (unsigned long)g.loopMs);
       g.bad = true;
       gifCardFreeSlot((uint8_t)s);
     }
   } else {
     double mb = r.bytes / 1e6;
-    Serial.printf("Card: read %.1f MB in %lu ms, %.2f MB/s; %lu read errors, %lu not as the index says; "
+    Console.printf("Card: read %.1f MB in %lu ms, %.2f MB/s; %lu read errors, %lu not as the index says; "
                   "the panel output stopped %lu times meanwhile\n", mb, (unsigned long)r.ms,
                   r.ms ? mb / (r.ms / 1000.0) : 0.0, (unsigned long)r.readErrors, (unsigned long)r.shaWrong,
                   (unsigned long)(wallOutputStops - cardSpeedStopsBefore));
@@ -7238,21 +7271,21 @@ void gifCardCommand(const char *line) {
       if (cardList.gifs[i].bad) { bad++; }
       if (!cardList.gifs[i].hasSha) { byHand++; }
     }
-    Serial.printf("Card: %s, %u GIFs (%u not in the index, %u left out), %lu MB, %lu MB free, %lu kHz; source %s; "
+    Console.printf("Card: %s, %u GIFs (%u not in the index, %u left out), %lu MB, %lu MB free, %lu kHz; source %s; "
                   "slots %d/%d (index %d/%d), last %d\n", cardMounted ? "mounted" : "none", cardList.count, byHand, bad,
                   (unsigned long)cardMb, (unsigned long)cardFreeMb, (unsigned long)cardRealKhz,
                   gifFromCard ? "the card" : "the pack", cardSlot[0].state, cardSlot[1].state, cardSlot[0].index,
                   cardSlot[1].index, cardLastSlot);
   } else if (strcmp(line, "sd remount") == 0) {
     cardRemountWanted = true;
-    Serial.println("Card: read anew as soon as no GIF plays");
+    Console.println("Card: read anew as soon as no GIF plays");
   } else if (sscanf(line, "sd freq %u", &khz) == 1 && khz >= 400 && khz <= 40000) {
     cardFreqKhz = khz;
     cardRemountWanted = true;
-    Serial.printf("Card: %u kHz from the next mount (now)\n", khz);
+    Console.printf("Card: %u kHz from the next mount (now)\n", khz);
   } else if (strcmp(line, "sd stress") == 0) {
     // The 10 largest files, then the 4 largest 192x128 not among them.
-    if (!gifFromCard || cardJobBusy || screen == SCREEN_GIF) { Serial.println("Card: not now (no card, busy, or a GIF plays)"); return; }
+    if (!gifFromCard || cardJobBusy || screen == SCREEN_GIF) { Console.println("Card: not now (no card, busy, or a GIF plays)"); return; }
     cardStressCount = 0;
     for (uint8_t pass = 0; pass < 2; pass++) {
       uint8_t want = pass == 0 ? 10 : 4;
@@ -7271,15 +7304,15 @@ void gifCardCommand(const char *line) {
     }
     cardStressAt = 0;
     for (uint8_t s = 0; s < 2; s++) { if (cardSlot[s].state == CARD_SLOT_READY && s != cardLastSlot) { gifCardFreeSlot(s); } }
-    Serial.printf("Card: the next %u GIFs read ahead are the largest:", cardStressCount);
-    for (uint8_t t = 0; t < cardStressCount; t++) { Serial.printf(" %s", cardList.gifs[cardStress[t]].name); }
-    Serial.println();
+    Console.printf("Card: the next %u GIFs read ahead are the largest:", cardStressCount);
+    for (uint8_t t = 0; t < cardStressCount; t++) { Console.printf(" %s", cardList.gifs[cardStress[t]].name); }
+    Console.println();
   } else if (strcmp(line, "sd speed") == 0) {
-    if (!cardMounted || cardJobBusy || screen == SCREEN_GIF) { Serial.println("Card: not now (no card, busy, or a GIF plays)"); return; }
+    if (!cardMounted || cardJobBusy || screen == SCREEN_GIF) { Console.println("Card: not now (no card, busy, or a GIF plays)"); return; }
     cardSpeedList() = &cardList;
     cardSpeedStopsBefore = wallOutputStops;
     gifCardSend(CARD_SPEED_JOB, -1);
-    Serial.println("Card: reading every GIF once ...");
+    Console.println("Card: reading every GIF once ...");
   }
 }
 #endif
@@ -7308,14 +7341,14 @@ void loadFeedSettings() {
   if (!roundChoice(feedSettings.roundMinutes)) { feedSettings.roundMinutes = FEED_DEFAULTS.roundMinutes; }
   feedTaskOK = feedBegin();
   if (!feedTaskOK) {
-    Serial.println("Info band: no RAM for the fetch task");
+    Console.println("Info band: no RAM for the fetch task");
   } else if (!feedSettings.located) {
-    Serial.println("Info band: no place set - set one on the config page");
+    Console.println("Info band: no place set - set one on the config page");
   } else {
     char lat[16], lon[16];
     feedDegrees(lat, sizeof(lat), feedSettings.lat);
     feedDegrees(lon, sizeof(lon), feedSettings.lon);
-    Serial.printf("Info band: weather %s, warnings %s, air quality %s, for %s, %s\n", feedOn(FEED_WEATHER) ? "on" : "off",
+    Console.printf("Info band: weather %s, warnings %s, air quality %s, for %s, %s\n", feedOn(FEED_WEATHER) ? "on" : "off",
                   feedOn(FEED_WARNINGS) ? "on" : "off", feedOn(FEED_AIR) ? "on" : "off", lat, lon);
   }
 }
@@ -7369,12 +7402,12 @@ void bandWhen(char *buf, size_t size, time_t utc) {
 void printBandItem(const char *mark, const BandItem &it) {
   char until[16];
   bandWhen(until, sizeof(until), it.until);
-  Serial.printf("Info band %s %s (%s, until %s, icon %s", mark, it.key, it.level == LEVEL_ALERT ? "alert" : "info", until,
+  Console.printf("Info band %s %s (%s, until %s, icon %s", mark, it.key, it.level == LEVEL_ALERT ? "alert" : "info", until,
                 it.icon < ICON_COUNT && it.icon != ICON_NONE ? ITEM_ICON_NAMES[it.icon] : "none");
-  if (it.severity)  { Serial.printf(", level %u", (unsigned)it.severity); }
-  if (it.intensity) { Serial.printf(", %s", ITEM_INTENSITY_NAMES[it.intensity]); }
-  if (it.chance <= 100) { Serial.printf(", %u %%", (unsigned)it.chance); }
-  Serial.printf("):\n  %s\n", it.text);
+  if (it.severity)  { Console.printf(", level %u", (unsigned)it.severity); }
+  if (it.intensity) { Console.printf(", %s", ITEM_INTENSITY_NAMES[it.intensity]); }
+  if (it.chance <= 100) { Console.printf(", %u %%", (unsigned)it.chance); }
+  Console.printf("):\n  %s\n", it.text);
 }
 
 // The earliest until of all items, worked out anew after every change to
@@ -7415,7 +7448,7 @@ void bandPut(const BandItem &n) {
     return;
   }
   if (bandItemCount == BAND_ITEMS_MAX) {
-    Serial.printf("Info band: no room for %s\n", n.key);
+    Console.printf("Info band: no room for %s\n", n.key);
     return;
   }
   it.seq = ++bandSeq;
@@ -7428,7 +7461,7 @@ void bandPut(const BandItem &n) {
 void bandRemove(uint8_t f, const char *key) {
   int8_t i = bandFind(f, key);
   if (i < 0) { return; }
-  Serial.printf("Info band - %s\n", key);
+  Console.printf("Info band - %s\n", key);
   noticeForget(bandItems[i]);
   bandRemoveAt((uint8_t)i);
 }
@@ -7440,7 +7473,7 @@ void bandDropFeed(uint8_t f, const FeedResult *keep = nullptr) {
     bool kept = false;
     for (uint8_t k = 0; keep && k < keep->count; k++) { kept |= strcmp(keep->item[k].key, bandItems[i].key) == 0; }
     if (kept) { continue; }
-    Serial.printf("Info band - %s\n", bandItems[i].key);
+    Console.printf("Info band - %s\n", bandItems[i].key);
     bandRemoveAt((uint8_t)i);
   }
 }
@@ -7450,7 +7483,7 @@ void bandExpire() {
   time_t now = clockNow();
   for (int i = (int)bandItemCount - 1; i >= 0; i--) {
     if (bandItems[i].until > now) { continue; }
-    Serial.printf("Info band - %s (ran out)\n", bandItems[i].key);
+    Console.printf("Info band - %s (ran out)\n", bandItems[i].key);
     noticeForget(bandItems[i]);
     bandRemoveAt((uint8_t)i);
   }
@@ -7675,14 +7708,14 @@ bool noticeStepShow(uint8_t i) {
       textToCp437(cardLine[1], bar ? bar + 1 : "", sizeof(cardLine[1]));
       noticeStepMs = CARD_MS;
     }
-    Serial.printf("Info card: %s, icon %s, %s\n", it.key, bannerLook.icon != ICON_NONE ? ITEM_ICON_NAMES[bannerLook.icon] : "none",
+    Console.printf("Info card: %s, icon %s, %s\n", it.key, bannerLook.icon != ICON_NONE ? ITEM_ICON_NAMES[bannerLook.icon] : "none",
                   cardRuns ? "its text running" : it.shortText);
   } else if (noticeSteps[i].phase == PHASE_ICON) {
     bool textNext = i + 1 < noticeStepCount && noticeStepsSame(i, i + 1) && noticeSteps[i + 1].phase == PHASE_TEXT;
     bannerKind   = BANNER_ALERT;
     bannerLook   = { noticeIcon(it), it.severity, it.intensity, it.chance };
     noticeStepMs = textNext ? ICON_BEFORE_TEXT_MS : ALERT_BANNER_MS;
-    Serial.printf("Notice: %s, icon %s\n", it.key, ITEM_ICON_NAMES[bannerLook.icon]);
+    Console.printf("Notice: %s, icon %s\n", it.key, ITEM_ICON_NAMES[bannerLook.icon]);
   } else {
     textToCp437(runText, it.text, sizeof(runText));
     panelSeparators(runText);
@@ -7692,7 +7725,7 @@ bool noticeStepShow(uint8_t i) {
     runLastX = INT16_MIN;
     bannerKind   = BANNER_RUN;
     noticeStepMs = (unsigned long)noticeRuns * (runWidth + matrix.width()) * 1000UL / RUN_PX_PER_S;
-    Serial.printf("Notice: %s, text for %lu ms\n", it.key, noticeStepMs);
+    Console.printf("Notice: %s, text for %lu ms\n", it.key, noticeStepMs);
   }
   noticeStepAt = i;
   bannerOpen();
@@ -7796,7 +7829,7 @@ uint8_t noticesShowAgain() {
     noticeAddStep(it, PHASE_CARD);
   }
 #endif
-  Serial.printf("Notifications: %u notices, %u information\n", n, m);
+  Console.printf("Notifications: %u notices, %u information\n", n, m);
   if (!noticeStart() && m == 0) {
     showBanner("nothing", "to show", 110, 110, 110);
     return 0;
@@ -7824,7 +7857,7 @@ bool infoRoundReady() {
   }
   if (roundMinuteAt == 0) { return false; }
   if (millisNow - roundMinuteAt > ROUND_LATEST_MS) {
-    Serial.println("Info round left out: the face was not free within a minute");
+    Console.println("Info round left out: the face was not free within a minute");
     roundMinuteAt = 0;
     return false;
   }
@@ -7865,7 +7898,7 @@ bool infoCardsStart(bool round) {
     noticeSeenAdd(bandItems[order[k]]);
     noticeAddStep(bandItems[order[k]], PHASE_CARD);
   }
-  Serial.printf("Info cards: %u, %s\n", n, round ? "the round" : "new");
+  Console.printf("Info cards: %u, %s\n", n, round ? "the round" : "new");
   if (noticeStart()) { noticeCardsRound = true; }
   return true;
 }
@@ -8125,11 +8158,11 @@ void extrasUpdate() {
   if (!face.offers(TRIGGER_NOW_AND_THEN) || !extrasDue()) { return; }
   extrasScheduleNext();
   if (!decorFree(0, false)) {
-    Serial.println("Extra: due, the panel not free for it - dropped");
+    Console.println("Extra: due, the panel not free for it - dropped");
     return;
   }
   if (face.request(faceMoment(), TRIGGER_NOW_AND_THEN) != OUTCOME_PLAYED) {
-    Serial.println("Extra: due, the face has no room for it - dropped");
+    Console.println("Extra: due, the face has no room for it - dropped");
   }
 }
 
@@ -8296,10 +8329,10 @@ void warningIconSelfTest() {
     uint8_t got = feedWarningIcon(c.event);
     if (got == c.icon) { continue; }
     wrong++;
-    Serial.printf("Warning icons: \"%s\" gave %s, not %s\n", c.event ? c.event : "(none)", ITEM_ICON_NAMES[got],
+    Console.printf("Warning icons: \"%s\" gave %s, not %s\n", c.event ? c.event : "(none)", ITEM_ICON_NAMES[got],
                   ITEM_ICON_NAMES[c.icon]);
   }
-  Serial.printf("Warning icons self-test: %s, %u cases\n", wrong ? "FAILED" : "all right",
+  Console.printf("Warning icons self-test: %s, %u cases\n", wrong ? "FAILED" : "all right",
                 (unsigned)(sizeof(CASES) / sizeof(CASES[0])));
 }
 #endif
@@ -8868,7 +8901,7 @@ void bandSelfTest() {
     struct tm v;
     gmtime_r(&t, &v);
     int got = isoWeek(v.tm_year + 1900, v.tm_yday, v.tm_wday);
-    if (got != w.week) { wrong++; Serial.printf("Band: %d-%02d-%02d is week %d, not %d\n", w.y, w.m, w.d, got, w.week); }
+    if (got != w.week) { wrong++; Console.printf("Band: %d-%02d-%02d is week %d, not %d\n", w.y, w.m, w.d, got, w.week); }
   }
   struct Wrap { const char *text; bool fits; const char *first, *second; };
   static const Wrap WRAPS[] = {
@@ -8895,7 +8928,7 @@ void bandSelfTest() {
     bool fits = bandWrap(w.text, 26, lines);
     if (fits != w.fits || (fits && (strcmp(lines[0], w.first) != 0 || strcmp(lines[1], w.second) != 0))) {
       wrong++;
-      Serial.printf("Band: \"%s\" gave %s \"%s\" / \"%s\"\n", w.text, fits ? "two lines" : "no fit", lines[0], lines[1]);
+      Console.printf("Band: \"%s\" gave %s \"%s\" / \"%s\"\n", w.text, fits ? "two lines" : "no fit", lines[0], lines[1]);
     }
   }
   // Sunrise and sunset as sunrise-and-sunset.com gave them on 2026-10-18,
@@ -8917,7 +8950,7 @@ void bandSelfTest() {
                                  (fabs(rise + s.off - s.rise) <= 2.0 && fabs(set + s.off - s.set) <= 2.0));
     if (!ok) {
       wrong++;
-      Serial.printf("Band: sun on %d-%02d-%02d at %.2f, %.2f gave kind %u, %.1f and %.1f min, not %d and %d\n", s.y, s.m,
+      Console.printf("Band: sun on %d-%02d-%02d at %.2f, %.2f gave kind %u, %.1f and %.1f min, not %d and %d\n", s.y, s.m,
                     s.d, s.lat, s.lon, (unsigned)kind, rise + s.off, set + s.off, s.rise, s.set);
     }
   }
@@ -8935,13 +8968,13 @@ void bandSelfTest() {
   for (const Moon &m : MOONS) {
     double e = sky::moonElongation(utcOf(m.at));
     double off = fmod(e - m.elongation + 540.0, 360.0) - 180.0;
-    if (fabs(off) > 2.0) { wrong++; Serial.printf("Band: the moon at %s is %.2f degrees ahead, not %.0f\n", m.at, e, m.elongation); }
+    if (fabs(off) > 2.0) { wrong++; Console.printf("Band: the moon at %s is %.2f degrees ahead, not %.0f\n", m.at, e, m.elongation); }
   }
   double from = utcOf("2026-10-14 00:00");
   double full = sky::moonNext(from, true), fresh = sky::moonNext(from, false);
   if (fabs(full - utcOf("2026-10-26 04:11")) > 7200.0 || fabs(fresh - utcOf("2026-11-09 07:02")) > 7200.0) {
     wrong++;
-    Serial.printf("Band: next full moon %.0f, new moon %.0f s off\n", full - utcOf("2026-10-26 04:11"),
+    Console.printf("Band: next full moon %.0f, new moon %.0f s off\n", full - utcOf("2026-10-26 04:11"),
                   fresh - utcOf("2026-11-09 07:02"));
   }
   // The clock changes of central Europe (01:00 UTC on the last Sunday of
@@ -8958,12 +8991,12 @@ void bandSelfTest() {
     bool found = clockShiftNear(tzRule(3600), (time_t)utcOf(s.now), at, forward);
     if (found != s.found || (found && (at != (time_t)utcOf(s.at) || forward != s.forward))) {
       wrong++;
-      Serial.printf("Band: clock change from %s gave %d at %ld, forward %d\n", s.now, found, (long)at, forward);
+      Console.printf("Band: clock change from %s gave %d at %ld, forward %d\n", s.now, found, (long)at, forward);
     }
   }
   unsigned cases = sizeof(WEEKS) / sizeof(WEEKS[0]) + sizeof(WRAPS) / sizeof(WRAPS[0]) + sizeof(SUNS) / sizeof(SUNS[0]) +
                    sizeof(MOONS) / sizeof(MOONS[0]) + 1 + sizeof(SHIFTS) / sizeof(SHIFTS[0]);
-  Serial.printf("Band self-test: %s, %u cases\n", wrong ? "FAILED" : "all right", cases);
+  Console.printf("Band self-test: %s, %u cases\n", wrong ? "FAILED" : "all right", cases);
 }
 #endif
 
@@ -8986,7 +9019,7 @@ void feedFailed(uint8_t f, const char *why) {
   if (wait > FEEDS[f].intervalMs) { wait = FEEDS[f].intervalMs; }
   r.dueAt = millisNow + wait;
   strlcpy(r.error, why, sizeof(r.error));
-  Serial.printf("Info band: %s failed (%s), again in %lu min\n", FEEDS[f].name, r.error, wait / 60000UL);
+  Console.printf("Info band: %s failed (%s), again in %lu min\n", FEEDS[f].name, r.error, wait / 60000UL);
 }
 
 #if defined(CLOCK_DEBUG)
@@ -9004,7 +9037,7 @@ void feedRetrySelfTest() {
     feedRuns[i].dueAt = due;
   }
   if (f < 0) {
-    Serial.println("Feed retry self-test: skipped, no source on");
+    Console.println("Feed retry self-test: skipped, no source on");
     return;
   }
   FeedRun saved = feedRuns[f];
@@ -9014,7 +9047,7 @@ void feedRetrySelfTest() {
   feedRuns[f].failures = 0;                        // the same wait without a failure
   bool gathers = feedDueWithin(f, FEED_GATHER_MS);
   feedRuns[f] = saved;
-  Serial.printf("Feed retry self-test: %s (%s: a failed one %s, one without a failure %s)\n",
+  Console.printf("Feed retry self-test: %s (%s: a failed one %s, one without a failure %s)\n",
                 waits && gathers ? "all right" : "FAILED", FEEDS[f].name,
                 waits ? "waits out its back-off" : "is fetched again at once",
                 gathers ? "comes along early" : "does not come along");
@@ -9028,9 +9061,9 @@ void feedApply(const FeedResult &res) {
   r.status = res.status;
   r.ms     = res.ms;
   r.bytes  = res.bytes;
-  Serial.printf("Info band: %s fetched, status %d, %ld bytes in %lu ms\n", FEEDS[res.feed].name, res.status,
+  Console.printf("Info band: %s fetched, status %d, %ld bytes in %lu ms\n", FEEDS[res.feed].name, res.status,
                 (long)res.bytes, (unsigned long)res.ms);
-  Serial.printf("  internal RAM %lu free before, %lu lowest since start; stack %lu bytes unused\n",
+  Console.printf("  internal RAM %lu free before, %lu lowest since start; stack %lu bytes unused\n",
                 (unsigned long)res.heapFree, (unsigned long)res.heapLow, (unsigned long)res.stackLeft);
   if (res.error[0]) {
     feedFailed(res.feed, res.error);
@@ -9139,7 +9172,7 @@ void applyFeedParams(const String &q) {
   } else if (microDegreesOf(la, 90, lat) && microDegreesOf(lo, 180, lon)) {
     located = true;
   } else {
-    Serial.println("Info band: the place could not be read - the stored one stays");
+    Console.println("Info band: the place could not be read - the stored one stays");
     lat = feedSettings.lat;
     lon = feedSettings.lon;
   }
@@ -9740,7 +9773,7 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   if (!gifFromCard)   // the card's GIFs stay as they are
 #endif
   gifLast = -1;   // it may have been a pack GIF the new pack does not have
-  Serial.printf("GIF pack: receiving %u GIFs, %u KB\n", h.count, (unsigned)(h.size / 1024));
+  Console.printf("GIF pack: receiving %u GIFs, %u KB\n", h.count, (unsigned)(h.size / 1024));
 
   uint8_t *buf = (uint8_t *)malloc(4096);
   uint32_t at = sizeof(h), erasedTo = 0, shownAt = 0;
@@ -9768,7 +9801,7 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   if (!ok) {
     String e = "The upload broke off after " + String(at / 1024) + " of " + String(h.size / 1024) + " KB; ";
     e += (erasedTo == 0) ? "the old pack stays." : "the clock has no GIF pack now and plays no GIFs.";
-    Serial.println("GIF pack: " + e);
+    Console.println("GIF pack: " + e);
     sendJsonError(out, 400, e.c_str());
     return;
   }
@@ -9783,7 +9816,7 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   }
   gifScheduleNext();
   unsigned long ms = millis() - started;
-  Serial.printf("GIF pack: written, %u GIFs, %u damaged, %lu ms\n", gifPackCount, damaged, ms);
+  Console.printf("GIF pack: written, %u GIFs, %u damaged, %lu ms\n", gifPackCount, damaged, ms);
   JsonDocument d;
   d["ok"] = damaged == 0;
   d["gifs"] = gifPackCount;
@@ -9851,7 +9884,7 @@ void apiSetTime(Print &c, const String &q) {
     int64_t t = strtoll(utc.c_str(), nullptr, 10);
     if (t < UTC_PLAUSIBLE_FROM || t > UTC_PLAUSIBLE_TO) { sendJsonError(c, 400, "Not set: the phone's time looks wrong."); return; }
     setClockTo((time_t)t, TIME_PHONE);
-    Serial.print("Time set from a phone: "); Serial.println((unsigned long)t);
+    Console.print("Time set from a phone: "); Console.println((unsigned long)t);
   } else {
     String date = getParam(q, "date"), hm = getParam(q, "time");
     int y = date.substring(0, 4).toInt(), mo = date.substring(5, 7).toInt(), dd = date.substring(8, 10).toInt();
@@ -9863,7 +9896,7 @@ void apiSetTime(Print &c, const String &q) {
     }
     time_t local = (time_t)daysFromCivil(y, mo, dd) * 86400 + h * 3600 + mi * 60;
     setClockTo(localToUtc(local), TIME_MANUAL);
-    Serial.println("Time set by hand");
+    Console.println("Time set by hand");
   }
   JsonDocument d;
   d["timeLine"] = timeStatusText();
@@ -9901,7 +9934,7 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
   applyFeedParams(body);
   saveFeedSettings();
 #endif
-  Serial.println("Settings saved from the web app");
+  Console.println("Settings saved from the web app");
   JsonDocument d;
   d["ok"] = true;
   d["closing"] = apActive;    // in the hotspot, saving closes it, as it always has
@@ -9939,6 +9972,14 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
   } else if (path == "/api/sensor-forget") {
     // id=<sensor>: one this clock no longer has is no longer missing.
     if (sensorForget(getParam(body, "id"))) { sendNoContent(c); } else { sendJsonError(c, 400, "No such sensor."); }
+#if BOARD_WAVESHARE_WALL
+  } else if (path == "/api/black") {
+    // The wall's panels dark until the next start: before a flash (the
+    // console's "black", in every build).
+    matrix.holdDark();
+    Console.println("Panels dark until the next start");
+    sendNoContent(c);
+#endif
   } else if (path == "/api/discard") {
     loadSettings();           // the stored settings, with the faces' ones, applied at once
     // The face shows what was restored, as after a change tried live (U1 of
@@ -10080,7 +10121,7 @@ void loadLanSettings() {
     saveLanSettings();
   }
   lanWantRadio();
-  if (lanSettings.on) { Serial.printf("Web app on the home network: on, as %s.local\n", netHostname()); }
+  if (lanSettings.on) { Console.printf("Web app on the home network: on, as %s.local\n", netHostname()); }
 }
 
 void saveLanSettings() {
@@ -10148,7 +10189,7 @@ bool lanAuthorized(Print &c, const String &auth) {
     lanFails = 0;
     lanLocked = true;
     lanLockedAt = millisNow;
-    Serial.println("Web app: five wrong passwords - no more tries for 30 s");
+    Console.println("Web app: five wrong passwords - no more tries for 30 s");
   }
   sendJsonError(c, 401, "The clock's password is needed.");
   return false;
@@ -10171,7 +10212,7 @@ void apiLan(Print &c, const String &body) {
   lanSettings.on = on ? 1 : 0;
   saveLanSettings();
   lanWantRadio();
-  Serial.printf("Web app on the home network: %s%s\n", on ? "on" : "off", pw.length() ? ", new password" : "");
+  Console.printf("Web app on the home network: %s%s\n", on ? "on" : "off", pw.length() ? ", new password" : "");
   JsonDocument d;
   d["ok"] = true;
   d["on"] = on;
@@ -10185,7 +10226,7 @@ void lanStop() {
   MDNS.end();
   WiFi.setSleep(true);
   lanServing = false;
-  Serial.println("Web app on the home network: stopped");
+  Console.println("Web app on the home network: stopped");
 }
 
 // On every pass outside the hotspot: the server on the home network while the
@@ -10200,9 +10241,9 @@ void lanUpdate() {
     bool named = MDNS.begin(netHostname());
     if (named) { MDNS.addService("http", "tcp", 80); }
     lanServing = true;
-    Serial.printf("Web app on the home network: http://%s.local, http://%s\n", netHostname(),
+    Console.printf("Web app on the home network: http://%s.local, http://%s\n", netHostname(),
                   WiFi.localIP().toString().c_str());
-    if (!named) { Serial.println("Web app: mDNS did not start; the address works"); }
+    if (!named) { Console.println("Web app: mDNS did not start; the address works"); }
   } else if (!want && lanServing) {
     lanStop();
   }
@@ -10236,7 +10277,7 @@ void loadHaSettings() {
   }
   haTopics(haId());
   if (haSettings.on) {
-    Serial.printf("Home Assistant: on, broker %s:%u, topics %s...\n", haSettings.host, haSettings.port, haLink().prefix);
+    Console.printf("Home Assistant: on, broker %s:%u, topics %s...\n", haSettings.host, haSettings.port, haLink().prefix);
   }
 }
 
@@ -10299,7 +10340,7 @@ void haBuildAnnounce() {
 void haFailed() {
   haFailedAt = millisNow ? millisNow : 1;
   haState = HA_FAILED;
-  Serial.println("Home Assistant: no RAM for the MQTT client - again in a minute");
+  Console.println("Home Assistant: no RAM for the MQTT client - again in a minute");
 }
 
 // Asks the worker for the client, with the settings as they are now.
@@ -10319,7 +10360,7 @@ void haStartLink() {
   haChanged = false;
   radioUsers |= RADIO_HA;
   haState = HA_CONNECTING;
-  Serial.printf("Home Assistant: connecting to %s:%u\n", haSettings.host, haSettings.port);
+  Console.printf("Home Assistant: connecting to %s:%u\n", haSettings.host, haSettings.port);
 }
 
 // Asks the worker to say goodbye and stop the client. The loop goes on at
@@ -10350,7 +10391,7 @@ void haUpdate() {
   while (haLink().in && xQueueReceive(haLink().in, &m, 0) == pdTRUE) { haApply(m); }
   uint32_t lost = haLink().lost.load();
   if (lost != haLostSeen) {
-    Serial.printf("Home Assistant: %lu messages lost, the loop was busy\n", (unsigned long)(lost - haLostSeen));
+    Console.printf("Home Assistant: %lu messages lost, the loop was busy\n", (unsigned long)(lost - haLostSeen));
     haLostSeen = lost;
   }
   bool want = haSettings.on && !haBlocked();
@@ -10386,7 +10427,7 @@ void haApply(const HaIn &m) {
     haPhase = HA_PHASE_IDLE;
     radioUsers &= (uint8_t)~RADIO_HA;
     if (m.kind == HA_IN_START_FAILED) { haFailed(); }
-    else { haState = HA_OFF; Serial.println("Home Assistant: link stopped"); }
+    else { haState = HA_OFF; Console.println("Home Assistant: link stopped"); }
     return;
   }
   // The client's: none counts once its stop was asked for.
@@ -10398,25 +10439,25 @@ void haApply(const HaIn &m) {
       haError[0] = '\0';
       haLightAt = 0;
       haDropItems();   // the broker sends the retained ones anew at once
-      Serial.printf("Home Assistant: connected to %s:%u\n", haSettings.host, haSettings.port);
+      Console.printf("Home Assistant: connected to %s:%u\n", haSettings.host, haSettings.port);
       break;
     case HA_IN_DISCONNECTED:
-      if (haState == HA_UP) { Serial.println("Home Assistant: connection lost - the client tries again"); }
+      if (haState == HA_UP) { Console.println("Home Assistant: connection lost - the client tries again"); }
       haState = HA_CONNECTING;
       break;
     case HA_IN_ERROR:
       if (m.error == HA_ERR_TOO_LONG) {
-        Serial.printf("Home Assistant: %s refused, %ld bytes (%u taken)\n", m.topic, (long)m.detail, HA_PAYLOAD_MAX);
+        Console.printf("Home Assistant: %s refused, %ld bytes (%u taken)\n", m.topic, (long)m.detail, HA_PAYLOAD_MAX);
         break;
       }
       haErrorText(m);
-      Serial.printf("Home Assistant: %s\n", haError);
+      Console.printf("Home Assistant: %s\n", haError);
       break;
     case HA_IN_DATA:
       if (!m.own) {
         // Home Assistant has started anew: it has forgotten what is not retained.
         if (strcmp(m.topic, "homeassistant/status") == 0 && strcmp(m.payload, "online") == 0) {
-          Serial.println("Home Assistant has started - the clock announces itself again");
+          Console.println("Home Assistant has started - the clock announces itself again");
           HaCmd c = {};
           c.kind = HA_CMD_ANNOUNCE;
           haCommand(c);
@@ -10429,7 +10470,7 @@ void haApply(const HaIn &m) {
         // at a (re)connect, never on one it passes on live: such a message
         // was shown when it came, and would come again with every connect.
         // An empty one is how a kept message is taken off the broker.
-        if (m.retained)    { Serial.println("Home Assistant: a message kept by the broker is not shown again"); }
+        if (m.retained)    { Console.println("Home Assistant: a message kept by the broker is not shown again"); }
         else if (m.len)    { haMessage(m.payload, m.len); }
       }
       break;
@@ -10500,26 +10541,26 @@ void haIconLook(JsonDocument &doc, BandItem &it) {
 // payload, or an until that has passed).
 void haItem(const char *name, const char *payload, uint16_t len) {
   if (!haNameOk(name)) {
-    Serial.printf("Home Assistant: item name \"%s\" not taken (1 to 23 of a-z, 0-9, _ and -)\n", name);
+    Console.printf("Home Assistant: item name \"%s\" not taken (1 to 23 of a-z, 0-9, _ and -)\n", name);
     return;
   }
   if (len == 0) { bandRemove(SOURCE_HA, name); return; }
   JsonDocument doc;
   DeserializationError e = deserializeJson(doc, payload, len);
   if (e || !doc.is<JsonObject>()) {
-    Serial.printf("Home Assistant: item %s is no JSON object (%s)\n", name, e ? e.c_str() : "another JSON value");
+    Console.printf("Home Assistant: item %s is no JSON object (%s)\n", name, e ? e.c_str() : "another JSON value");
     return;
   }
   long long until = doc["until"].as<long long>();
   if (until <= 0) {
-    Serial.printf("Home Assistant: item %s has no until (Unix time) - not taken\n", name);
+    Console.printf("Home Assistant: item %s has no until (Unix time) - not taken\n", name);
     return;
   }
   if (clockIsSet() && (time_t)until <= clockNow()) { bandRemove(SOURCE_HA, name); return; }
   const char *text = doc["text"] | "";
   uint8_t icon = itemIconByName(doc["icon"] | "");
   if (!text[0] && icon == ICON_NONE) {
-    Serial.printf("Home Assistant: item %s has neither a text nor an icon - not taken\n", name);
+    Console.printf("Home Assistant: item %s has neither a text nor an icon - not taken\n", name);
     return;
   }
   BandItem it = {};
@@ -10546,11 +10587,11 @@ void haMessage(const char *payload, uint16_t len) {
   JsonDocument doc;
   DeserializationError e = deserializeJson(doc, payload, len);
   if (e || !doc.is<JsonObject>()) {
-    Serial.printf("Home Assistant: the message is no JSON object (%s)\n", e ? e.c_str() : "another JSON value");
+    Console.printf("Home Assistant: the message is no JSON object (%s)\n", e ? e.c_str() : "another JSON value");
     return;
   }
   const char *text = doc["text"] | "", *title = doc["title"] | "";
-  if (!text[0] && !title[0]) { Serial.println("Home Assistant: an empty message"); return; }
+  if (!text[0] && !title[0]) { Console.println("Home Assistant: an empty message"); return; }
   long seconds = constrain(doc["seconds"] | (long)HA_MESSAGE_S, 5L, 3600L);
   char line[HA_PAYLOAD_MAX + 1];
   if (title[0] && text[0]) { snprintf(line, sizeof(line), "%s | %s", title, text); }   // the band's separator
@@ -10636,7 +10677,7 @@ void apiHa(Print &c, const String &body) {
   haFailedAt = 0;
   haError[0] = '\0';
   if (wasOn && !on) { bandDropFeed(SOURCE_HA); }   // switched off, the link takes its items with it
-  Serial.printf("Home Assistant: %s, broker %s:%u%s\n", on ? "on" : "off", haSettings.host, haSettings.port,
+  Console.printf("Home Assistant: %s, broker %s:%u%s\n", on ? "on" : "off", haSettings.host, haSettings.port,
                 pw.length() ? ", new password" : "");
   JsonDocument d;
   d["ok"] = true;

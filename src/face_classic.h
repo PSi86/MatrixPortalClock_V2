@@ -184,8 +184,8 @@ class ClassicFace : public Watchface {
     }
     _anim = ANIM_ASKED;
     _askedIn = now.secondAt;
-    Serial.print("Face animation: the classic digits fly in at the next second (");
-    Serial.print(_ignored); Serial.println(" requests ignored since the last one)");
+    Console.print("Face animation: the classic digits fly in at the next second (");
+    Console.print(_ignored); Console.println(" requests ignored since the last one)");
     _ignored = 0;
     return OUTCOME_PLAYED;
   }
