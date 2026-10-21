@@ -1271,6 +1271,27 @@ inline void netStaBegin(const char *ssid, const char *pass) {
 
 inline bool netStaConnected() { return WiFi.status() == WL_CONNECTED; }
 
+// Once as the station comes up, before anything that looks names up may
+// start. The core's NetworkManager::hostByName() clears lwIP's DNS cache on
+// its first call after the addresses changed, without lwIP's lock: a lookup
+// in flight then - the Home Assistant link's, SNTP's - is ended on the wrong
+// task, and lwIP stops the clock ("assert failed: udp_remove ... Required to
+// lock TCPIP core functionality!"; on the S3 2026-10-20 at every start of the
+// debug build, the info band's first fetch against the link's lookup of
+// homeassistant.local). Called here, the core sees the new address while no
+// lookup runs, and the lookups after it find nothing changed. lwIP answers
+// "localhost" itself (its loopback), so this does not wait for the network.
+inline void netDnsSettle() {
+  IPAddress ip;
+#if defined(CLOCK_DEBUG)
+  unsigned long t0 = micros();
+  Network.hostByName("localhost", ip);
+  Serial.printf("DNS: settled for the new address in %lu us\n", (unsigned long)(micros() - t0));
+#else
+  Network.hostByName("localhost", ip);
+#endif
+}
+
 // Stop the SNTP client after a sync while the station stays joined for
 // something else; the next sync starts it afresh (netNtpEpoch()).
 inline void netSntpStop() {
@@ -1421,6 +1442,8 @@ inline void netStaBegin(const char *ssid, const char *pass) {
 }
 
 inline bool netStaConnected() { return WiFi.status() == WL_CONNECTED; }
+
+inline void netDnsSettle() {}   // the NINA looks names up on its own
 
 // Radio off, for real: the co-processor is held in reset. WiFi.end() cannot do
 // it - it only calls WiFiDrv::wifiDriverDeinit(), an empty function in WiFiNINA

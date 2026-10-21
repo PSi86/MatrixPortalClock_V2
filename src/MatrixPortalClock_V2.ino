@@ -5504,6 +5504,7 @@ void stationUpdate() {
     if (netStaConnected()) {
       Serial.println("Connected to WiFi");
       printWifiStatus();
+      netDnsSettle();   // before stationUp(): what looks names up waits for it (board_hal.h)
       if (!bootStageCleared) { boardBootStageWrite(BOOT_STAGE_RUN); }
       joinOutcome   = JOIN_SUCCEEDED;
       joinRssi      = netStaRssi();

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <WiFi.h>
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
 #include <ArduinoJson.h>
@@ -524,11 +525,20 @@ inline void feedRun(const FeedJob &job, FeedResult &r) {
   r.bytes    = -1;
   r.heapFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   uint32_t t0 = millis();
-  switch (job.feed) {
-    case FEED_WEATHER:  feedWeather(job, r);  break;
-    case FEED_WARNINGS: feedWarnings(job, r); break;
-    case FEED_AIR:      feedAir(job, r);      break;
-    default:            strlcpy(r.error, "unknown source", sizeof(r.error)); break;
+  // The station looked at again: the loop does so only twice a second, and a
+  // job can come just after it dropped. Without an address the core's
+  // hostByName() would take note and clear the DNS cache - then, and again on
+  // the station's return - while other lookups may run (netDnsSettle(),
+  // board_hal.h).
+  if (WiFi.status() != WL_CONNECTED) {
+    strlcpy(r.error, "no WiFi connection", sizeof(r.error));
+  } else {
+    switch (job.feed) {
+      case FEED_WEATHER:  feedWeather(job, r);  break;
+      case FEED_WARNINGS: feedWarnings(job, r); break;
+      case FEED_AIR:      feedAir(job, r);      break;
+      default:            strlcpy(r.error, "unknown source", sizeof(r.error)); break;
+    }
   }
   r.ms        = millis() - t0;
   r.heapLow   = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
