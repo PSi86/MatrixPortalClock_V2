@@ -1686,7 +1686,7 @@ shortcuts to begin with, which the Inputs page can change (see
 | swipe right, push | open the menu | open the item; in an editor: save |
 | swipe left | - | back, without saving |
 | a hand comes near and stays | a hint: `swipe` / `menu` | - |
-| a hand held over the sensor for 3 s during boot | open the config hotspot | - |
+| a hand held over the sensor for 3 s during boot, then taken away when the panel says `LET GO` | open the config hotspot | - |
 
 On the hotspot screen a swipe to the left closes the hotspot again. Pull (a
 hand moving away) does nothing unless the Inputs page gives it something. The

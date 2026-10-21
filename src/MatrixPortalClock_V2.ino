@@ -6642,12 +6642,18 @@ void drawGestureTest() {
   panelDirty = false;
 }
 
-// At boot: whether a hand is held over the sensor for APPROACH_BOOT_MS, the
-// recovery of a clock without buttons. Asked here whether the INT line is
-// wired or not, since the line reports gestures only. The sensor has only just
-// been set up, so it gets APPROACH_BOOT_LOOK_MS to see a hand that is already
-// there; with nothing near the start goes on after that.
+// At boot: whether a hand is held over the sensor for APPROACH_BOOT_MS and
+// then taken away, the recovery of a clock without buttons. Asked here whether
+// the INT line is wired or not, since the line reports gestures only. The
+// sensor has only just been set up, so it gets APPROACH_BOOT_LOOK_MS to see a
+// hand that is already there; with nothing near the start goes on after that.
+// After the hold the panel says LET GO, and only a hand taken away within
+// APPROACH_LET_GO_MS opens the hotspot: an object standing in front of the
+// sensor does not go, and the clock starts as usual. (Until 2026-10-21 the
+// hold alone opened it, and an object the sensor had come to face opened it
+// at every start, the clock off its home network.)
 const unsigned long APPROACH_BOOT_LOOK_MS = 300;
+const unsigned long APPROACH_LET_GO_MS    = 3000;
 bool gestureHeldAtBoot() {
   if (!gestureOK) { return false; }
   bool near = false;
@@ -6662,9 +6668,23 @@ bool gestureHeldAtBoot() {
   bootStatus("HOLD");
   for (unsigned long t0 = millis(); millis() - t0 < APPROACH_BOOT_MS; ) {
     delay(50);
-    if (!gestureSensor.isObjectInView()) { Serial.println("Gesture sensor: gone again"); return false; }
+    if (!gestureSensor.isObjectInView()) {
+      Serial.println("Gesture sensor: gone again");
+      bootStatus("CLOCK");
+      return false;
+    }
   }
-  return true;
+  bootStatus("LET GO");
+  for (unsigned long t0 = millis(); millis() - t0 < APPROACH_LET_GO_MS; ) {
+    delay(50);
+    if (!gestureSensor.isObjectInView()) {
+      Serial.println("Gesture sensor: let go - the hotspot opens");
+      return true;
+    }
+  }
+  Serial.println("Gesture sensor: still near after the hold - an object, not a hand: the clock starts as usual");
+  bootStatus("CLOCK");
+  return false;
 }
 
 /* ======================================================================
