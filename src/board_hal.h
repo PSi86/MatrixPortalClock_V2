@@ -624,7 +624,10 @@ class PanelCanvas : public GFXcanvas16 {
   // Brightness of the whole panel, 0..255: 0 switches it dark (through the OE
   // time), anything else sets the light the colour values give (see above),
   // at least PANEL_BRIGHT_FLOOR. Another brightness rebuilds the tables, and
-  // the next shows write every pixel.
+  // when they came out different, the next shows write every pixel. Often
+  // they do not: on the S3 the brightness keeps to blue's steps, which are
+  // coarse at the dark end (brightness 36 to 40 give the same tables), and on
+  // the wall clock's planes one step of light is about two of brightness.
   void setBrightness(uint8_t b) {
     if (!_dma) { return; }
 #if BOARD_WAVESHARE_WALL
@@ -641,8 +644,7 @@ class PanelCanvas : public GFXcanvas16 {
     if (b == _bright) { return; }
     if (_bright == 0) { _dma->setBrightness8(PANEL_OE_FULL); }
     _bright = b;
-    buildLuts();
-    forgetHeld();
+    if (buildLuts()) { forgetHeld(); }
   }
 
   // The driver's value for colour c (0 red, 1 green, 2 blue) of the canvas
@@ -801,13 +803,20 @@ class PanelCanvas : public GFXcanvas16 {
   // the full share all three aim at: white stays white (measured: blue at 0.94 to
   // 1.07 of red, green at 1.00 to 1.13), and the brightness keeps to blue's steps
   // there (up to 21 % off the asked one) instead of the colours drifting apart.
-  void buildLuts() {
+  // Says whether any value came out different.
+  bool buildLuts() {
     uint16_t k = 0;
     uint32_t full = _light[2][nearest(2, (uint32_t)_bright * 65535UL / 255UL, k)];
+    bool changed = false;
     for (uint8_t c = 0; c < 3; c++) {
       k = 0;
-      for (uint16_t v = 0; v < 256; v++) { _lut[c][v] = nearest(c, (uint32_t)v * full / 255UL, k); }
+      for (uint16_t v = 0; v < 256; v++) {
+        uint8_t n = nearest(c, (uint32_t)v * full / 255UL, k);
+        changed |= n != _lut[c][v];
+        _lut[c][v] = n;
+      }
     }
+    return changed;
   }
 
 #if defined(CLOCK_DEBUG)
