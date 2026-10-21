@@ -22,26 +22,29 @@ Todo Concept:
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 #include "input_map.h"      // input events, functions and the profiles mapping them
+#include "face.h"           // what the watchfaces share
+#include "face_classic.h"   // the classic watchface, on every board
 
 #if !PANEL_DRIVER_DMA
 #include <Adafruit_Protomatter.h>   // the M4's panel driver; the S3's is in board_hal.h
 #endif
-//#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font works
-//#include <Fonts/FreeMonoBold12pt7b.h> // Large friendly font
-//#include <Fonts/FreeSans12pt7b.h> // Large friendly font
-#include <Fonts/FreeSansBold12pt7b.h> // Large friendly font
-#include <Fonts/FreeSansBold9pt7b.h> // Large friendly font
 #include <Fonts/Picopixel.h>
 #include <Fonts/TomThumb.h>    // 3x5, for the menu
 
 #if WATCHFACE_TETRIS
-#include "tetris_digits.h"     // generated block tables for the Tetris watchface
+#include "face_tetris.h"       // the Tetris watchface
+#endif
+#if KNOCK_SENSING
+#if !WATCHFACE_TETRIS
+#error "The knock's sensitivity is stored with the Tetris face's settings (shk): WATCHFACE_TETRIS has to be on as well"
+#endif
+#include "knock.h"             // the knock on the clock, from its motion sensor
 #endif
 #if WATCHFACE_MUNCHER
 #if !WATCHFACE_TETRIS
-#error "The Muncher watchface uses the Tetris face's knock: WATCHFACE_TETRIS has to be on as well"
+#error "The Muncher's settings are loaded and saved with the Tetris face's (FACE_BLOBS): WATCHFACE_TETRIS has to be on as well"
 #endif
-#include "muncher.h"           // the Muncher watchface's logic
+#include "face_muncher.h"     // the Muncher watchface
 #endif
 #if WATCHFACE_ALIENS
 #if !WATCHFACE_MUNCHER
@@ -50,7 +53,7 @@ Todo Concept:
 #if !GIF_PLAYBACK
 #error "The Aliens watchface takes the panel by the rules that come with the GIF playback: GIF_PLAYBACK has to be on as well"
 #endif
-#include "aliens.h"            // the Aliens watchface's logic
+#include "face_aliens.h"      // the Aliens watchface
 #endif
 
 #include <math.h>              // powf() for perceptual brightness fade
@@ -160,10 +163,7 @@ struct Settings {
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
   uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
-  uint8_t  flyInTime;    // how long every fly-in of the classic face takes, in 10 ms (rev 1: ms per pixel)
-  uint8_t  digitR, digitG, digitB; // color of the time digits
-  uint8_t  trailR, trailG, trailB; // color of a digit while it is flying in
-  uint8_t  dir[6];       // fly-in direction per digit (0=top,1=right,2=bottom,3=left)
+  ClassicSettings classic;   // the classic face's fly-in time, colours and fly-in sides (face_classic.h)
   uint8_t  syncHour;     // hour of daily NTP resync
   uint8_t  syncMinute;   // minute of daily NTP resync
   uint8_t  autoBright;   // 1 = BH1750 light sensor controls the master brightness
@@ -179,10 +179,8 @@ struct Settings {
 // sizeof(Settings), and a mismatch would silently reset EVERY setting.
 static_assert(sizeof(Settings) == 32,
               "Settings must stay 32 bytes - stored blobs are read back by exact size");
-
-// The fly-in time's range (Settings::flyInTime): at most 850 ms, so every digit
-// has landed before the next second's flights start.
-const uint16_t FLY_IN_MIN_MS = 100, FLY_IN_MAX_MS = 850;
+static_assert(offsetof(Settings, classic) == 10 && offsetof(Settings, syncHour) == 23,
+              "The classic face's settings must stay where the stored blobs have them");
 
 // Watchfaces (Settings::watchface). A value a firmware does not know falls
 // back to the classic face (applySettings()).
@@ -212,10 +210,10 @@ const Settings DEFAULTS = {
   3600,            // CET base (UTC+1)
   DST_AUTO,        // CET/CEST switched automatically (the original was a fixed UTC+2)
   128,             // neutral: absolute half in manual mode, sensor-as-is trim in auto mode
-  40,              // fly-in time 400 ms
-  0, 0, 255,       // blue digits
-  255, 255, 255,   // fly-in trail (full color; dimmed relative to brightness at render time)
-  {3, 1, 3, 1, 1, 1},
+  { 40,            // the classic face: fly-in time 400 ms
+    0, 0, 255,     // blue digits
+    255, 255, 255, // fly-in trail (full color; dimmed relative to brightness at render time)
+    {3, 1, 3, 1, 1, 1} },
   5, 11,           // original sync time 05:11
   1,               // auto-brightness on (BH1750)
   1, 400,          // lux mapping range: 1 lux (dark) .. 400 lux (bright)
@@ -438,11 +436,10 @@ const uint32_t CARD_LOOP_MAX_MS = 25000;
    is due is dropped, and a random time that falls into the slot around a
    change is drawn anew.
    ====================================================================== */
-const unsigned long PANEL_GUARD_BEFORE_MS = 3000;   // optional things end this long before a change starts
+const unsigned long PANEL_GUARD_BEFORE_MS = FACE_GUARD_MS;   // optional things end this long before a change starts (face.h)
 const unsigned long PANEL_INFO_AFTER_MS   = 3000;   // messages, cards, the info round: after a change's end
 const unsigned long PANEL_DECOR_REST_MS   = 10000;  // GIFs and extras of their own accord: the plain face this long first
-const unsigned long PANEL_EXTRA_MS        = 8000;   // the longest extra of a face, about
-const unsigned long TETRIS_KNOCK_MS       = 6000;   // a knock's break-up and build on the Tetris face, about
+const unsigned long PANEL_EXTRA_MS        = 8000;   // the longest extra of a face, about: for drawing their times
 const uint8_t       PANEL_INFO_HALF_S     = 30;     // messages and cards start before this second
 unsigned long faceChangeEndedAt = 0;   // the face's last change or scene ended
 unsigned long panelFaceSince    = 0;   // the face came back on top
@@ -883,8 +880,7 @@ unsigned long fbBlinkStart = 0;              // millis() when that sequence star
 bool          fbLit = false;                 // feedback state of this loop (LED and matrix)
 
 // Perceptual brightness fade (Classic clicks: UP held) ----------------------
-const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep
-const float FADE_GAMMA     = 2.2f;    // perceptual -> linear-light exponent
+const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep (FADE_GAMMA: face.h)
 float       fadePhase = 1.0f;         // perceptual position 0..1 (linear to the human eye)
 int8_t      fadeDir   = -1;
 unsigned long fadeLastMs = 0;
@@ -953,15 +949,13 @@ unsigned long bannerAt = 0;      // millis() the banner came up
 // the banner, the hotspot info) repaint when it is set; every full repaint
 // clears it.
 bool          panelDirty = true;
-// Knock gates: one reason and one timestamp each, read only by knockIsReal()
-// and knockEffectReady().
-// Declared here rather than with the rest of the shake code because setup() and
-// the orientation code set them, and those are compiled on both boards.
+// Knock gates: one reason and one timestamp each, read only by knockIsReal().
+// Declared here rather than with the knock code because setup() and the
+// orientation code set them, and those are compiled on every board.
 const unsigned long KNOCK_START_QUIET_MS = 3000;  // after setup(): plugging the clock in
-const unsigned long SHAKE_SETTLE_MS      = 1200;  // after a turn, and after an effect
+const unsigned long KNOCK_AFTER_TURN_MS      = 1200;  // after a turn
 unsigned long setupDoneAt  = 0;   // millis() at the end of setup()
 unsigned long rotatedAt    = 0;   // millis() when the device rotation last changed
-unsigned long shakeEndedAt = 0;   // millis() when the last effect had run its course
 // Boot breadcrumb stages, written to flash while starting (see board_hal.h).
 const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
 const uint8_t BOOT_STAGE_START = 1;   // setup() entered
@@ -1084,66 +1078,23 @@ class BufferedWriter : public Print {
 uint8_t BufferedWriter::_buf[2000];
 #endif
 
-// Sundry globals used for animation ---------------------------------------
-
-char timeStr[7], animStr[7]; // 6 digits + null terminator
-bool animTrigger[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
-// FN_FACE_ANIMATION on the classic face: asked for (all six fly in at the next
-// second), flying, or neither. A new one is ignored until the last one has
-// landed and CLASSIC_ANIM_REST_MS have passed. An input can come again before
-// the first has played - a knock reports every event the sensor latches
-// (updateShake()), seen 2 to 7 per knock - and one that came after the second
-// had taken the request asked for a second animation.
-enum ClassicAnim : uint8_t { CLASSIC_ANIM_IDLE, CLASSIC_ANIM_ASKED, CLASSIC_ANIM_FLYING };
-ClassicAnim classicAnim = CLASSIC_ANIM_IDLE;
-unsigned long classicAnimEndedAt = 0;   // millis() when the last one landed or was cut off
-uint16_t      classicAnimIgnored = 0;   // requests ignored since the last one taken, for the console
-const unsigned long CLASSIC_ANIM_REST_MS = 300;
-bool animShow[6] = {0, 0, 0, 0, 0, 0}; //[0-1] hours digits, [2-3] minutes, [4-5] seconds
-int8_t animXPos[6] = {0, 0, 0, 0, 0, 0};
-int8_t animYPos[6] = {0, 0, 0, 0, 0, 0};
-// Active (runtime) layout - populated by applyOrientation() from the source tables
-// below. Initialised to the portrait layout so the very first frames look right
-// even before the first accelerometer read.
-int8_t timeXPos[6] = {0, 13, 6, 19, 6, 17};
-int8_t timeYPos[6] = {16, 16, 35, 35, 50, 50};
-int8_t animXTarget[6] = {0, 13, 6, 19, 6, 17}; // Todo check 25 abd 31 value
-int8_t animYTarget[6] = {16, 16, 35, 35, 50, 50};
-// Each digit's flight, set when it starts (startFlight()): the side it comes
-// from (settings.dir: 0 = from the top, 1 = from the right, 2 = from the
-// bottom, 3 = from the left) and how many pixels it flies.
-uint8_t flightDir[6]  = {0, 0, 0, 0, 0, 0};
-uint8_t flightDist[6] = {1, 1, 1, 1, 1, 1};
-// The loop iterations every flight takes, set at each second tick
-// (flightIterations()): all flights take the same time, so whatever flies at a
-// tick lands together.
-uint16_t flightTime = 1;
-// The loop iterations the classic face had in its last whole second, counted
-// between two second ticks (0 = none counted yet). Web requests are served in
-// the same loop and take iterations away - measured: with /api/panel asked
-// every 60 ms a flight paced by the panel's refresh rate ran 30 % slow and
-// missed its landing. Pacing by this count keeps the fly-in time real.
-uint16_t faceItersPerSec = 0;
-uint32_t faceTickMs = 0;   // when stepClockAnim() last saw a second tick; 0 = not since the face came up
-
-// Source layouts. The active tables above are copied from one of these whenever
-// the orientation changes. Portrait = 32 wide x 64 tall (digits stacked
-// HH/MM/SS); landscape = 64 wide x 32 tall (HH/MM large side by side, SS small
-// centered below). Landscape positions are starting values, easy to fine-tune.
-const int8_t portXTarget[6] = {0, 13, 6, 19, 6, 17};
-const int8_t portYTarget[6] = {16, 16, 35, 35, 50, 50};
-const int8_t landXTarget[6] = {2, 15, 36, 49, 22, 32}; // HH | MM big, SS small
-const int8_t landYTarget[6] = {17, 17, 17, 17, 30, 30}; // HH/MM baseline 17, SS baseline 30
+// The classic watchface (face_classic.h), on every board, with its settings
+// inside the clock's.
+ClassicFace classicFace(settings.classic);
+// The face of a watchface number. Declared here: the prototypes Arduino
+// generates leave out a function that returns a reference.
+Watchface &faceFor(uint8_t id);
 
 // Orientation handling -----------------------------------------------------
 // The MatrixPortal M4 has an onboard LIS3DH accelerometer. We read gravity and
 // rotate the display in 90 deg steps so the clock always shows the right way up.
 Adafruit_LIS3DH lis = Adafruit_LIS3DH();
 bool    accelOK = false;          // true once the LIS3DH was found on I2C
-#if BOARD_WAVESHARE_WALL
-bool    knockOK = false;          // the board's QMI8658 watches for the knock (knockSensorBegin())
+#if KNOCK_SENSING
+Knock   knock;                    // the knock (knock.h): the LIS3DH's, or the wall clock's QMI8658's
+#define knockOK knock.found()
 #else
-#define knockOK accelOK           // the LIS3DH's knock: the same chip as the rotation
+#define knockOK false             // no knock on this board
 #endif
 // Two rotations, kept apart on purpose:
 // - deviceRotation is how the panel is held: the accelerometer's reading after
@@ -1203,6 +1154,30 @@ uint8_t syncTimeHour = 5, syncTimeMinute = 11;
 unsigned long millisNow, deltaT;
 unsigned long secondStartedAt = 0;   // millis() when the second on show began (timekeeper())
 time_t localTime;   // what the panel shows: the clock's UTC plus zone and daylight saving
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+long testShift = 0;   // debug and test builds: seconds the panel's time is moved for a test (POST /api/test)
+#endif
+#if defined(FACE_FRAME_LOG)
+// Test builds: the test's own clock (POST /api/test virtual=1). Every pass
+// of the loop is TEST_STEP_MS, whatever it really took; the panel's time runs
+// from the scene's start, and what the scene asks for happens at its moment
+// (plan=). So the same code shows the same frames on every run, which real
+// time - a pass early or late, a request landing anywhere in a second - did
+// not give (2026-10-20: Tetris differed from the first frame).
+const unsigned long TEST_STEP_MS = 5;
+bool          testVirtualOn = false;
+bool          testVirtualStart = false;                // asked for: the next pass begins the scene
+uint8_t       testVirtualReset = 0;                    // ... with the face shown afresh
+uint32_t      testVirtualSeed = 1;
+unsigned long testVirtualMs = 0, testVirtualMs0 = 0;   // the test's millis(), and where its scene began
+time_t        testVirtualLocal = 0;                    // the panel's time at testVirtualMs0
+bool          testQuiet = false;                       // no notices and no info cards over the face
+String        testPendingPlan;                         // the next scene's steps, taken when it begins
+bool          testFrameAnew = false;                   // log the next frame even if it looks like the last
+struct TestStep { unsigned long atMs; char what; long arg; };   // ms after the scene's start
+TestStep      testPlan[8];
+uint8_t       testPlanCount = 0, testPlanNext = 0;
+#endif
 
 // NTP sync -----------------------------------------------------------------
 // One state instead of the flags ntpSuccess, ntpRequestActive and wifiEnabled.
@@ -1582,8 +1557,8 @@ void setup(void) {
     // the old rate it was a coin toss whether the sensor even showed it.
     lis.setDataRate(LIS3DH_DATARATE_100_HZ);
     Serial.println("LIS3DH found");
-#if WATCHFACE_TETRIS && !BOARD_WAVESHARE_WALL
-    shakeSensorBegin();   // let the sensor itself watch for a knock
+#if KNOCK_SENSING && !BOARD_WAVESHARE_WALL
+    knock.begin(Wire, ACCEL_I2C_ADDR, ACCEL_INT_PIN);   // let the sensor itself watch for a knock
 #endif
   } else {
 #if BOARD_HAS_ACCEL
@@ -1620,8 +1595,8 @@ void setup(void) {
   i2cScan();              // after the sensors: a PAJ7620U2 asleep may miss the first call
 #if BOARD_WAVESHARE_WALL
   boardBusScan();
-#if WATCHFACE_TETRIS
-  knockSensorBegin();     // the board's QMI8658; before loadFaceKeys(), which asks what was found
+#if KNOCK_SENSING
+  knock.begin(Wire1);     // the board's QMI8658; before loadFaceKeys(), which asks what was found
 #endif
 #endif
   loadFaceKeys();         // needs to know which sensors were found
@@ -1735,6 +1710,9 @@ void setup(void) {
 // MAIN
 void loop(void) {
   timekeeper(); // Updates Time variables and gives Triggers for second, minute and hour updates
+#if defined(FACE_FRAME_LOG)
+  testPlanRun();   // a test scene's steps that are due on the test's clock
+#endif
 #if BOARD_WAVESHARE_WALL
   wallConsole();  // "black" on the USB console before a flash, test pictures
   wallOutputWatch();
@@ -1814,8 +1792,8 @@ void loop(void) {
 #endif
   if (minuteTrigger) { updateAutoDst(); } // follow the timezone's summer/winter time changes
   updateOrientation();  // rotate the display to match how the panel is held
-#if WATCHFACE_TETRIS
-  updateShake();        // a knock takes the Tetris digits apart and rebuilds them
+#if KNOCK_SENSING
+  updateKnock();        // a knock does what the Inputs page maps it to
 #endif
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
   updateScreenTimeouts();
@@ -1830,9 +1808,14 @@ void loop(void) {
   gifCardUpdate();      // the card's task: its results, and the next GIF read ahead
 #endif
   gifUpdate();          // a GIF of its own accord when one is due
+  extrasUpdate();       // the face's extra when one is due
 #endif
   switch (screen) {
-    case SCREEN_FACE:   drawClock(); break;
+#if defined(CLOCK_DEBUG)
+    case SCREEN_FACE: { uint32_t passStart = micros(); faceUpdate(false); facePassStats(micros() - passStart); } break;
+#else
+    case SCREEN_FACE:   faceUpdate(false); break;
+#endif
 #if GIF_PLAYBACK
     case SCREEN_GIF:    drawGif(); break;
 #endif
@@ -1907,9 +1890,9 @@ void showScreen(Screen next) {
   slideDir = (prev == SCREEN_MENU   && next == SCREEN_EDITOR) ? +1
            : (prev == SCREEN_EDITOR && next == SCREEN_MENU)   ? -1 : 0;
 #endif
-#if WATCHFACE_TETRIS
+#if KNOCK_SENSING
   // A knock latched while another screen was up is old news on the face.
-  if (next == SCREEN_FACE) { shakeDiscardLatched(); }
+  if (next == SCREEN_FACE) { knock.discard(); }
 #endif
 }
 
@@ -2002,62 +1985,25 @@ void updateApDisplay() {
       return;
     }
   }
-  // SCREEN_HOTSPOT_PREVIEW: a client is connected. Keep the animation advancing
-  // every loop so it runs at real time (stepClockAnim is cheap, no panel I/O),
-  // but only push the latest state to the panel at the board's preview rate
-  // (5 fps on the M4): skipped frames are computed, not slowed down. This leaves
-  // the radio free for the slow WiFiNINA web server; the S3 draws every frame.
-#if WATCHFACE_TETRIS
-  // The Tetris and Muncher watchfaces throttle themselves (they only repaint on
-  // an animation step or a visible change), so they need no preview rate on
-  // top of that.
-  uint8_t face = activeWatchface();
-  if (face == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
-#if WATCHFACE_MUNCHER
-  if (face == WATCHFACE_MUNCHER_ID) { drawMuncherFace(); return; }
-#endif
-#if WATCHFACE_ALIENS
-  if (face == WATCHFACE_ALIENS_ID) { drawAliensFace(); return; }
-#endif
-#else
-  activeWatchface();
-#endif
-  stepClockAnim();
-  if (millisNow - apClockLast >= AP_PREVIEW_MS) {
-    apClockLast = millisNow;
-    renderClock();
-  }
+  // SCREEN_HOTSPOT_PREVIEW: a client is connected, and sees the face.
+  faceUpdate(true);
 }
 
 /* ======================================================================
    Orientation: read the accelerometer and rotate the display in 90 deg steps
    ====================================================================== */
 
-// Switch the matrix to rotation "rot" and load the matching digit layout into
-// the active runtime tables. Rotations 1/3 are portrait (32x64, stacked
-// HH/MM/SS); rotations 0/2 are landscape (64x32, HH/MM large + SS small below).
-// The fly-in directions mean the same in both: a digit set to come from the
-// top comes from the top of the panel as it is held (until 2026-10-08
-// landscape swapped them, but only until the next save, which set them back).
-// Digits snap to the new layout so an in-flight animation never streaks
-// across the screen during a rotation.
+// Switch the matrix to rotation "rot", and the classic face to its layout for
+// it. Rotations 1/3 are portrait (32x64, stacked HH/MM/SS); rotations 0/2 are
+// landscape (64x32, HH/MM large + SS small below). The fly-in directions mean
+// the same in both: a digit set to come from the top comes from the top of the
+// panel as it is held (until 2026-10-08 landscape swapped them, but only until
+// the next save, which set them back). Digits snap to the new layout so an
+// in-flight animation never streaks across the screen during a rotation. The
+// other faces see the turn by themselves, on their next pass.
 void applyOrientation(uint8_t rot) {
   setScreenRotation(rot);
-
-  for (uint8_t i = 0; i < 6; i++) {
-    if (screenIsLandscape()) {
-      animXTarget[i] = landXTarget[i];
-      animYTarget[i] = landYTarget[i];
-    } else {
-      animXTarget[i] = portXTarget[i];
-      animYTarget[i] = portYTarget[i];
-    }
-    timeXPos[i] = animXTarget[i];
-    timeYPos[i] = animYTarget[i];
-    animXPos[i] = animXTarget[i];
-    animYPos[i] = animYTarget[i];
-    animShow[i] = false;
-  }
+  classicFace.enter(faceMoment(), ENTER_TURNED);
 }
 
 // The one place the panel's drawing rotation is set.
@@ -2425,7 +2371,7 @@ void formatOffset(char *buf, size_t size, long offset) {
    wait. Text: TomThumb (3x5) for titles, values and the portrait rows, the
    built-in 5x7 font for the landscape rows. One accent colour marks the focus
    and the focused value; secondary text is dimmed. Every colour keeps the
-   AP_INFO_MIN_BRIGHT floor, so the menu stays readable at night.
+   FacePaint::VISIBLE_MIN floor, so the menu stays readable at night.
    ====================================================================== */
 
 uint16_t uiInk()    { return scaledColorVisible(255, 255, 255); }
@@ -2758,145 +2704,15 @@ void updatePanelRate() {
   panelRateLast = millisNow;
 }
 
-// Loop iterations per second on the classic face: the last second's count, or
-// before there is one what the loop is made to do - on the S3 once per panel
-// refresh when nothing holds it up, on the M4 once every LOOP_MS.
-uint32_t faceLoopHz() {
-  if (faceItersPerSec) { return faceItersPerSec; }
-#if PANEL_PACED_LOOP
-  return panelHz ? panelHz : PANEL_HZ_TYPICAL;
-#else
-  return 1000 / LOOP_MS;
-#endif
-}
-
-// Advance the clock animation state by one step. This is the cheap part - no
-// matrix I/O at all - so it can run on EVERY loop iteration to keep the animation
-// at real time regardless of how often the panel is actually redrawn. On a second
-// tick it rebuilds the digit strings and puts every digit that was flying back
-// on its place; per digit it starts a flight (animTrigger) and places one that
-// is under way (placeFlight()).
-void stepClockAnim(void) {
-  static uint16_t itersSinceTick = 0;   // loop iterations since the second tick, where flights start
-  if (secondTrigger) {
-    // The iterations of the second that just ended (the one the last tick
-    // started, counted with it) pace the flights of the next.
-    uint32_t span = millisNow - faceTickMs;
-    if (faceTickMs != 0 && span >= 900 && span <= 1100) {
-      faceItersPerSec = (uint16_t)min(((uint32_t)itersSinceTick + 1) * 1000UL / span, (uint32_t)0xFFFF);
-    }
-    faceTickMs = millisNow;
-    itersSinceTick = 0;
-    flightTime = flightIterations();
-  }
-  else if (itersSinceTick < 0xFFFF) { itersSinceTick++; }
-
-  if (secondTrigger) { classicDigits(); }
-  bool timeKnown = clockIsSet();   // dashes do not fly in
-
-  for (uint8_t i = 0; i < 6; i++) { // 6 displayed digits (HH MM SS); timeStr[6] is the null terminator
-    // On the tick the digit that flew in is the one the time shows now, so it
-    // stands on its place - also one a stalled loop kept from landing, which
-    // would otherwise leave the shown digit off its place from then on.
-    if (secondTrigger && animShow[i]) {
-      timeXPos[i] = animXTarget[i];
-      timeYPos[i] = animYTarget[i];
-      animShow[i] = false;
-    }
-    if (animTrigger[i] && timeKnown) { startFlight(i); }
-    if (animShow[i]) { placeFlight(i, itersSinceTick); }
-  }
-  // The watchface animation has landed once its flights have: every flight
-  // takes flightTime iterations from the tick it started on.
-  if (classicAnim == CLASSIC_ANIM_FLYING && itersSinceTick >= flightTime) {
-    classicAnim = CLASSIC_ANIM_IDLE;
-    classicAnimEndedAt = millisNow;
-  }
-}
-
-// How far digit i has to fly when it comes from side dir: so far that the
-// incoming digit starts wholly off the panel and the outgoing one, which moves
-// out the other side by the same distance, ends wholly off it. Measured with
-// the box all ten digits of its font cover, and the panel's size as it is
-// turned now.
-int16_t flightNeed(uint8_t i, uint8_t dir) {
-  const GFXfont *f = (i > 3) ? &FreeSansBold9pt7b : &FreeSansBold12pt7b;   // as renderClock() draws them
-  bool across = (dir == 1 || dir == 3);
-  int16_t lo = 127, hi = -128;   // the digits' box along the flight, from the cursor (hi exclusive)
-  for (char c = '0'; c <= '9'; c++) {
-    const GFXglyph &g = f->glyph[c - f->first];
-    int16_t a = across ? g.xOffset : g.yOffset;
-    int16_t b = a + (across ? g.width : g.height);
-    if (a < lo) { lo = a; }
-    if (b > hi) { hi = b; }
-  }
-  int16_t pos  = across ? animXTarget[i] : animYTarget[i];
-  int16_t size = across ? matrix.width() : matrix.height();
-  return max((int16_t)(size - pos - lo), (int16_t)(pos + hi));
-}
-
-// The loop iterations every flight takes: the fly-in time at the rate the
-// face's loop really has. All flights take this time, each covering its own way
-// in it, so whatever flies at a tick lands together, and every second looks the
-// same whether one digit flies or six. (Until 2026-10-08 the setting was ms per
-// pixel, rounded to whole loop iterations per pixel: with flights up to 62 px
-// and every flight held under a second, it had three steps - 4..7, 8..12 and
-// 13..60 ms looked alike within each.)
-uint16_t flightIterations() {
-  uint32_t ms = (uint32_t)settings.flyInTime * 10;
-  uint32_t iters = (ms * faceLoopHz() + 500) / 1000;
-  return (uint16_t)max(iters, (uint32_t)1);
-}
-
-// The fly-in time in the 10 ms Settings::flyInTime keeps, from ms, within its range.
-uint8_t flyInUnits(long ms) {
-  return (uint8_t)constrain((ms + 5) / 10, (long)(FLY_IN_MIN_MS / 10), (long)(FLY_IN_MAX_MS / 10));
-}
-
-// Digit i starts its flight from the side settings.dir names for it, in the
-// time all flights take (flightTime). Every digit that comes from the same side
-// flies the same distance, the longest any of them needs (flightNeed()), so
-// they move at one speed as one block and keep their spacing - a pair set to
-// one side flies in as it stands, and with every digit set to one side the
-// whole face slides. (Each flying only as far as it needs, the hours' and the
-// minutes' two digits drew apart or together on the way.)
-void startFlight(uint8_t i) {
-  flightDir[i] = settings.dir[i] & 3;
-  int16_t d = 1;
-  for (uint8_t j = 0; j < 6; j++) {
-    if ((settings.dir[j] & 3) == flightDir[i]) { d = max(d, flightNeed(j, flightDir[i])); }
-  }
-  bool across = (flightDir[i] == 1 || flightDir[i] == 3);
-  int16_t pos = across ? animXTarget[i] : animYTarget[i];
-  if (d > 127 - pos) { d = 127 - pos; }   // the positions are int8_t
-  flightDist[i] = (uint8_t)max(d, (int16_t)1);
-  animShow[i] = true;
-}
-
-// Put digit i where its flight is after iters loop iterations: the incoming
-// digit (animStr) the rest of the way out from its place, the outgoing one
-// (timeStr) as far past it on the other side as the flight has come. Every
-// flight covers its way in flightTime iterations, its pixels spread evenly
-// over them.
-void placeFlight(uint8_t i, uint16_t iters) {
-  static const int8_t SIDE_X[4] = { 0, 1, 0, -1 };   // where each settings.dir value comes from
-  static const int8_t SIDE_Y[4] = { -1, 0, 1, 0 };
-  uint32_t moved = (uint32_t)flightDist[i] * min(iters, flightTime) / flightTime;
-  int16_t rest = flightDist[i] - (int16_t)moved;
-  uint8_t d = flightDir[i];
-  animXPos[i] = animXTarget[i] + SIDE_X[d] * rest;
-  animYPos[i] = animYTarget[i] + SIDE_Y[d] * rest;
-  timeXPos[i] = animXTarget[i] - SIDE_X[d] * (int16_t)moved;
-  timeYPos[i] = animYTarget[i] - SIDE_Y[d] * (int16_t)moved;
-}
-
 #if defined(CLOCK_DEBUG)
 // Debug build only: frame timing, printed once per second. "frames" is how often
-// the clock was rendered, "panel" the panel's refresh rate (updatePanelRate()),
-// "draw" the time to build a frame and "show" the time show() spent handing it
-// over (with double buffering it waits for the next panel refresh).
+// a face was drawn, "panel" the panel's refresh rate (updatePanelRate()),
+// "draw" the time from the face's pass to the frame (faceDrawStart) and "show"
+// the time show() spent handing it over (with double buffering it waits for
+// the next panel refresh).
 struct FrameStats { uint32_t frames, drawSum, drawMax, showSum, showMax, since; };
 FrameStats frameStats = {};
+uint32_t faceDrawStart = 0;   // micros() when faceUpdate() began the face's pass
 
 // Debug build only: the RAM every 30 s - internal free, its lowest since the
 // start and its largest free block, and the free PSRAM. The panel driver's
@@ -2944,6 +2760,50 @@ void frameStatsAdd(uint32_t drawUs, uint32_t showUs) {
                 (unsigned long)(f.showSum / f.frames), (unsigned long)f.showMax);
   f = FrameStats{};
   f.since = millis();
+}
+
+// Debug build: the face's passes, printed every 2 s - how often the loop ran
+// it, how long a pass took on average and at most (handing a frame over and
+// waiting for the panel included), and how many frames it drew.
+uint32_t faceDraws = 0;
+void facePassStats(uint32_t us) {
+  static uint32_t passes = 0, sum = 0, most = 0, since = 0;
+  passes++;
+  sum += us; if (us > most) { most = us; }
+  if (millis() - since < 2000) { return; }
+  Serial.printf("face %u: %lu passes, avg %lu max %lu us, %lu frames\n", (unsigned)settings.watchface,
+                (unsigned long)passes, (unsigned long)(sum / passes), (unsigned long)most, (unsigned long)faceDraws);
+  passes = sum = most = faceDraws = 0;
+  since = millis();
+}
+#endif
+
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+// Debug and test builds: a face drew a frame, before the marks go over it.
+// Counted for facePassStats(); a test build (FACE_FRAME_LOG) also logs it as a
+// checksum of the canvas whenever that differs from the last one -
+// "F hh:mm:ss.mmm crc face" - so two runs of the same scenes, before and after
+// a step of the refactor, show whether every frame stayed as it was
+// (tools.local/refactor).
+void faceFrameDrawn() {
+#if defined(CLOCK_DEBUG)
+  faceDraws++;
+#endif
+#if defined(FACE_FRAME_LOG)
+  static uint32_t last = 0;
+  uint32_t crc = faceCrc32((const uint8_t *)matrix.getBuffer(), (size_t)matrix.width() * matrix.height() * 2);
+  if (crc == last && !testFrameAnew) { return; }
+  last = crc;
+  testFrameAnew = false;
+  char line[56];
+  int n = snprintf(line, sizeof(line), "F %02u:%02u:%02u.%03lu %08lx %u", (unsigned)hourNow, (unsigned)minuteNow,
+                   (unsigned)secondNow, (unsigned long)(millisNow - secondStartedAt), (unsigned long)crc,
+                   (unsigned)settings.watchface);
+  if (testVirtualOn && n > 0 && n < (int)sizeof(line)) {   // and the ms into the scene, on the test's clock
+    snprintf(line + n, sizeof(line) - n, " %lu", (unsigned long)(millisNow - testVirtualMs0));
+  }
+  Serial.println(line);
+#endif
 }
 #endif
 
@@ -3010,1467 +2870,64 @@ void drawNoticeMarker() {
 }
 
 /* ======================================================================
-   Tetris watchface
-
-   HH:MM built from falling tetromino blocks. The block tables live in
-   src/tetris_digits.h and are produced by scripts/gen_tetris_digits.py: every
-   digit comes in several different tilings of its 6x10 glyph, each
-   already ordered so the pieces can be dropped in from above and coloured so
-   that no two touching pieces share a colour class.
-
-   Two things happen fresh every time a digit changes: a variant is drawn at
-   random, and the colour classes are mapped onto a shuffled palette. So the
-   same digit is neither built the same way nor coloured the same way twice.
-
-   The palette is six hues exactly 60 degrees apart. Because the classes are a
-   proper colouring and the mapping is injective, touching pieces can never end
-   up within 60 degrees of each other - no run-time check needed.
+   Tetris watchface (face_tetris.h): its settings, stored in a blob of their
+   own, and the face.
    ====================================================================== */
 #if WATCHFACE_TETRIS
-
-const uint8_t TETRIS_CELL  = 2;   // panel pixels per grid cell -> digit 12x20 px
-const uint8_t TETRIS_PITCH = 14;  // x distance between the two digits of a group
-const uint8_t TETRIS_DOT   = 4;   // colon dot edge length
-const uint8_t TETRIS_SETTLE = 2;  // last cells of the fall, never turning any more
-
-// Drop and turn pace are two separate settings, because they are two separate
-// things to watch: how fast the blocks come down, and how busily they turn on
-// the way. Both are stored in their own blob (see TetrisSettings below).
-const uint8_t  TETRIS_DROP_MIN = 20,  TETRIS_DROP_MAX = 250;   // ms per cell
-const uint16_t TETRIS_SPIN_MIN = 80,  TETRIS_SPIN_MAX = 1500;  // ms per quarter turn
-
-// Six hues 60 degrees apart. Blue is lifted off pure 0000FF, which is too dark
-// against the others on the panel, without moving its hue.
-const uint8_t TETRIS_PALETTE[TETRIS_COLOUR_CLASSES][3] = {
-  {255,   0,   0},   // red
-  {255, 255,   0},   // yellow
-  {  0, 255,   0},   // green
-  {  0, 255, 255},   // cyan
-  { 48,  48, 255},   // blue
-  {255,   0, 255}    // magenta
-};
-
-// Settings of this watchface, in their own flash blob. Keeping them out of the
-// main Settings struct is not tidiness: that struct is exactly 32 bytes with no
-// padding left, and a firmware that stored 36 would be refused wholesale by any
-// older build (Preferences::getBytes returns 0 when the blob is larger than the
-// buffer), which would reset every setting the user has. A second key costs
-// nothing and leaves the old blob untouched.
-// Fields added later go on the end and are filled in by revision, so a blob
-// written by an earlier firmware keeps everything it had.
-#define TETRIS_SETTINGS_MAGIC 0x7E71
-#define TETRIS_SETTINGS_REV   3   // 1 = drop and spin, 2 = adds the shake, 3 = on a time change too
-
-// How the digits come apart when the clock is knocked.
-const uint8_t SHAKE_STYLE_COLLAPSE = 0;  // the stack gives way and drops
-const uint8_t SHAKE_STYLE_SCATTER  = 1;  // the pieces fly off and tumble
-const uint8_t SHAKE_STYLE_CLEAR    = 2;  // rows flash and vanish, bottom up
-const uint8_t SHAKE_STYLE_RANDOM   = 3;  // one of the three, drawn each time
-const uint8_t SHAKE_STYLE_COUNT    = 4;
-const uint8_t SHAKE_LEVEL_MAX      = 10;
-
-struct TetrisSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  dropMs;      // milliseconds per cell of fall
-  uint16_t spinMs;      // average milliseconds between quarter turns
-  uint8_t  shakeLevel;  // 0 = knocking the clock does nothing, 1..10 sensitivity
-  uint8_t  shakeStyle;  // the break-up effect: how the digits come apart, see SHAKE_STYLE_*
-  uint8_t  unusedRev3;  // was shakeOnChange (rev 3); since 2026-10-08 a changing digit always breaks up
-};
-
-const TetrisSettings TETRIS_DEFAULTS = {
-  TETRIS_SETTINGS_MAGIC, TETRIS_SETTINGS_REV,
-  70,    // a block falls one cell every 70 ms
-  260,   // and turns a quarter every 260 ms on average
-  6,     // reacts to a knock, not to someone walking past
-  3,     // a different way of coming apart each time
-  0
-};
-
-TetrisSettings tetrisSettings;
-SettingsStore<TetrisSettings> tetrisStore;
-
-// State of one of the four digits.
-struct TetrisDigit {
-  uint8_t value;      // 0..9, or 0xFF when nothing has been placed yet
-  uint8_t variant;    // which tiling of that digit is being built
-  uint8_t piece;      // index of the piece currently falling; == piece count when settled
-  uint8_t fall;       // cells that piece still has to drop
-  uint8_t turns;      // quarter turns this piece still owes
-  unsigned long turnAt[3];  // millis() at which each of them happens
-  int8_t  shiftDx;    // cells the piece still starts to the side of its column
-  uint8_t shiftAt;    // rows it falls before it starts walking across
-  uint8_t shiftEvery; // rows between one column change and the next
-  uint8_t fall0;      // the fall it started with, to work out how far it has come
-  uint8_t hue[TETRIS_COLOUR_CLASSES];  // colour class -> palette entry
-};
-
-TetrisDigit   tetrisDigits[4];
-uint16_t      tetrisPal[TETRIS_COLOUR_CLASSES]; // palette at the current brightness
-uint8_t       tetrisRotation    = 0xFF;   // rotation the layout was built for
-bool          tetrisLandscape   = false;  // orientation the layout was built for
-bool          tetrisSettled     = false;  // true once every block has landed
-unsigned long tetrisStepLast    = 0;      // millis() of the last animation step
-bool          tetrisColonDrawn  = false;  // colon state of the frame on the panel
-uint8_t       tetrisSpinDrawn   = 0;      // turns still owed when that frame was drawn
-
-/* ----------------------------------------------------------------------
-   Coming apart when the clock is knocked
-
-   A nudge throws the digits away and the time is then built up again from
-   scratch, which also picks fresh tilings and fresh colours. Three ways of
-   coming apart: the stack collapsing, the pieces flying off, and the rows
-   being cleared away from the bottom. The first two need pieces that move
-   freely, the third needs a cell grid - both are built from the same tables
-   when the animation starts, and only the one the style needs is filled in.
-   ------------------------------------------------------------------------- */
-const uint8_t  SHAKE_MAX_DEBRIS  = 4 * 13;  // four digits, at most 13 pieces each
-const uint8_t  SHAKE_STEP_MS     = 30;      // one animation step
-const int16_t  SHAKE_GRAVITY     = 10;      // added to the fall speed each step, 1/16 px
-const uint8_t  SHAKE_CLEAR_FLASH = 3;       // steps a row stays lit before it goes
-const uint16_t SHAKE_HOLD_MS     = 300;     // beat of empty space before it builds again
-
-// One flying piece. Position and speed are in 1/16 of a pixel so the movement
-// does not step in whole pixels.
-struct ShakePiece {
-  int16_t x16, y16;    // top-left corner
-  int16_t vx16, vy16;  // speed per step
-  uint8_t orient;
-  uint8_t colour;      // index into tetrisPal
-  uint8_t delay;       // steps to wait before this one starts moving
-  uint8_t spin;        // steps between quarter turns, 0 = does not turn
-  uint8_t spinTick;    // steps since this one last turned
-};
-
-// All of this is per digit, not per display: a knock takes all four apart at
-// once, but a minute change only replaces the digits that actually changed, and
-// those have to come apart on their own while the rest stand still.
-const uint8_t SHAKE_MAX_PIECES = 13;  // the most any digit is made of
-
-bool          shakeBusy[4]    = {false, false, false, false};
-uint8_t        shakeStyleOf[4] = {0, 0, 0, 0};   // the style that digit is using
-uint8_t       shakeCount[4]   = {0, 0, 0, 0};    // pieces flying, per digit
-uint16_t      shakeFrame[4]   = {0, 0, 0, 0};    // steps since that one started
-ShakePiece    shakeDebris[4][SHAKE_MAX_PIECES];
-// Cell grid for the row-clearing style: colour + 1 per cell, 0 = empty. Rows are
-// always taken off the bottom of the digit and everything above drops into the
-// gap, just like a line clear in the game.
-uint8_t       shakeGrid[4][TETRIS_GRID_W * TETRIS_GRID_H];
-uint8_t       shakeClearsLeft[4] = {0, 0, 0, 0}; // rows still to take away
-uint8_t       shakeClearTick[4]  = {0, 0, 0, 0}; // steps spent on the row going
-unsigned long shakeStepLast = 0;      // one clock for all of them, they step together
-bool          shakePreviewReq = false;  // the config page asked to show a setting off
-unsigned long shakeHoldUntil[4] = {0, 0, 0, 0};  // empty space before the rebuild starts
-int           tetrisXHour = 0, tetrisXMin = 0;  // left edge of each digit group
-int           tetrisYHour = 0, tetrisYMin = 0;  // top edge of each digit group
-int           tetrisDropHour = 4, tetrisDropMin = 4;  // cells above the box where a
-                                                      // piece's bottom edge starts
-
-// The packed piece record of one piece of one variant.
-uint16_t tetrisPieceAt(uint8_t digit, uint8_t variant, uint8_t piece) {
-  return TETRIS_VAR[digit][(uint16_t)variant * TETRIS_PIECES_PER_DIGIT[digit] + piece];
-}
-
-// Send the next piece on its way: set how far it falls and decide at which
-// heights it flicks round a quarter. The heights are spread over the fall with
-// a random position inside each band, so the turns look tapped out by hand
-// instead of clocked. Nothing turns during the last TETRIS_SETTLE cells, so a
-// piece always arrives in the orientation it will keep.
-//
-// Takes the digit index rather than a reference: the .ino preprocessor injects
-// a prototype for every function ahead of the file, so a parameter of a type
-// declared here would not be known yet.
-void tetrisArmPiece(uint8_t idx) {
-  TetrisDigit &s   = tetrisDigits[idx];
-  uint16_t rec     = tetrisPieceAt(s.value, s.variant, s.piece);
-  uint8_t  oFinal  = TETRIS_PIECE_ORIENT(rec);
-  uint8_t  hFinal  = TETRIS_SIZE[oFinal] & 0x0F;
-  uint8_t  landing = TETRIS_PIECE_TOP(rec);
-  uint8_t  targetX = TETRIS_PIECE_X(rec);
-  // The fall is led by the piece's bottom edge, so that is what the start
-  // height is measured on: it begins tetrisDrop* cells above the digit box and
-  // travels down to where it lands. Anchoring the TOP instead, as an earlier
-  // version did, left tall pieces half inside the panel at the moment they
-  // appeared, because a quarter turn swaps the bounding box and the top edge is
-  // then up to three cells away from where the fall actually starts.
-  uint8_t  drop    = (idx < 2) ? (uint8_t)tetrisDropHour : (uint8_t)tetrisDropMin;
-  s.fall  = landing + hFinal - 1 + drop;
-  s.fall0 = s.fall;
-
-  // How much room there is to manoeuvre: the rows it can fall while it is still
-  // clear of everything already lying in the digit. The game's rule is that a
-  // piece may not pass through the stack, and both the turning and the walk
-  // sideways are kept inside this window for exactly that reason. A high stack
-  // therefore leaves little room for either - as it does in the game.
-  int topRow = TETRIS_GRID_H;
-  for (uint8_t q = 0; q < s.piece; q++) {
-    uint16_t o = tetrisPieceAt(s.value, s.variant, q);
-    if ((int)TETRIS_PIECE_TOP(o) < topRow) { topRow = TETRIS_PIECE_TOP(o); }
-  }
-  // After `clear` steps the piece's bottom edge is level with the top of the
-  // stack, so only the steps before that are genuinely free.
-  int bottom0 = (int)landing + (int)hFinal - 1 - (int)s.fall;
-  int clear   = topRow - bottom0;
-  if (clear < 0) { clear = 0; }
-  if (clear > (int)s.fall) { clear = (int)s.fall; }
-
-  // Quarter turns, all of which have to be over before it reaches the stack.
-  // Not every piece turns, and one that does rarely uses every turn it could
-  // have, so some come down flat while others tumble.
-  uint8_t turns = 0;
-  // Every turn has to be over by the last genuinely free step, so that from
-  // there on the piece is in the orientation it will land in.
-  int turnSteps = clear - 1;
-  if (turnSteps > (int)s.fall - TETRIS_SETTLE) { turnSteps = (int)s.fall - TETRIS_SETTLE; }
-  unsigned long band  = tetrisSettings.spinMs;
-  unsigned long start = 0;
-  if (turnSteps > 0 && band > 0) {
-    unsigned long budget = (unsigned long)turnSteps * tetrisSettings.dropMs;
-    uint8_t fits = 0;
-    while (fits < 3 && (unsigned long)(fits + 1) * band <= budget) { fits++; }
-    turns = (fits == 0) ? 0 : (uint8_t)random(fits + 1);
-    if (turns > 0) {
-      // The turns themselves take turns*spinMs; whatever room is left over is
-      // where they may begin. A piece with a long way to fall can therefore
-      // still be turning well down the panel instead of sorting itself out at
-      // the top, which is what a player does too.
-      unsigned long slack = budget - (unsigned long)turns * band;
-      start = (unsigned long)random(slack + 1);
-    }
-  }
-  s.turns = turns;
-  // One turn per band, at a random point inside it: the gaps come out uneven
-  // rather than metronomic, and they always finish inside the free window.
-  for (uint8_t i = 0; i < turns; i++) {
-    s.turnAt[i] = millisNow + start + (unsigned long)i * band + 1 + (unsigned long)random(band);
-  }
-
-  // Where it comes in, and how far it has to walk.
-  //
-  // The game spawns a piece centred over the field, rounded to the left, and the
-  // player walks it across. Same here, and the whole walk is over before the
-  // piece reaches the stack, because from there on only its own column is clear.
-  //
-  // The game would also allow one more move as the piece touches down - that is
-  // what the lock delay is for. It is deliberately not used here: a piece can
-  // only be walked into place at the end if it could descend in the wrong column
-  // first, and with tilings where every piece is reached by a straight drop that
-  // column is usually blocked. Tried it, and the replay caught pieces sinking
-  // straight through the stack while they held their last move back. The move is
-  // worth one extra cell of reach in about one case in 250, and costs a piece
-  // passing through the stack in far more.
-  //
-  // When there is less room than distance, the piece comes in closer to its
-  // column instead - which is what happens in the game as well: a high stack
-  // leaves no time to walk a piece across.
-  uint8_t oSpawn = oFinal;
-  for (uint8_t i = 0; i < turns; i++) { oSpawn = TETRIS_TURN[oSpawn]; }
-  int spawnX   = (TETRIS_GRID_W - (TETRIS_SIZE[oSpawn] >> 4)) / 2;   // rounded left
-  int maxShift = clear - 1;      // every move on a step that is still free
-  if (maxShift < 0) { maxShift = 0; }
-  if (maxShift > (int)s.fall) { maxShift = (int)s.fall; }
-  int dx = spawnX - (int)targetX;
-  if (dx >  maxShift) { dx =  maxShift; }
-  if (dx < -maxShift) { dx = -maxShift; }
-  s.shiftDx = (int8_t)dx;
-  // When it sets off, and how briskly it walks, are drawn separately and
-  // separately from the turning - so one piece darts across the moment it
-  // appears while another drifts over a column at a time well down the panel.
-  // Both still finish inside the free window.
-  int span = (dx < 0) ? -dx : dx;
-  s.shiftEvery = 1;
-  s.shiftAt    = 0;
-  if (span > 0) {
-    int strideMax = (span > 1) ? (maxShift - 1) / (span - 1) : maxShift;
-    if (strideMax > 3) { strideMax = 3; }        // slower than this reads as drifting
-    if (strideMax < 1) { strideMax = 1; }
-    s.shiftEvery = (uint8_t)(1 + random(strideMax));
-    int needed = 1 + (span - 1) * (int)s.shiftEvery;
-    int slack  = maxShift - needed;
-    if (slack < 0) { slack = 0; }
-    s.shiftAt = (uint8_t)random(slack + 1);
-  }
-}
-
-// Quarter turns this digit still owes, which is how far short of its landing
-// orientation the falling piece is drawn.
-uint8_t tetrisPendingTurns(uint8_t idx) {
-  TetrisDigit &s = tetrisDigits[idx];
-  uint8_t pending = 0;
-  for (uint8_t i = 0; i < s.turns; i++) {
-    if ((long)(s.turnAt[i] - millisNow) > 0) { pending++; }
-  }
-  return pending;
-}
-
-// Start building a digit: new tiling, new colours, first piece at the top.
-//
-// Do NOT add a randomSeed() anywhere for this: on the S3, random() reads the
-// hardware generator until randomSeed() is called, and calling it switches the
-// core over to a seeded software PRNG (WMath.cpp:44-61). Seeding would make the
-// variety worse, not better.
-void tetrisStartDigit(uint8_t idx, uint8_t value) {
-  TetrisDigit &s = tetrisDigits[idx];
-  s.value   = value;
-  // Per digit, not TETRIS_VARIANTS: only builds where every piece lands on
-  // something are shipped, and the 2, the 5 and the 7 have fewer of those.
-  s.variant = (uint8_t)random(TETRIS_VARIANTS_PER_DIGIT[value]);
-  s.piece   = 0;
-  tetrisArmPiece(idx);
-  for (uint8_t i = 0; i < TETRIS_COLOUR_CLASSES; i++) { s.hue[i] = i; }
-  for (uint8_t i = TETRIS_COLOUR_CLASSES - 1; i > 0; i--) {   // Fisher-Yates
-    uint8_t j = (uint8_t)random(i + 1);
-    uint8_t t = s.hue[i]; s.hue[i] = s.hue[j]; s.hue[j] = t;
-  }
-}
-
-// Place the digit groups for the current rotation and rebuild all four digits.
-// A group is TETRIS_GRID_W x TETRIS_GRID_H cells, so 12 x 20 px, and the two
-// digits of a group sit TETRIS_PITCH apart; the coordinates below are the
-// top-left corner of each group.
-//
-// The layout follows screenRotation, the rotation the panel is drawn in.
-void tetrisLayout() {
-  tetrisRotation  = screenRotation;
-  tetrisLandscape = screenIsLandscape();
-  if (tetrisLandscape) {
-    // 64x32: one line. Hours x 2..27, minutes x 36..61, both rows 6..25.
-    tetrisXHour = 2;  tetrisXMin = 36;
-    tetrisYHour = 6;  tetrisYMin = 6;
-    // A piece starts with its BOTTOM edge one row above the panel, so the whole
-    // of it is off screen however tall it happens to be at that moment, and it
-    // slides in over the edge. Measured in cells above the digit box.
-    tetrisDropHour = tetrisDropMin = tetrisYHour / TETRIS_CELL + 1;
-  } else {
-    // 32x64: hours above minutes, x 3..28, rows 8..27 and 36..55.
-    tetrisXHour = 3;  tetrisXMin = 3;
-    tetrisYHour = 8;  tetrisYMin = 36;
-    tetrisDropHour = tetrisYHour / TETRIS_CELL + 1;   // off the top of the panel
-    // The minutes have the hours above them, not the panel edge, so they start
-    // in the eight-pixel gap between the two rows: bottom edge on its lowest
-    // row, which leaves room for a piece of any height without reaching up into
-    // the hours.
-    tetrisDropMin = 1;
-  }
-  for (uint8_t i = 0; i < 4; i++) {
-    tetrisDigits[i].value = 0xFF;
-    shakeHoldUntil[i] = 0;   // a rotation rebuilds at once, it does not wait
-  }
-  tetrisSettled = false;
-}
-
-// Hand the current HH:MM to the four digits. Only a digit whose value really
-// changed is rebuilt - the others keep the blocks they have already dropped.
-void tetrisPushTime() {
-  if (!clockIsSet()) { return; }   // nothing to build yet; drawTetrisFace() shows dashes
-  uint8_t h = clockHour(localTime), m = clockMinute(localTime);
-  uint8_t d[4] = { (uint8_t)(h / 10), (uint8_t)(h % 10),
-                   (uint8_t)(m / 10), (uint8_t)(m % 10) };
-  uint8_t changeStyle = 0xFF;   // drawn once, so digits changing together match
-  for (uint8_t i = 0; i < 4; i++) {
-    if (shakeBusy[i]) { continue; }   // still coming apart, it will be rebuilt after
-    if (millisNow < shakeHoldUntil[i]) { continue; }   // the pause after it came apart
-    if (d[i] == tetrisDigits[i].value) { continue; }
-    // The outgoing digit breaks up rather than vanishing at once (decided by
-    // Peter, 2026-10-08: the effect always counts at a time change). Only one
-    // that is actually standing there can break up, so a digit still being
-    // built, or not yet drawn at all, is just swapped.
-    if (tetrisDigits[i].value <= 9 && tetrisDigits[i].piece > 0) {
-      if (changeStyle == 0xFF) { changeStyle = shakePickStyle(); }
-      shakeStartDigit(i, changeStyle);
-      continue;
-    }
-    tetrisStartDigit(i, d[i]);
-    tetrisSettled = false;
-  }
-}
-
-// Rescale the palette to the master brightness, so the watchface follows the
-// light sensor and the brightness slider like the classic one does.
-void tetrisApplyBrightness() {
-  for (uint8_t i = 0; i < TETRIS_COLOUR_CLASSES; i++) {
-    tetrisPal[i] = scaledColorB(TETRIS_PALETTE[i][0], TETRIS_PALETTE[i][1],
-                                TETRIS_PALETTE[i][2], effectiveBrightness);
-  }
-}
-
-// Move every digit on by one fall step. A piece drops one cell per step; when
-// it has arrived the next one starts at the top of the digit box.
-void tetrisStep() {
-  bool allSettled = true;
-  for (uint8_t i = 0; i < 4; i++) {
-    TetrisDigit &s = tetrisDigits[i];
-    if (s.value > 9 || shakeBusy[i]) { continue; }
-    uint8_t total = TETRIS_PIECES_PER_DIGIT[s.value];
-    if (s.piece >= total) { continue; }        // this digit is complete
-    allSettled = false;
-    if (s.fall > 0) { s.fall--; continue; }
-    s.piece++;
-    if (s.piece < total) { tetrisArmPiece(i); }
-  }
-  tetrisSettled = allSettled;
-}
-
-// Draw one digit: every piece already dropped, plus the one still falling.
-//
-// The falling piece spins into place. A quarter turn changes the piece's
-// bounding box, so a rotated state can be wider than where it will land - the
-// library this replaced simply let those pixels run off the panel (measured: 21
-// of its 229 fall states left the six-cell digit box, by up to 6 px, which on
-// the rightmost digit meant drawing to x=67 on a 64 px panel). Here the spinning
-// piece is kept inside its own digit box instead, the way a real game kicks a
-// piece off the wall when you rotate against it. Vertically the piece hangs from
-// its landing edge, so its bottom travels smoothly however it is turned.
-void tetrisDrawDigit(uint8_t idx, int originX, int originY) {
-  TetrisDigit &s = tetrisDigits[idx];
-  if (s.value > 9) { return; }
-  uint8_t total = TETRIS_PIECES_PER_DIGIT[s.value];
-  uint8_t last  = (s.piece < total) ? s.piece : (uint8_t)(total - 1);
-  for (uint8_t p = 0; p <= last; p++) {
-    uint16_t rec    = tetrisPieceAt(s.value, s.variant, p);
-    uint8_t  orient = TETRIS_PIECE_ORIENT(rec);
-    int      lift   = (p == s.piece) ? s.fall : 0;   // only the current one is airborne
-    // One cell closer to its column for every row it has fallen; the last of
-    // those moves may be the one it makes as it lands.
-    int      cx     = TETRIS_PIECE_X(rec);
-    if (lift > 0 && s.shiftDx != 0 && p == s.piece) {
-      int total = (s.shiftDx < 0) ? -s.shiftDx : s.shiftDx;
-      // Column changes happen every shiftEvery rows, starting shiftAt rows down.
-      int rows = (int)s.fall0 - lift - (int)s.shiftAt - 1;
-      int done = (rows < 0) ? 0 : (rows / (int)s.shiftEvery) + 1;
-      if (done > total) { done = total; }
-      int left = total - done;
-      if (left > 0) { cx += (s.shiftDx < 0) ? -left : left; }
-    }
-    int      bottom = (int)TETRIS_PIECE_TOP(rec) + (TETRIS_SIZE[orient] & 0x0F) - 1 - lift;
-
-    if (lift > 0) {
-      // Turns still to come: the piece is shown that many quarters short of its
-      // landing orientation and unwinds one flick at a time on the way down.
-      uint8_t turns = tetrisPendingTurns(idx);
-      while (turns--) { orient = TETRIS_TURN[orient]; }
-      int w = TETRIS_SIZE[orient] >> 4;
-      if (cx + w > TETRIS_GRID_W) { cx = TETRIS_GRID_W - w; }   // kick off the wall
-      if (cx < 0) { cx = 0; }
-    }
-
-    uint16_t col = tetrisPal[s.hue[TETRIS_PIECE_CLASS(rec)]];
-    int      bx  = originX + cx * TETRIS_CELL;
-    int      by  = originY + (bottom - (TETRIS_SIZE[orient] & 0x0F) + 1) * TETRIS_CELL;
-    for (uint8_t c = 0; c < 4; c++) {
-      uint8_t cell = TETRIS_SHAPE[orient][c];
-      matrix.fillRect(bx + (cell >> 4) * TETRIS_CELL, by + (cell & 0x0F) * TETRIS_CELL,
-                      TETRIS_CELL, TETRIS_CELL, col);
-    }
-  }
-}
-
-// The separator between hours and minutes: vertically stacked between the two
-// groups in landscape, a horizontal pair in the gap between the rows in portrait.
-void tetrisDrawColon() {
-  uint16_t c = scaledColorVisible(255, 255, 255);
-  if (tetrisLandscape) {
-    int x = tetrisXHour + TETRIS_PITCH * 2;   // x 30..33, between the two groups
-    matrix.fillRect(x, tetrisYHour + 4,  TETRIS_DOT, TETRIS_DOT, c);  // y 10..13
-    matrix.fillRect(x, tetrisYHour + 12, TETRIS_DOT, TETRIS_DOT, c);  // y 18..21
-  } else {
-    int y = tetrisYHour + 22;                 // y 30..33, in the 8 px gap between rows
-    matrix.fillRect(tetrisXHour + 5,  y, TETRIS_DOT, TETRIS_DOT, c);  // x 8..11
-    matrix.fillRect(tetrisXHour + 17, y, TETRIS_DOT, TETRIS_DOT, c);  // x 20..23
-  }
-}
-
-// Stand-ins for the four digits while the clock has no time yet: a bar of
-// blocks across the middle of each digit box, in the colon's colour.
-void tetrisDrawDashes() {
-  uint16_t c = scaledColorVisible(255, 255, 255);
-  for (uint8_t i = 0; i < 4; i++) {
-    matrix.fillRect(tetrisOriginX(i) + TETRIS_CELL, tetrisOriginY(i) + 4 * TETRIS_CELL,
-                    4 * TETRIS_CELL, 2 * TETRIS_CELL, c);
-  }
-}
-
-// Where digit `idx` sits on the panel: which group it belongs to, and whether it
-// is the left or the right of the two.
-int tetrisOriginX(uint8_t idx) {
-  return ((idx < 2) ? tetrisXHour : tetrisXMin) + ((idx & 1) ? TETRIS_PITCH : 0);
-}
-int tetrisOriginY(uint8_t idx) {
-  return (idx < 2) ? tetrisYHour : tetrisYMin;
-}
-
-// Take one digit apart. Only the pieces that have actually landed are thrown;
-// one still in the air simply goes with the rest of the build.
-// The style is chosen per EVENT and passed in, never per digit: with "random"
-// selected, picking it here would give a knock four different effects at once.
-uint8_t shakePickStyle() {
-  uint8_t style = tetrisSettings.shakeStyle;
-  if (style >= SHAKE_STYLE_RANDOM) { style = (uint8_t)random(SHAKE_STYLE_RANDOM); }
-  return style;
-}
-
-void shakeStartDigit(uint8_t d, uint8_t style) {
-  TetrisDigit &s = tetrisDigits[d];
-  shakeStyleOf[d]    = style;
-  shakeCount[d]      = 0;
-  shakeFrame[d]      = 0;
-  shakeClearTick[d]  = 0;
-  shakeClearsLeft[d] = (style == SHAKE_STYLE_CLEAR) ? TETRIS_GRID_H : 0;
-  if (style == SHAKE_STYLE_CLEAR) { memset(shakeGrid[d], 0, TETRIS_GRID_W * TETRIS_GRID_H); }
-  if (s.value > 9) { return; }   // nothing standing there, so nothing to throw
-
-  uint8_t total   = TETRIS_PIECES_PER_DIGIT[s.value];
-  uint8_t settled = (s.piece < total) ? s.piece : total;
-  // Marked busy only when there is something to show, or an empty digit would
-  // hold the whole display in the animation for nothing.
-  shakeBusy[d] = (settled > 0);
-  if (!shakeBusy[d]) { return; }
-  for (uint8_t p = 0; p < settled; p++) {
-    uint16_t rec    = tetrisPieceAt(s.value, s.variant, p);
-    uint8_t  orient = TETRIS_PIECE_ORIENT(rec);
-    uint8_t  colour = s.hue[TETRIS_PIECE_CLASS(rec)];
-    if (style == SHAKE_STYLE_CLEAR) {
-      for (uint8_t c = 0; c < 4; c++) {
-        uint8_t cell = TETRIS_SHAPE[orient][c];
-        uint8_t gx = TETRIS_PIECE_X(rec) + (cell >> 4);
-        uint8_t gy = TETRIS_PIECE_TOP(rec) + (cell & 0x0F);
-        shakeGrid[d][gy * TETRIS_GRID_W + gx] = colour + 1;
-      }
-    } else if (shakeCount[d] < SHAKE_MAX_PIECES) {
-      ShakePiece &f = shakeDebris[d][shakeCount[d]++];
-      f.orient = orient;
-      f.colour = colour;
-      f.x16 = (int16_t)((tetrisOriginX(d) + TETRIS_PIECE_X(rec) * TETRIS_CELL) * 16);
-      f.y16 = (int16_t)((tetrisOriginY(d) + TETRIS_PIECE_TOP(rec) * TETRIS_CELL) * 16);
-      if (style == SHAKE_STYLE_COLLAPSE) {
-        // The bottom gives way first and the rest sinks after it.
-        f.vx16 = 0;
-        f.vy16 = 0;
-        f.spin = 0;
-        f.spinTick = 0;
-        f.delay = (uint8_t)((TETRIS_GRID_H - 1 - TETRIS_PIECE_TOP(rec)) / 2);
-      } else {
-        f.vx16  = (int16_t)random(-40, 41);
-        f.vy16  = (int16_t)random(-48, -8);   // a kick upwards first
-        f.spin  = (uint8_t)random(2, 6);
-        f.spinTick = (uint8_t)random(f.spin);   // start them out of step
-        f.delay = 0;
-      }
-    }
-  }
-}
-
-bool shakeAnyBusy() {
-  for (uint8_t d = 0; d < 4; d++) { if (shakeBusy[d]) { return true; } }
-  return false;
-}
-
-// Take all four apart at once - what a knock does.
-void shakeStartAll() {
-  shakeStepLast = millisNow;
-  uint8_t style = shakePickStyle();   // one effect for the whole knock
-  for (uint8_t d = 0; d < 4; d++) { shakeStartDigit(d, style); }
-}
-
-// Advance one digit by one step. Returns true once it has nothing left to show.
-bool shakeStepDigit(uint8_t d) {
-  if (++shakeFrame[d] > 150) { return true; }   // never let it hang
-
-  if (shakeStyleOf[d] == SHAKE_STYLE_CLEAR) {
-    if (++shakeClearTick[d] < SHAKE_CLEAR_FLASH) { return false; }
-    shakeClearTick[d] = 0;
-    for (uint8_t r = TETRIS_GRID_H - 1; r > 0; r--) {   // everything drops into the gap
-      memcpy(&shakeGrid[d][r * TETRIS_GRID_W],
-             &shakeGrid[d][(r - 1) * TETRIS_GRID_W], TETRIS_GRID_W);
-    }
-    memset(&shakeGrid[d][0], 0, TETRIS_GRID_W);
-    return (shakeClearsLeft[d] == 0) || (--shakeClearsLeft[d] == 0);
-  }
-
-  bool allGone = true;
-  for (uint8_t i = 0; i < shakeCount[d]; i++) {
-    ShakePiece &f = shakeDebris[d][i];
-    if (f.delay) { f.delay--; allGone = false; continue; }
-    f.vy16 += SHAKE_GRAVITY;
-    f.x16  += f.vx16;
-    f.y16  += f.vy16;
-    // A quarter turn swaps the piece's bounding box, so shift it by half the
-    // difference and its middle stays put; anchored at the top-left instead, a
-    // long piece would jump three cells sideways on every turn. The tick is per
-    // piece, so pieces sharing a rate do not all flick on the same frame.
-    if (f.spin && ++f.spinTick >= f.spin) {
-      f.spinTick = 0;
-      uint8_t o = f.orient, n = TETRIS_TURN[o];
-      int dw = (int)(TETRIS_SIZE[o] >> 4)   - (int)(TETRIS_SIZE[n] >> 4);
-      int dh = (int)(TETRIS_SIZE[o] & 0x0F) - (int)(TETRIS_SIZE[n] & 0x0F);
-      f.x16 = (int16_t)(f.x16 + dw * TETRIS_CELL * 8);   // 8 = half of the sixteenths
-      f.y16 = (int16_t)(f.y16 + dh * TETRIS_CELL * 8);
-      f.orient = n;
-    }
-    if ((f.y16 >> 4) < matrix.height()) { allGone = false; }
-  }
-  return allGone;
-}
-
-// Draw the one digit that is coming apart.
-void shakeDrawDigit(uint8_t d) {
-  if (shakeStyleOf[d] == SHAKE_STYLE_CLEAR) {
-    bool flash = (shakeClearTick[d] == SHAKE_CLEAR_FLASH - 1);
-    uint16_t white = scaledColorVisible(255, 255, 255);
-    int ox = tetrisOriginX(d), oy = tetrisOriginY(d);
-    for (uint8_t gy = 0; gy < TETRIS_GRID_H; gy++) {
-      for (uint8_t gx = 0; gx < TETRIS_GRID_W; gx++) {
-        uint8_t v = shakeGrid[d][gy * TETRIS_GRID_W + gx];
-        if (!v) { continue; }
-        uint16_t col = (flash && gy == TETRIS_GRID_H - 1) ? white : tetrisPal[v - 1];
-        matrix.fillRect(ox + gx * TETRIS_CELL, oy + gy * TETRIS_CELL,
-                        TETRIS_CELL, TETRIS_CELL, col);
-      }
-    }
-    return;
-  }
-  for (uint8_t i = 0; i < shakeCount[d]; i++) {
-    ShakePiece &f = shakeDebris[d][i];
-    int bx = f.x16 >> 4, by = f.y16 >> 4;
-    uint16_t col = tetrisPal[f.colour];
-    for (uint8_t c = 0; c < 4; c++) {
-      uint8_t cell = TETRIS_SHAPE[f.orient][c];
-      matrix.fillRect(bx + (cell >> 4) * TETRIS_CELL, by + (cell & 0x0F) * TETRIS_CELL,
-                      TETRIS_CELL, TETRIS_CELL, col);
-    }
-  }
-}
-
-
-// One pass of the watchface. While blocks are falling this runs at the animation
-// step interval; once everything has landed it only repaints when something it
-// shows has actually changed, so an idle clock costs almost nothing. Skipping
-// matrix.show() is safe: the panel driver keeps refreshing the last frame it was given.
-void drawTetrisFace() {
-  // A rotation moves every coordinate a running animation holds, and a rotation
-  // rebuilds the digits anyway - so it wins over the animation.
-  if (screenRotation != tetrisRotation) {
-    for (uint8_t i = 0; i < 4; i++) { shakeBusy[i] = false; }
-    tetrisLayout();
-  }
-
-  // The config page asks for a run when a setting has been changed there. A
-  // knock cannot be used for that - the sensor is deliberately ignored while the
-  // AP is up - and without it a changed setting would simply sit there unseen.
-  // Held back until the last run has finished, so each one can be watched to the
-  // end rather than being cut off by the next slider release.
-  if (shakePreviewReq && !shakeAnyBusy()) {
-    shakePreviewReq = false;
-    shakeStartAll();
-  }
-
-  // A digit that has finished coming apart is marked unknown, so the next
-  // tetrisPushTime() starts it again from the current time - which is also what
-  // makes the rebuild show the right value if a minute passed on the way.
-  bool anyShake = false;
-  bool shakeEnded = false;   // a digit finished this pass and the panel must be cleared
-  bool shakeDue = (millisNow - shakeStepLast >= SHAKE_STEP_MS);
-  for (uint8_t i = 0; i < 4; i++) {
-    if (!shakeBusy[i]) { continue; }
-    if (shakeDue && shakeStepDigit(i)) {
-      shakeEnded = true;
-      shakeBusy[i] = false;
-      tetrisDigits[i].value = 0xFF;
-      // Let the space stand empty for a moment. Without it the first new block
-      // is already on its way down while the last of the old ones is still
-      // leaving the panel, and the two read as one continuous movement.
-      shakeHoldUntil[i] = millisNow + SHAKE_HOLD_MS;
-      shakeEndedAt = millisNow;   // do not retrigger on the same knock
-    }
-    if (shakeBusy[i]) { anyShake = true; }
-  }
-  if (shakeDue) { shakeStepLast = millisNow; }
-
-  tetrisPushTime();
-
-  bool colonOn = (localTime % 2) == 0;   // 1 Hz blink, in step with the seconds
-
-  // Turning runs on its own clock, so a flick between two fall steps has to be
-  // painted when it happens - otherwise the drop rate would quietly limit how
-  // finely the rotation setting can act.
-  uint8_t spinPending = 0;
-  for (uint8_t i = 0; i < 4; i++) { spinPending += tetrisPendingTurns(i); }
-
-  bool stepDue = !tetrisSettled &&
-                 (millisNow - tetrisStepLast >= tetrisSettings.dropMs);
-  // panelDirty covers everything outside the face itself: another screen having
-  // drawn over it, a change of watchface or brightness, the press
-  // indicator.
-  bool changed = panelDirty || colonOn != tetrisColonDrawn ||
-                 spinPending != tetrisSpinDrawn;
-  // Debris moving is a change in itself, so while anything is coming apart the
-  // face repaints on the animation's clock rather than waiting to be asked.
-  // shakeEnded matters just as much: on the pass where the last piece leaves,
-  // nothing is moving any more and nothing has "changed", so without it the
-  // test below would return and leave the previous frame - debris and all -
-  // standing on the panel for the whole pause.
-  if (!stepDue && !changed && !shakeEnded && !(anyShake && shakeDue)) { return; }
-  if (stepDue) {
-    tetrisStepLast = millisNow;
-    tetrisStep();
-  }
-
-  tetrisApplyBrightness();
-  matrix.fillScreen(0);
-  for (uint8_t i = 0; i < 4; i++) {
-    if (shakeBusy[i]) { shakeDrawDigit(i); } else { tetrisDrawDigit(i, tetrisOriginX(i), tetrisOriginY(i)); }
-  }
-  if (!clockIsSet()) { tetrisDrawDashes(); }
-  // The colon keeps its own beat and is never touched by the animations. It is
-  // the one thing on this face that shows real time passing, so it has to stay
-  // on the second, whatever the digits are doing. Hiding it while everything was
-  // coming apart, as an earlier version did, made it drop out mid-phase on a
-  // knock and reappear off-beat as the new digits arrived.
-  if (colonOn) { tetrisDrawColon(); }
-
-  // Same overlays the classic watchface draws, so both behave alike.
-  drawStatusPixel();
-  drawHotspotMark();
-  drawNoticeMarker();
-  drawFeedbackIndicator();
-  matrix.show();
-
-  tetrisColonDrawn  = colonOn;
-  panelDirty        = false;
-  // After the step, because a piece may have landed and the next one armed.
-  tetrisSpinDrawn = 0;
-  for (uint8_t i = 0; i < 4; i++) { tetrisSpinDrawn += tetrisPendingTurns(i); }
-}
-
-/* ----------------------------------------------------------------------
-   Detecting the knock
-
-   Not the absolute reading: a baseline that follows the sensor slowly holds
-   gravity, and the trigger looks at how far the current sample is from it. So
-   tilting or carrying the clock does not count, while a knock stands out. All
-   integer, and the magnitudes are compared squared so there is no square root.
-   ------------------------------------------------------------------------- */
-// Measured on the device rather than guessed. Over two quiet stretches totalling
-// about 70 s the largest deviation in any one second was 780 counts - that is
-// the sensor's own noise at 100 Hz. Every deliberate interaction came out at
-// 1900 or more, knocks at 5900, a firm knock or picking the clock up at 12700.
-// So the most sensitive setting sits at roughly twice the noise, and the least
-// sensitive just above a knock on the table.
-// The sensor watches for the knock itself, and pulls its INT1 line when it sees
-// one. That is better than sampling it: between two reads we were blind for
-// 20 ms, which is long enough for a short tap to pass unnoticed, and each read
-// cost four I2C transactions. Now a knock costs one digitalRead per loop.
-//
-// The LIS3DH's own interrupt generator compares against a fixed threshold, which
-// would fire on gravity alone as soon as the clock is tilted. Its high-pass
-// filter solves that, and it is applied to the interrupt generator ONLY
-// (HP_IA1), not to the output registers (FDS stays 0) - so sensorRotation()
-// still reads gravity while the interrupt only sees what changes.
-const uint8_t LIS3DH_CTRL_REG2     = 0x21;
-const uint8_t LIS3DH_CTRL_REG3     = 0x22;
-const uint8_t LIS3DH_CTRL_REG5     = 0x24;
-const uint8_t LIS3DH_REFERENCE     = 0x26;
-const uint8_t LIS3DH_INT1_CFG      = 0x30;
-const uint8_t LIS3DH_INT1_SRC      = 0x31;
-const uint8_t LIS3DH_INT1_THS      = 0x32;
-const uint8_t LIS3DH_INT1_DURATION = 0x33;
-
-// Sensitivity 1..10 as a threshold register value. One step is 16 mg at the
-// +/-2 g range, and the levels come from the deviations measured on the device:
-// the noise floor was 780 counts and one g is 16000, so level 10 at 1500 counts
-// is 0.094 g, which is 6 steps, and level 1 at 6000 counts is 0.375 g, 23 steps.
-const uint8_t SHAKE_THS_MIN  = 6;   // level 10
-const uint8_t SHAKE_THS_STEP = 2;   // level 1 -> 24
-
-uint8_t shakeThreshold() {
-  uint8_t level = tetrisSettings.shakeLevel;
-  if (level == 0) { return 0; }
-  if (level > SHAKE_LEVEL_MAX) { level = SHAKE_LEVEL_MAX; }
-  return (uint8_t)(SHAKE_THS_MIN + (SHAKE_LEVEL_MAX - level) * SHAKE_THS_STEP);
-}
-
-void accelWriteReg(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission((uint8_t)ACCEL_I2C_ADDR);
-  Wire.write(reg);
-  Wire.write(value);
-  Wire.endTransmission();
-}
-
-uint8_t accelReadReg(uint8_t reg) {
-  Wire.beginTransmission((uint8_t)ACCEL_I2C_ADDR);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) { return 0; }
-  if (Wire.requestFrom((int)ACCEL_I2C_ADDR, 1) != 1) { return 0; }
-  return (uint8_t)Wire.read();
-}
-
-#if BOARD_WAVESHARE_WALL
-/* The wall clock's knock: the board's QMI8658 in its Wake on Motion
-   (src/imu_qmi8658.h). The chip compares every sample, at 128 Hz, with the
-   threshold and toggles INT1 (GPIO13) for each one over it - a knock comes as
-   1 to 5 edges 7-15 ms apart (measured on 2026-10-19). An interrupt counts the
-   edges, so none is lost between two passes, and updateShake() takes the first
-   of a burst as the knock. The chip decides, as the S3's LIS3DH does. */
-Qmi8658 imu;
-const uint8_t IMU_INT_PIN = 13;              // the QMI8658's INT1 (schematic, 2026-10-19)
-const unsigned long KNOCK_BURST_MS = 150;    // edges this close are the same knock
-const unsigned long KNOCK_FRESH_MS = 100;    // an edge older than this when looked at is dropped
-const unsigned long KNOCK_ARM_MS   = 300;    // after a (re)start the chip's own edges
-volatile uint32_t      knockEdges = 0;       // INT1's edges since the start
-volatile unsigned long knockEdgeAt = 0;      // millis() of the last
-uint32_t      knockEdgesSeen = 0;            // as far as updateShake() looked
-unsigned long knockLastEdgeAt = 0;           // the last edge it saw, a knock or not
-unsigned long knockArmedAt = 0;
-uint32_t      knocksSeen = 0;                // bursts taken as knocks, for the console
-
-// INT1's interrupt. A struct's member: the prototypes generated from this
-// sketch are free functions, on every board, and IRAM_ATTR exists on the
-// ESP32 only. Defined outside it: in IRAM an inline function's literals land
-// elsewhere, and the linker refuses that.
-struct KnockIsr {
-  static void edge();
-};
-void IRAM_ATTR KnockIsr::edge() {
-  knockEdges = knockEdges + 1;
-  knockEdgeAt = millis();
-}
-
-// Sensitivity 1..10 as the threshold in mg (Wake on Motion takes 1-255).
-// Measured on the wall on 2026-10-19: at rest 4-13 mg, knocks 180 mg to 3.3 g;
-// at 128 Hz 100 mg took 5 of 5 normal knocks, one of them as a single edge,
-// and nothing in two quiet minutes. Level 10 is about three times the noise,
-// level 1 the most the chip takes.
-const uint8_t KNOCK_WOM_MG[SHAKE_LEVEL_MAX + 1] = { 0, 255, 200, 160, 130, 100, 80, 64, 50, 40, 30 };
-
-uint8_t knockLevel() { return min<uint8_t>(tetrisSettings.shakeLevel, SHAKE_LEVEL_MAX); }
-
-// The sensitivity into the chip, at start-up and whenever it changes (also
-// from the live preview): a reset ends what ran, then Wake on Motion at the
-// threshold - or nothing, for 0.
-void shakeApplyThreshold() {
-  if (!knockOK) { return; }
-  bool ok = imu.begin(Wire1);
-  if (ok && knockLevel() > 0) { ok = imu.womStart(KNOCK_WOM_MG[knockLevel()], 16); }
-  knockArmedAt = millis();
-  if (!ok) { Serial.println("QMI8658: the knock did not start"); }
-}
-
-// At start-up, once the board's bus runs (and before loadFaceKeys()).
-void knockSensorBegin() {
-  pinMode(IMU_INT_PIN, INPUT);
-  if (!imu.begin(Wire1)) { Serial.println("QMI8658 not found - no knock"); return; }
-  knockOK = true;
-  attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN), KnockIsr::edge, CHANGE);
-  shakeApplyThreshold();
-  Serial.printf("QMI8658 found (revision 0x%02X): the knock by Wake on Motion over %u mg\n", imu.revision(),
-                KNOCK_WOM_MG[knockLevel()]);
-}
-
-void updateShake() {
-  if (!knockOK) { return; }
-  uint32_t edges = knockEdges;
-  if (edges == knockEdgesSeen) { return; }             // nothing happened
-  knockEdgesSeen = edges;
-  unsigned long at = knockEdgeAt;
-  bool sameKnock = knockLastEdgeAt != 0 && (long)(at - knockLastEdgeAt) < (long)KNOCK_BURST_MS;
-  knockLastEdgeAt = at;
-  if (sameKnock) { return; }
-  if ((long)(at - knockArmedAt) < (long)KNOCK_ARM_MS) { return; }   // the chip starting
-  if ((long)(millisNow - at) > (long)KNOCK_FRESH_MS) { return; }    // seen too late: now or not at all
-  knocksSeen++;
-  if (knockIsReal()) { handleInput(EV_KNOCK, 1); }
-}
-
-// Console "imu": the chip, the threshold and what it gave.
-void wallKnockReport() {
-  if (!knockOK) { Serial.println("QMI8658 not found - no knock"); return; }
-  Serial.printf("QMI8658 (revision 0x%02X): knock sensitivity %u, Wake on Motion over %u mg; INT1 %s; "
-                "%lu edges and %lu knocks since the start; bus errors %lu\n", imu.revision(), knockLevel(),
-                KNOCK_WOM_MG[knockLevel()], digitalRead(IMU_INT_PIN) == HIGH ? "high" : "low",
-                (unsigned long)knockEdges, (unsigned long)knocksSeen, (unsigned long)imu.busErrors());
-}
-#else
-// Push the current sensitivity into the sensor. Called at start-up and whenever
-// the setting changes, including from the live preview.
-void shakeApplyThreshold() {
-  if (!accelOK) { return; }
-  uint8_t ths = shakeThreshold();
-  if (ths == 0) {
-    accelWriteReg(LIS3DH_INT1_CFG, 0x00);   // no axis enabled: the line stays quiet
-    return;
-  }
-  accelWriteReg(LIS3DH_INT1_THS, ths);
-  accelWriteReg(LIS3DH_INT1_CFG, 0x2A);     // X, Y or Z above the threshold
-}
-
-void shakeSensorBegin() {
-  pinMode(ACCEL_INT_PIN, INPUT);
-  // High-pass filter on interrupt generator 1 only. HPM = 00 and the highest
-  // cutoff, so the reference follows within a fraction of a second: tilting is
-  // filtered away, a knock is not.
-  accelWriteReg(LIS3DH_CTRL_REG2, 0x01);
-  accelWriteReg(LIS3DH_INT1_DURATION, 0);   // react to the first sample over the line
-  accelWriteReg(LIS3DH_CTRL_REG3, 0x40);    // route generator 1 to the INT1 pin
-  accelWriteReg(LIS3DH_CTRL_REG5, 0x08);    // latch it until INT1_SRC is read
-  (void)accelReadReg(LIS3DH_REFERENCE);     // reset the filter
-  shakeApplyThreshold();
-  (void)accelReadReg(LIS3DH_INT1_SRC);      // start with the line clear
-}
-
-void updateShake() {
-  if (!accelOK) { return; }
-  if (digitalRead(ACCEL_INT_PIN) == LOW) { return; }   // nothing happened
-
-  // The interrupt is latched, so it has to be read away even when the knock is
-  // going to be ignored - otherwise it would fire the moment the block lifts.
-  (void)accelReadReg(LIS3DH_INT1_SRC);
-  if (knockIsReal()) { handleInput(EV_KNOCK, 1); }
-}
+#if KNOCK_SENSING
+static_assert(TETRIS_KNOCK_LEVEL_MAX == KNOCK_LEVEL_MAX, "the stored knock sensitivity and knock.h agree on its range");
 #endif
 
-// Whether the sensor's latched event is worth reporting as a knock. These are
-// the reasons it fires without anyone knocking; one per line, each reading one
-// explicit state or one gate with one reason. What a knock then does is the
-// profile's business.
+TetrisSettings tetrisSettings;
+FaceBlob tetrisBlob = { "tetris", TETRIS_SETTINGS_MAGIC, TETRIS_SETTINGS_REV, WATCHFACE_TETRIS_ID,
+                        (uint8_t *)&tetrisSettings, sizeof(TetrisSettings), (const uint8_t *)&TETRIS_DEFAULTS,
+                        TETRIS_PARAMS, sizeof(TETRIS_PARAMS) / sizeof(TETRIS_PARAMS[0]), tetrisMigrate };
+TetrisFace tetrisFace(tetrisSettings);
+#endif  // WATCHFACE_TETRIS
+
+/* ----------------------------------------------------------------------
+   The knock: knock.h senses it; here, whether it counts, and on to the
+   inputs as EV_KNOCK. Its sensitivity is the Tetris face's setting shk.
+   ------------------------------------------------------------------------- */
+#if KNOCK_SENSING
+// Whether the sensor's knock is worth reporting. These are the reasons it
+// fires without anyone knocking; one per line, each reading one explicit
+// state or one gate with one reason. What a knock then does is the profile's
+// business.
 bool knockIsReal() {
-  if (shakeThreshold() == 0)                           { return false; }  // switched off
+  if (knock.level() == 0)                              { return false; }  // switched off
   if (anyButtonDown())                                 { return false; }  // a button press IS a knock: the
                                                                           // switches sit 20 mm from the sensor
   if (millisNow - lastInputAt  < INPUT_SETTLE_MS)      { return false; }  // hands still on the clock
   if (orientCandidate != deviceRotation)               { return false; }  // a rotation is being debounced
   if (millisNow - setupDoneAt  < KNOCK_START_QUIET_MS) { return false; }  // just plugged in
-  if (millisNow - rotatedAt    < SHAKE_SETTLE_MS)      { return false; }  // turning is not a knock
+  if (millisNow - rotatedAt    < KNOCK_AFTER_TURN_MS)      { return false; }  // turning is not a knock
   return true;
 }
 
-// Whether the Tetris face can be knocked apart right now - what
-// FN_FACE_ANIMATION needs on it, whichever input asked for it.
-bool knockEffectReady() {
-  if (screen != SCREEN_FACE)                           { return false; }  // the banner is on top of it
-  if (settings.watchface != WATCHFACE_TETRIS_ID)       { return false; }  // the classic face has nothing to throw
-  if (shakeAnyBusy())                                  { return false; }  // already coming apart
-  if (millisNow - shakeEndedAt < SHAKE_SETTLE_MS)      { return false; }  // the last one has only just ended
-  return true;
+// On every pass outside the hotspot.
+void updateKnock() {
+  if (knock.sensed(millisNow) && knockIsReal()) { handleInput(EV_KNOCK, 1); }
 }
+#endif
 
-// Throw away a knock the sensor has latched. updateShake() does not run while
-// the config AP is up, so a button press there - a knock as far as the sensor
-// is concerned - would otherwise still be waiting when the face comes back, and
-// fire at once. (A side effect of the old rotation block used to swallow it.)
-void shakeDiscardLatched() {
-#if BOARD_WAVESHARE_WALL
-  knockEdgesSeen = knockEdges;      // the wall's edges so far count as seen
-  knockLastEdgeAt = knockEdgeAt;
-#else
-  if (accelOK) { (void)accelReadReg(LIS3DH_INT1_SRC); }
+// The sensitivity setting into the sensor, wherever it changes.
+void knockFollowSetting() {
+#if KNOCK_SENSING
+  knock.setLevel(tetrisSettings.knockLevel);
 #endif
 }
-#endif  // WATCHFACE_TETRIS
 
 /* ======================================================================
-   Muncher watchface
-
-   HH:MM in dots, which a muncher eats and lays anew when the time changes;
-   the logic is in src/muncher.h, here is when it moves and what the panel
-   shows. Between changes nothing moves. A change is planned backwards from
-   second 00, so the last digit is complete as the new minute begins, and it
-   is stepped by the time since it started: a screen that was on top for a
-   while, or a loop held up by a request, does not put it behind.
+   Muncher watchface (face_muncher.h): its settings, stored in a blob of
+   their own, and the face.
    ====================================================================== */
 #if WATCHFACE_MUNCHER
-
-// Settings of this watchface, in their own blob, as the Tetris ones are.
-#define MUNCHER_SETTINGS_MAGIC 0x3C1A
-#define MUNCHER_SETTINGS_REV   2   // 2 = adds pellets
-
-// What a knock, or the face action "trigger watchface animation", plays.
-// Stored values: a new one goes at the end, so "random" keeps its 2.
-const uint8_t MUNCHER_KNOCK_POWER  = 0;   // the power pellet: the ghosts turn and flee
-const uint8_t MUNCHER_KNOCK_REPLAY = 1;   // the minutes' ones eaten and laid again
-const uint8_t MUNCHER_KNOCK_RANDOM = 2;   // one of the others, drawn each time
-const uint8_t MUNCHER_KNOCK_DEATH  = 3;   // the ghosts win
-const uint8_t MUNCHER_KNOCK_COUNT  = 4;
-const uint8_t MUNCHER_FRUIT_ONE_IN = 5;   // without the extras' shared pace: a bonus fruit after one minute change in this many
-// The LEDs of a pellet, in the digits and the corridor: one, or more to be
-// seen better from afar (Peter, 2026-10-11) - two side by side, which makes
-// the level strokes solid lines, two one above the other, which makes the
-// upright ones solid, or a block of 2 x 2, which makes every stroke a solid
-// line 2 px thick: the digits drawn for reading first, the game kept as a
-// token. The other LEDs go right of and below the pellet's own, so a digit
-// grows by a pixel; the muncher's way stays on the pellet's own.
-const uint8_t MUNCHER_PELLETS_ONE   = 0;
-const uint8_t MUNCHER_PELLETS_WIDE  = 1;
-const uint8_t MUNCHER_PELLETS_TALL  = 2;
-const uint8_t MUNCHER_PELLETS_SOLID = 3;
-const uint8_t MUNCHER_PELLETS_COUNT = 4;
-// What a scene that ends leads to: a minute change may leave a bonus fruit,
-// and the change to a full hour is followed by the hour show.
-const uint8_t MUNCHER_AFTER_NOTHING = 0;
-const uint8_t MUNCHER_AFTER_MINUTE  = 1;
-const uint8_t MUNCHER_AFTER_HOUR    = 2;
-const uint8_t MUNCHER_PACE_MIN = 20, MUNCHER_PACE_MAX = 80;   // ms per pixel
-const unsigned long MUNCHER_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
-const unsigned long MUNCHER_KNOCK_ROOM_MS = PANEL_GUARD_BEFORE_MS;   // a knock's scene ends this long before a change starts
-// The most steps what the web app asks to see can take: a change of the
-// minutes' ones, or a knock's scene.
-const long MUNCHER_PREVIEW_STEPS = 260;
-
-struct MuncherSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  style;     // muncher::STYLE_*: how a changing digit is walked
-  uint8_t  knock;     // MUNCHER_KNOCK_*
-  uint8_t  paceMs;    // milliseconds per pixel the muncher walks
-  uint8_t  pellets;   // rev 2: MUNCHER_PELLETS_*, the LEDs of a pellet (was a spare byte, 0)
-  uint8_t  spare[1];
-};
-static_assert(sizeof(MuncherSettings) == 8, "the stored blob keeps its size");
-
-const MuncherSettings MUNCHER_DEFAULTS = {
-  MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV,
-  muncher::STYLE_MIXED,   // the whole digit when one changes, only the difference when several do
-  MUNCHER_KNOCK_RANDOM,
-  40,                     // 25 pixels a second
-  0,                      // one LED a pellet
-  { 0 }
-};
-
 MuncherSettings muncherSettings;
-SettingsStore<MuncherSettings> muncherStore;
-muncher::Face munch;
-uint8_t       muncherRotation     = 0xFF;   // rotation the layout was built for
-unsigned long muncherStartAt      = 0;      // when the planned or running scene starts
-time_t        muncherPlannedFor   = 0;      // the minute the planned change is for; 0 = none
-uint16_t      muncherPlannedDone  = 0;      // the step the planned minute change completes the time at
-uint16_t      muncherDoneSteps    = 0;      // the same for the running one, until it is logged; 0 = none
-unsigned long muncherSceneEndedAt = 0;
-uint8_t       muncherPlannedAfter = MUNCHER_AFTER_NOTHING;   // what the planned change leads to
-uint8_t       muncherAfter        = MUNCHER_AFTER_NOTHING;   // ... and the running scene
-uint16_t      muncherFruitsLogged = 0;      // bonus fruits eaten, as far as the console knows
-bool          muncherColonDrawn   = false;
-bool          muncherPreviewReq   = false;  // the web app asks to see a change
-bool          muncherKnockReq     = false;  // ... or the knock's scene
-
-// The four digits of a moment; dashes while the clock has no time.
-void muncherDigitsAt(time_t t, uint8_t d[4]) {
-  if (!clockIsSet()) {
-    for (uint8_t i = 0; i < 4; i++) { d[i] = muncher::NO_DIGIT; }
-    return;
-  }
-  uint8_t h = (uint8_t)clockHour(t), m = (uint8_t)clockMinute(t);
-  d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
-}
-
-void muncherStartScene(muncher::Mode mode, unsigned long at, uint8_t after = MUNCHER_AFTER_NOTHING) {
-  munch.start(mode);
-  muncherStartAt = at;
-  muncherPlannedFor = 0;
-  muncherDoneSteps = 0;   // not a planned minute change: nothing to time
-  muncherAfter = after;
-}
-
-// A bonus fruit somewhere along the corridor, of any kind, unless one lies
-// there already.
-void muncherPlaceFruit() {
-  if (munch.fruitX != muncher::NO_FRUIT) { return; }
-  int16_t slots = (munch.L.w - 20) / 4 + 1;   // the corridor's pellet places, 10 px off either end
-  munch.placeFruit(10 + 4 * (int16_t)random(slots), (uint8_t)random(muncher::FRUIT_KINDS));
-  panelDirty = true;
-}
-
-// The knock's scene, or the face action's: refused while a scene runs, just
-// after one, and when it could not end before the next change starts.
-bool muncherKnock() {
-  if (munch.mode != muncher::MODE_IDLE || munch.shown[0] == muncher::NO_DIGIT) { return false; }
-  if (millisNow - muncherSceneEndedAt < MUNCHER_KNOCK_REST_MS) { return false; }
-  uint8_t kind = muncherSettings.knock;
-  if (kind == MUNCHER_KNOCK_RANDOM) {
-    const uint8_t KINDS[3] = { MUNCHER_KNOCK_POWER, MUNCHER_KNOCK_REPLAY, MUNCHER_KNOCK_DEATH };
-    kind = KINDS[random(3)];
-  }
-  // Only against a planned change: until the face has planned one (it does
-  // on its next pass), there is nothing to measure the scene against.
-  bool planned = munch.legsPlanned() && muncherPlannedFor != 0;
-  if (!planned) { return false; }
-  unsigned long plannedStart = muncherStartAt;
-  uint16_t steps;
-  muncher::Mode mode;
-  const char *what;
-  if (kind == MUNCHER_KNOCK_POWER) {
-    steps = munch.planPower();
-    steps += 120;                      // the walk back and the ghosts, at the most
-    mode = muncher::MODE_POWER;
-    what = "the power pellet";
-  } else if (kind == MUNCHER_KNOCK_DEATH) {
-    steps = munch.planDeath();
-    steps += 140;                      // the fall, the pause and the next one's walk
-    mode = muncher::MODE_DEATH;
-    what = "the ghosts win";
-  } else {
-    uint8_t same[4];
-    memcpy(same, munch.shown, 4);
-    steps = munch.planChange(same, muncher::STYLE_ALL, 1 << 3);
-    steps += 60;                       // the walk out and the ghosts
-    mode = muncher::MODE_CHANGE;
-    what = "the minute's ones again";
-  }
-  unsigned long needs = (unsigned long)steps * muncherSettings.paceMs + MUNCHER_KNOCK_ROOM_MS;
-  muncherPlannedFor = 0;               // the change is planned anew afterwards
-  if ((long)(plannedStart - millisNow) < (long)needs) {
-    munch.show(munch.shown);           // drop the knock's walk
-    return false;
-  }
-  muncherStartScene(mode, millisNow);
-  Serial.printf("Muncher: %s\n", what);
-  return true;
-}
-
-// Nothing moving: put a time that moved on without a change right (a time
-// set by hand, a sync that corrected it, a minute the face missed), plan
-// the next change once per minute, and start it when its moment has come.
-void muncherIdle(const uint8_t now[4]) {
-  if (memcmp(munch.shown, now, 4) != 0) {
-    if (munch.shown[0] == muncher::NO_DIGIT || now[0] == muncher::NO_DIGIT) {
-      munch.show(now);                 // dashes come and go without a muncher
-      panelDirty = true;
-    } else if (munch.planChange(now, muncherSettings.style)) {
-      muncherStartScene(muncher::MODE_CHANGE, millisNow);
-    }
-    muncherPlannedFor = 0;
-    return;
-  }
-  if (now[0] == muncher::NO_DIGIT) { return; }
-  // The next change first: a knock is measured against it.
-  uint8_t sec = (uint8_t)clockSecond(localTime);
-  time_t next = localTime - sec + 60;
-  if (muncherPlannedFor != next) {
-    // To a full hour four ghosts follow the muncher, and the hour show
-    // comes after.
-    uint8_t to[4];
-    muncherDigitsAt(next, to);
-    bool hour = clockMinute(next) == 0;
-    muncherPlannedDone = munch.planChange(to, muncherSettings.style, 0, hour ? 4 : 2);
-    muncherPlannedAfter = hour ? MUNCHER_AFTER_HOUR : MUNCHER_AFTER_MINUTE;
-    muncherPlannedFor = next;
-  }
-  // The start, worked out anew on every pass until the change begins: the
-  // second's beginning it is measured from is only right once a real second
-  // has begun. Measured once at planning time, the first change after a
-  // restart stood complete at :00.973 (twice on 2026-10-10): the loop's
-  // first pass after the start counts as a new second, wherever in its
-  // second it falls. A sync that moves the second, or a new pace, is
-  // followed the same way.
-  unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
-  muncherStartAt = nextMinuteAt - (unsigned long)muncherPlannedDone * muncherSettings.paceMs;
-  // What the web app asks to see waits until it can end before the next
-  // change starts, and for the rest after a scene: a preview never holds up
-  // a change of the time.
-  long room = (long)(muncherStartAt - millisNow) - (long)MUNCHER_KNOCK_ROOM_MS;
-  bool rested = millisNow - muncherSceneEndedAt >= MUNCHER_KNOCK_REST_MS;
-  long pace = muncherSettings.paceMs;
-  if (muncherPreviewReq && rested && room >= MUNCHER_PREVIEW_STEPS * pace) {
-    // A change: the minutes' ones eaten and laid again, as the knock's "last
-    // digit again" does, so the time on show stays right. Showing the last
-    // minute's digits first, as this did, set the clock back a minute for
-    // the preview's time (midnight, 2026-10-11).
-    muncherPreviewReq = false;
-    uint8_t same[4];
-    memcpy(same, now, 4);
-    if (munch.planChange(same, muncher::STYLE_ALL, 1 << 3)) { muncherStartScene(muncher::MODE_CHANGE, millisNow); }
-    muncherPlannedFor = 0;
-    return;
-  }
-  if (muncherKnockReq && rested && room >= MUNCHER_PREVIEW_STEPS * pace) {
-    muncherKnockReq = false;
-    if (muncherKnock()) { return; }
-  }
-  // Started at its planned moment even when that has passed (the face was
-  // away): stepped from there, the muncher is where it ought to be by now.
-  if (munch.legsPlanned() && (long)(millisNow - muncherStartAt) >= 0) {
-    munch.start(muncher::MODE_CHANGE);
-    muncherDoneSteps = muncherPlannedDone;
-    muncherAfter = muncherPlannedAfter;
-    muncherPlannedFor = 0;
-  }
-}
-
-// A scene is over: what it leads to. After the change to a full hour the
-// hour show; after a minute change now and then a bonus fruit, at the pace
-// of the extras the faces share, and none in quiet hours or a dark room.
-void muncherSceneEnded() {
-  uint8_t after = muncherAfter;
-  muncherAfter = MUNCHER_AFTER_NOTHING;
-  muncherSceneEndedAt = millisNow;
-  panelDirty = true;
-  if (after == MUNCHER_AFTER_HOUR) {
-    munch.startHour();
-    muncherStartAt = millisNow;
-    muncherPlannedFor = 0;
-    Serial.println("Muncher: the hour show");
-  } else if (after == MUNCHER_AFTER_MINUTE) {
-#if GIF_PLAYBACK
-    if (extrasDue()) {
-      extrasScheduleNext();
-      if (!decorQuiet()) { muncherPlaceFruit(); }
-    }
-#else
-    if (random(MUNCHER_FRUIT_ONE_IN) == 0) { muncherPlaceFruit(); }
-#endif
-  }
-}
-
-// A sprite of 5 x 5, its rows with the leftmost pixel in bit 4, drawn round
-// its middle and turned to face (dx, dy); as drawn it faces right.
-void muncherSprite(const uint8_t rows[5], int16_t cx, int16_t cy, int8_t dx, int8_t dy, uint16_t colour) {
-  for (uint8_t r = 0; r < 5; r++) {
-    for (uint8_t c = 0; c < 5; c++) {
-      uint8_t sr = r, sc = c;
-      if (dx < 0)      { sc = 4 - c; }
-      else if (dy < 0) { sr = c; sc = 4 - r; }
-      else if (dy > 0) { sr = c; sc = r; }
-      if (rows[sr] & (0x10 >> sc)) { matrix.drawPixel(cx - 2 + c, cy - 2 + r, colour); }
-    }
-  }
-}
-
-const uint8_t MUNCH_OPEN[5]  = { 0x0E, 0x1C, 0x18, 0x1C, 0x0E };   // .###. ###.. ##... ###.. .###.
-const uint8_t MUNCH_SHUT[5]  = { 0x0E, 0x1F, 0x1F, 0x1F, 0x0E };
-const uint8_t GHOST_BODY[5]  = { 0x0E, 0x1F, 0x15, 0x1F, 0x15 };   // .###. ##### #.#.# ##### #.#.#
-const uint8_t GHOST_EYES[5]  = { 0x00, 0x00, 0x0A, 0x00, 0x00 };   // the two gaps of row 2
-// Red and pink follow the muncher; cyan and orange join them to a full hour.
-const uint8_t GHOST_RGB[muncher::GHOSTS][3] = { { 255, 0, 0 }, { 255, 184, 255 }, { 0, 255, 255 }, { 255, 184, 82 } };
-// The muncher folding up after the ghosts won, facing up: its mouth opens
-// wider and wider until nothing is left, then a little burst.
-const uint8_t MUNCH_FOLD[muncher::DEATH_FRAMES][5] = {
-  { 0x0E, 0x1F, 0x1F, 0x1F, 0x0E },   // .###. ##### ##### ##### .###.
-  { 0x0A, 0x1B, 0x1F, 0x1F, 0x0E },   // .#.#. ##.## ##### ##### .###.
-  { 0x11, 0x1B, 0x1F, 0x1F, 0x0E },   // #...# ##.## ##### ##### .###.
-  { 0x00, 0x11, 0x1B, 0x1F, 0x0E },   // ..... #...# ##.## ##### .###.
-  { 0x00, 0x00, 0x11, 0x1B, 0x0E },   // ..... ..... #...# ##.## .###.
-  { 0x00, 0x00, 0x00, 0x11, 0x0E },   // ..... ..... ..... #...# .###.
-  { 0x00, 0x0A, 0x00, 0x0A, 0x00 },   // ..... .#.#. ..... .#.#. .....
-  { 0x11, 0x00, 0x00, 0x00, 0x11 },   // #...# ..... ..... ..... #...#
-};
-
-// The hour show's giant muncher, 13 x 13, facing right; '#' lights a pixel.
-constexpr uint16_t giantRow(const char (&row)[muncher::GIANT + 1]) {
-  uint16_t bits = 0;
-  for (uint8_t i = 0; i < muncher::GIANT; i++) { bits = (uint16_t)((bits << 1) | (row[i] == '#' ? 1 : 0)); }
-  return bits;
-}
-constexpr uint16_t GIANT_OPEN[muncher::GIANT] = {
-  giantRow("....#####...."), giantRow("..#########.."), giantRow(".###########."), giantRow(".#########..."),
-  giantRow("########....."), giantRow("######......."), giantRow("#####........"), giantRow("######......."),
-  giantRow("########....."), giantRow(".#########..."), giantRow(".###########."), giantRow("..#########.."),
-  giantRow("....#####...."),
-};
-constexpr uint16_t GIANT_SHUT[muncher::GIANT] = {
-  giantRow("....#####...."), giantRow("..#########.."), giantRow(".###########."), giantRow(".###########."),
-  giantRow("#############"), giantRow("#############"), giantRow("#############"), giantRow("#############"),
-  giantRow("#############"), giantRow(".###########."), giantRow(".###########."), giantRow("..#########.."),
-  giantRow("....#####...."),
-};
-
-// The bonus fruits, 7 x 7, in muncher::FRUIT_KINDS' order: cherry,
-// strawberry, orange, apple. A letter is a colour (FRUIT_RGB), '.' nothing.
-const char *const FRUITS[muncher::FRUIT_KINDS][7] = {
-  { ".....GG", "....GG.", "..GG.G.", ".R...R.", "RRR.RRR", "RRR.RRR", ".R...R." },
-  { "..GGG..", ".RGGGR.", "RRWRWRR", "RWRRRWR", ".RRWRR.", "..RWR..", "...R..." },
-  { "...GG..", "..OGO..", ".OOOOO.", ".OOOOO.", ".OOOOO.", "..OOO..", "......." },
-  { "...BG..", "..RBR..", ".RRRRR.", ".RRRRR.", ".RRRRR.", "..R.R..", "......." },
-};
-
-uint16_t fruitColour(char c) {
-  switch (c) {
-    case 'R': return scaledColor(255, 0, 0);
-    case 'G': return scaledColor(0, 200, 0);
-    case 'W': return scaledColor(255, 255, 255);
-    case 'O': return scaledColor(255, 140, 0);
-    case 'B': return scaledColor(150, 75, 0);
-    default:  return 0;
-  }
-}
-
-// One pellet at (x, y), with the LEDs the setting adds to it.
-void muncherPellet(int16_t x, int16_t y, uint16_t colour) {
-  uint8_t p = muncherSettings.pellets;
-  matrix.drawPixel(x, y, colour);
-  if (p == MUNCHER_PELLETS_WIDE || p == MUNCHER_PELLETS_SOLID) { matrix.drawPixel(x + 1, y, colour); }
-  if (p == MUNCHER_PELLETS_TALL || p == MUNCHER_PELLETS_SOLID) { matrix.drawPixel(x, y + 1, colour); }
-  if (p == MUNCHER_PELLETS_SOLID)                              { matrix.drawPixel(x + 1, y + 1, colour); }
-}
-
-void muncherDraw(bool colonOn) {
-  const muncher::Layout &L = munch.L;
-  uint16_t dot   = scaledColor(255, 184, 151);
-  uint16_t wall  = scaledColor(40, 40, 255);
-  uint16_t eyes  = scaledColor(255, 255, 255);
-  uint16_t walls = munch.wallsWhite() ? eyes : wall;   // the hour show flashes them
-  matrix.fillScreen(0);
-  for (uint8_t i = 0; i < 4; i++) {
-    uint64_t bits = munch.dots[i];
-    for (uint8_t k = 0; k < muncher::COLS * muncher::ROWS; k++) {
-      if (bits & (1ULL << k)) {
-        muncherPellet(L.digitX[i] + 2 * (k % muncher::COLS), L.digitY[i] + 2 * (k / muncher::COLS), dot);
-      }
-    }
-  }
-  // The colon: two power pellets, 4 x 4 without their corners, on the
-  // second's beat. The one the knock's muncher ate stays away until its
-  // scene is over.
-  if (colonOn) {
-    for (uint8_t p = 0; p < 2; p++) {
-      if (munch.pelletEaten && p == L.knockPellet) { continue; }
-      matrix.fillRect(L.colonX[p] + 1, L.colonY[p], 2, 4, dot);
-      matrix.fillRect(L.colonX[p], L.colonY[p] + 1, 4, 2, dot);
-    }
-  }
-  for (int16_t x = 0; x < L.w; x++) {
-    if (!muncher::wallOpen(L, x)) { matrix.drawPixel(x, L.wallTop, walls); }
-    matrix.drawPixel(x, L.wallBottom, walls);
-  }
-  for (uint8_t k = 0; k < 32 && 2 + 4 * k < L.w; k++) {
-    if (munch.lanePellets & (1UL << k)) { muncherPellet(2 + 4 * k, L.laneY, dot); }
-  }
-  if (munch.fruitX != muncher::NO_FRUIT) {
-    const char *const *rows = FRUITS[munch.fruitKind];
-    for (uint8_t r = 0; r < 7; r++) {
-      for (uint8_t c = 0; c < 7; c++) {
-        if (rows[r][c] != '.') { matrix.drawPixel(munch.fruitX - 3 + c, L.laneY - 3 + r, fruitColour(rows[r][c])); }
-      }
-    }
-  }
-  // The ghosts under the muncher, except one caught: its white flash goes on
-  // top, or the muncher standing next to it would hide most of it.
-  uint16_t yellow = scaledColor(255, 255, 0);
-  for (uint8_t pass = 0; pass < 2; pass++) {
-    if (pass == 1 && munch.muncherOn()) {
-      muncherSprite(munch.mouthOpen() ? MUNCH_OPEN : MUNCH_SHUT, munch.mx, munch.my, munch.dx, munch.dy, yellow);
-    }
-    if (pass == 1 && munch.deathFrame() != 0xFF) {
-      muncherSprite(MUNCH_FOLD[munch.deathFrame()], munch.mx, munch.my, 1, 0, yellow);
-    }
-    for (uint8_t g = 0; g < muncher::GHOSTS; g++) {
-      const muncher::Ghost &h = munch.ghosts[g];
-      bool caught = h.mode == muncher::GHOST_CAUGHT;
-      if (h.mode == muncher::GHOST_OFF || !h.lit() || caught != (pass == 1)) { continue; }
-      // A blue one blinks white as the muncher closes in.
-      uint16_t body = caught ? eyes
-                    : (h.mode == muncher::GHOST_SCARED) ? (munch.scaredBlink(h) ? eyes : wall)
-                    : scaledColor(GHOST_RGB[g][0], GHOST_RGB[g][1], GHOST_RGB[g][2]);
-      muncherSprite(GHOST_BODY, h.x, L.laneY, 1, 0, body);
-      muncherSprite(GHOST_EYES, h.x, L.laneY, 1, 0, eyes);
-    }
-  }
-  if (munch.giantOn()) {
-    const uint16_t *rows = munch.giantMouthOpen() ? GIANT_OPEN : GIANT_SHUT;
-    int16_t half = muncher::GIANT / 2;
-    for (uint8_t r = 0; r < muncher::GIANT; r++) {
-      for (uint8_t c = 0; c < muncher::GIANT; c++) {
-        if (rows[r] & (1 << (muncher::GIANT - 1 - c))) {
-          matrix.drawPixel(munch.giantX - half + c, L.laneY - half + r, yellow);
-        }
-      }
-    }
-  }
-  drawStatusPixel();
-  drawHotspotMark();
-  drawNoticeMarker();
-  drawFeedbackIndicator();
-  matrix.show();
-  panelDirty = false;
-}
-
-// One pass of the watchface. Between changes it only repaints when what it
-// shows has changed (the colon's beat, another screen having drawn over it),
-// so an idle clock costs almost nothing, as with the Tetris face.
-void drawMuncherFace() {
-  if (screenRotation != muncherRotation) {
-    // A rotation moves everything: the time is shown as it is, at once.
-    muncherRotation = screenRotation;
-    munch.setLayout(screenIsLandscape() ? muncher::LANDSCAPE : muncher::PORTRAIT);
-    uint8_t now[4];
-    muncherDigitsAt(localTime, now);
-    munch.show(now);
-    muncherPlannedFor = 0;
-    panelDirty = true;
-  }
-  bool moved = false;
-  if (munch.mode != muncher::MODE_IDLE) {
-    long since = (long)(millisNow - muncherStartAt);
-    if (since >= 0) {
-      uint32_t steps = (uint32_t)since / muncherSettings.paceMs;
-      moved = munch.advanceTo((uint16_t)min(steps, (uint32_t)0xFFFF));
-      if (muncherDoneSteps && (munch.stepsDone >= muncherDoneSteps || munch.mode == muncher::MODE_IDLE)) {
-        // When the new time stood complete, against the clock's own second:
-        // :00.0xx is on time.
-        Serial.printf("Muncher: the new time stands at :%02d.%03lu\n", clockSecond(localTime),
-                      millisNow - secondStartedAt);
-        muncherDoneSteps = 0;
-      }
-      if (munch.fruitsEaten != muncherFruitsLogged) {
-        muncherFruitsLogged = munch.fruitsEaten;
-        Serial.println("Muncher: a bonus fruit eaten");
-      }
-      if (munch.mode == muncher::MODE_IDLE) {
-        muncherSceneEnded();
-        if (munch.mode != muncher::MODE_IDLE) { moved = true; }
-      }
-    }
-  }
-  if (munch.mode == muncher::MODE_IDLE) {
-    uint8_t now[4];
-    muncherDigitsAt(localTime, now);
-    muncherIdle(now);
-    if (munch.mode != muncher::MODE_IDLE) { moved = true; }
-  }
-  bool colonOn = (localTime % 2) == 0;   // 1 Hz, in step with the seconds, as on the Tetris face
-  if (!moved && !panelDirty && colonOn == muncherColonDrawn) { return; }
-  muncherDraw(colonOn);
-  muncherColonDrawn = colonOn;
-}
-
-void loadMuncherSettings() {
-  muncherStore.begin("muncher");
-  muncherStore.read(muncherSettings);
-  if (muncherSettings.magic != MUNCHER_SETTINGS_MAGIC) {
-    muncherSettings = MUNCHER_DEFAULTS;   // written with the next save
-  } else if (muncherSettings.rev < 2) {
-    muncherSettings.pellets = MUNCHER_PELLETS_ONE;   // rev 1 had a spare byte there; written with the next save
-  }
-  if (muncherSettings.style >= muncher::STYLE_COUNT) { muncherSettings.style = muncher::STYLE_MIXED; }
-  if (muncherSettings.knock >= MUNCHER_KNOCK_COUNT)  { muncherSettings.knock = MUNCHER_KNOCK_RANDOM; }
-  if (muncherSettings.pellets >= MUNCHER_PELLETS_COUNT) { muncherSettings.pellets = MUNCHER_PELLETS_ONE; }
-  muncherSettings.paceMs = constrain(muncherSettings.paceMs, MUNCHER_PACE_MIN, MUNCHER_PACE_MAX);
-}
-
-void saveMuncherSettings() {
-  muncherSettings.magic = MUNCHER_SETTINGS_MAGIC;
-  muncherSettings.rev   = MUNCHER_SETTINGS_REV;
-  muncherStore.write(muncherSettings);
-}
-
-// The web app's Muncher controls, live or saved; a changed knock shows its
-// scene, and the page's pv says a control asked to see a change.
-void applyMuncherParams(const String &q, bool live) {
-  String v;
-  v = getParam(q, "mst");   if (v.length()) { muncherSettings.style = constrain(v.toInt(), 0, muncher::STYLE_COUNT - 1); }
-  v = getParam(q, "mpace"); if (v.length()) { muncherSettings.paceMs = constrain(v.toInt(), MUNCHER_PACE_MIN, MUNCHER_PACE_MAX); }
-  v = getParam(q, "mpel");
-  if (v.length()) {
-    uint8_t pellets = constrain(v.toInt(), 0, MUNCHER_PELLETS_COUNT - 1);
-    if (pellets != muncherSettings.pellets) { panelDirty = true; }   // the face redraws at once
-    muncherSettings.pellets = pellets;
-  }
-  v = getParam(q, "mkn");
-  if (v.length()) {
-    uint8_t knock = constrain(v.toInt(), 0, MUNCHER_KNOCK_COUNT - 1);
-    if (live && knock != muncherSettings.knock && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherKnockReq = true; }
-    muncherSettings.knock = knock;
-  }
-  if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_MUNCHER_ID) { muncherPreviewReq = true; }
-}
+FaceBlob muncherBlob = { "muncher", MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV, WATCHFACE_MUNCHER_ID,
+                         (uint8_t *)&muncherSettings, sizeof(MuncherSettings), (const uint8_t *)&MUNCHER_DEFAULTS,
+                         MUNCHER_PARAMS, sizeof(MUNCHER_PARAMS) / sizeof(MUNCHER_PARAMS[0]), muncherMigrate };
+MuncherFace muncherFace(muncherSettings);
 
 #if defined(CLOCK_DEBUG)
 // Every change of a digit walked through, at start-up: see muncher::selfTest().
@@ -4483,7 +2940,7 @@ void muncherSelfTest() {
                 longest, millis() - t0);
   if (!ok) { Serial.printf(", first wrong: %u", failed); }
   Serial.println();
-  // Where the knock's scene catches the ghosts, and how long it takes.
+  // Where the power pellet's scene catches the ghosts, and how long it takes.
   const muncher::Layout *layouts[2] = { &muncher::LANDSCAPE, &muncher::PORTRAIT };
   for (uint8_t l = 0; l < 2; l++) {
     uint8_t d[4] = { 1, 2, 3, 4 };
@@ -4493,7 +2950,7 @@ void muncherSelfTest() {
     f.start(muncher::MODE_POWER);
     uint16_t n = 0;
     while (f.mode != muncher::MODE_IDLE && n < 3000) { f.advanceTo(++n); }
-    Serial.printf("Muncher knock scene, %s: %u caught", l ? "upright" : "landscape", f.caughtCount);
+    Serial.printf("Muncher power pellet scene, %s: %u caught", l ? "upright" : "landscape", f.caughtCount);
     for (uint8_t g = 0; g < f.caughtCount; g++) { Serial.printf(" at x %d", f.caughtX[g]); }
     Serial.printf(", %u steps\n", n);
   }
@@ -4501,402 +2958,16 @@ void muncherSelfTest() {
 #endif
 #endif  // WATCHFACE_MUNCHER
 
+/* ======================================================================
+   Aliens watchface (face_aliens.h): its settings, stored in a blob of their
+   own, and the face.
+   ====================================================================== */
 #if WATCHFACE_ALIENS
-// The Aliens watchface (src/aliens.h, concept doc "Aliens: draft"). Its
-// settings are in a blob of their own (NVS "aliens"), as the Muncher's are.
-#define ALIENS_SETTINGS_MAGIC 0xA11E
-#define ALIENS_SETTINGS_REV   4   // 1 = the trial build with four looks, 2 = without them, 3 = adds knock, 4 = nap
-
-// The digits are blocks of 3 x 3 with a gap, and only the blocks a change
-// takes wake as aliens: digits of aliens could not be read as a time (Peter,
-// 2026-10-11, after small aliens, wide aliens and solid cells on the panel).
-// White aliens with a green cannon, as the arcade's overlay, or the rows in
-// colours of their own.
-const uint8_t ALIENS_COLOURS_ARCADE = 0;
-const uint8_t ALIENS_COLOURS_ROWS   = 1;
-const uint8_t ALIENS_COLOURS_COUNT  = 2;
-// What a knock, or the face action "trigger watchface animation", plays.
-const uint8_t ALIENS_KNOCK_REPLAY = 0;   // the minutes' ones shot and marching in again
-const uint8_t ALIENS_KNOCK_SAUCER = 1;   // a saucer, shot by the cannon
-const uint8_t ALIENS_KNOCK_BACK   = 2;   // an alien shoots back and hits the cannon
-const uint8_t ALIENS_KNOCK_RANDOM = 3;   // one of the others, drawn each time
-const uint8_t ALIENS_KNOCK_COUNT  = 4;
-// Not a knock's choice: a block waking for a moment, one of the extras that
-// come now and then at the pace the faces share (decorSettings.extras) when
-// its option is on (Peter, 2026-10-12).
-const uint8_t ALIENS_EXTRA_NAP = 4;
-const unsigned long ALIENS_KNOCK_ROOM_MS = PANEL_GUARD_BEFORE_MS;   // a scene ends this long before a change starts
-const unsigned long ALIENS_KNOCK_REST_MS = 1000;   // after a scene, before a knock counts again
-const unsigned long ALIENS_PREVIEW_MS    = 15000;  // the longest a scene asked for takes: the minutes' ones shot and back
-
-struct AliensSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  style;     // aliens::STYLE_*: how a changing digit goes
-  uint8_t  colours;   // ALIENS_COLOURS_*
-  uint8_t  knock;     // rev 3: ALIENS_KNOCK_* (was a spare byte, 0)
-  uint8_t  nap;       // rev 4: 1 = a block wakes for a moment now and then (was a spare byte, 0)
-  uint8_t  spare[1];
-};
-static_assert(sizeof(AliensSettings) == 8, "the stored blob keeps its size");
-
-const AliensSettings ALIENS_DEFAULTS = {
-  ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, aliens::STYLE_MIXED, ALIENS_COLOURS_ARCADE, ALIENS_KNOCK_RANDOM, 1, { 0 }
-};
-
 AliensSettings aliensSettings;
-SettingsStore<AliensSettings> aliensStore;
-aliens::Face  alienFace;
-uint8_t       aliensRotation     = 0xFF;    // rotation the layout was built for
-unsigned long aliensStartAt      = 0;       // when the planned or running scene starts
-time_t        aliensPlannedFor   = 0;       // the minute the planned change is for; 0 = none
-uint32_t      aliensPlannedStand = 0;       // ms from its start until the new time stands
-bool          aliensLogStand     = false;   // the running scene is the time's change: log when it stands
-unsigned long aliensSceneEndedAt = 0;
-bool          aliensPreviewReq   = false;   // the web app asks to see a change
-bool          aliensKnockReq     = false;   // ... or the knock's scene
-uint32_t      aliensDrawnKey     = 0;       // what the panel shows, to repaint only on a change
-
-// The sprites, '#' lit; the alien in two frames, so it marches, and the hit
-// cannon's wreck in two, so it flickers.
-const char *const ALIEN_SMALL[2][3] = { { "#.#", "###", "#.#" }, { ".#.", "###", "#.#" } };
-const char *const ALIEN_CANNON[3]   = { "..#..", ".###.", "#####" };
-const char *const ALIEN_WRECK[2][3] = { { "#...#", ".#.#.", "#.#.#" }, { ".#.#.", "#...#", ".###." } };
-const char *const ALIEN_BURST[3]    = { "#.#", ".#.", "#.#" };
-const char *const ALIEN_SAUCER[3]   = { "..###..", ".#####.", "#.#.#.#" };
-const char *const ALIEN_SAUCER_BURST[2][3] = { { "#..#..#", ".#.#.#.", "#.#.#.#" }, { ".#.#.#.", "#.###.#", ".#...#." } };
-const uint8_t ALIEN_ROW_RGB[aliens::ROWS][3] = {   // the colourful rows: magenta, cyan, green
-  { 255, 60, 200 }, { 255, 60, 200 }, { 60, 220, 255 }, { 60, 220, 255 }, { 40, 230, 60 },
-};
-
-void aliensDigitsAt(time_t t, uint8_t d[4]) {
-  if (!clockIsSet()) {
-    for (uint8_t i = 0; i < 4; i++) { d[i] = aliens::NO_DIGIT; }
-    return;
-  }
-  uint8_t h = (uint8_t)clockHour(t), m = (uint8_t)clockMinute(t);
-  d[0] = h / 10; d[1] = h % 10; d[2] = m / 10; d[3] = m % 10;
-}
-
-// An alien that can shoot back, drawn at random: a digit and a column with
-// a block, the lowest of which drops the bomb. Returns the scene's length.
-uint32_t aliensPlanBack() {
-  uint8_t first = (uint8_t)random(4 * aliens::COLS);
-  for (uint8_t n = 0; n < 4 * aliens::COLS; n++) {
-    uint8_t o = (first + n) % (4 * aliens::COLS);
-    uint32_t len = alienFace.planBack(o / aliens::COLS, o % aliens::COLS);
-    if (len) { return len; }
-  }
-  return 0;
-}
-
-// A block that wakes for a moment, drawn at random among the lit ones.
-// Returns the scene's length.
-uint32_t aliensPlanNap() {
-  const uint8_t cells = aliens::COLS * aliens::ROWS;
-  uint8_t first = (uint8_t)random(4 * cells);
-  for (uint8_t n = 0; n < 4 * cells; n++) {
-    uint8_t o = (first + n) % (4 * cells);
-    uint32_t len = alienFace.planNap(o / cells, o % cells);
-    if (len) { return len; }
-  }
-  return 0;
-}
-
-// The extra of this time: a saucer, an alien shooting back, or - with the
-// option on - a block waking for a moment.
-uint8_t aliensExtraKind() {
-  uint8_t k = (uint8_t)random(aliensSettings.nap ? 3 : 2);
-  return k == 0 ? ALIENS_KNOCK_SAUCER : k == 1 ? ALIENS_KNOCK_BACK : ALIENS_EXTRA_NAP;
-}
-
-// A scene between changes - the minutes' ones shot and marching in again
-// (the time on show stays right), a saucer, an alien shooting back, a block
-// waking - for a knock, the web app, and now and then. Refused while a scene
-// runs, just after one, and when it could not end before the next change
-// starts: then it is dropped, not kept.
-bool aliensScene(uint8_t kind, const char *why) {
-  if (alienFace.running || alienFace.shown[0] == aliens::NO_DIGIT) { return false; }
-  if (millisNow - aliensSceneEndedAt < ALIENS_KNOCK_REST_MS) { return false; }
-  if (aliensPlannedFor == 0) { return false; }   // the next change is planned on the face's next pass
-  if (kind == ALIENS_KNOCK_RANDOM) {
-    const uint8_t KINDS[3] = { ALIENS_KNOCK_REPLAY, ALIENS_KNOCK_SAUCER, ALIENS_KNOCK_BACK };
-    kind = KINDS[random(3)];
-  }
-  unsigned long plannedStart = aliensStartAt;
-  uint32_t len;
-  const char *what;
-  if (kind == ALIENS_KNOCK_SAUCER) {
-    len = alienFace.planSaucer(random(2) == 0, (uint8_t)random(3));
-    what = "a saucer";
-  } else if (kind == ALIENS_KNOCK_BACK) {
-    len = aliensPlanBack();
-    what = "an alien shoots back";
-  } else if (kind == ALIENS_EXTRA_NAP) {
-    len = aliensPlanNap();
-    what = "a block wakes";
-  } else {
-    uint8_t same[4];
-    memcpy(same, alienFace.shown, 4);
-    len = alienFace.planChange(same, aliens::STYLE_ALL, 1 << 3) ? alienFace.endMs : 0;
-    what = "the minutes' ones again";
-  }
-  aliensPlannedFor = 0;                          // the change is planned anew afterwards
-  if (len == 0 || (long)(plannedStart - millisNow) < (long)(len + ALIENS_KNOCK_ROOM_MS)) { return false; }
-  aliensStartAt = millisNow;
-  aliensLogStand = false;
-  alienFace.start();
-  Serial.printf("Aliens: %s (%s)\n", what, why);
-  return true;
-}
-
-// The knock's scene, or the face action's.
-bool aliensKnock() { return aliensScene(aliensSettings.knock, "a knock"); }
-
-// Nothing moving: put a time right that moved on without a change, plan the
-// next change once a minute - backwards from the minute, worked out anew on
-// every pass from the second's beginning, as the Muncher's; to a full hour
-// the wave - and start it when its moment has come. In between, what the
-// web app asks for, and now and then an extra.
-void aliensIdle(const uint8_t now[4]) {
-  if (memcmp(alienFace.shown, now, 4) != 0) {
-    if (alienFace.shown[0] == aliens::NO_DIGIT || now[0] == aliens::NO_DIGIT) {
-      alienFace.show(now);               // dashes come and go without a fight
-      panelDirty = true;
-    } else if (alienFace.planChange(now, aliensSettings.style)) {
-      aliensStartAt = millisNow;
-      aliensLogStand = false;
-      alienFace.start();
-    }
-    aliensPlannedFor = 0;
-    return;
-  }
-  if (now[0] == aliens::NO_DIGIT) { return; }
-  uint8_t sec = (uint8_t)clockSecond(localTime);
-  time_t next = localTime - sec + 60;
-  if (aliensPlannedFor != next) {
-    uint8_t to[4];
-    aliensDigitsAt(next, to);
-    aliensPlannedStand = alienFace.planChange(to, aliensSettings.style, 0, clockMinute(next) == 0);
-    aliensPlannedFor = next;
-  }
-  unsigned long nextMinuteAt = secondStartedAt + (60UL - sec) * 1000UL;
-  aliensStartAt = nextMinuteAt - aliensPlannedStand;
-  // What the web app asks to see waits until it can end before the next
-  // change starts, and for the rest after a scene, as with the Muncher. A
-  // scene tried returns either way: one refused has taken the face's plan,
-  // and the change is planned anew on the next pass, before its start is
-  // looked at - else the refused scene would start as the time's change.
-  long room = (long)(aliensStartAt - millisNow) - (long)ALIENS_KNOCK_ROOM_MS;
-  bool rested = millisNow - aliensSceneEndedAt >= ALIENS_KNOCK_REST_MS;
-  if (aliensPreviewReq && rested && room >= (long)ALIENS_PREVIEW_MS) {
-    aliensPreviewReq = false;
-    aliensScene(ALIENS_KNOCK_REPLAY, "the web app's preview");
-    return;
-  }
-  if (aliensKnockReq && rested && room >= (long)ALIENS_PREVIEW_MS) {
-    aliensKnockReq = false;
-    aliensScene(aliensSettings.knock, "the web app's knock");
-    return;
-  }
-  // An extra now and then, at the pace the faces share: now, or dropped when
-  // the panel is not free for it (decorFree()) - it does not wait.
-  if (extrasDue()) {
-    extrasScheduleNext();
-    if (rested && decorFree(PANEL_EXTRA_MS, false)) {
-      aliensScene(aliensExtraKind(), "now and then");
-      return;
-    }
-    Serial.println("Aliens: an extra due, the panel not free for it - dropped");
-  }
-  // Started at its planned moment even when that has passed (the face was
-  // away): from there, everything is where it ought to be by now.
-  if (aliensPlannedStand && (long)(millisNow - aliensStartAt) >= 0) {
-    aliensLogStand = true;
-    aliensPlannedFor = 0;
-    alienFace.start();
-    if (alienFace.scene == aliens::SCENE_WAVE) { Serial.println("Aliens: the hour's wave"); }
-  }
-}
-
-uint16_t aliensColour(uint8_t row) {
-  if (aliensSettings.colours == ALIENS_COLOURS_ROWS) {
-    return scaledColor(ALIEN_ROW_RGB[row][0], ALIEN_ROW_RGB[row][1], ALIEN_ROW_RGB[row][2]);
-  }
-  return scaledColor(235, 235, 235);
-}
-
-// A sprite's '#' pixels at (x, y); the panel clips what lies off it.
-void aliensArt(const char *const *rows, uint8_t n, int16_t x, int16_t y, uint16_t colour) {
-  for (uint8_t r = 0; r < n; r++) {
-    for (uint8_t c = 0; rows[r][c]; c++) {
-      if (rows[r][c] == '#') { matrix.drawPixel(x + c, y + r, colour); }
-    }
-  }
-}
-
-// A cell at (x, y): an alien in its march frame, or a block.
-void aliensCell(int16_t x, int16_t y, uint8_t r, uint8_t c, bool alien, uint8_t frame, uint16_t colour) {
-  if (alien) { aliensArt(ALIEN_SMALL[(frame + r + c) & 1], 3, x, y, colour); }
-  else       { matrix.fillRect(x, y, aliens::CELL - 1, aliens::CELL - 1, colour); }
-}
-
-// The panel at `sceneMs` into the running scene (0 between scenes); the
-// woken aliens step their legs and sway - the wave lower by the rows it has
-// stepped down - the arriving ones only step.
-void aliensDraw(bool colonOn, uint32_t sceneMs) {
-  const aliens::Layout &L = alienFace.L;
-  uint8_t frame = aliens::Face::marchFrame(sceneMs);
-  matrix.fillScreen(0);
-  for (uint8_t i = 0; i < 4; i++) {
-    for (uint8_t k = 0; k < aliens::COLS * aliens::ROWS; k++) {
-      uint8_t r = k / aliens::COLS, c = k % aliens::COLS;
-      int16_t x = L.digitX[i] + aliens::CELL * c;
-      if (alienFace.cells[i] & (1 << k)) {
-        bool awake = alienFace.running && (alienFace.awake[i] & (1 << k));
-        int16_t dx = awake ? alienFace.sway(i, k, sceneMs) : 0;
-        int16_t dy = awake ? aliens::CELL * alienFace.drop : 0;
-        aliensCell(x + dx, L.digitY[i] + aliens::CELL * r + dy, r, c, awake, frame, aliensColour(r));
-      }
-      if (alienFace.arriving[i] & (1 << k)) {
-        // On the way down; behind a block that stays where it would cover one.
-        int16_t y = L.digitY[i] + aliens::CELL * ((int8_t)r + alienFace.arriveRow);
-        if (alienFace.blockAt(x, y)) { continue; }
-        aliensCell(x, y, r, c, true, frame, aliensColour(r));
-      }
-    }
-  }
-  uint16_t white = scaledColor(235, 235, 235), orange = scaledColor(255, 140, 0);
-  if (colonOn) {
-    for (uint8_t p = 0; p < 2; p++) { matrix.fillRect(L.colonX[p], L.colonY[p], 2, 2, white); }
-  }
-  if (alienFace.saucerOn) { aliensArt(ALIEN_SAUCER, 3, alienFace.saucerX, 0, scaledColor(255, 30, 60)); }
-  if (alienFace.cannonOn) { aliensArt(ALIEN_CANNON, 3, alienFace.cannonX, L.cannonY, scaledColor(40, 230, 60)); }
-  if (alienFace.wreckOn) {
-    aliensArt(ALIEN_WRECK[alienFace.wreckFrame], 3, alienFace.cannonX, L.cannonY,
-              alienFace.wreckFrame ? orange : scaledColor(40, 230, 60));
-  }
-  if (alienFace.shotOn) {
-    matrix.drawPixel(alienFace.shotX, alienFace.shotY, white);
-    matrix.drawPixel(alienFace.shotX, alienFace.shotY + 1, white);
-  }
-  if (alienFace.bombOn) {
-    uint16_t yellow = scaledColor(255, 230, 0);
-    matrix.drawPixel(alienFace.bombX, alienFace.bombY, yellow);
-    matrix.drawPixel(alienFace.bombX, alienFace.bombY + 1, yellow);
-  }
-  if (alienFace.burstOn && alienFace.burstWide) {   // the saucer's, flickering in two frames
-    uint8_t b = (uint8_t)((sceneMs / aliens::BLINK_STEP_MS) & 1);
-    aliensArt(ALIEN_SAUCER_BURST[b], 3, alienFace.burstX, alienFace.burstY, b ? scaledColor(255, 30, 60) : orange);
-  } else if (alienFace.burstOn) {
-    aliensArt(ALIEN_BURST, 3, alienFace.burstX, alienFace.burstY, orange);
-  }
-  drawStatusPixel();
-  drawHotspotMark();
-  drawNoticeMarker();
-  drawFeedbackIndicator();
-  matrix.show();
-  panelDirty = false;
-}
-
-// One pass of the watchface: it repaints only when what it shows has
-// changed (a step of a scene, the aliens' march, the colon's beat), as the
-// others. Between scenes the blocks stand still.
-void drawAliensFace() {
-  if (screenRotation != aliensRotation) {
-    aliensRotation = screenRotation;
-    alienFace.setLayout(screenIsLandscape() ? aliens::LANDSCAPE : aliens::PORTRAIT);
-    uint8_t now[4];
-    aliensDigitsAt(localTime, now);
-    alienFace.show(now);
-    aliensPlannedFor = 0;
-    panelDirty = true;
-  }
-  uint32_t sceneMs = 0;
-  if (alienFace.running) {
-    long since = (long)(millisNow - aliensStartAt);
-    if (since >= 0) {
-      sceneMs = (uint32_t)since;
-      alienFace.at(sceneMs);
-      if (aliensLogStand && sceneMs >= alienFace.standMs) {
-        // When the new time stood complete, against the clock's own second.
-        Serial.printf("Aliens: the new time stands at :%02d.%03lu\n", clockSecond(localTime),
-                      millisNow - secondStartedAt);
-        aliensLogStand = false;
-      }
-      if (!alienFace.running) { aliensSceneEndedAt = millisNow; panelDirty = true; }
-    }
-  }
-  if (!alienFace.running) {
-    uint8_t now[4];
-    aliensDigitsAt(localTime, now);
-    aliensIdle(now);
-  }
-  bool colonOn = (localTime % 2) == 0;
-  if (!alienFace.running) { sceneMs = 0; }
-  // What the picture depends on, folded into one number (FNV-1a).
-  uint32_t key = 2166136261u;
-  auto fold = [&key](uint32_t v) { for (uint8_t b = 0; b < 4; b++) { key = (key ^ (uint8_t)(v >> (8 * b))) * 16777619u; } };
-  const aliens::Face &f = alienFace;
-  fold(f.running); fold((uint16_t)f.cannonX | (uint32_t)f.cannonOn << 16 | (uint32_t)f.wreckOn << 17 | (uint32_t)f.wreckFrame << 18);
-  fold(f.shotOn ? (uint16_t)f.shotY : 0xFFFF); fold(f.bombOn ? (uint16_t)f.bombY : 0xFFFF);
-  fold(f.burstOn ? (uint16_t)f.burstX | (uint32_t)(uint16_t)f.burstY << 16 : 0xFFFFFFFF);
-  fold(f.saucerOn ? (uint16_t)f.saucerX : 0xFFFF); fold((uint8_t)f.arriveRow | (uint16_t)(uint8_t)f.drop << 8);
-  fold(f.burstWide ? sceneMs / aliens::BLINK_STEP_MS % 2 : 2);   // the saucer's burst flickers
-  for (uint8_t i = 0; i < 4; i++) { fold(f.cells[i]); fold(f.awake[i]); fold(f.arriving[i]); }
-  fold(colonOn); fold(sceneMs / aliens::MARCH_MS % 4);   // the march: the legs' frame and the sway
-  if (key == aliensDrawnKey && !panelDirty) { return; }
-  aliensDrawnKey = key;
-  aliensDraw(colonOn, sceneMs);
-}
-
-void loadAliensSettings() {
-  aliensStore.begin("aliens");
-  aliensStore.read(aliensSettings);
-  if (aliensSettings.magic != ALIENS_SETTINGS_MAGIC) {
-    aliensSettings = ALIENS_DEFAULTS;   // written with the next save
-  } else if (aliensSettings.rev < 2) {
-    // The trial build's bytes: look, style, idle, colours after the rev.
-    const uint8_t *b = (const uint8_t *)&aliensSettings;
-    AliensSettings was = ALIENS_DEFAULTS;
-    was.style = b[4];
-    was.colours = b[6];
-    aliensSettings = was;
-  } else if (aliensSettings.rev < 3) {
-    aliensSettings.knock = ALIENS_DEFAULTS.knock;
-    aliensSettings.nap = ALIENS_DEFAULTS.nap;
-  } else if (aliensSettings.rev < 4) {
-    aliensSettings.nap = ALIENS_DEFAULTS.nap;
-  }
-  if (aliensSettings.nap > 1) { aliensSettings.nap = 1; }
-  if (aliensSettings.style >= aliens::STYLE_COUNT)     { aliensSettings.style = aliens::STYLE_MIXED; }
-  if (aliensSettings.colours >= ALIENS_COLOURS_COUNT)  { aliensSettings.colours = ALIENS_COLOURS_ARCADE; }
-  if (aliensSettings.knock >= ALIENS_KNOCK_COUNT)      { aliensSettings.knock = ALIENS_DEFAULTS.knock; }
-}
-
-void saveAliensSettings() {
-  aliensSettings.magic = ALIENS_SETTINGS_MAGIC;
-  aliensSettings.rev   = ALIENS_SETTINGS_REV;
-  aliensStore.write(aliensSettings);
-}
-
-// The web app's Aliens controls, live or saved; the page's pv asks to see a
-// change (choosing the face in the picker sends it), a new knock its scene.
-void applyAliensParams(const String &q, bool live) {
-  String v;
-  uint8_t colours = aliensSettings.colours;
-  v = getParam(q, "ast");   if (v.length()) { aliensSettings.style = constrain(v.toInt(), 0, aliens::STYLE_COUNT - 1); }
-  v = getParam(q, "acol");  if (v.length()) { aliensSettings.colours = constrain(v.toInt(), 0, ALIENS_COLOURS_COUNT - 1); }
-  if (colours != aliensSettings.colours) { panelDirty = true; }   // the face redraws at once
-  v = getParam(q, "anap");  if (v.length()) { aliensSettings.nap = v.toInt() ? 1 : 0; }
-  v = getParam(q, "akn");
-  if (v.length()) {
-    uint8_t knock = constrain(v.toInt(), 0, ALIENS_KNOCK_COUNT - 1);
-    if (live && knock != aliensSettings.knock && settings.watchface == WATCHFACE_ALIENS_ID) { aliensKnockReq = true; }
-    aliensSettings.knock = knock;
-  }
-  if (live && getParam(q, "pv").length() && settings.watchface == WATCHFACE_ALIENS_ID) { aliensPreviewReq = true; }
-}
+FaceBlob aliensBlob = { "aliens", ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, WATCHFACE_ALIENS_ID,
+                        (uint8_t *)&aliensSettings, sizeof(AliensSettings), (const uint8_t *)&ALIENS_DEFAULTS,
+                        ALIENS_PARAMS, sizeof(ALIENS_PARAMS) / sizeof(ALIENS_PARAMS[0]), aliensMigrate };
+AliensFace aliensFace(aliensSettings);
 
 #if defined(CLOCK_DEBUG)
 void aliensSelfTest() {
@@ -4914,35 +2985,178 @@ void aliensSelfTest() {
 #endif
 #endif  // WATCHFACE_ALIENS
 
-// Draw the current clock state to the panel. This is the expensive part (clears
-// the framebuffer, prints all six digits and pushes via matrix.show()). In the M4's
-// AP preview it is throttled to 5 fps while stepClockAnim() keeps the state moving,
-// so frames are skipped (latest state shown) instead of the animation slowing down.
-void renderClock(void) {
-#if defined(CLOCK_DEBUG)
-  uint32_t drawStart = micros();
+#if defined(FACE_FRAME_LOG)
+/* Test builds: a scene of tools.local/refactor starts with the face shown
+   afresh, as on a turn of the panel - the time at once, nothing running,
+   nothing asked for, every rest over - so it starts the same way on every
+   run; its steps (plan=) happen at their moment on the test's clock. */
+void testFaceReset() {
+  faceCatchUp();
+#if WATCHFACE_TETRIS
+  tetrisFace.testReset();
 #endif
-  matrix.fillScreen(0); // Fill background black
+#if WATCHFACE_MUNCHER
+  muncherFace.testReset();
+#endif
+#if WATCHFACE_ALIENS
+  aliensFace.testReset();
+#endif
+  panelDirty = true;
+}
 
-  for (uint8_t i = 0; i < 6; i++) {
-    // Animate future digits BEGIN
-    if(i>3) { matrix.setFont(&FreeSansBold9pt7b); }  // Smaller Font for displaying Seconds
-    else    { matrix.setFont(&FreeSansBold12pt7b); } // Bigger Font for displaying Minutes and Hours
-
-    if(animShow[i] == true) {
-      if (animXPos[i] == animXTarget[i] && animYPos[i] == animYTarget[i]) { matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB)); } // digit has arrived
-      else { matrix.setTextColor(scaledColorB(settings.trailR, settings.trailG, settings.trailB, trailBrightness())); } // dim trail (relative to brightness, never black)
-      matrix.setCursor(animXPos[i], animYPos[i]);
-      matrix.print(animStr[i]);
-    }
-    // Animate future digits END
-
-    // Time now digits are drawn here
-    matrix.setTextColor(scaledColor(settings.digitR, settings.digitG, settings.digitB));
-    matrix.setCursor(timeXPos[i], timeYPos[i]);
-    matrix.print(timeStr[i]);
+void testPlanRun() {
+  while (testVirtualOn && testPlanNext < testPlanCount && millisNow - testVirtualMs0 >= testPlan[testPlanNext].atMs) {
+    const TestStep &s = testPlan[testPlanNext++];
+    if (s.what == 'a') { faceAnimationStart(); }                        // "trigger watchface animation"
+#if GIF_PLAYBACK
+    else if (s.what == 'e') { extrasDueAt = millisNow ? millisNow : 1; }   // an extra due now
+#endif
+    else if (s.what == 's') { testShift += s.arg; panelDirty = true; }    // the panel's time jumps
   }
+}
 
+// plan=a2000,s8000:60,e25000: a letter, the ms after the scene's start, an argument.
+void testPlanParse(const String &plan) {
+  testPlanCount = testPlanNext = 0;
+  int from = 0;
+  while (from < (int)plan.length() && testPlanCount < sizeof(testPlan) / sizeof(testPlan[0])) {
+    int to = plan.indexOf(',', from);
+    if (to < 0) { to = plan.length(); }
+    String step = plan.substring(from, to);
+    int colon = step.indexOf(':');
+    TestStep &s = testPlan[testPlanCount++];
+    s.what = step.charAt(0);
+    s.atMs = (unsigned long)step.substring(1, colon < 0 ? step.length() : colon).toInt();
+    s.arg = colon < 0 ? 0 : step.substring(colon + 1).toInt();
+    from = to + 1;
+  }
+}
+#endif
+
+/* ----------------------------------------------------------------------
+   The faces' settings: each face's blob and its table (face.h), loaded,
+   saved, taken from the web app and reported the same way for all.
+   ------------------------------------------------------------------------- */
+#if WATCHFACE_TETRIS
+FaceBlob *const FACE_BLOBS[] = {
+  &tetrisBlob,
+#if WATCHFACE_MUNCHER
+  &muncherBlob,
+#endif
+#if WATCHFACE_ALIENS
+  &aliensBlob,
+#endif
+};
+const uint8_t FACE_BLOB_COUNT = sizeof(FACE_BLOBS) / sizeof(FACE_BLOBS[0]);
+SettingsBlobStore faceStores[FACE_BLOB_COUNT];
+
+void loadFaceSettings() {
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobLoad(*FACE_BLOBS[i], faceStores[i]); }
+  knockFollowSetting();    // the sensor, not the sketch, holds the threshold
+}
+
+void saveFaceSettings() {
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobSave(*FACE_BLOBS[i], faceStores[i]); }
+}
+
+// The web app's face settings, live or to be saved. A setting that redraws
+// redraws, the knock's sensitivity goes to the sensor, and - live, on the
+// face shown - a new watchface animation plays once, and pv asks to see what
+// a control changed: now or not at all, and the page is told which. The page says outright when such a control was used:
+// comparing the values instead, as this did at first, was unreliable, since
+// the updates sent while a slider was dragged had already pushed the final
+// value across, and the release looked like no change at all.
+FaceOutcome applyFaceParams(const String &q, bool live) {
+  FaceOutcome shown = OUTCOME_NONE;
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) {
+    FaceBlob &b = *FACE_BLOBS[i];
+    uint8_t came = faceBlobApply(b, [&q](const char *key) { return getParam(q, key); });
+    if (came & PARAM_REDRAW) { panelDirty = true; }
+    if (came & PARAM_KNOCK)  { knockFollowSetting(); }
+    if (live && (came & PARAM_PLAYS) && settings.watchface == b.face) {
+      shown = previewOutcome(shown, faceFor(b.face).request(faceMoment(), TRIGGER_PREVIEW_ANIMATION));
+    }
+  }
+  if (!live || !getParam(q, "pv").length()) { return shown; }
+  return previewOutcome(shown, faceFor(settings.watchface).request(faceMoment(), TRIGGER_PREVIEW_CHANGE));
+}
+
+// What the page is told of two previews asked for at once: one played, or
+// one refused, or none of them asked.
+FaceOutcome previewOutcome(FaceOutcome a, FaceOutcome b) {
+  if (a == OUTCOME_PLAYED || b == OUTCOME_PLAYED)   { return OUTCOME_PLAYED; }
+  if (a == OUTCOME_REFUSED || b == OUTCOME_REFUSED) { return OUTCOME_REFUSED; }
+  return OUTCOME_NONE;
+}
+#endif
+
+// The moment for the face: the timekeeper's time as it stands now. Built
+// where the face is stepped or asked, not once per pass, since whether the
+// clock has a time can change within a pass (a sync).
+FaceNow faceMoment() {
+  FaceNow n;
+  n.ms         = millisNow;
+  n.secondAt   = secondStartedAt;
+  n.local      = localTime;
+  n.set        = clockIsSet();
+  n.hour       = hourNow;
+  n.minute     = minuteNow;
+  n.second     = secondNow;
+  n.secondTick = secondTrigger;
+  n.minuteTick = minuteTrigger;
+  n.hourTick   = hourTrigger;
+  n.turn       = screenRotation;
+  n.w          = matrix.width();
+  n.h          = matrix.height();
+  return n;
+}
+
+// One pass of the face on the panel: the plain face, or its preview while the
+// hotspot is up and a phone is on it. The face is stepped on every pass, so it
+// runs at real time, and drawn when its picture changed or the panel no longer
+// shows it (panelDirty). In the M4's preview it is shown at most every
+// AP_PREVIEW_MS, which leaves the radio to the slow WiFiNINA web server:
+// skipped frames are stepped, not slowed down.
+void faceUpdate(bool preview) {
+#if defined(CLOCK_DEBUG)
+  faceDrawStart = micros();
+#endif
+  Watchface &face = faceFor(activeWatchface());
+  FaceNow now = faceMoment();
+  bool changed = face.update(now);
+  if (preview) {
+    if (millisNow - apClockLast < AP_PREVIEW_MS) { return; }
+    apClockLast = millisNow;
+  }
+  if (!changed && !panelDirty) { return; }
+  face.draw(matrix, now, FacePaint{effectiveBrightness});
+  faceShow();
+}
+
+// The face of a watchface number (Settings::watchface); the classic one for
+// any this build does not have.
+Watchface &faceFor(uint8_t id) {
+  switch (id) {
+#if WATCHFACE_TETRIS
+    case WATCHFACE_TETRIS_ID:  return tetrisFace;
+#endif
+#if WATCHFACE_MUNCHER
+    case WATCHFACE_MUNCHER_ID: return muncherFace;
+#endif
+#if WATCHFACE_ALIENS
+    case WATCHFACE_ALIENS_ID:  return aliensFace;
+#endif
+    default:                   return classicFace;
+  }
+}
+
+// A face has drawn its picture: the marks go over it - the status pixel, the
+// hotspot's mark, the notices' marker, an input's feedback - and it goes to
+// the panel.
+void faceShow() {
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+  faceFrameDrawn();   // counted, and in a test build logged as a checksum, before the marks go over it
+#endif
   drawStatusPixel();
   drawHotspotMark();
   drawNoticeMarker();
@@ -4950,98 +3164,42 @@ void renderClock(void) {
 #if defined(CLOCK_DEBUG)
   uint32_t showStart = micros();
 #endif
-  matrix.show();  // AFTER DRAWING, A show() CALL IS REQUIRED TO UPDATE THE MATRIX!
+  matrix.show();
   panelDirty = false;
 #if defined(CLOCK_DEBUG)
-  frameStatsAdd(showStart - drawStart, micros() - showStart);
+  frameStatsAdd(showStart - faceDrawStart, micros() - showStart);
 #endif
 }
 
 // The watchface to draw. It can change at runtime (the config page previews the
 // choice live), and only the visible face is stepped, so whichever takes over is
-// resynchronised here: the classic one gets fresh digit strings, which
-// stepClockAnim() would otherwise only rebuild on the next second tick, plus
-// digits snapped onto their targets; the Tetris one rebuilds its layout and
-// drops its digits again.
+// resynchronised here: the panel turned as it is held and the classic face
+// up to the time (faceCatchUp()), and the face chosen told so - the Tetris
+// one rebuilds its layout and drops its digits again, the Muncher and the
+// Aliens show the time at once.
 uint8_t activeWatchface() {
   static uint8_t shown = 0xFF;
   if (settings.watchface == shown) { return shown; }
   shown = settings.watchface;
   faceCatchUp();
-#if WATCHFACE_TETRIS
-  tetrisRotation = 0xFF;           // force a fresh layout and a fresh drop
-#endif
-#if WATCHFACE_MUNCHER
-  muncherRotation = 0xFF;          // a fresh layout, the time shown at once
-#endif
-#if WATCHFACE_ALIENS
-  aliensRotation = 0xFF;
-#endif
+  faceFor(shown).enter(faceMoment(), ENTER_CHOSEN);
   panelDirty = true;               // the other face's picture is still on the panel
   return shown;
 }
 
 // Bring the classic face up to the time before it is drawn again, after it was
-// hidden or replaced: fresh digit strings, which stepClockAnim() would only
-// rebuild on the next second tick, and all six digits snapped onto their
-// places, so no fly-in from before resumes. The Tetris face catches up by
-// itself, digit by digit.
+// hidden or replaced, with the panel turned as it is held: no fly-in from
+// before resumes. The Tetris face catches up by itself, digit by digit.
 void faceCatchUp() {
-  faceTickMs = 0;                    // it was not stepped meanwhile: the next tick starts a new count
-  if (classicAnim != CLASSIC_ANIM_IDLE) {   // another screen or face cut the watchface animation off
-    classicAnim = CLASSIC_ANIM_IDLE;
-    classicAnimEndedAt = millisNow;
-  }
-  classicDigits();
-  applyOrientation(deviceRotation);  // snaps all six digits, clears animShow[]
+  setScreenRotation(deviceRotation);
+  classicFace.enter(faceMoment(), ENTER_SHOWN);
 }
 
-// The six characters of the classic face, for now and for one second ahead
-// (what flies in). Dashes while the clock has no time yet: it shows that it
-// has none rather than counting up from midnight.
-void classicDigits() {
-  if (!clockIsSet()) {
-    strcpy(timeStr, "------");
-    strcpy(animStr, "------");
-    return;
-  }
-  sprintf(timeStr, "%02d%02d%02d", clockHour(localTime),   clockMinute(localTime),   clockSecond(localTime));
-  sprintf(animStr, "%02d%02d%02d", clockHour(localTime+1), clockMinute(localTime+1), clockSecond(localTime+1));
-}
-
-// Live (non-AP) mode: advance and draw the selected watchface every loop
-// iteration. The Tetris one keeps its own state machine and pacing, so the
-// classic fly-in animation is not stepped while it is showing.
-void drawClock(void) {
-#if WATCHFACE_TETRIS
-  uint8_t face = activeWatchface();
-  if (face == WATCHFACE_TETRIS_ID) { drawTetrisFace(); return; }
-#if WATCHFACE_MUNCHER
-  if (face == WATCHFACE_MUNCHER_ID) { drawMuncherFace(); return; }
-#endif
-#if WATCHFACE_ALIENS
-  if (face == WATCHFACE_ALIENS_ID) { drawAliensFace(); return; }
-#endif
-#else
-  activeWatchface();
-#endif
-  stepClockAnim();
-  renderClock();
-}
-
-/* Updates millisNow, localTime. Keeps track of the looptime using delay(). Updates the animTrigger[] array. */
+/* Updates millisNow, localTime and the ticks. Keeps track of the looptime using delay(). */
 void timekeeper(void) { 
   /*Call this always in the beginning of an iteration in loop()
     for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain localTime with the clock_time.h helpers eg: clockHour(localTime)
     Triggers are only active for one iteration: hourTrigger -> when the hour has changed
-    animTrigger[]: for each individual clock digit (6) the corresponding bool goes high if this digit will change in one second. This gives enough time for the entry animation of the digit.
-
-  - if secondTrigger: trigger secondNow[1] animation
-  - if secondNow+1 quotient 10 = 0: trigger secondNow[0] animation
-  - if secondNow=59: trigger minuteNow[1] animation
-  - if minuteNow+1 quotient 10 = 0: trigger minuteNow[0] animation
-  - if minuteNow=59: trigger hourNow[1] animation
-  - if hourNow+1 quotient 10 = 0: trigger hourNow[0] animation
 */
   deltaT=millisNow;
   millisNow=millis();
@@ -5054,41 +3212,42 @@ void timekeeper(void) {
   
   millisNow=millis();
   localTime=clockNow() + tzTotalOffset();   // the clock keeps UTC; the panel shows local time
+#if defined(FACE_FRAME_LOG)
+  bool testBegins = testVirtualStart;        // a scene begins on this pass, before anything draws
+  if (testBegins) {
+    testVirtualStart = false;
+    testVirtualOn = true;
+    testVirtualMs = testVirtualMs0 = millisNow;
+    testShift = 0;
+    FaceRandom::seed(testVirtualSeed);
+    secondNow = minuteNow = hourNow = 0xFF;  // its second, minute and hour all begin now
+    testPlanParse(testPendingPlan);          // its steps count from now, not from the request
+    testFrameAnew = true;                    // and its first frame is logged, whatever came before
+  }
+  if (testVirtualOn) {                       // the test's own clock: a pass is TEST_STEP_MS
+    testVirtualMs += TEST_STEP_MS;
+    millisNow = testVirtualMs;
+    localTime = testVirtualLocal + (time_t)((testVirtualMs - testVirtualMs0) / 1000);
+  }
+#endif
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+  localTime += testShift;                    // a test's moment (POST /api/test shift=): the panel only, never the clock
+#endif
+#if defined(FACE_FRAME_LOG)
+  if (testBegins && testVirtualReset) { testFaceReset(); }   // the face afresh, at the scene's time
+#endif
 
   if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; secondStartedAt=millisNow; }
   else { secondTrigger=false; }
  
   if(secondTrigger && minuteNow != clockMinute(localTime)) { minuteNow=clockMinute(localTime); minuteTrigger=true; }
   else { minuteTrigger=false; }
+#if defined(FACE_FRAME_LOG)
+  if (minuteTrigger) { FaceRandom::seed((uint32_t)((localTime / 60) % 1440) + 1); }   // the same minute of any day, the same numbers
+#endif
 
   if(minuteTrigger && hourNow != clockHour(localTime)) { hourNow=clockHour(localTime); hourTrigger=true; }
   else { hourTrigger=false; }
-
-  if(secondTrigger) { 
-    animTrigger[5]=true; 
-    if ((secondNow+1) % 10 == 0) { animTrigger[4]=true; }
-      else { animTrigger[4]=false; }
-    if (animTrigger[4]==true && secondNow+1 == 60) { animTrigger[3]=true; }
-      else { animTrigger[3]=false; }
-    if (animTrigger[3]==true && (minuteNow+1) % 10 == 0) { animTrigger[2]=true; }
-      else { animTrigger[2]=false; }
-    if (animTrigger[2]==true && minuteNow+1 == 60) { animTrigger[1]=true; }
-      else { animTrigger[1]=false; }
-    if (animTrigger[1]==true && ((hourNow+1) % 10 == 0 || hourNow+1 == 24)) { animTrigger[0]=true; }
-      else { animTrigger[0]=false; }
-      // TODO: maybe there is another check necessary for the hours: 23 to 00 change
-    // The watchface animation on the classic face: every digit flies in as if
-    // it changed, through the same steps as a real change.
-    if (classicAnim == CLASSIC_ANIM_ASKED) {
-      classicAnim = CLASSIC_ANIM_FLYING;
-      for (uint8_t i = 0; i < sizeof(animTrigger); i++) { animTrigger[i] = true; }
-    }
-  }
-  else {
-    for (uint8_t i = 0; i < sizeof(animTrigger); i++) {
-      animTrigger[i] = false;
-    }
-  }
 }
 
 // The one way to change the sync state. A sync becomes due when it is entered
@@ -5686,58 +3845,15 @@ void loadSettings() {
     if (settings.settingsRev < 1) { settings.watchface = WATCHFACE_CLASSIC; }
     // Rev 1 held the fly-in speed in ms per pixel (4..60), and a fly-in went
     // 32 px in landscape: that times 32 is the time it took then.
-    if (settings.settingsRev < 2) { settings.flyInTime = flyInUnits((long)settings.flyInTime * 32); }
+    if (settings.settingsRev < 2) { settings.classic.flyInTime = flyInUnits((long)settings.classic.flyInTime * 32); }
     saveSettings();   // stamps the new revision
     Serial.print("Settings: stored layout migrated to rev "); Serial.println(SETTINGS_REV);
   }
 #if WATCHFACE_TETRIS
-  loadTetrisSettings();
-#endif
-#if WATCHFACE_MUNCHER
-  loadMuncherSettings();
-#endif
-#if WATCHFACE_ALIENS
-  loadAliensSettings();
+  loadFaceSettings();   // the faces' own blobs
 #endif
   applySettings();
 }
-
-#if WATCHFACE_TETRIS
-// The Tetris watchface keeps its settings in a blob of its own, so the main one
-// never has to grow. Same shape of migration: the magic says "mine", the
-// revision says how much of it is filled in.
-void loadTetrisSettings() {
-  tetrisStore.begin("tetris");
-  tetrisStore.read(tetrisSettings);
-  if (tetrisSettings.magic != TETRIS_SETTINGS_MAGIC) {
-    tetrisSettings = TETRIS_DEFAULTS;
-    saveTetrisSettings();
-    Serial.println("Tetris settings: defaults written to flash");
-  } else if (tetrisSettings.rev < TETRIS_SETTINGS_REV) {
-    // Migration ladder, same idea as the main settings. A rev 1 blob only had
-    // dropMs and spinMs; the read left the rest zeroed, so give the fields added
-    // since an explicit value and keep what the user had set.
-    if (tetrisSettings.rev < 2) {
-      tetrisSettings.shakeLevel = TETRIS_DEFAULTS.shakeLevel;
-      tetrisSettings.shakeStyle = TETRIS_DEFAULTS.shakeStyle;
-    }
-    if (tetrisSettings.rev < 3) { tetrisSettings.unusedRev3 = 0; }
-    saveTetrisSettings();
-    Serial.print("Tetris settings: migrated to rev "); Serial.println(TETRIS_SETTINGS_REV);
-  }
-  tetrisSettings.dropMs = constrain(tetrisSettings.dropMs, TETRIS_DROP_MIN, TETRIS_DROP_MAX);
-  tetrisSettings.spinMs = constrain(tetrisSettings.spinMs, TETRIS_SPIN_MIN, TETRIS_SPIN_MAX);
-  if (tetrisSettings.shakeLevel > SHAKE_LEVEL_MAX) { tetrisSettings.shakeLevel = SHAKE_LEVEL_MAX; }
-  if (tetrisSettings.shakeStyle >= SHAKE_STYLE_COUNT) { tetrisSettings.shakeStyle = SHAKE_STYLE_RANDOM; }
-  shakeApplyThreshold();   // the sensor, not the sketch, holds the threshold now
-}
-
-void saveTetrisSettings() {
-  tetrisSettings.magic = TETRIS_SETTINGS_MAGIC;
-  tetrisSettings.rev   = TETRIS_SETTINGS_REV;
-  tetrisStore.write(tetrisSettings);
-}
-#endif
 
 // UI settings from flash; the defaults on a clock that never had them, which
 // are only written once something is changed. Fields an older revision did
@@ -5813,32 +3929,18 @@ void applySettings() {
 #if !WATCHFACE_TETRIS
   settings.watchface = WATCHFACE_CLASSIC;   // this build has no other watchface
 #endif
-  settings.flyInTime = constrain(settings.flyInTime, FLY_IN_MIN_MS / 10, FLY_IN_MAX_MS / 10);
+  settings.classic.flyInTime = constrain(settings.classic.flyInTime, FLY_IN_MIN_MS / 10, FLY_IN_MAX_MS / 10);
   syncTimeHour   = settings.syncHour;
   syncTimeMinute = settings.syncMinute;
   // Enforce full colors (the trail is dimmed at render time, not by the swatch).
-  normalizeColorFull(settings.digitR, settings.digitG, settings.digitB);
-  normalizeColorFull(settings.trailR, settings.trailG, settings.trailB);
+  normalizeColorFull(settings.classic.digitR, settings.classic.digitG, settings.classic.digitB);
+  normalizeColorFull(settings.classic.trailR, settings.classic.trailG, settings.classic.trailB);
+  panelDirty = true;   // the faces draw on a change only: what is on the panel may be of other settings
 }
 
-// Scale a base color by an explicit brightness (0..255). Linear scaling keeps the
-// hue (channel ratios); rounding (+127) instead of truncating reduces drift when
-// dimming into the low end of the panel's few levels per channel.
-// On the S3 the panel itself dims to effectiveBrightness, so a colour asked at
-// that brightness (or above) is drawn at full strength, and one asked dimmer
-// keeps its share of it: the fly-in trail stays the same fraction of the digits.
+// Scale a base color by an explicit brightness (0..255), as the faces do (FacePaint).
 uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright) {
-#if PANEL_DRIVER_DMA
-  if (bright >= effectiveBrightness || effectiveBrightness == 0) { return matrix.color565(r, g, b); }
-  uint16_t panel = effectiveBrightness;
-  return matrix.color565(((uint16_t)r * bright + panel / 2) / panel,
-                         ((uint16_t)g * bright + panel / 2) / panel,
-                         ((uint16_t)b * bright + panel / 2) / panel);
-#else
-  return matrix.color565(((uint16_t)r * bright + 127) / 255,
-                         ((uint16_t)g * bright + 127) / 255,
-                         ((uint16_t)b * bright + 127) / 255);
-#endif
+  return FacePaint{effectiveBrightness}.color(r, g, b, bright);
 }
 
 // Scale a base color by the brightness actually used for rendering.
@@ -5847,33 +3949,16 @@ uint16_t scaledColor(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 // Like scaledColor(), but never dims below a floor that keeps the color visible
-// on the panel. Used for the critical AP info (SSID/PW/IP) so it can never
-// quantise to black even when the clock brightness is very low.
-const uint8_t AP_INFO_MIN_BRIGHT = 24;
+// on the panel (FacePaint::visible()). Used for the critical AP info
+// (SSID/PW/IP) so it can never quantise to black even when the clock
+// brightness is very low.
 uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b) {
-  uint8_t br = (effectiveBrightness < AP_INFO_MIN_BRIGHT) ? AP_INFO_MIN_BRIGHT : effectiveBrightness;
-  return scaledColorB(r, g, b, br);
-}
-
-// Effective brightness of the fly-in (trail) color. The eye is roughly gamma
-// 2.2, so a *linear* fraction of the master brightness hardly looks dimmer
-// (50% linear ~= 73% perceived). We dim perceptually instead - using the same
-// FADE_GAMMA as the brightness fade - so the trail actually appears at
-// TRAIL_BRIGHTNESS_PCT of the digit's perceived brightness. Floored so it never
-// quantises to black, capped so it is never brighter than the digit.
-const uint8_t TRAIL_BRIGHTNESS_PCT = 50; // trail = ~50% of the digit's PERCEIVED brightness
-const uint8_t TRAIL_BRIGHTNESS_MIN = 24; // absolute floor that keeps the LEDs on
-uint8_t trailBrightness() {
-  float frac = TRAIL_BRIGHTNESS_PCT / 100.0f;                 // desired perceived fraction
-  uint16_t t = (uint16_t)lroundf(powf(frac, FADE_GAMMA) * effectiveBrightness); // -> linear light
-  if (t < TRAIL_BRIGHTNESS_MIN) { t = TRAIL_BRIGHTNESS_MIN; }
-  if (t > effectiveBrightness)  { t = effectiveBrightness; } // very low brightness -> match the digit
-  return (uint8_t)t;
+  return FacePaint{effectiveBrightness}.visible(r, g, b);
 }
 
 // Snap a color to a "full" color (largest channel = 255) while preserving hue.
 // Digit and fly-in colors are always full colors now; the trail's dimness comes
-// from trailBrightness(), not from a pre-dimmed swatch. This also migrates any
+// from the classic face's trail brightness, not from a pre-dimmed swatch. This also migrates any
 // previously-stored dark/grey color so old settings never render near-black.
 void normalizeColorFull(uint8_t &r, uint8_t &g, uint8_t &b) {
   uint8_t m = max(r, max(g, b));
@@ -5932,9 +4017,9 @@ int8_t faceEventIndex(InputEvent ev) {
 // with the accelerometer, the gestures with the gesture sensor. (The wall clock
 // has no buttons.)
 bool faceEventFitted(InputEvent ev) {
-  // The knock is sensed by the Tetris face's code (updateShake()), so a board
-  // without it - the M4 - has no knock, accelerometer or not.
-  if (ev == EV_KNOCK) { return knockOK && WATCHFACE_TETRIS != 0; }
+  // The knock comes from knock.h, which a board without it - the M4 - does
+  // not build, accelerometer or not.
+  if (ev == EV_KNOCK) { return knockOK; }
   if (ev == EV_WAVE) { return false; }   // not read: too unreliable (updateGestures())
   if (ev == EV_CIRCLE_CW || ev == EV_CIRCLE_CCW) { return false; }   // left out (gestureLeftOut())
   if (isGestureEvent(ev)) { return gestureOK; }
@@ -6120,39 +4205,13 @@ void runFunction(InputFunction fn, uint8_t steps) {
   }
 }
 
-// FN_FACE_ANIMATION, on the face only: the watchface's own animation. The
-// Tetris digits break up in the break-up effect; the classic digits all fly
-// in at the next second, as if every one of them changed then - unless one is
-// still asked for or flying, or landed less than CLASSIC_ANIM_REST_MS ago. The
-// console gets one line per animation taken, with the requests ignored since
-// the one before, not one per request (a stress test of fast knocks wrote over
-// 200 lines in 30 s).
+// FN_FACE_ANIMATION, on the face only: the watchface's own animation, each
+// face deciding whether it plays now (Watchface::request()): the classic
+// digits all fly in at the next second, the Tetris digits break up, the
+// Muncher and the Aliens play the scene their setting picks.
 void faceAnimationStart() {
   if (screen != SCREEN_FACE) { return; }
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) { muncherKnock(); return; }
-#endif
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) { aliensKnock(); return; }
-#endif
-#if WATCHFACE_TETRIS
-  if (settings.watchface == WATCHFACE_TETRIS_ID) {
-#if GIF_PLAYBACK
-    // Not into the time's change: dropped, not kept (Peter, 2026-10-12).
-    if (!panelFitsBeforeChange(TETRIS_KNOCK_MS)) { return; }
-#endif
-    if (knockEffectReady()) { shakeStartAll(); }
-    return;
-  }
-#endif
-  if (classicAnim != CLASSIC_ANIM_IDLE || millisNow - classicAnimEndedAt < CLASSIC_ANIM_REST_MS) {
-    if (classicAnimIgnored < 0xFFFF) { classicAnimIgnored++; }
-    return;
-  }
-  classicAnim = CLASSIC_ANIM_ASKED;
-  Serial.print("Face animation: the classic digits fly in at the next second (");
-  Serial.print(classicAnimIgnored); Serial.println(" requests ignored since the last one)");
-  classicAnimIgnored = 0;
+  faceFor(settings.watchface).request(faceMoment(), TRIGGER_ACTION);
 }
 
 void holdStep(InputFunction fn) {
@@ -7159,7 +5218,7 @@ void stopAPMode() {
 // - "rtc" shows what the DS3231 and the board's PCF85063 hold against the
 //   clock (wallRtcReport()).
 // - "imu" shows the board's motion sensor and what it gave of the knock
-//   (wallKnockReport()).
+//   (Knock::report()).
 // - "sd" shows the microSD card and its GIFs; "sd speed" reads every GIF once
 //   and checks it; "sd remount" reads the card anew; "sd freq <kHz>" mounts
 //   it at another clock; "sd stress" reads its largest GIFs ahead in turn
@@ -7201,9 +5260,9 @@ void wallConsole() {
       wallCryptoTest(line[6] != '\0');
     } else if (strcmp(line, "rtc") == 0) {
       wallRtcReport();
-#if WATCHFACE_TETRIS
+#if KNOCK_SENSING
     } else if (strcmp(line, "imu") == 0) {
-      wallKnockReport();
+      knock.report();
 #endif
     } else if (strncmp(line, "sd", 2) == 0 && (line[2] == '\0' || line[2] == ' ')) {
       gifCardCommand(line);
@@ -7661,9 +5720,6 @@ void serveClient(WiFiClient &client, bool lan) {
     applySettings();            // the runtime copies: animation speed, sync time
     setDstMode(settings.dst);   // a new zone's daylight-saving rule counts at once
     saveSettings();
-#if WATCHFACE_TETRIS
-    saveTetrisSettings();
-#endif
     saveUiSettings();
     // NTP sync switched off: a sync that is due or about to start is dropped,
     // and stopAPMode() below then leaves the radio off.
@@ -7710,9 +5766,6 @@ void serveClient(WiFiClient &client, bool lan) {
     // in RAM.
     loadSettings();
     sendNoContent(out);
-#if WATCHFACE_TETRIS
-    shakePreviewReq = true;   // show what was restored
-#endif
   } else if (path == "/inputs") {
     sendInputsPage(out);
   } else if (path == "/keys") {
@@ -7847,24 +5900,17 @@ void applyParams(const String &q) {
   v = getParam(q, "dst");    if (v.length()) { settings.dst = constrain(v.toInt(), DST_WINTER, DST_AUTO); }
 #if WATCHFACE_TETRIS
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
-  v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
-  v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
-  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); shakeApplyThreshold(); }
-  v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
 #endif
-#if WATCHFACE_MUNCHER
-  applyMuncherParams(q, false);
-#endif
-#if WATCHFACE_ALIENS
-  applyAliensParams(q, false);
+#if WATCHFACE_TETRIS
+  applyFaceParams(q, false);   // the faces' own settings (face.h)
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "speed");  if (v.length()) { settings.flyInTime  = flyInUnits(v.toInt()); }   // ms
-  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
-  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
+  v = getParam(q, "speed");  if (v.length()) { settings.classic.flyInTime  = flyInUnits(v.toInt()); }   // ms
+  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); panelDirty = true; }
+  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); panelDirty = true; }
   for (int i = 0; i < 6; i++) {
     v = getParam(q, "dir" + String(i));
-    if (v.length()) { settings.dir[i] = constrain(v.toInt(), 0, 3); }
+    if (v.length()) { settings.classic.dir[i] = constrain(v.toInt(), 0, 3); }
   }
   v = getParam(q, "synch");  if (v.length()) { settings.syncHour   = constrain(v.toInt(), 0, 23); }
   v = getParam(q, "syncm");  if (v.length()) { settings.syncMinute = constrain(v.toInt(), 0, 59); }
@@ -7954,14 +6000,12 @@ void printAgo(Print &c, unsigned long at) {
 
 // Live preview (/live): apply only the visual settings to RAM, no flash write,
 // no reboot. The clock is being rendered every frame, so changes show instantly.
-void applyLiveParams(const String &q) {
+// Returns what became of a preview the page asked for (OUTCOME_NONE: none).
+FaceOutcome applyLiveParams(const String &q) {
   String v;
+  uint8_t faceBefore = settings.watchface;
 #if WATCHFACE_TETRIS
   v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
-  v = getParam(q, "tdrop");  if (v.length()) { tetrisSettings.dropMs = constrain(v.toInt(), TETRIS_DROP_MIN, TETRIS_DROP_MAX); }
-  v = getParam(q, "tspin");  if (v.length()) { tetrisSettings.spinMs = constrain(v.toInt(), TETRIS_SPIN_MIN, TETRIS_SPIN_MAX); }
-  v = getParam(q, "shk");    if (v.length()) { tetrisSettings.shakeLevel = constrain(v.toInt(), 0, SHAKE_LEVEL_MAX); shakeApplyThreshold(); }
-  v = getParam(q, "shs");    if (v.length()) { tetrisSettings.shakeStyle = constrain(v.toInt(), 0, SHAKE_STYLE_COUNT - 1); }
 #endif
   v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "autob");  if (v.length()) { settings.autoBright = (v == "on") ? 1 : 0; } // updateBrightness() re-seeds the fade
@@ -7969,22 +6013,17 @@ void applyLiveParams(const String &q) {
   v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
   v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
   v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "speed");  if (v.length()) { settings.flyInTime = flyInUnits(v.toInt()); }   // ms
-  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.digitR, settings.digitG, settings.digitB); }
-  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.trailR, settings.trailG, settings.trailB); }
+  v = getParam(q, "speed");  if (v.length()) { settings.classic.flyInTime = flyInUnits(v.toInt()); }   // ms
+  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); panelDirty = true; }
+  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); panelDirty = true; }
 #if WATCHFACE_TETRIS
-  // The page says outright when a control that changes the Tetris face has been
-  // used, and that is what asks for a run. Comparing the values instead, as this
-  // did at first, was unreliable: the updates sent while a slider was being
-  // dragged had already pushed the final value across, so the release looked
-  // like no change at all and nothing was shown.
-  if (getParam(q, "pv").length() && settings.watchface == WATCHFACE_TETRIS_ID) { shakePreviewReq = true; }
-#endif
-#if WATCHFACE_MUNCHER
-  applyMuncherParams(q, true);
-#endif
-#if WATCHFACE_ALIENS
-  applyAliensParams(q, true);
+  // The faces' own settings, and what the page asks to see - but a face just
+  // chosen shows itself as it comes (the Tetris digits drop, the others show
+  // the time) and plays no preview with it: it has planned nothing yet.
+  return applyFaceParams(q, settings.watchface == faceBefore);
+#else
+  (void)faceBefore;
+  return OUTCOME_NONE;
 #endif
 }
 
@@ -8046,46 +6085,6 @@ void sendFormPage(Print &c) {
   printOption(c, settings.dst, DST_WINTER, "Standard / winter time");
   c.println("</select>");
 
-#if WATCHFACE_TETRIS
-  // Watchface (live, so the choice can be judged on the panel before saving).
-  c.println("<label>Watchface</label><select name=wf onchange=\"liveNow(1)\">");
-  printOption(c, settings.watchface, WATCHFACE_CLASSIC,   "Classic (flying digits, HH MM SS)");
-  printOption(c, settings.watchface, WATCHFACE_TETRIS_ID, "Tetris (falling blocks, HH:MM)");
-  c.println("</select>");
-
-  // Tetris pace: how fast the blocks come down, and how busily they turn on the
-  // way. Separate settings because they are separate things to look at.
-  c.print("<label>Tetris drop (ms per block row; higher = slower)</label>");
-  c.print("<input type=range min="); c.print(TETRIS_DROP_MIN);
-  c.print(" max="); c.print(TETRIS_DROP_MAX);
-  c.print(" name=tdrop value="); c.print(tetrisSettings.dropMs);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value\" onchange=\"this.nextElementSibling.value=this.value;liveNow(1)\">");
-  c.print("<output>"); c.print(tetrisSettings.dropMs); c.println("</output>");
-
-  c.print("<label>Tetris turn (ms between quarter turns; higher = calmer)</label>");
-  c.print("<input type=range min="); c.print(TETRIS_SPIN_MIN);
-  c.print(" max="); c.print(TETRIS_SPIN_MAX);
-  c.print(" step=10 name=tspin value="); c.print(tetrisSettings.spinMs);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value\" onchange=\"this.nextElementSibling.value=this.value;liveNow(1)\">");
-  c.print("<output>"); c.print(tetrisSettings.spinMs); c.println("</output>");
-
-  // Knock the clock and the digits come apart. 0 switches it off.
-  c.print("<label>Shake sensitivity (0 = off, 10 = reacts to a light tap)</label>");
-  c.print("<input type=range min=0 max="); c.print(SHAKE_LEVEL_MAX);
-  c.print(" name=shk value="); c.print(tetrisSettings.shakeLevel);
-  c.println(" oninput=\"this.nextElementSibling.value=this.value==0?'off':this.value\" onchange=\"this.nextElementSibling.value=this.value==0?'off':this.value;liveNow(1)\">");
-  c.print("<output>");
-  if (tetrisSettings.shakeLevel == 0) { c.print("off"); } else { c.print(tetrisSettings.shakeLevel); }
-  c.println("</output>");
-
-  c.println("<label>Break-up effect (when the time changes a digit, and for the shortcut)</label><select name=shs onchange=\"liveNow(1)\">");
-  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_RANDOM,   "Random each time");
-  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_COLLAPSE, "Collapse (the stack gives way)");
-  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_SCATTER,  "Scatter (pieces fly off)");
-  printOption(c, tetrisSettings.shakeStyle, SHAKE_STYLE_CLEAR,    "Clear rows (bottom up)");
-  c.println("</select>");
-#endif
-
   // Brightness (live). Manual mode: absolute brightness. Auto mode: relative trim
   // around the sensor value (128 = neutral, lower = darker, higher = brighter).
   c.print("<label>Brightness (0-255; auto mode: 128 = neutral)</label>");
@@ -8115,14 +6114,14 @@ void sendFormPage(Print &c) {
   // Fly-in time (live)
   c.print("<label>Fly-in time (ms, every digit lands at once)</label>");
   c.print("<input type=number min="); c.print(FLY_IN_MIN_MS); c.print(" max="); c.print(FLY_IN_MAX_MS);
-  c.print(" step=10 name=speed value="); c.print(settings.flyInTime * 10);
+  c.print(" step=10 name=speed value="); c.print(settings.classic.flyInTime * 10);
   c.println(" onchange=liveNow(0)>");
 
   // Colors (live) - palette swatches instead of a free color picker (few levels per channel)
   c.print("<label>Digit color</label><div class=swbox id=swDigit></div><input type=hidden name=digit value=");
-  c.print(toHex(settings.digitR, settings.digitG, settings.digitB)); c.println(">");
+  c.print(toHex(settings.classic.digitR, settings.classic.digitG, settings.classic.digitB)); c.println(">");
   c.print("<label>Fly-in color (auto-dimmed)</label><div class=swbox id=swTrail></div><input type=hidden name=trail value=");
-  c.print(toHex(settings.trailR, settings.trailG, settings.trailB)); c.println(">");
+  c.print(toHex(settings.classic.trailR, settings.classic.trailG, settings.classic.trailB)); c.println(">");
 
   // Animation directions
   const char *names[6] = {"Hours tens", "Hours ones", "Min tens", "Min ones", "Sec tens", "Sec ones"};
@@ -8130,10 +6129,10 @@ void sendFormPage(Print &c) {
   for (int i = 0; i < 6; i++) {
     c.print("<div style=\"margin-bottom:6px\">"); c.print(names[i]);
     c.print(" <select name=dir"); c.print(i); c.println(">");
-    printOption(c, settings.dir[i], 0, "from top");
-    printOption(c, settings.dir[i], 1, "from right");
-    printOption(c, settings.dir[i], 2, "from bottom");
-    printOption(c, settings.dir[i], 3, "from left");
+    printOption(c, settings.classic.dir[i], 0, "from top");
+    printOption(c, settings.classic.dir[i], 1, "from right");
+    printOption(c, settings.classic.dir[i], 2, "from bottom");
+    printOption(c, settings.classic.dir[i], 3, "from left");
     c.println("</select></div>");
   }
 
@@ -8251,11 +6250,7 @@ void sendFormPage(Print &c) {
 
   c.println("function _send(p){var g=function(n){return document.getElementsByName(n)[0].value;};");
   c.println("var ab=document.getElementsByName('autob')[0].checked?'on':'off';");
-#if WATCHFACE_TETRIS
-  c.println("var wf='&wf='+g('wf')+'&tdrop='+g('tdrop')+'&tspin='+g('tspin')+'&shk='+g('shk')+'&shs='+g('shs');");
-#else
-  c.println("var wf='';");   // no watchface selector in this build
-#endif
+  c.println("var wf='';");   // no watchface selector on this page: the M4 has the classic face only
   c.println("fetch('/live?bright='+g('bright')+'&autob='+ab+'&luxd='+g('luxd')+'&luxb='+g('luxb')+'&brmin='+g('brmin')+'&brmax='+g('brmax')+'&speed='+g('speed')+'&digit='+encodeURIComponent(g('digit'))+'&trail='+encodeURIComponent(g('trail'))+wf+(p?'&pv=1':'')).catch(function(){});}");
   // Nothing is sent while a slider is being dragged - only the readout beside it
   // follows. A value is taken over when the slider is let go of or a point on it
@@ -8542,7 +6537,7 @@ void gifDrawLine(GIFDRAW *d) {
 }
 
 // Shows GIF i over the face; false when it does not open.
-bool gifStart(int16_t i) {
+bool gifStart(int16_t i, bool ownAccord) {
   if (i < 0 || i >= gifCount()) { return false; }
   const char *name;
   uint16_t w, h;
@@ -8577,10 +6572,15 @@ bool gifStart(int16_t i) {
   gifLoopTime = gifLoopMs(data, size, gifFrames);
   uint32_t playMs = gifSettings.seconds * 1000UL;
   gifLoopsPlanned = (gifLoopTime > 0 && gifLoopTime <= playMs) ? (uint16_t)(playMs / gifLoopTime) : 1;
-  // Its whole loops end before the time's next change, or it does not start.
+  // Its whole loops end before the time's next change - and, of its own
+  // accord, ROUND_GIF_GAP_MS before an info round - or it does not start.
+  // Checked once, against what it plays (K6 of the face refactor: until
+  // 2026-10-20 a GIF of its own accord was checked against the seconds set
+  // first, which let one through whose loops ran longer, and held one back
+  // whose loops were shorter).
   uint32_t lenMs = gifLoopTime > 0 ? min<uint32_t>((uint32_t)gifLoopsPlanned * gifLoopTime, GIF_PLAY_MAX_MS) : playMs;
-  if (!panelFitsBeforeChange(lenMs)) {
-    Serial.printf("GIF %s: its %lu ms would run into the time's change, dropped\n", name, (unsigned long)lenMs);
+  if (!panelFitsBeforeChange(lenMs) || (ownAccord && roundNextIn() < lenMs + ROUND_GIF_GAP_MS)) {
+    Serial.printf("GIF %s: its %lu ms have no room before the time's change, dropped\n", name, (unsigned long)lenMs);
     gifPlayer->decoder.close();
     delete gifPlayer;
     gifPlayer = nullptr;
@@ -8627,7 +6627,7 @@ int16_t gifNext() {
 // A GIF now (FN_PLAY_GIF): on the face only, and only one that fits.
 void gifPlayNow() {
   if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
-  if (!gifStart(gifNext())) { gifScheduleNext(); }
+  if (!gifStart(gifNext(), false)) { gifScheduleNext(); }
 }
 
 // The last GIF shown once more (FN_GIF_AGAIN): on the face only; a random one
@@ -8635,23 +6635,24 @@ void gifPlayNow() {
 void gifPlayAgain() {
   if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
   int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifNext();
-  if (!gifStart(i)) { gifScheduleNext(); }
+  if (!gifStart(i, false)) { gifScheduleNext(); }
 }
 
 // A GIF of its own accord once it is due: now, or not at all when the panel
 // is not free for it (decorFree()) - it does not wait (Peter, 2026-10-12);
 // GIFs that waited all came at once when the wait ended, right after the
-// time's change.
+// time's change. What does not depend on its length is looked at before it
+// is opened; its whole loops when they are known (gifStart()).
 void gifUpdate() {
   if (screen == SCREEN_GIF) { return; }   // one on show; the next is drawn at its end
   if (!gifSettings.randomOn || gifCount() == 0) { return; }
   if ((long)(millisNow - gifDueAt) < 0) { return; }
-  if (screen != SCREEN_FACE || !decorFree((unsigned long)gifSettings.seconds * 1000UL, true)) {
+  if (screen != SCREEN_FACE || !decorFree(0, true)) {
     Serial.println("GIF: due, the panel not free for it - dropped");
     gifScheduleNext();
     return;
   }
-  if (!gifStart(gifNext())) { gifScheduleNext(); }
+  if (!gifStart(gifNext(), true)) { gifScheduleNext(); }
 }
 
 // Lets go of the bytes of the GIF that was on show, or was about to be.
@@ -9726,19 +7727,7 @@ uint8_t noticesShowAgain() {
 // it: the classic face's fly-in of the new minute, the Tetris blocks, the
 // muncher's walk and hour show.
 bool faceTimeShown() {
-#if WATCHFACE_TETRIS
-  if (settings.watchface == WATCHFACE_TETRIS_ID) {
-    for (uint8_t i = 0; i < 4; i++) { if (shakeBusy[i]) { return false; } }
-    return tetrisSettled;
-  }
-#endif
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) { return munch.mode == muncher::MODE_IDLE; }
-#endif
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) { return !alienFace.running; }
-#endif
-  return secondNow != 0 || millisNow - secondStartedAt >= (unsigned long)settings.flyInTime * 10UL;
+  return !faceFor(settings.watchface).busy(faceMoment());
 }
 
 // On every pass: a round's minute begins, and whether its round starts now -
@@ -9818,6 +7807,9 @@ void infoCardsEnded() {
 // After the notices, the information: what is new as cards at once, all of
 // it in the info round; over the face only, after a GIF's end.
 void noticesUpdate() {
+#if defined(FACE_FRAME_LOG)
+  if (testQuiet) { return; }       // a test's scenes: nothing over the face (POST /api/test quiet=1)
+#endif
   bool round = infoRoundReady();   // on every pass: it keeps watch for the round's minute
   NoticeMark mark = MARK_NONE;
   bool newAlert = false, newAny = false, newInfo = false;
@@ -9901,54 +7893,27 @@ unsigned long noticeNewMs() {
    Who takes the panel, and when: the rules (the constants at the top).
    ---------------------------------------------------------------------- */
 
-// How long before the minute the face's change starts, about - for drawing
-// random times only; faceChangeIn() is what counts.
-unsigned long faceLeadMs() {
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) { return aliensPlannedStand ? aliensPlannedStand : 15000UL; }
-#endif
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) {
-    return muncherPlannedDone ? (unsigned long)muncherPlannedDone * muncherSettings.paceMs : 15000UL;
-  }
-#endif
-  return 0;
-}
-
-// How long the face's change goes on after the minute has begun, about: the
-// Tetris digits come apart and build anew, the others stand at :00.
-unsigned long faceTailMs() {
-  return settings.watchface == WATCHFACE_TETRIS_ID ? 6000UL : 1500UL;
-}
-
 // How long until the time's next change starts, in ms: 0 while the face's
-// change or a scene of it runs, ~0UL without a time. The Muncher and the
-// Aliens plan theirs backwards from the minute; until a plan is made, about
-// 15 s before it.
+// change or a scene of it runs, ~0UL without a time. Each face says how long
+// before the minute its change starts (Watchface::changeSpan()): the Muncher
+// and the Aliens as planned backwards from it, the classic digits in the
+// second before, the Tetris ones at the minute. (K5 of the face refactor:
+// until 2026-10-20 the Muncher and the Aliens counted 15 s until they had
+// planned, and the classic face from the minute.)
 unsigned long faceChangeIn() {
   if (!clockIsSet()) { return ~0UL; }
   if (!faceTimeShown()) { return 0; }
-  long toMinute = (long)(secondStartedAt + (60UL - secondNow) * 1000UL - millisNow);
-#if WATCHFACE_ALIENS
-  if (settings.watchface == WATCHFACE_ALIENS_ID) {
-    if (aliensPlannedFor && aliensPlannedStand) { long in = (long)(aliensStartAt - millisNow); return in > 0 ? (unsigned long)in : 0; }
-    toMinute -= 15000;
-  }
-#endif
-#if WATCHFACE_MUNCHER
-  if (settings.watchface == WATCHFACE_MUNCHER_ID) {
-    if (munch.legsPlanned() && muncherPlannedFor) { long in = (long)(muncherStartAt - millisNow); return in > 0 ? (unsigned long)in : 0; }
-    toMinute -= 15000;
-  }
-#endif
-  return toMinute > 0 ? (unsigned long)toMinute : 0;
+  time_t next = localTime - secondNow + 60;
+  long in = (long)(secondStartedAt + (60UL - secondNow) * 1000UL - millisNow)
+          - (long)faceFor(settings.watchface).changeSpan(faceMoment(), next).lead;
+  return in > 0 ? (unsigned long)in : 0;
 }
 
 // Whether something optional of `ms` ends PANEL_GUARD_BEFORE_MS before the
 // time's next change starts.
 bool panelFitsBeforeChange(unsigned long ms) {
   unsigned long in = faceChangeIn();
-  return in == ~0UL || in >= ms + PANEL_GUARD_BEFORE_MS;
+  return in == ~0UL || faceFits(millisNow + in, millisNow, ms);
 }
 
 // On every pass: when the face's change or scene ends.
@@ -10004,12 +7969,30 @@ bool decorFree(unsigned long ms, bool gif) {
   return true;
 }
 
+// The minute the moment `at` (millis) falls in - the local time it began
+// at - and how far into it `at` lies, in ms.
+void panelMinuteOf(unsigned long at, time_t &minute, unsigned long &inMinute) {
+  unsigned long fromMinute = secondNow * 1000UL + (millisNow - secondStartedAt) + (at - millisNow);
+  minute = localTime - secondNow + (time_t)(fromMinute / 60000UL) * 60;
+  inMinute = fromMinute % 60000UL;
+}
+
 // Whether the moment `at` (millis) falls into the slot around a change of
-// the time, for something of `ms`: from its length, the guard and the
-// face's lead before the minute until the change's tail and the rest after it.
+// the time, for something of `ms`: from its length, the guard and the lead
+// of the change after it until the tail of the change before it and the rest
+// after that - each as the face says (Watchface::changeSpan()), the hour's
+// longer ones included. (K5 of the face refactor: until 2026-10-20 a flat
+// 15 s before on the Muncher and the Aliens, 1.5 s after - 6 s on the Tetris
+// face -, which let the Aliens' wave and the Muncher's hour show drop what
+// fell into them.)
 bool panelInChangeSlot(unsigned long at, unsigned long ms) {
-  unsigned long inMinute = (secondNow * 1000UL + (millisNow - secondStartedAt) + (at - millisNow)) % 60000UL;
-  unsigned long before = faceLeadMs() + PANEL_GUARD_BEFORE_MS + ms, after = faceTailMs() + PANEL_DECOR_REST_MS;
+  time_t minute;
+  unsigned long inMinute;
+  panelMinuteOf(at, minute, inMinute);
+  Watchface &face = faceFor(settings.watchface);
+  FaceNow now = faceMoment();
+  unsigned long before = face.changeSpan(now, minute + 60).lead + PANEL_GUARD_BEFORE_MS + ms;
+  unsigned long after = face.changeSpan(now, minute).tail + PANEL_DECOR_REST_MS;
   return inMinute + before >= 60000UL || inMinute < after;
 }
 
@@ -10022,9 +8005,14 @@ unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms
     at = millisNow + lo + (hi > lo ? esp_random() % (hi - lo + 1) : 0);
     if (!panelInChangeSlot(at, ms)) { return at; }
   }
-  unsigned long inMinute = (secondNow * 1000UL + (millisNow - secondStartedAt) + (at - millisNow)) % 60000UL;
-  unsigned long after = faceTailMs() + PANEL_DECOR_REST_MS;
-  return at + (inMinute < after ? after - inMinute : 60000UL - inMinute + after);
+  time_t minute;
+  unsigned long inMinute;
+  panelMinuteOf(at, minute, inMinute);
+  FaceNow now = faceMoment();
+  Watchface &face = faceFor(settings.watchface);
+  unsigned long after = face.changeSpan(now, minute).tail + PANEL_DECOR_REST_MS;
+  if (inMinute < after) { return at + (after - inMinute); }
+  return at + (60000UL - inMinute) + face.changeSpan(now, minute + 60).tail + PANEL_DECOR_REST_MS;
 }
 
 // The faces' extras: the next at a random time around the slider's mean -
@@ -10037,12 +8025,31 @@ void extrasScheduleNext() {
   if (!extrasDueAt) { extrasDueAt = 1; }
 }
 
-// Whether an extra is due. Then it plays now or not at all: the face asks
-// decorFree() and calls extrasScheduleNext() either way.
+// Whether an extra is due. Then it plays now or not at all (extrasUpdate()).
 bool extrasDue() {
   if (!decorSettings.extras) { return false; }
   if (extrasDueAt == 0) { extrasScheduleNext(); return false; }
   return (long)(millisNow - extrasDueAt) >= 0;
+}
+
+// On every pass outside the hotspot, after a GIF of its own accord: the
+// extra of the face shown, when one is due - now, or dropped, and the next
+// time drawn either way. The panel has to be free for something of its own
+// accord (decorFree(): quiet, the face at rest, information waiting, room
+// before the change); then the face, which knows how long its extra takes,
+// plays it or refuses one that would run into its next change. Faces
+// without extras leave the time alone.
+void extrasUpdate() {
+  Watchface &face = faceFor(settings.watchface);
+  if (!face.offers(TRIGGER_NOW_AND_THEN) || !extrasDue()) { return; }
+  extrasScheduleNext();
+  if (!decorFree(0, false)) {
+    Serial.println("Extra: due, the panel not free for it - dropped");
+    return;
+  }
+  if (face.request(faceMoment(), TRIGGER_NOW_AND_THEN) != OUTCOME_PLAYED) {
+    Serial.println("Extra: due, the face has no room for it - dropped");
+  }
 }
 
 void loadDecorSettings() {
@@ -11175,6 +9182,15 @@ void sendJson(Print &c, JsonDocument &doc, int code = 200) {
   serializeJson(doc, c);
 }
 
+// The answer to a change tried live: nothing when it asked for no preview,
+// else whether the face played it now or could not (it does not wait).
+void sendPreviewOutcome(Print &c, FaceOutcome o) {
+  if (o == OUTCOME_NONE) { sendNoContent(c); return; }
+  JsonDocument d;
+  d["preview"] = o == OUTCOME_PLAYED ? "played" : "refused";
+  sendJson(c, d);
+}
+
 void sendJsonError(Print &c, int code, const char *text) {
   JsonDocument d;
   d["error"] = text;
@@ -11319,28 +9335,13 @@ void apiState(Print &c) {
 
   JsonObject s = d["settings"].to<JsonObject>();
   s["wf"] = settings.watchface;
-  s["digit"] = toHex(settings.digitR, settings.digitG, settings.digitB);
-  s["trail"] = toHex(settings.trailR, settings.trailG, settings.trailB);
-  s["speed"] = settings.flyInTime * 10;   // ms
+  s["digit"] = toHex(settings.classic.digitR, settings.classic.digitG, settings.classic.digitB);
+  s["trail"] = toHex(settings.classic.trailR, settings.classic.trailG, settings.classic.trailB);
+  s["speed"] = settings.classic.flyInTime * 10;   // ms
   JsonArray dirs = s["dirs"].to<JsonArray>();
-  for (uint8_t i = 0; i < 6; i++) { dirs.add(settings.dir[i]); }
+  for (uint8_t i = 0; i < 6; i++) { dirs.add(settings.classic.dir[i]); }
 #if WATCHFACE_TETRIS
-  s["tdrop"] = tetrisSettings.dropMs;
-  s["tspin"] = tetrisSettings.spinMs;
-  s["shk"] = tetrisSettings.shakeLevel;
-  s["shs"] = tetrisSettings.shakeStyle;
-#endif
-#if WATCHFACE_MUNCHER
-  s["mst"] = muncherSettings.style;
-  s["mkn"] = muncherSettings.knock;
-  s["mpace"] = muncherSettings.paceMs;
-  s["mpel"] = muncherSettings.pellets;
-#endif
-#if WATCHFACE_ALIENS
-  s["ast"] = aliensSettings.style;
-  s["acol"] = aliensSettings.colours;
-  s["akn"] = aliensSettings.knock;
-  s["anap"] = aliensSettings.nap;
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobJson(*FACE_BLOBS[i], s); }   // tdrop .. anap
 #endif
   s["autob"] = settings.autoBright != 0;
   s["bright"] = settings.brightness;
@@ -11434,43 +9435,13 @@ void apiState(Print &c) {
       if (faceActionOffered(a, e.event)) { offered.add(a); }
     }
   }
-  JsonArray shs = lists["shs"].to<JsonArray>();   // by value: SHAKE_STYLE_*
-  shs.add("Collapse");
-  shs.add("Scatter");
-  shs.add("Clear rows");
-  shs.add("Random each time");
-#if WATCHFACE_MUNCHER
-  JsonArray mst = lists["mst"].to<JsonArray>();   // by value: muncher::STYLE_*
-  mst.add("Mixed");
-  mst.add("Whole digit");
-  mst.add("Only the difference");
-  JsonArray mkn = lists["mkn"].to<JsonArray>();   // by value: MUNCHER_KNOCK_*
-  mkn.add("Power pellet");
-  mkn.add("Last digit again");
-  mkn.add("Random each time");
-  mkn.add("Ghosts win");
-  JsonArray mpel = lists["mpel"].to<JsonArray>();   // by value: MUNCHER_PELLETS_*
-  mpel.add("One LED");
-  mpel.add("Side by side");
-  mpel.add("One above the other");
-  mpel.add("Solid");
-#endif
-#if WATCHFACE_ALIENS
-  JsonArray ast = lists["ast"].to<JsonArray>();       // by value: aliens::STYLE_*
-  ast.add("Mixed");
-  ast.add("Whole digit");
-  ast.add("Only the difference");
-  JsonArray acol = lists["acol"].to<JsonArray>();     // by value: ALIENS_COLOURS_*
-  acol.add("White");
-  acol.add("Coloured rows");
-  JsonArray akn = lists["akn"].to<JsonArray>();     // by value: ALIENS_KNOCK_*
-  akn.add("Last digit again");
-  akn.add("Saucer");
-  akn.add("Aliens shoot back");
-  akn.add("Random each time");
-  JsonArray anap = lists["anap"].to<JsonArray>();   // by value: 0 off, 1 on
-  anap.add("Off");
-  anap.add("Now and then");
+#if WATCHFACE_TETRIS
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) {   // the faces' choices by value: shs, mst .. anap
+    faceBlobLists(*FACE_BLOBS[i], [&lists](const char *key, const char *const *labels, uint8_t n) {
+      JsonArray a = lists[key].to<JsonArray>();
+      for (uint8_t k = 0; k < n; k++) { a.add(labels[k]); }
+    });
+  }
 #endif
 #if GIF_PLAYBACK
   JsonArray dxr = lists["dxr"].to<JsonArray>();   // by value: the extras' slider, DECOR_EXTRAS_MINUTES
@@ -11485,7 +9456,7 @@ void apiState(Print &c) {
   hw["muncher"] = WATCHFACE_MUNCHER != 0;
   hw["aliens"] = WATCHFACE_ALIENS != 0;
   hw["accel"] = accelOK;
-  hw["knock"] = knockOK && WATCHFACE_TETRIS != 0;   // as the knock's row on the Inputs page
+  hw["knock"] = knockOK;   // as the knock's row on the Inputs page
   hw["buttons"] = BOARD_BUTTON_COUNT;
 #if BOARD_WAVESHARE_WALL
   hw["knockBy"] = "QMI8658";
@@ -11801,13 +9772,7 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
   setDstMode(settings.dst);   // a new zone's daylight-saving rule counts at once
   saveSettings();
 #if WATCHFACE_TETRIS
-  saveTetrisSettings();
-#endif
-#if WATCHFACE_MUNCHER
-  saveMuncherSettings();
-#endif
-#if WATCHFACE_ALIENS
-  saveAliensSettings();
+  saveFaceSettings();
 #endif
   saveUiSettings();
   saveFaceKeys();
@@ -11858,16 +9823,15 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     return;
   }
   if (path == "/api/live") {
-    applyLiveParams(body);    // RAM only; Save keeps it, Discard reads the stored settings back
-    sendNoContent(c);
+    // RAM only; Save keeps it, Discard reads the stored settings back.
+    sendPreviewOutcome(c, applyLiveParams(body));
   } else if (path == "/api/save") {
     apiSave(c, body, closeHotspot);
   } else if (path == "/api/discard") {
-    loadSettings();           // the stored settings, with the Tetris ones, applied at once
-#if WATCHFACE_TETRIS
-    shakePreviewReq = true;   // show what was restored
-#endif
-    sendNoContent(c);
+    loadSettings();           // the stored settings, with the faces' ones, applied at once
+    // The face shows what was restored, as after a change tried live (U1 of
+    // the face refactor: until 2026-10-20 only the Tetris face did).
+    sendPreviewOutcome(c, faceFor(settings.watchface).request(faceMoment(), TRIGGER_PREVIEW_CHANGE));
   } else if (path == "/api/time") {
     apiSetTime(c, body);
   } else if (path == "/api/wifi") {
@@ -11888,12 +9852,13 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
   } else if (path == "/api/gif") {
     bool onFace = (screen == SCREEN_FACE);
     // Not during the face's change or a scene of it, nor into the next change:
-    // then it is dropped, not kept (Peter, 2026-10-12).
-    bool busy = onFace && (!faceTimeShown() || !panelFitsBeforeChange((unsigned long)gifSettings.seconds * 1000UL));
+    // then it is dropped, not kept (Peter, 2026-10-12). Whether it played says
+    // why not: on the face, with GIFs to play, it found no room.
     if (onFace) { gifPlayNow(); }
+    bool playing = onFace && screen == SCREEN_GIF;
     JsonDocument d;
-    d["playing"] = onFace && screen == SCREEN_GIF;
-    d["busy"] = busy;
+    d["playing"] = playing;
+    d["busy"] = onFace && !playing && gifCount() > 0;
     sendJson(c, d);
 #if BOARD_WAVESHARE_WALL
   } else if (path == "/api/card") {
@@ -11922,6 +9887,55 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
 #if HA_LINK
   } else if (path == "/api/ha") {
     apiHa(c, body);
+#endif
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+  } else if (path == "/api/test") {
+    // Debug and test builds: what tools.local/refactor needs to play the same
+    // scenes again. shift= moves the panel's time by that many seconds (RAM
+    // only: the clock, its RTC and the sync keep the real time); seed= sets
+    // the faces' random numbers (test builds); quiet=1 keeps GIFs and extras
+    // from coming of their own accord until a restart; extra=1 makes an extra
+    // due now; anim=1 runs "trigger watchface animation", as a knock does.
+    String v = getParam(body, "shift");
+    if (v.length()) { testShift = v.toInt(); panelDirty = true; }
+#if defined(FACE_FRAME_LOG)
+    v = getParam(body, "seed");
+    if (v.length()) { FaceRandom::seed((uint32_t)strtoul(v.c_str(), nullptr, 10)); }
+    // virtual=1&start=<local time>[&plan=..][&reset=1]: a scene on the test's
+    // own clock from the panel time `start`; virtual=0 back to the real one
+    // (millis then jumps: restart the clock after a test).
+    v = getParam(body, "virtual");
+    if (v == "1") {   // taken on the next pass, so the face sees nothing of this one's real time
+      testVirtualStart = true;
+      testVirtualLocal = (time_t)strtoll(getParam(body, "start").c_str(), nullptr, 10);
+      testVirtualReset = getParam(body, "reset") == "1";
+      String s = getParam(body, "seed");
+      testVirtualSeed = s.length() ? (uint32_t)strtoul(s.c_str(), nullptr, 10) : 1;
+      testPendingPlan = getParam(body, "plan");
+      testPlanCount = testPlanNext = 0;   // the scene still running asks for nothing more
+    } else if (v == "0") {
+      testVirtualOn = false;
+      testPlanCount = testPlanNext = 0;
+    }
+    if (getParam(body, "quiet") == "1") { testQuiet = true; }
+#endif
+#if GIF_PLAYBACK
+    if (getParam(body, "quiet") == "1") {
+      gifSettings.randomOn = 0;
+      decorSettings.extras = 1;                    // the rarest pace, so extra=1 still has one to give
+      extrasDueAt = millisNow + 3600000UL;
+    }
+    if (getParam(body, "extra") == "1") { extrasDueAt = millisNow ? millisNow : 1; }
+#endif
+    if (getParam(body, "anim") == "1") { faceAnimationStart(); }
+    JsonDocument d;
+    d["shift"] = testShift;
+    d["local"] = (long long)localTime;
+#if defined(FACE_FRAME_LOG)
+    d["virtual"] = testVirtualOn;
+    d["sceneMs"] = testVirtualOn ? (unsigned long)(millisNow - testVirtualMs0) : 0UL;
+#endif
+    sendJson(c, d);
 #endif
   } else if (path == "/api/restart") {
     sendNoContent(c);

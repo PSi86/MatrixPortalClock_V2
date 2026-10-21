@@ -209,10 +209,15 @@ inline bool boardBusBegin() {
   // only been tested on the S3, so it stays switched off elsewhere until the M4
   // gets a hardware test.
   #define WATCHFACE_TETRIS 1
-  // The Muncher watchface (src/muncher.h). It shares the knock with the
-  // Tetris face, so it needs that one too.
+  // The knock on the clock (src/knock.h): the LIS3DH, or on the wall clock
+  // the board's QMI8658. Its sensitivity is stored with the Tetris face's
+  // settings, so it needs that face.
+  #define KNOCK_SENSING 1
+  // The Muncher watchface (src/face_muncher.h). Its settings are loaded and
+  // saved with the Tetris face's (FACE_BLOBS), so it needs that one too.
   #define WATCHFACE_MUNCHER 1
-  // The Aliens watchface (src/aliens.h), the same way.
+  // The Aliens watchface (src/face_aliens.h), the same way; it comes after
+  // the Muncher's number.
   #define WATCHFACE_ALIENS 1
   // Moving between the menu list and an editor slides the picture sideways.
   #define MENU_SLIDE 1
@@ -255,6 +260,8 @@ inline bool boardBusBegin() {
   #define WATCHFACE_TETRIS 0
   #define WATCHFACE_MUNCHER 0
   #define WATCHFACE_ALIENS 0
+  // No knock: the LIS3DH turns the panel only.
+  #define KNOCK_SENSING 0
   // The menu changes its picture at once, without a slide (UI concept: the
   // S class slides on the S3 only).
   #define MENU_SLIDE 0
@@ -953,36 +960,44 @@ class PanelCanvas : public GFXcanvas16 {
 
 // The key lets a build keep more than one blob side by side in the same
 // namespace. It defaults to the one the clock has always used, so existing
-// settings stay exactly where they are.
-template <typename T>
-class SettingsStore {
+// settings stay exactly where they are. A blob of bytes; SettingsStore<T>
+// below is the same for a struct, and the faces' settings (face.h) use this
+// one through their tables.
+class SettingsBlobStore {
  public:
   void begin(const char *key = "settings") {
     _key = key;
     _prefs.begin("matrixclock", false);
   }
 
-  // Reads the stored blob. A blob SHORTER than the struct is accepted and the
-  // rest left zeroed - that is a layout from an earlier firmware, which
-  // loadSettings() then migrates by revision. Anything longer comes from a
-  // NEWER firmware and is refused, leaving the destination zeroed so the
-  // caller's magic check falls back to the factory defaults.
-  bool read(T &dst) {
-    memset(&dst, 0, sizeof(T));
+  // Reads the stored blob. A blob SHORTER than `size` is accepted and the
+  // rest left zeroed - that is a layout from an earlier firmware, which the
+  // loader then migrates by revision. Anything longer comes from a NEWER
+  // firmware and is refused, leaving the destination zeroed so the caller's
+  // magic check falls back to the factory defaults.
+  bool read(void *dst, size_t size) {
+    memset(dst, 0, size);
     size_t stored = _prefs.getBytesLength(_key);
-    if (stored == 0 || stored > sizeof(T)) { return false; }
-    if (_prefs.getBytes(_key, &dst, sizeof(T)) != stored) {
-      memset(&dst, 0, sizeof(T));
+    if (stored == 0 || stored > size) { return false; }
+    if (_prefs.getBytes(_key, dst, size) != stored) {
+      memset(dst, 0, size);
       return false;
     }
     return true;
   }
 
-  void write(T &src) { _prefs.putBytes(_key, &src, sizeof(T)); }
+  void write(const void *src, size_t size) { _prefs.putBytes(_key, src, size); }
 
  private:
   Preferences _prefs;
   const char *_key = "settings";
+};
+
+template <typename T>
+class SettingsStore : public SettingsBlobStore {
+ public:
+  bool read(T &dst) { return SettingsBlobStore::read(&dst, sizeof(T)); }
+  void write(T &src) { SettingsBlobStore::write(&src, sizeof(T)); }
 };
 
 #else // BOARD_MATRIXPORTAL_M4

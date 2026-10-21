@@ -197,7 +197,7 @@ class Face {
   // The way from `to` and the style: the cells each changing digit loses and
   // gains. Returns the time the new time stands at (ms), 0 when nothing
   // changes. `force` changes the digits in its bits even when they are the
-  // same (a knock's replay, a preview). `wave`: the full hour's - every
+  // same (the animation "last digit again", a preview). `wave`: the full hour's - every
   // digit wakes whole, the wave is shot away row by row from the bottom,
   // stepping down as it thins out while the cannon fires on, and the new
   // time marches in.

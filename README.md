@@ -316,12 +316,13 @@ notifications (S3, see [Alerts, messages and info](#alerts-messages-and-info-on-
 On the S3 each input also has a tick, **closes**: a ticked input closes an alert
 or a message on the panel and goes on to the next one. The watchface animation
 is the face's own: the Tetris digits break up in the
-break-up effect, the muncher plays its knock scene, and the classic digits all fly in at the next second as if
-every one of them changed. On the classic face a new one is ignored until the
-running one has landed and 0.3 s have passed, so a knock that reports itself
+break-up effect, the Muncher and the Aliens play the scene their setting picks, and the classic digits all fly in at the next second as if
+every one of them changed - not when they would not have landed 3 s before the
+minute's own fly-in during second :59, so a knock from :55 on does nothing
+there. A new one is ignored until the running one has ended and 1 s has passed, on every face, so a knock that reports itself
 more than once (2 to 7 times, seen) plays it once, and a fast run of knocks
-plays the next one just after the last has landed; the Tetris face keeps its
-own rules (see the break-up effect). The page lists only
+plays the next one 1 s after the last has ended; the Tetris face keeps its
+own rules besides (see the break-up effect). The page lists only
 the inputs found. The profile chosen there keeps the menu, the hotspot screen
 and the start; choosing it fills the face with its own rows to begin with, and
 nothing set means the profile's rows. Saving is refused unless an input found
@@ -357,13 +358,18 @@ because whatever waited took the panel the moment it was free.
   need the plain face at rest for 10 s first, and a GIF a minute after info
   cards and before an info round.
 - **Nothing optional waits:** a GIF or an extra that has no room when it is due
-  is dropped (`GIF: due, the panel not free for it - dropped`), and the next
-  random time is drawn; a random time that falls into the slot around a change
-  is drawn anew straight away. A GIF or a face scene asked for by an input
+  is dropped (`GIF: due, the panel not free for it - dropped`, `Extra: due, the
+  panel not free for it - dropped`), and the next random time is drawn; an
+  extra is measured by its own length, which only the face knows, and one that
+  would run into the face's next change is dropped too (`Extra: due, the face
+  has no room for it - dropped`); a random time that falls into the slot around a change
+  is drawn anew straight away - the slot each face's own change, as long as it
+  really is, the Aliens' hour wave and the Muncher's hour show included. A GIF or a face scene asked for by an input
   (button, gesture, knock, the web app) plays at once or not at all: during the
   face's change or a scene it is dropped (`GIF: asked for during the face's
   change or scene, dropped`), and so is one that would run into the next change.
-- **Extras** (the face section, **Extras**, shared by the faces that have them):
+- **Now and then** (the face section's card **Now and then**, its slider **How often**,
+  shared by the faces that have such scenes):
   how often the Aliens' saucer, an alien shooting back and a waking block, and
   the Muncher's fruit come - never, or about every 60, 30, 15, 10, 5 (the
   default) or 2 minutes, at a random time from half to one and a half times
@@ -374,6 +380,15 @@ because whatever waited took the panel the moment it was free.
   an input asks for still plays.
 
 The settings for extras and quiet are a blob of their own (NVS key `deco`).
+
+In the web app every face's settings come in the same groups (Peter,
+2026-10-20): **Change** - how its time changes: the Tetris break-up effect and
+paces, the classic fly-in time and sides, the Muncher's and the Aliens' style
+and the Muncher's pace -, **Look** - colours, pellets -, **Watchface
+animation** - what the input action of that name plays, only on the Muncher and
+the Aliens, which have a choice; on the classic face all six digits fly in, on
+the Tetris face all four break up - and **Now and then** - how often, and the
+Aliens' waking blocks. The keys and the stored values are those of before.
 
 ## GIF playback
 
@@ -1053,9 +1068,9 @@ form-encoded POSTs, answers are JSON:
 | `GET /api/state` | settings, the lists the page offers, hardware found, WiFi, system |
 | `GET /api/status` | brightness, light, time and its source, rotation, screen, the info band's sources and items, the Home Assistant link (the page asks every 2 s) |
 | `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
-| `POST /api/live` | tries settings live, in RAM only |
+| `POST /api/live` | tries settings live, in RAM only; when a preview was asked for (`pv=1`, or a new watchface animation), `{"preview": "played"}` or `"refused"` - it plays now or not at all |
 | `POST /api/save` | stores everything the page shows |
-| `POST /api/discard` | puts the stored settings back |
+| `POST /api/discard` | puts the stored settings back, and the face shows them as a preview (the same answer) |
 | `POST /api/time` | sets the time, from the phone or typed |
 | `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
 | `POST /api/gif` | plays a GIF now (on the face) |
@@ -1249,7 +1264,8 @@ Classic on both boards, Tetris, Muncher and Aliens on the S3. It previews live, 
 choice can be judged on the panel before saving.
 
 **Classic** (default) shows `HH MM SS` with the six flying digits. This is the
-face the clock has always had; nothing about it changed.
+face the clock has always had. Since 2026-10-20 its flights are placed by the
+time since their second began, and it draws only when a digit has moved.
 
 **Tetris** shows `HH:MM` built up from falling tetromino blocks. Only the digits
 that actually change are rebuilt, so at a minute change the rest of the display
@@ -1375,15 +1391,20 @@ so level 10 is 6 steps and level 1 is 24.
 
 Nothing is triggered while another screen owns the panel (the menu, an editor,
 a banner), in the config AP, for
-the first three seconds after start-up, for 1.2 s after a rotation or after an
-effect has run, while an animation is already running, **while a button is
+the first three seconds after start-up, for 1.2 s after a rotation, for 1 s
+after an effect has run (the rest every face keeps after its animation), while the digits are already coming apart, **while a button is
 held, and for 3 s after a button was last pressed or let go** — the switches sit
 next to the sensor, so a button press is a knock as far as it is concerned, and
 so is everything around it: the release, steadying the clock, letting go of a
 held button. A knock the sensor latched while the config AP was up is
-discarded when the face comes back. The reasons the sensor fires without a real
-knock sit together in `knockIsReal()`, the reasons the face cannot be knocked
-apart right now in `knockEffectReady()`.
+discarded when the face comes back. Digits still being built can be knocked
+apart again, the minute change's too; only the time just before a change is
+kept free: a knock whose break-up and rebuild - worked out from the drop pace and the
+digits' tilings: up to 10 s at the default 70 ms, 33 s at the slowest - would not end 3 s
+before the next minute starts does nothing, so the change always starts from a
+clean picture. The reasons the sensor fires without a real knock sit together
+in `knockIsReal()`, the reasons the face cannot be knocked apart right now in
+`TetrisFace::request()` (`src/face_tetris.h`).
 
 At a minute rollover only the digits that actually changed break up, and they
 rebuild while the others stand still; a digit still being built is simply
@@ -1392,14 +1413,18 @@ builds again. (Until 2026-10-08 an option chose between this and a plain swap,
 where the old digit vanished at once; the break-up now always counts.) The colon is never touched by any of this — it blinks on the second
 throughout, being the one thing on this face that shows time actually passing.
 
-**Trying it out on the config page.** Changing the watchface, the drop or turn
-pace, the sensitivity or the effect takes the digits
-apart and builds them again straight away, so the setting can be judged on the
-panel. That matters here because the clock deliberately ignores the sensor while
-the AP is up, so a knock is not available to test with. It happens on the
-settled value only — a slider let go of, or a point on it tapped. **Discard
-changes** puts the stored settings back: everything on the page previews live but
-sits in RAM until saved, and this is the way back from that.
+**Trying it out on the config page.** Changing the drop or turn pace or the
+effect takes the digits apart and builds them again straight away, so the
+setting can be judged on the panel; choosing the face drops its digits anew.
+That matters here because the clock deliberately ignores the sensor while the AP
+is up, so a knock is not available to test with. It happens on the settled value
+only — a slider let go of, or a point on it tapped — and now or not at all, as
+the knock: while the digits are coming apart, for 1 s after, or when it would run
+into the minute's change, the page says that no preview is possible now, and the
+setting is taken anyway (until 2026-10-20 the preview waited). **Discard
+changes** puts the stored settings back and shows them the same way on every
+face: everything on the page previews live but sits in RAM until saved, and this
+is the way back from that.
 
 The **digit and trail colors do not apply** to this face. The master brightness
 (and therefore the light sensor) does: the palette is rescaled before every frame.
@@ -1476,13 +1501,15 @@ intermission - a ghost chases the muncher out to the left, and a giant muncher
 right. About 9 s.
 
 **Bonus fruit**: now and then, at the pace of the extras the faces share (the
-**Extras** slider, about every 5 min by default; none in quiet hours or a dark
-room), a fruit lies after a minute change in the
-corridor - a cherry, a strawberry, an orange or an apple, 7 × 7 px - still until
-the next change, whose muncher eats it on its way along (`Muncher: a bonus fruit
-eaten` on the console).
+**How often** slider under **Now and then**, about every 5 min by default; none in quiet hours or a dark
+room), a fruit appears in the corridor at its drawn time, outside the slot around
+the change - a cherry, a strawberry, an orange or an apple, 7 × 7 px - and lies
+still until the next change, whose muncher eats it on its way along (`Muncher: a
+bonus fruit (now and then)`, then `Muncher: a bonus fruit eaten` on the console).
+Until 2026-10-20 it came only at the end of a minute change.
 
-**Knock**, and the face action *trigger watchface animation*: *Power pellet*,
+**Watchface animation** (`mkn`), what the input action *trigger watchface animation*
+plays - a knock, unless the Inputs page says otherwise: *Power pellet*,
 *Last digit again* (the minutes' ones eaten and laid again), *Ghosts win*, or
 *Random each time* (one of the three). All of them start as a change of the time
 does, the muncher in from the left with both ghosts behind it, so none gives
@@ -1510,11 +1537,13 @@ The settings are in a blob of their own (NVS key `muncher`), as the Tetris ones
 are; `mst`, `mkn` (0 power pellet, 1 last digit again, 2 random, 3 ghosts win:
 the newest value went to the end, so a stored *random* stays random) and `mpace`
 in the web app's interface. Changing the pace shows a change of the minutes' ones
-(eaten and laid again); choosing another knock shows its scene; a new change
-style shows at the next change of the time. A preview waits until it can end 3 s
-before the next change starts, so it never holds one up, and the time on show is
-never wrong for it: the first previews showed the last minute's digits and walked
-them to this minute's, which at midnight set the clock back to 23:59 for a moment.
+(eaten and laid again); choosing another watchface animation shows its scene; a
+new change style shows at the next change of the time. A preview plays at once
+when it can end 3 s before the next change starts and no scene runs, and
+otherwise not at all - the page says so; until 2026-10-20 it waited for room.
+The time on show is never wrong for it: the first previews showed the last
+minute's digits and walked them to this minute's, which at midnight set the clock
+back to 23:59 for a moment.
 The debug build walks every change of every digit, both ways
 and on both layouts, and every other scene - the power pellet (both ghosts
 caught, away from the panel's edges), the ghosts winning, both with the same
@@ -1565,7 +1594,7 @@ stands, and a burst goes down with the wave (Peter, 2026-10-14: it had stepped d
 at once, before a shot; 2026-10-16: the cannon waited for every step down). Then
 the new time marches in. That takes about 17 s, upright as well.
 
-**Now and then**, at the pace of the extras the faces share (the **Extras** slider,
+**Now and then**, at the pace of the extras the faces share (the **How often** slider,
 about every 5 min by default) and at a random time outside the slot around the
 change, a scene leaves the time as it is: a red **saucer** crosses the lane above the digits and
 the cannon shoots it through a gap between two digits it can reach in time (upright
@@ -1575,13 +1604,13 @@ it and, once it is there, the alien drops its bomb, which hits it; the wreck fli
 in at home and the alien turns back into its block; or, with **Waking blocks**
 (`anap`, on by default), a single block wakes as an alien for 3 s and turns back.
 Upright only the minutes shoot back, since the hours stand above them. One that has
-no room when it is due - the wave's minute, info cards waiting, a GIF just before -
-is dropped, not kept. **Knock** (`akn`): what a knock, or the face action "trigger watchface
-animation", plays - *Last digit again* (the minutes' ones shot and brought back),
+no room when it is due, measured by its own length - the wave's minute, info cards
+waiting, a GIF just before - is dropped, not kept. **Watchface animation** (`akn`): what the input action "trigger watchface
+animation" (a knock, unless the Inputs page says otherwise) plays - *Last digit again* (the minutes' ones shot and brought back),
 *Saucer*, *Aliens shoot back*, or *Random each time* (the default); a new value
-chosen in the web app plays it once, and choosing the face shows a change of the
-minutes' ones. None of them starts when it could not end 3 s before the next
-change; GIFs and info cards do not start into a scene.
+chosen in the web app plays it once, at once or not at all (the page says when
+not). None of them starts when it could not end 3 s before the next change; GIFs
+and info cards do not start into a scene.
 
 **Colours** (`acol`): white, as the arcade's overlay, or each row in its own colour
 (magenta, cyan, green). The settings blob of the trial build (revision 1, with a
@@ -1601,6 +1630,63 @@ apart, a step down only with two rows empty below, and at least one), the saucer
 from either side to each gap, and every alien that can shoot back: the shot meets
 the saucer, the bomb meets the cannon, the time stays.
 
+### How the faces are built
+
+Each face is a class of its own in a header - `src/face_classic.h`,
+`face_tetris.h`, `face_muncher.h`, `face_aliens.h` - behind one interface,
+`Watchface` in `src/face.h` (since 2026-10-20; before, the sketch asked at about
+30 places which face was on, and the Muncher and the Aliens were near copies of
+each other). The core keeps the time, the screens and the rules for who takes
+the panel. It hands a face the moment (`FaceNow`: the time, the ticks, the panel
+as it is turned), how to colour (`FacePaint`) and the canvas, and asks it:
+
+| | what the face does or says |
+|---|---|
+| `enter()` | it comes onto the panel: chosen, shown again after a screen on top, the panel turned |
+| `update()` | one pass: it steps what moves, by the time; whether its picture changed - only then is it drawn |
+| `draw()` | its picture, without the marks the core puts over it (status pixel, hotspot mark, notices, an input's feedback) |
+| `busy()` | whether its change of the time or a scene runs: nothing optional starts then |
+| `changeSpan()` | how long before a minute its change starts and how long after it goes on, the full hour's included: the rules keep that free |
+| `offers()`, `request()` | an animation asked for - the input action "trigger watchface animation", now and then, the web app's preview - played now or refused |
+
+The Muncher and the Aliens share `face_planned.h`: they plan their change
+backwards from the minute, work its start out anew on every pass from the
+second's beginning, start it at its moment even when that has passed, and log
+when the new time stood (`... the new time stands at :00.0xx`). Each face also
+keeps a table of its own settings (`FaceParam`: the web app's key, where it sits
+in the face's blob, its range), through which one piece of code loads, checks,
+takes from the web app and reports them all.
+
+The same rules for every face: an animation asked for plays at once or not at
+all, and not when it would not end 3 s before the face's next change; after one,
+the next waits 1 s; now and then, the core first looks at quiet hours, a dark
+room, the face at rest and information waiting, and the face then at the length
+of its extra; a preview in the web app plays now or the page says it cannot.
+
+A **test build** (the release env with `-DFACE_FRAME_LOG`) logs every frame a
+face draws as a checksum (`F hh:mm:ss.mmm crc face ms`) and has `POST /api/test`,
+which runs the panel on a clock of its own - 5 ms a pass, from a given time -
+so two builds show the same frames when nothing has changed. That is how the
+move of the faces into their headers was checked to leave the panel as it was;
+the scripts for it are not part of the repository.
+
+Measured on the wall clock before the faces moved behind the interface and
+after (debug builds, each face 150 s on the live clock, 2026-10-21; a pass is
+one run of the main loop, a frame one the face drew):
+
+| Face | passes/s | time a pass takes, average | frames/s |
+|---|---|---|---|
+| Classic | 145 -> 656 | 5711 -> 514 us | 145 -> 54.6 |
+| Tetris | 992 -> 994 | 14 -> 18 us | 3.3 -> 2.4 |
+| Muncher | 992 -> 993 | 16 -> 14 us | 4.4 -> 4.1 |
+| Aliens | 991 -> 991 | 24 -> 25 us | 6.0 -> 5.9 |
+
+The classic face drew on every pass and so held the loop for over 80 % of its
+time; it now draws when a digit has moved. The other faces drew only on a change
+before as well, and stay as they were (their frames depend on how many digits
+changed in the window). The internal RAM free while running was about 200 bytes
+lower (142.6 instead of 142.9 KB at its least).
+
 ## Animation timing
 
 The **fly-in time** is how long every flight of the classic face takes, in ms
@@ -1615,15 +1701,14 @@ The Tetris watchface has its own pair of settings instead (see above); the
 fly-in time does not apply to it.
 
 On the S3 the loop runs in step with the panel refresh (about 200 Hz):
-`show()` waits out one refresh period after the previous frame, and the fly-in
-time is turned into whole refreshes at the rate the face's loop really had in its
-last second. A flight's pixels are spread evenly over them, so a step stays on
-the panel for one refresh or the next whole number, never drifting. Drawing a
-frame and handing it over takes well under a refresh period, so the S3 has
-plenty of headroom. With a fixed millisecond loop, as before, the loop drifted
-against the refresh and single steps stayed on screen for 1, 2 or 3 refreshes,
-which showed as a slight judder. The M4's loop runs every 10 ms (until
-2026-10-08 every "speed" ms).
+`show()` waits out one refresh period after the previous frame. A flight is
+placed by the time since its second began, its pixels spread evenly over the
+fly-in time, and the face is drawn on a pass where a digit has moved - a loop
+held up for a moment (a web request) does not slow a flight, the next pass puts
+it where it ought to be. Until 2026-10-20 the fly-in time was turned into the
+passes the loop had had in the second before, and the face was drawn on every
+pass, about 200 times a second. The M4's loop runs every 10 ms (until 2026-10-08
+every "speed" ms).
 
 ### Panel driver
 
