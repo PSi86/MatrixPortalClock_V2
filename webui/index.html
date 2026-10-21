@@ -244,74 +244,91 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <button class="face" type="button" data-face="3" id="faceAliens"><canvas width="128" height="64" data-mini="aliens"></canvas><span><b>Aliens</b><small>HH:MM of blocks that wake as aliens</small></span></button>
         </div>
       </div>
+      <!-- Each face's settings in the same groups (Peter, 2026-10-20): Change - how its time changes -, Look,
+           Watchface animation - only where there is a choice -, and Now and then. The keys are the stored ones. -->
       <div class="card" data-for-face="0">
-        <div class="group-title">Classic</div>
-        <div class="row stack"><div class="lbl">Digit colour</div><div class="swatches" id="swDigit"></div></div>
-        <div class="row stack"><div><div class="lbl">Fly-in colour</div><div class="hint">Dimmed by itself while a digit moves.</div></div><div class="swatches" id="swTrail"></div></div>
+        <div class="group-title">Change</div>
         <div class="row">
-          <div><label class="lbl" for="speed">Fly-in time</label><div class="hint">How long every fly-in takes; all digits land together.</div></div>
+          <div><label class="lbl" for="speed">Fly-in time</label><div class="hint">How long every fly-in takes; all digits land together. Asked for, all six fly in at the next second.</div></div>
           <div class="range"><input type="range" id="speed" min="100" max="850" step="10" data-live><output for="speed"></output></div>
         </div>
-        <div class="row stack"><div><div class="lbl">Where each digit flies in from</div><div class="hint">Tap a digit to turn its arrow. Kept by Save.</div></div><div class="dirs" id="dirs"></div></div>
+        <div class="row stack"><div><div class="lbl">Where each digit flies in from</div><div class="hint">Tap a digit to turn its arrow; the old digit flies out the other side. Kept by Save.</div></div><div class="dirs" id="dirs"></div></div>
+      </div>
+      <div class="card" data-for-face="0">
+        <div class="group-title">Look</div>
+        <div class="row stack"><div class="lbl">Digit colour</div><div class="swatches" id="swDigit"></div></div>
+        <div class="row stack"><div><div class="lbl">Fly-in colour</div><div class="hint">Dimmed by itself while a digit moves.</div></div><div class="swatches" id="swTrail"></div></div>
       </div>
       <div class="card" data-for-face="1">
-        <div class="group-title">Tetris</div>
+        <div class="group-title">Change</div>
         <div class="row">
-          <div><label class="lbl" for="tdrop">Drop pace</label><div class="hint">Milliseconds per block row; higher is slower.</div></div>
+          <div><div class="lbl">Break-up effect</div><div class="hint">How the old digits come apart when the time changes, and when the face is asked for its animation.</div></div>
+          <div class="seg" id="shs" role="group" aria-label="Break-up effect"></div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="tdrop">Drop pace</label><div class="hint">Milliseconds per block row as the new digits are built; higher is slower.</div></div>
           <div class="range"><input type="range" id="tdrop" min="20" max="250" data-live data-pv><output for="tdrop"></output></div>
         </div>
         <div class="row">
           <div><label class="lbl" for="tspin">Turn pace</label><div class="hint">Milliseconds between quarter turns; higher is calmer.</div></div>
           <div class="range"><input type="range" id="tspin" min="80" max="1500" step="10" data-live data-pv><output for="tspin"></output></div>
         </div>
+      </div>
+      <div class="card" data-for-face="2">
+        <div class="group-title">Change</div>
         <div class="row">
-          <div><div class="lbl">Break-up effect</div><div class="hint">How digits come apart when time changes.</div></div>
-          <div class="seg" id="shs" role="group" aria-label="Break-up effect"></div>
+          <div><div class="lbl">Style</div><div class="hint">How a digit that changes is walked, seen at the next change of the time. Mixed: the whole digit when one changes, only the difference when several do.</div></div>
+          <div class="seg" id="mst" role="group" aria-label="Style"></div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="mpace">Pace</label><div class="hint">Milliseconds per pixel; higher is slower. The change ends as the minute begins; to a full hour the hour show follows.</div></div>
+          <div class="range"><input type="range" id="mpace" min="20" max="80" data-live data-pv><output for="mpace"></output></div>
         </div>
       </div>
       <div class="card" data-for-face="2">
-        <div class="group-title">Muncher</div>
-        <div class="row">
-          <div><div class="lbl">Change</div><div class="hint">How a digit that changes is walked, seen at the next change of the time. Mixed: the whole digit when one changes, only the difference when several do.</div></div>
-          <div class="seg" id="mst" role="group" aria-label="Change"></div>
-        </div>
-        <div class="row">
-          <div><label class="lbl" for="mpace">Pace</label><div class="hint">Milliseconds per pixel; higher is slower. The change ends as the minute begins.</div></div>
-          <div class="range"><input type="range" id="mpace" min="20" max="80" data-live data-pv><output for="mpace"></output></div>
-        </div>
+        <div class="group-title">Look</div>
         <div class="row">
           <div><div class="lbl">Pellets</div><div class="hint">LEDs per pellet; more are seen better from afar. Side by side makes the level strokes solid, one above the other the upright ones; Solid draws every stroke 2 px thick, with pellets of 2 × 2 in the corridor.</div></div>
           <div class="seg" id="mpel" role="group" aria-label="Pellets"></div>
         </div>
+      </div>
+      <div class="card" data-for-face="2">
+        <div class="group-title">Watchface animation</div>
         <div class="row">
-          <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays.</div></div>
-          <div class="seg" id="mkn" role="group" aria-label="Knock"></div>
+          <div><div class="lbl">Plays</div><div class="hint">What the input action “trigger watchface animation” plays - a knock, unless the Inputs page says otherwise.</div></div>
+          <div class="seg" id="mkn" role="group" aria-label="Watchface animation"></div>
         </div>
       </div>
       <div class="card" data-for-face="3">
-        <div class="group-title">Aliens</div>
+        <div class="group-title">Change</div>
         <div class="row">
-          <div><div class="lbl">Change</div><div class="hint">How a digit that changes goes, seen at the next change of the time: all its blocks wake as aliens, are shot and the new formation marches down, or only the blocks the new digit does not have, and those standing in the way of a new one. Mixed: the whole digit when one changes, only the difference when several do.</div></div>
-          <div class="seg" id="ast" role="group" aria-label="Change"></div>
+          <div><div class="lbl">Style</div><div class="hint">How a digit that changes goes, seen at the next change of the time: all its blocks wake as aliens, are shot and the new formation marches down, or only the blocks the new digit does not have, and those standing in the way of a new one. Mixed: the whole digit when one changes, only the difference when several do. Every full hour the whole time goes as a wave.</div></div>
+          <div class="seg" id="ast" role="group" aria-label="Style"></div>
         </div>
+      </div>
+      <div class="card" data-for-face="3">
+        <div class="group-title">Look</div>
         <div class="row">
           <div><div class="lbl">Colours</div><div class="hint">White, as the arcade's, or each row in a colour of its own.</div></div>
           <div class="seg" id="acol" role="group" aria-label="Colours"></div>
         </div>
+      </div>
+      <div class="card" data-for-face="3">
+        <div class="group-title">Watchface animation</div>
         <div class="row">
-          <div><div class="lbl">Knock</div><div class="hint">What a knock, or the face action, plays. A saucer and an alien shooting back also come now and then, as often as Extras below says; every full hour the whole time goes as a wave.</div></div>
-          <div class="seg" id="akn" role="group" aria-label="Knock"></div>
-        </div>
-        <div class="row">
-          <div><div class="lbl">Waking blocks</div><div class="hint">Now and then, among the extras, a single block wakes as an alien for a moment and turns back.</div></div>
-          <div class="seg" id="anap" role="group" aria-label="Waking blocks"></div>
+          <div><div class="lbl">Plays</div><div class="hint">What the input action “trigger watchface animation” plays - a knock, unless the Inputs page says otherwise.</div></div>
+          <div class="seg" id="akn" role="group" aria-label="Watchface animation"></div>
         </div>
       </div>
       <div class="card" id="extrasCard" hidden>
-        <div class="group-title">Extras</div>
+        <div class="group-title">Now and then</div>
         <div class="row">
           <div><label class="lbl" for="dxr">How often</label><div class="hint">The face's own scenes between changes - the Aliens' saucer, an alien shooting back, a waking block; the Muncher's fruit - shared by the faces. Never around the time's change; one that has no room when it is due is left out. None in the quiet hours set under GIFs.</div></div>
           <div class="range"><input type="range" id="dxr" min="0" max="6"><output for="dxr"></output></div>
+        </div>
+        <div class="row" id="anapRow">
+          <div><div class="lbl">Waking blocks</div><div class="hint">Among them, a single block waking as an alien for a moment and turning back.</div></div>
+          <div class="seg" id="anap" role="group" aria-label="Waking blocks"></div>
         </div>
       </div>
     </section>
@@ -653,7 +670,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     clearTimeout(liveTimer);
     liveTimer = setTimeout(function () {
       var f = liveForm(livePv); livePv = false;
-      api('/api/live', f).catch(function () { toast('The clock did not answer.'); });
+      api('/api/live', f).then(function (j) {
+        // A preview plays now or not at all; the setting is taken either way.
+        if (j && j.preview === 'refused') { toast('No preview now: the face is busy or about to change the time.'); }
+      }).catch(function () { toast('The clock did not answer.'); });
     }, 120);
   }
 
@@ -763,6 +783,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $$('[data-for-face]').forEach(function (c) { c.hidden = +c.dataset.forFace !== cur.wf; });
     // The extras' pace, shared by the faces that have extras: the Muncher, the Aliens.
     $('#extrasCard').hidden = !(has('dxr') && (cur.wf === 2 || cur.wf === 3));
+    $('#anapRow').hidden = cur.wf !== 3;   // the Aliens' own extra
   }
   function showAuto() {
     var sensor = S.hw.lux;

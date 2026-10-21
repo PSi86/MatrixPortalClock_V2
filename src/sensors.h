@@ -56,7 +56,7 @@ inline uint16_t sensorsSupported() {
 #endif
 #if BOARD_WAVESHARE_WALL
   m |= 1 << SENSOR_BOARD_RTC;
-#if WATCHFACE_TETRIS
+#if KNOCK_SENSING
   m |= 1 << SENSOR_MOTION;
 #endif
 #endif
