@@ -95,11 +95,11 @@ class Knock {
   // At start-up, once imuBegin() has found the QMI8658 or not.
   void begin(TwoWire &bus, bool found) {
     _bus = &bus;
-    if (!found) { Serial.println("QMI8658 not found - no knock"); return; }
+    if (!found) { Console.println("QMI8658 not found - no knock"); return; }
     _found = true;
     attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN), KnockIsr::edge, CHANGE);
     apply();
-    Serial.printf("QMI8658 found (revision 0x%02X): the knock by Wake on Motion over %u mg\n", _imu.revision(),
+    Console.printf("QMI8658 found (revision 0x%02X): the knock by Wake on Motion over %u mg\n", _imu.revision(),
                   KNOCK_WOM_MG[_level]);
   }
 #else
@@ -175,8 +175,8 @@ class Knock {
 #if BOARD_WAVESHARE_WALL
   // Console "imu": the chip, the threshold and what it gave.
   void report() const {
-    if (!_found) { Serial.println("QMI8658 not found - no knock"); return; }
-    Serial.printf("QMI8658 (revision 0x%02X): knock sensitivity %u, Wake on Motion over %u mg; INT1 %s; "
+    if (!_found) { Console.println("QMI8658 not found - no knock"); return; }
+    Console.printf("QMI8658 (revision 0x%02X): knock sensitivity %u, Wake on Motion over %u mg; INT1 %s; "
                   "%lu edges and %lu knocks since the start; bus errors %lu\n", _imu.revision(), _level,
                   KNOCK_WOM_MG[_level], digitalRead(IMU_INT_PIN) == HIGH ? "high" : "low",
                   (unsigned long)KnockIsr::edges, (unsigned long)_knocks, (unsigned long)_imu.busErrors());
@@ -191,7 +191,7 @@ class Knock {
     bool ok = _imu.begin(*_bus);
     if (ok && _level > 0) { ok = _imu.womStart(KNOCK_WOM_MG[_level], 16); }
     _armedAt = millis();
-    if (!ok) { Serial.println("QMI8658: the knock did not start"); }
+    if (!ok) { Console.println("QMI8658: the knock did not start"); }
   }
   Qmi8658 _imu;
   uint32_t _edgesSeen = 0;          // as far as sensed() looked

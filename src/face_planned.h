@@ -41,7 +41,7 @@ class PlannedFace : public Watchface {
   }
 
   static void logStands(const char *face, const FaceNow &now) {
-    Serial.printf("%s: the new time stands at :%02d.%03lu\n", face, clockSecond(now.local), now.ms - now.secondAt);
+    Console.printf("%s: the new time stands at :%02d.%03lu\n", face, clockSecond(now.local), now.ms - now.secondAt);
   }
 
   uint8_t       _rotation     = 0xFF;   // rotation the layout was built for; 0xFF = build anew

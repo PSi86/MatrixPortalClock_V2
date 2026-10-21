@@ -155,7 +155,7 @@ class MuncherFace : public PlannedFace {
         }
         if (_m.fruitsEaten != _fruitsLogged) {
           _fruitsLogged = _m.fruitsEaten;
-          Serial.println("Muncher: a bonus fruit eaten");
+          Console.println("Muncher: a bonus fruit eaten");
         }
         if (_m.mode == muncher::MODE_IDLE) {
           sceneEnded(now);
@@ -364,7 +364,7 @@ class MuncherFace : public PlannedFace {
     if (!faceFits(_startAt, now.ms, (unsigned long)steps * _s.paceMs)) { return false; }
     planScene(_m, kind, what);           // the same plan, now for the face
     startScene(mode, now.ms);
-    Serial.printf("Muncher: %s\n", what);
+    Console.printf("Muncher: %s\n", what);
     return true;
   }
 
@@ -394,7 +394,7 @@ class MuncherFace : public PlannedFace {
     if (_m.mode != muncher::MODE_IDLE || _m.shown[0] == muncher::NO_DIGIT) { return false; }
     if (_m.fruitX != muncher::NO_FRUIT) { return false; }
     placeFruit();
-    Serial.println("Muncher: a bonus fruit (now and then)");
+    Console.println("Muncher: a bonus fruit (now and then)");
     return true;
   }
 
@@ -449,7 +449,7 @@ class MuncherFace : public PlannedFace {
       _m.startHour();
       _startAt = now.ms;
       _plannedFor = 0;
-      Serial.println("Muncher: the hour show");
+      Console.println("Muncher: the hour show");
     }
   }
 

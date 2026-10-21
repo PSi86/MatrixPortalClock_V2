@@ -96,10 +96,10 @@ inline uint8_t sensorBegin(SensorId id, bool (*begin)()) {
     if (id == SENSOR_HIDE) { ok = false; }
 #endif
     if (ok) {
-      if (t > 1) { Serial.printf("%s: found on try %u\n", k.chip, (unsigned)t); }
+      if (t > 1) { Console.printf("%s: found on try %u\n", k.chip, (unsigned)t); }
       return t;
     }
-    Serial.printf("%s: try %u of %u failed - %s on 0x%02X\n", k.chip, (unsigned)t, (unsigned)SENSOR_TRIES,
+    Console.printf("%s: try %u of %u failed - %s on 0x%02X\n", k.chip, (unsigned)t, (unsigned)SENSOR_TRIES,
                   sensorAnswers(k) ? "something answers" : "nothing answers", k.addr);
     if (t < SENSOR_TRIES) { delay(SENSOR_RETRY_MS); }
   }

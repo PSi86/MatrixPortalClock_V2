@@ -13,6 +13,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "console.h"   // the console: Serial in debug and test builds, nothing in release
 
 /* ======================================================================
    Board detection
@@ -420,7 +421,7 @@ class PanelCanvas : public GFXcanvas16 {
     // bright until wallOutputWatch() restarted it. Measured 2026-10-18 at
     // 16 MHz, weather + warnings fetched six times each way: 20 stops at
     // priority 0, 1 at 5; the crypto engine as fast at 5 as at 0.
-    if (!_dma->setDmaPriority(PANEL_DMA_PRIORITY)) { Serial.println("Panel: DMA priority NOT set"); }
+    if (!_dma->setDmaPriority(PANEL_DMA_PRIORITY)) { Console.println("Panel: DMA priority NOT set"); }
 #endif
     _dma->setBrightness8(0);   // dark until the sketch sets a brightness
     // The driver clocks the panel bus without a pause and sets its pins to the
@@ -447,7 +448,7 @@ class PanelCanvas : public GFXcanvas16 {
     uint32_t div = LCD_CAM.lcd_clock.lcd_clkm_div_num;
     uint32_t reckoned = (uint32_t)_dma->getCfg().i2sspeed;
     if (div > 0 && reckoned > 0) { _rate = (uint32_t)((uint64_t)_rate * (160000000UL / div) / reckoned); }
-    Serial.printf("Panel: bus %lu kHz, refresh %lu Hz\n", (unsigned long)(160000UL / (div ? div : 1)),
+    Console.printf("Panel: bus %lu kHz, refresh %lu Hz\n", (unsigned long)(160000UL / (div ? div : 1)),
                   (unsigned long)_rate);
 #endif
     _periodUs = 1000000UL / _rate;
@@ -656,7 +657,7 @@ class PanelCanvas : public GFXcanvas16 {
       sum += _planeLight[i];
     }
     _planeLight[depth - 1] += (uint16_t)(65535 - sum);   // rounding: 255 gives exactly 65535
-    Serial.printf("Panel: planes 0..%d shown once each; light per plane %u %u %u %u %u %u %u %u\n", t,
+    Console.printf("Panel: planes 0..%d shown once each; light per plane %u %u %u %u %u %u %u %u\n", t,
                   _planeLight[0], _planeLight[1], _planeLight[2], _planeLight[3],
                   _planeLight[4], _planeLight[5], _planeLight[6], _planeLight[7]);
   }
@@ -904,9 +905,11 @@ class PanelCanvas : public GFXcanvas16 {
     _dbgCalls++; _dbgUs += us; _dbgPixels += pixels;
     if (us > _dbgMaxUs) { _dbgMaxUs = us; }
     if (millis() - _dbgSince < 2000) { return; }
-    Serial.printf("show: %lu frames, %lu px avg, push avg %lu max %lu us\n",
-                  (unsigned long)_dbgCalls, (unsigned long)(_dbgPixels / _dbgCalls),
-                  (unsigned long)(_dbgUs / _dbgCalls), (unsigned long)_dbgMaxUs);
+    if (consoleLevel >= 2) {   // a running figure (console.h)
+      Console.printf("show: %lu frames, %lu px avg, push avg %lu max %lu us\n",
+                    (unsigned long)_dbgCalls, (unsigned long)(_dbgPixels / _dbgCalls),
+                    (unsigned long)(_dbgUs / _dbgCalls), (unsigned long)_dbgMaxUs);
+    }
     _dbgCalls = _dbgUs = _dbgPixels = _dbgMaxUs = 0;
     _dbgSince = millis();
   }
@@ -1032,7 +1035,7 @@ class SettingsStore {
  public:
   void begin(const char *key = "settings") {
     _addr = settingsFlashAddr(key);
-    if (_addr == 0) { Serial.print("No flash block for the key "); Serial.println(key); }
+    if (_addr == 0) { Console.print("No flash block for the key "); Console.println(key); }
   }
 
   // A key without a block reads as all zero, which the caller's magic check
@@ -1062,14 +1065,22 @@ class SettingsStore {
 // Both compile to nothing in the normal builds. BOOT_TRACE pushes its line out
 // before continuing so it survives a reset right after it.
 #if defined(CLOCK_DEBUG)
-  #define BOOT_TRACE(msg) do { Serial.println(msg); Serial.flush(); } while (0)
-  #define DEBUG_LOG(...)  do { Serial.printf(__VA_ARGS__); } while (0)
+  #define BOOT_TRACE(msg) do { Console.println(msg); Console.flush(); } while (0)
+  #define DEBUG_LOG(...)  do { Console.printf(__VA_ARGS__); } while (0)
 #else
   #define BOOT_TRACE(msg) do { } while (0)
   #define DEBUG_LOG(...)  do { } while (0)
 #endif
 
 inline void boardSerialBegin(unsigned long baud) {
+#if !CLOCK_CONSOLE
+  // A release build has no console (console.h): nothing is started on the
+  // USB serial. The S3's USB-Serial-JTAG still takes uploads, in hardware.
+  (void)baud;
+#if BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT && !ARDUINO_USB_MODE
+  Serial.enableReboot(false);   // TinyUSB's CDC: as below
+#endif
+#else
 #if defined(BOOT_WAIT_FOR_SERIAL_MS) && BOARD_ESP32S3 && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
   // The debug build writes much more; with the TX timeout at 0 below, what the
   // reader has not taken yet waits here instead of being dropped.
@@ -1119,6 +1130,7 @@ inline void boardSerialBegin(unsigned long baud) {
   // esptool's DTR/RTS order resets the chip into its ROM bootloader in
   // hardware, which is how uploads go now; no software can switch that off.
   // A tool that only reads the console opens the port with DTR and RTS low.
+#endif
 #endif
 #endif
 }
@@ -1301,7 +1313,7 @@ inline void netDnsSettle() {
 #if defined(CLOCK_DEBUG)
   unsigned long t0 = micros();
   Network.hostByName("localhost", ip);
-  Serial.printf("DNS: settled for the new address in %lu us\n", (unsigned long)(micros() - t0));
+  Console.printf("DNS: settled for the new address in %lu us\n", (unsigned long)(micros() - t0));
 #else
   Network.hostByName("localhost", ip);
 #endif
@@ -1434,8 +1446,8 @@ inline void netClientTimeoutMs(WiFiClient &c, uint16_t ms) {
 inline WiFiClient netServerAccept(WiFiServer &s) { return s.accept(); }
 
 inline void netPrintRadioInfo() {
-  Serial.print("ESP-IDF SDK: ");
-  Serial.println(ESP.getSdkVersion());
+  Console.print("ESP-IDF SDK: ");
+  Console.println(ESP.getSdkVersion());
 }
 
 #else // BOARD_MATRIXPORTAL_M4
@@ -1538,9 +1550,9 @@ inline WiFiClient netServerAccept(WiFiServer &s) { return s.available(); }
 
 inline void netPrintRadioInfo() {
   String fv = WiFi.firmwareVersion();
-  Serial.print("NINA FW: ");
-  Serial.println(fv);
-  if (fv < WIFI_FIRMWARE_LATEST_VERSION) { Serial.println("Please upgrade the firmware"); }
+  Console.print("NINA FW: ");
+  Console.println(fv);
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) { Console.println("Please upgrade the firmware"); }
 }
 
 #endif

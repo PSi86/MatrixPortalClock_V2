@@ -329,7 +329,7 @@ class AliensFace : public PlannedFace {
     _startAt = now.ms;
     _logStand = false;
     _a.start();
-    Serial.printf("Aliens: %s (%s)\n", what, why);
+    Console.printf("Aliens: %s (%s)\n", what, why);
     return true;
   }
 
@@ -364,7 +364,7 @@ class AliensFace : public PlannedFace {
       _logStand = true;
       _plannedFor = 0;
       _a.start();
-      if (_a.scene == aliens::SCENE_WAVE) { Serial.println("Aliens: the hour's wave"); }
+      if (_a.scene == aliens::SCENE_WAVE) { Console.println("Aliens: the hour's wave"); }
     }
   }
 
