@@ -1121,11 +1121,13 @@ to the network without waiting, at most 2,920 bytes a pass; the connection is
 closed a pass later. A connection that has not sent its request within 2 s,
 or whose form or answer moves no byte for 5 s, is dropped (browsers open
 connections in case they need them). Measured on the MatrixPortal S3 (debug
-build) with the page's requests - the panel every 200 ms, the status every
-2 s: the longest time between two passes of the loop was 6.4 ms, against
-4.6 ms without the page and 42 ms before, when every request held the loop
-until it was answered. Only a GIF pack's upload still holds the loop while it
-is written, with its progress on the panel.
+build, 2026-10-21) with the page's requests - the panel every 200 ms, the
+status every 2 s - as the longest time between two passes of the loop in each
+2 s: 5.5 ms in the median and 9.3 ms at most, against 4.6 and 5.0 ms without
+the page. Before, when every request held the loop until it was answered, it
+was 32.5 and 42 ms, with 113 gaps over 20 ms in a minute. Only a GIF pack's
+upload still holds the loop while it is written, with its progress on the
+panel.
 
 **The interface** — the page uses nothing else, so tools can too. Writes are
 form-encoded POSTs, answers are JSON:
