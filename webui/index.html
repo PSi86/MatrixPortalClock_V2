@@ -52,6 +52,8 @@ a { color: var(--accent); }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12.5px; border: 1px solid var(--line); background: var(--raised); white-space: nowrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+.kv dd .dot { display: inline-block; margin-right: 6px; vertical-align: middle; }
+.kv dd .btn { margin-left: 8px; }
 .iconbtn { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 5px 9px; cursor: pointer; }
 .tabs { background: var(--surface); padding: 0 16px 10px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
@@ -550,6 +552,9 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="row stack"><dl class="kv" id="sysKv"></dl></div>
         <div class="row"><div class="lbl">Restart</div><div class="ctl"><button class="btn" type="button" id="restart">Restart the clock</button></div></div>
       </div>
+      <div class="card">
+        <div class="row stack"><div><div class="lbl">Sensors</div><div class="hint" id="sensorHint"></div></div><dl class="kv" id="sensorKv"></dl></div>
+      </div>
     </section>
   </main>
 </div>
@@ -1002,6 +1007,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       ['Real-time clock', S.hw.rtc ? S.hw.rtcChip + (S.hw.rtcLost ? ', had lost power' : '') : 'none']];
     kv.innerHTML = '';
     rows.forEach(function (r) { var dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = r[0]; dd.textContent = r[1]; kv.appendChild(dt); kv.appendChild(dd); });
+    fillSensors();
     $('#railFoot').textContent = 'Firmware ' + S.fw + '. Changes show on the clock at once and stay after Save.';
     // Context
     $('#addr').textContent = location.host + ' · ' + S.board;
@@ -1009,6 +1015,43 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#saveHint').textContent = S.mode === 'ap' ? 'Saving closes the hotspot.' : '';
     applyStatus(S);
     changed();
+  }
+  // Every sensor the clock supports, as it found it at this start: on which try, or missing although it was
+  // found at an earlier start - then with Forget, for one this clock no longer has - or not fitted; and what
+  // answers on the I2C bus.
+  function fillSensors() {
+    var kv = $('#sensorKv'), n = S.hw.sensorTries;
+    $('#sensorHint').textContent = 'Looked for at every start, each up to ' + n + ' times. One found at an earlier start '
+      + 'that is missing now turns the status pixel red, and the start says SENSOR. Forget it if this clock no longer has it.';
+    kv.innerHTML = '';
+    var row = function (name, dot, text, btn) {
+      var dt = document.createElement('dt'), dd = document.createElement('dd');
+      dt.textContent = name;
+      if (dot) { var d = document.createElement('span'); d.className = 'dot ' + dot; dd.appendChild(d); }
+      dd.appendChild(document.createTextNode(text));
+      if (btn) { dd.appendChild(btn); }
+      kv.appendChild(dt); kv.appendChild(dd);
+    };
+    (S.hw.sensors || []).forEach(function (s) {
+      var where = ', ' + s.addr + (s.bus === 'board' ? ' on the board’s bus' : ''), name = s.chip + ' (' + s.what + ')';
+      if (s.missing) {
+        var b = document.createElement('button');
+        b.className = 'btn'; b.type = 'button'; b.textContent = 'Forget';
+        b.addEventListener('click', function () { forgetSensor(s); });
+        row(name, 'bad', 'missing - found at an earlier start' + where, b);
+      } else if (s.tries) {
+        row(name, s.tries > 1 ? 'warn' : 'ok', (s.tries > 1 ? 'found on try ' + s.tries + ' of ' + n : 'found') + where);
+      } else {
+        row(name, '', 'not fitted' + where);
+      }
+    });
+    row('I2C bus', '', S.hw.i2c.length ? S.hw.i2c.join(' ') : 'nothing answers');
+    if (S.hw.i2cBoard) { row('Board’s bus', '', S.hw.i2cBoard.length ? S.hw.i2cBoard.join(' ') : 'nothing answers'); }
+  }
+  function forgetSensor(s) {
+    api('/api/sensor-forget', 'id=' + encodeURIComponent(s.id)).then(function () { return load(); })
+      .then(function () { toast(s.chip + ' forgotten: no longer reported missing.'); })
+      .catch(function (e) { toast(e.message); });
   }
   // What a source that is switched on still lacks, said where it is switched on: a stored home WiFi
   // with its password, and for a source marked so, continuous network access.

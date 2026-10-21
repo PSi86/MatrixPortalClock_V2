@@ -86,11 +86,16 @@ const uint8_t KNOCK_THS_STEP = 2;   // level 1 -> 24
 class Knock {
  public:
 #if BOARD_WAVESHARE_WALL
-  // At start-up, once the board's bus runs: the QMI8658 found or not.
-  void begin(TwoWire &bus) {
-    _bus = &bus;
+  // One try at setting the QMI8658 up on the board's bus; the sketch tries
+  // again (sensorBegin(), sensors.h).
+  bool imuBegin(TwoWire &bus) {
     pinMode(IMU_INT_PIN, INPUT);
-    if (!_imu.begin(bus)) { Serial.println("QMI8658 not found - no knock"); return; }
+    return _imu.begin(bus);
+  }
+  // At start-up, once imuBegin() has found the QMI8658 or not.
+  void begin(TwoWire &bus, bool found) {
+    _bus = &bus;
+    if (!found) { Serial.println("QMI8658 not found - no knock"); return; }
     _found = true;
     attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN), KnockIsr::edge, CHANGE);
     apply();
