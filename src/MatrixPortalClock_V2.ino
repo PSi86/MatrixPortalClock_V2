@@ -2896,8 +2896,10 @@ void loadFaceSettings() {
   knockFollowSetting();    // the sensor, not the sketch, holds the threshold
 }
 
-void saveFaceSettings() {
-  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobSave(*FACE_BLOBS[i], faceStores[i]); }
+bool saveFaceSettings() {
+  bool stored = true;
+  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { stored &= faceBlobSave(*FACE_BLOBS[i], faceStores[i]); }
+  return stored;
 }
 
 // The web app's face settings, live or to be saved. A setting that redraws
@@ -3741,10 +3743,10 @@ void loadUiSettings() {
   Console.print("Input profile: "); Console.println(INPUT_PROFILES[uiSettings.inputProfile].name);
 }
 
-void saveUiSettings() {
+bool saveUiSettings() {
   uiSettings.magic = UI_SETTINGS_MAGIC;
   uiSettings.rev   = UI_SETTINGS_REV;
-  uiStore.write(uiSettings);
+  return uiStore.write(uiSettings);
 }
 
 // The home WiFi from flash. A clock that has never stored one takes the
@@ -3769,28 +3771,29 @@ void loadWifiCreds() {
 #endif
 }
 
-void saveWifiCreds() {
+bool saveWifiCreds() {
   wifiCreds.magic = WIFI_CREDS_MAGIC;
   wifiCreds.rev   = WIFI_CREDS_REV;
-  wifiStore.write(wifiCreds);
+  return wifiStore.write(wifiCreds);
 }
 
 // Forget WiFi: an empty entry is stored, not none, so the credentials of the
-// build are not copied in again at the next start.
-void forgetWifi() {
+// build are not copied in again at the next start. Says whether it is stored.
+bool forgetWifi() {
   memset(wifiCreds.ssid, 0, sizeof(wifiCreds.ssid));
   memset(wifiCreds.pass, 0, sizeof(wifiCreds.pass));
   wifiCreds.verified = 0;
-  saveWifiCreds();
+  bool stored = saveWifiCreds();
   joinOutcome = JOIN_NOT_TRIED;
   Console.println("WiFi: forgotten");
+  return stored;
 }
 
 // Write current settings to flash.
-void saveSettings() {
+bool saveSettings() {
   settings.magic       = SETTINGS_MAGIC;
   settings.settingsRev = SETTINGS_REV;
-  clockStore.write(settings);
+  return clockStore.write(settings);
 }
 
 // Push settings into the runtime globals that drive the clock.
@@ -3979,14 +3982,14 @@ void loadFaceKeys() {
   Console.println(faceKeysOwn ? "set on the Inputs page" : "the profile's");
 }
 
-void saveFaceKeys() {
+bool saveFaceKeys() {
   FaceKeys k;
   memset(&k, 0, sizeof(k));
   k.magic = FACE_KEYS_MAGIC;
   k.rev   = FACE_KEYS_REV;
   k.count = FACE_EVENT_COUNT;
   memcpy(k.action, faceKeys, FACE_EVENT_COUNT);
-  keysStore.write(k);
+  return keysStore.write(k);
 }
 
 const InputProfile &activeProfile() {
@@ -5557,6 +5560,11 @@ void webAnswer(WebConn &w) {
   if (r.path.startsWith("/api/")) {
     if (!w.lan || lanAuthorized(out, r.auth)) {
       if (r.isPost && r.path == "/api/pack") { apiPackUpload(w.client, out, r.contentLength); }
+      // A form too large to read (webReadBody()) is refused, not answered as
+      // an empty one: /api/save would take every checkbox as off and store it.
+      else if (r.isPost && r.contentLength > (long)HTTP_BODY_MAX) {
+        sendJsonError(out, 413, "The form is too large for the clock.");
+      }
       else { webApi(out, r.path, r.isPost, r.body, closeHotspot, syncNow, restart); }
     }
   } else if (r.path == "/" || r.path.startsWith("/index")) {
@@ -5837,10 +5845,10 @@ void loadGifSettings() {
                 gifSettings.brightTimes / 10, gifSettings.brightTimes % 10);
 }
 
-void saveGifSettings() {
+bool saveGifSettings() {
   gifSettings.magic = GIF_SETTINGS_MAGIC;
   gifSettings.rev   = GIF_SETTINGS_REV;
-  gifStore.write(gifSettings);
+  return gifStore.write(gifSettings);
 }
 
 // A number such as 2, 2.5 or 2,5 in tenths, without the C library's float
@@ -6635,10 +6643,10 @@ void loadFeedSettings() {
   }
 }
 
-void saveFeedSettings() {
+bool saveFeedSettings() {
   feedSettings.magic = FEED_SETTINGS_MAGIC;
   feedSettings.rev   = FEED_SETTINGS_REV;
-  feedStore.write(feedSettings);
+  return feedStore.write(feedSettings);
 }
 
 bool feedOn(uint8_t f) {
@@ -7448,10 +7456,10 @@ void loadDecorSettings() {
   if (decorSettings.quietTo > 23)   { decorSettings.quietTo = 0; }
 }
 
-void saveDecorSettings() {
+bool saveDecorSettings() {
   decorSettings.magic = DECOR_SETTINGS_MAGIC;
   decorSettings.rev   = DECOR_SETTINGS_REV;
-  decorStore.write(decorSettings);
+  return decorStore.write(decorSettings);
 }
 
 // The web app's extras and quiet; a new pace of the extras draws the next anew.
@@ -7484,14 +7492,14 @@ void loadNoticeKeys() {
   for (uint8_t i = 0; i < FACE_EVENT_COUNT && i < k.count; i++) { noticeCloses[i] = k.closes[i] ? 1 : 0; }
 }
 
-void saveNoticeKeys() {
+bool saveNoticeKeys() {
   NoticeKeys k;
   memset(&k, 0, sizeof(k));
   k.magic = NOTICE_KEYS_MAGIC;
   k.rev   = NOTICE_KEYS_REV;
   k.count = FACE_EVENT_COUNT;
   memcpy(k.closes, noticeCloses, FACE_EVENT_COUNT);
-  noticeKeysStore.write(k);
+  return noticeKeysStore.write(k);
 }
 
 // The Inputs page's ticks, when it sent them (cset): c<i>=on for each event
@@ -8510,7 +8518,8 @@ void sendWebApp(Print &c) {
 
 void sendJson(Print &c, JsonDocument &doc, int code = 200) {
   c.print("HTTP/1.1 "); c.print(code);
-  c.println(code == 200 ? " OK" : code == 400 ? " Bad Request" : code == 404 ? " Not Found" : " Error");
+  c.println(code == 200 ? " OK" : code == 400 ? " Bad Request" : code == 404 ? " Not Found" :
+            code == 413 ? " Content Too Large" : " Error");
   c.println("Content-Type: application/json");
   c.println("Cache-Control: no-store");
   c.println("Connection: close");
@@ -9094,27 +9103,35 @@ void apiSetTime(Print &c, const String &q) {
 
 // Save: every setting the page sends, checked first where a check can refuse
 // (the face shortcuts must leave a way into the menu), so a refused save
-// changes nothing.
+// changes nothing. Saved is said only when every part is in the flash; a
+// part that could not be written there works until the next restart, and
+// the page says so - the hotspot stays open for it.
 void apiSave(Print &c, const String &body, bool &closeHotspot) {
   String error = applyKeysForm(body);
   if (error.length()) { sendJsonError(c, 400, error.c_str()); return; }
   applyParams(body);
   applySettings();            // the runtime copies: animation speed, sync time
   setDstMode(settings.dst);   // a new zone's daylight-saving rule counts at once
-  saveSettings();
-  saveFaceSettings();
-  saveUiSettings();
-  saveFaceKeys();
+  bool stored = saveSettings();
+  stored &= saveFaceSettings();
+  stored &= saveUiSettings();
+  stored &= saveFaceKeys();
   applyNoticeKeysForm(body);
-  saveNoticeKeys();
+  stored &= saveNoticeKeys();
   if (!ntpSyncOn() && syncState != SYNC_IDLE) { setSyncState(SYNC_IDLE); }
   applyGifParams(body);
-  saveGifSettings();
+  stored &= saveGifSettings();
   gifScheduleNext();          // the new times count from now
   applyDecorParams(body);
-  saveDecorSettings();
+  stored &= saveDecorSettings();
   applyFeedParams(body);
-  saveFeedSettings();
+  stored &= saveFeedSettings();
+  if (!stored) {
+    Console.println("Settings from the web app: NOT all stored, the flash could not be written");
+    sendJsonError(c, 500, "Not saved in full: the clock could not write its flash. The settings work now; "
+                          "after a restart some may be as before.");
+    return;
+  }
   Console.println("Settings saved from the web app");
   JsonDocument d;
   d["ok"] = true;
@@ -9171,14 +9188,21 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
   } else if (path == "/api/wifi") {
     String error = applyWifiForm(body);
     if (error.length()) { sendJsonError(c, 400, error.c_str()); return; }
-    saveWifiCreds();
+    if (!saveWifiCreds()) {
+      // The hotspot stays open, so this can be seen.
+      sendJsonError(c, 500, "Not saved: the clock could not write its flash. It knows this WiFi until the next restart.");
+      return;
+    }
     JsonDocument d;
     d["ok"] = true;
     d["closing"] = apActive;
     sendJson(c, d);
     if (apActive) { closeHotspot = true; syncNow = true; }   // join it and fetch the time at once
   } else if (path == "/api/forget") {
-    forgetWifi();
+    if (!forgetWifi()) {
+      sendJsonError(c, 500, "The clock could not write its flash: it forgets this WiFi only until the next restart.");
+      return;
+    }
     JsonDocument d;
     d["line"] = homeWifiStatusText();
     sendJson(c, d);
@@ -9295,10 +9319,10 @@ void loadLanSettings() {
   if (lanSettings.on) { Console.printf("Web app on the home network: on, as %s.local\n", netHostname()); }
 }
 
-void saveLanSettings() {
+bool saveLanSettings() {
   lanSettings.magic = LAN_SETTINGS_MAGIC;
   lanSettings.rev = LAN_SETTINGS_REV;
-  lanStore.write(lanSettings);
+  return lanStore.write(lanSettings);
 }
 
 // While it is on, the station stays joined.
@@ -9381,9 +9405,13 @@ void apiLan(Print &c, const String &body) {
   }
   if (pw.length()) { lanSetPassword(pw.c_str()); }
   lanSettings.on = on ? 1 : 0;
-  saveLanSettings();
+  bool stored = saveLanSettings();
   lanWantRadio();
   Console.printf("Web app on the home network: %s%s\n", on ? "on" : "off", pw.length() ? ", new password" : "");
+  if (!stored) {
+    sendJsonError(c, 500, "Not saved: the clock could not write its flash. This works until the next restart.");
+    return;
+  }
   JsonDocument d;
   d["ok"] = true;
   d["on"] = on;
@@ -9446,10 +9474,10 @@ void loadHaSettings() {
   }
 }
 
-void saveHaSettings() {
+bool saveHaSettings() {
   haSettings.magic = HA_SETTINGS_MAGIC;
   haSettings.rev   = HA_SETTINGS_REV;
-  haStore.write(haSettings);
+  return haStore.write(haSettings);
 }
 
 // What the link lacks to run, or nullptr: the page says so where it is
@@ -9840,13 +9868,17 @@ void apiHa(Print &c, const String &body) {
   if (pw.length())         { strlcpy(haSettings.pass, pw.c_str(), sizeof(haSettings.pass)); }
   else if (!user.length()) { haSettings.pass[0] = '\0'; }   // a password belongs to a user
   haSettings.on = on ? 1 : 0;
-  saveHaSettings();
+  bool stored = saveHaSettings();
   haChanged = true;
   haFailedAt = 0;
   haError[0] = '\0';
   if (wasOn && !on) { bandDropFeed(SOURCE_HA); }   // switched off, the link takes its items with it
   Console.printf("Home Assistant: %s, broker %s:%u%s\n", on ? "on" : "off", haSettings.host, haSettings.port,
                 pw.length() ? ", new password" : "");
+  if (!stored) {
+    sendJsonError(c, 500, "Not saved: the clock could not write its flash. The link works so until the next restart.");
+    return;
+  }
   JsonDocument d;
   d["ok"] = true;
   haSettingsInto(d["ha"].to<JsonObject>());
