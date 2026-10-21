@@ -20,6 +20,7 @@ Todo Concept:
 ------------------------------------------------------------------------- */
 
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
+#include "sensors.h"        // the sensors each board supports, tried at the start and remembered
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 #include "input_map.h"      // input events, functions and the profiles mapping them
 
@@ -1284,6 +1285,13 @@ const int64_t UTC_PLAUSIBLE_TO   = 4102444799LL;   // 2099-12-31 23:59:59
 // boot or not at all; with one, the clock has its time at power-up and the
 // NTP sync needs to run only now and then (uiSettings.syncDays).
 uint8_t i2cFound[16];        // the addresses that answered at boot, one bit each (i2cScan())
+// The sensors (sensors.h): the try each was found on at this start (0: not
+// found), those found at an earlier start and not forgotten, and of those the
+// ones missing now - for them the status pixel is red and the start says SENSOR.
+uint8_t  sensorTries[SENSOR_COUNT] = {};
+uint16_t sensorsSeen    = 0;
+uint16_t sensorsMissing = 0;
+SettingsStore<SensorRecord> sensorStore;
 RTC_DS3231 rtc;
 bool rtcOK        = false;   // a DS3231 answered at boot
 bool rtcLostPower = false;   // its oscillator had stopped, so its time is not used until it is set again
@@ -1574,7 +1582,9 @@ void setup(void) {
   // found the clock simply stays in the default portrait orientation.
   Wire.begin();
 #if BOARD_HAS_ACCEL
-  accelOK = lis.begin(ACCEL_I2C_ADDR); // onboard, non-standard address on both boards
+  // onboard, non-standard address on both boards
+  sensorTries[SENSOR_ACCEL] = sensorBegin(SENSOR_ACCEL, []() { return lis.begin(ACCEL_I2C_ADDR); });
+  accelOK = sensorTries[SENSOR_ACCEL] != 0;
 #endif
   if (accelOK) {
     lis.setRange(LIS3DH_RANGE_2_G);
@@ -1595,12 +1605,13 @@ void setup(void) {
 
   // External BH1750 ambient light sensor -> auto-brightness. Shares the I2C bus
   // (default address 0x23). If absent, brightness stays under manual control.
-  luxOK = lightMeter.begin();          // true if the sensor answers on I2C
-  if (luxOK) {
+  sensorTries[SENSOR_LIGHT] = sensorBegin(SENSOR_LIGHT, []() {
+    if (!lightMeter.begin()) { return false; }   // true if the sensor answers on I2C
     lightMeter.powerOn();
     lightMeter.setContHighRes();       // 1 lx resolution, a new value every ~120 ms
-    luxOK = (lightMeter.getError() == BH1750FVI_OK);
-  }
+    return lightMeter.getError() == BH1750FVI_OK;
+  });
+  luxOK = sensorTries[SENSOR_LIGHT] != 0;
   if (luxOK) {
     Serial.println("BH1750 found");
   } else {
@@ -1624,6 +1635,7 @@ void setup(void) {
   knockSensorBegin();     // the board's QMI8658; before loadFaceKeys(), which asks what was found
 #endif
 #endif
+  sensorsCheck();         // which of those found before are missing now
   loadFaceKeys();         // needs to know which sensors were found
 #if BAND_DATA
   loadNoticeKeys();       // which of those events close a notice on the panel
@@ -1669,6 +1681,12 @@ void setup(void) {
     char msg[8];
     snprintf(msg, sizeof(msg), "DIED%u", (unsigned)prevBootStage);
     bootStatus(msg);
+    delay(2000);
+  }
+  // A sensor found at an earlier start is missing (sensorsCheck()): the
+  // status pixel stays red for it, the web app says which.
+  if (sensorsMissing) {
+    bootStatus("SENSOR");
     delay(2000);
   }
   boardBootStageWrite(BOOT_STAGE_PANEL);
@@ -2962,10 +2980,11 @@ bool syncOverdue() {
   return millisNow - syncDueSince > SYNC_LATE_MS;
 }
 
-// NTP status pixel: off in normal operation, red only on an error - a due sync
+// Status pixel: off in normal operation, red only on an error - a due sync
 // that has not succeeded within SYNC_LATE_MS, or the first failure of a WiFi
-// config that has never worked yet (syncOverdue()) - and then until a sync
-// succeeds.
+// config that has never worked yet (syncOverdue()), then until a sync
+// succeeds; or a sensor found at an earlier start that is missing now
+// (sensorsCheck()), until it is back or the web app forgets it.
 // It sits in the bottom-left corner of the current rotation: (0,63) in
 // portrait, (0,31) in landscape. A fixed (0,63) lies outside the 32 px tall
 // landscape canvas and was silently clipped, so landscape never showed the sync
@@ -2977,7 +2996,7 @@ bool syncOverdue() {
 // brightness of 48, while the old green one (six bits) still showed.
 const uint8_t STATUS_PIXEL_MIN = 24;
 void drawStatusPixel() {
-  if (!syncOverdue()) { return; }
+  if (!syncOverdue() && !sensorsMissing) { return; }
   uint8_t level = effectiveBrightness / 6;
   if (level < STATUS_PIXEL_MIN) { level = STATUS_PIXEL_MIN; }
   // Through scaledColorB(), as every colour: on the S3 the panel itself dims,
@@ -3859,7 +3878,8 @@ void shakeApplyThreshold() {
 // At start-up, once the board's bus runs (and before loadFaceKeys()).
 void knockSensorBegin() {
   pinMode(IMU_INT_PIN, INPUT);
-  if (!imu.begin(Wire1)) { Serial.println("QMI8658 not found - no knock"); return; }
+  sensorTries[SENSOR_MOTION] = sensorBegin(SENSOR_MOTION, []() { return imu.begin(Wire1); });
+  if (!sensorTries[SENSOR_MOTION]) { Serial.println("QMI8658 not found - no knock"); return; }
   knockOK = true;
   attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN), KnockIsr::edge, CHANGE);
   shakeApplyThreshold();
@@ -5180,6 +5200,62 @@ void boardBusScan() {
 }
 #endif
 
+/* ---- The sensors, remembered ------------------------------------------------ */
+
+// After the sensors were set up: which of those found at an earlier start are
+// missing now, and the ones found remembered. A sensor this board does not
+// support is never counted. The M4 has no flash block for the record: it
+// starts from none each time, and none is missing.
+void sensorsCheck() {
+  SensorRecord rec = { SENSOR_RECORD_MAGIC, 0, 0 };
+#if BOARD_ESP32S3
+  sensorStore.begin("sensors");
+  if (!sensorStore.read(rec) || rec.magic != SENSOR_RECORD_MAGIC) { rec = { SENSOR_RECORD_MAGIC, 0, 0 }; }
+#endif
+  uint16_t supported = sensorsSupported(), found = 0;
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    if (sensorTries[i]) { found |= (uint16_t)(1 << i); }
+  }
+  sensorsMissing = (uint16_t)(rec.seen & supported & ~found);
+  sensorsSeen = (uint16_t)((rec.seen | found) & supported);
+#if BOARD_ESP32S3
+  if (sensorsSeen != rec.seen) {
+    rec.seen = sensorsSeen;
+    sensorStore.write(rec);
+  }
+#endif
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    if (sensorsMissing & (1 << i)) {
+      Serial.printf("%s missing - found at an earlier start; the web app can forget it\n", SENSOR_KINDS[i].chip);
+    }
+  }
+}
+
+// The web app's "Forget": a sensor this clock no longer has is no longer
+// missing, and not remembered until it is found again. False for a key that
+// names no sensor.
+bool sensorForget(const String &key) {
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    if (key != SENSOR_KINDS[i].key) { continue; }
+    uint16_t bit = (uint16_t)(1 << i);
+    if (sensorsSeen & bit) {
+      sensorsSeen &= (uint16_t)~bit;
+      sensorsMissing &= (uint16_t)~bit;
+#if BOARD_ESP32S3
+      SensorRecord rec = { SENSOR_RECORD_MAGIC, sensorsSeen, 0 };
+      sensorStore.write(rec);
+#endif
+      panelDirty = true;   // the status pixel may go
+#if BAND_ON_PANEL
+      bandLocalDone = false;   // and the band's status line
+#endif
+      Serial.printf("%s forgotten\n", SENSOR_KINDS[i].chip);
+    }
+    return true;
+  }
+  return false;
+}
+
 /* ---- Real-time clock (DS3231) -------------------------------------------- */
 
 #if BOARD_WAVESHARE_WALL
@@ -5197,7 +5273,8 @@ const char *rtcChipName() {
 // not have.
 void rtcBegin() {
   pcfStore.begin("pcf");
-  dsOK = rtc.begin(&Wire);
+  sensorTries[SENSOR_RTC] = sensorBegin(SENSOR_RTC, []() { return rtc.begin(&Wire); });
+  dsOK = sensorTries[SENSOR_RTC] != 0;
   time_t dsUtc = 0;
   if (dsOK) {
     dsLost = rtc.lostPower();
@@ -5207,7 +5284,8 @@ void rtcBegin() {
     Serial.println("DS3231 not found");
   }
   time_t pcfUtc = 0;
-  if (pcf.begin(Wire1)) {
+  sensorTries[SENSOR_BOARD_RTC] = sensorBegin(SENSOR_BOARD_RTC, []() { return pcf.begin(Wire1); });
+  if (sensorTries[SENSOR_BOARD_RTC]) {
     Serial.printf("PCF85063 found: Control_1 0x%02X, Control_2 0x%02X, Offset %d, %s\n", pcf.control1(),
                   pcf.control2(), pcf.offset(), pcf.kept() ? "holds a time of this clock's" : "holds no time of this clock's");
     if (pcf.kept()) { pcfUtc = pcf.read(); }
@@ -5325,7 +5403,8 @@ void wallRtcReport() {
 // no time worth showing, so the clock stays without one until NTP or the user
 // sets it - the face never shows a time it does not have.
 void rtcBegin() {
-  rtcOK = rtc.begin(&Wire);
+  sensorTries[SENSOR_RTC] = sensorBegin(SENSOR_RTC, []() { return rtc.begin(&Wire); });
+  rtcOK = sensorTries[SENSOR_RTC] != 0;
   if (!rtcOK) { Serial.println("DS3231 not found - no real-time clock"); return; }
   if (rtc.lostPower()) {
     rtcLostPower = true;
@@ -6308,7 +6387,8 @@ void updateInput() {
 // 2026-10-10 (9 of 9), with the library's often as swipes (6 of 14). So a
 // circling hand is left out, instead of moving through the menu.
 void gestureBegin() {
-  gestureOK = gestureSensor.begin(&Wire) != 0;
+  sensorTries[SENSOR_GESTURE] = sensorBegin(SENSOR_GESTURE, []() { return gestureSensor.begin(&Wire) != 0; });
+  gestureOK = sensorTries[SENSOR_GESTURE] != 0;
   if (!gestureOK) { Serial.println("PAJ7620U2 not found - no gestures"); return; }
   gestureTune(true);
   if (GESTURE_INT >= 0) { pinMode((uint8_t)GESTURE_INT, INPUT_PULLUP); }
@@ -10556,18 +10636,27 @@ void bandMoonLines(BandLocal &l) {
            BAND_MONTHS[t.tm_mon]);
 }
 
-// The clock's trouble in words while the status pixel is red (syncOverdue()):
-// a new home WiFi that does not join, "Home WiFi does not join:" and its
-// name, or a time sync that keeps failing, "Time sync is failing" and when
-// the last good one was. The warning sign in yellow, the first of the
-// clock's own turns. Nothing while all is well.
+// The clock's trouble in words while the status pixel is red (syncOverdue(),
+// sensorsMissing): a new home WiFi that does not join, "Home WiFi does not
+// join:" and its name, or a time sync that keeps failing, "Time sync is
+// failing" and when the last good one was; else a sensor found before that is
+// missing now, "Sensor missing" and which. The warning sign in yellow, the
+// first of the clock's own turns. Nothing while all is well.
 const unsigned long BAND_STATUS_TEST_MS = 2UL * 60UL * 1000UL;   // the console's "status test"
 void bandStatusLines(BandLocal &l) {
   bool test = bandStatusTestAt && millisNow - bandStatusTestAt < BAND_STATUS_TEST_MS;
-  l.on = clockIsSet() && (syncOverdue() || test);
+  bool sync = syncOverdue() || test;
+  l.on = clockIsSet() && (sync || sensorsMissing);
   if (!l.on) { return; }
   l.icon = ICON_WARNING;
   l.severity = 1;
+  if (!sync) {
+    int n = snprintf(l.text, sizeof(l.text), "Sensor missing |");
+    for (uint8_t i = 0; i < SENSOR_COUNT && n > 0 && n < (int)sizeof(l.text); i++) {
+      if (sensorsMissing & (1 << i)) { n += snprintf(l.text + n, sizeof(l.text) - (size_t)n, " %s", SENSOR_KINDS[i].chip); }
+    }
+    return;
+  }
   if (wifiStored() && !wifiCreds.verified && joinOutcome == JOIN_FAILED) {
     snprintf(l.text, sizeof(l.text), "Home WiFi does not join | %s", wifiCreds.ssid);
     return;
@@ -11494,6 +11583,25 @@ void apiState(Print &c) {
   }
 #endif
   hw["lux"] = lastLux >= 0;
+  // Every sensor this board supports (sensors.h): found at this start and on
+  // which try, found at an earlier start, missing now.
+  hw["sensorTries"] = SENSOR_TRIES;
+  JsonArray sensors = hw["sensors"].to<JsonArray>();
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    if (!(sensorsSupported() & (1 << i))) { continue; }
+    const SensorKind &k = SENSOR_KINDS[i];
+    JsonObject o = sensors.add<JsonObject>();
+    o["id"] = k.key;
+    o["chip"] = k.chip;
+    o["what"] = k.what;
+    char hex[8];
+    snprintf(hex, sizeof(hex), "0x%02X", k.addr);
+    o["addr"] = hex;
+    o["bus"] = k.boardBus ? "board" : "main";
+    o["tries"] = sensorTries[i];                     // 0: not found at this start
+    o["seen"] = (sensorsSeen & (1 << i)) != 0;       // found at an earlier start, not forgotten
+    o["missing"] = (sensorsMissing & (1 << i)) != 0;
+  }
 
 #if GIF_PLAYBACK
   JsonObject gifs = d["gifs"].to<JsonObject>();
@@ -11841,6 +11949,9 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     sendNoContent(c);
   } else if (path == "/api/save") {
     apiSave(c, body, closeHotspot);
+  } else if (path == "/api/sensor-forget") {
+    // id=<sensor>: one this clock no longer has is no longer missing.
+    if (sensorForget(getParam(body, "id"))) { sendNoContent(c); } else { sendJsonError(c, 400, "No such sensor."); }
   } else if (path == "/api/discard") {
     loadSettings();           // the stored settings, with the Tetris ones, applied at once
 #if WATCHFACE_TETRIS

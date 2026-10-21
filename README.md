@@ -120,7 +120,21 @@ in the wall's own 192x128 LEDs.
   known-good WiFi config, one a sync has worked over before. A new one - stored
   on the config page, or copied from the build - has not proven itself yet, so
   the pixel turns red at once when it fails to join (within about 10 s) or the
-  sync gives up (after a minute), also after a restart, until a sync works
+  sync gives up (after a minute), also after a restart, until a sync works.
+  It is red as well while a sensor found at an earlier start is missing (see
+  below), until the sensor is back or the web app forgets it
+- **Sensors looked for at every start**, each up to 3 times, 50 ms apart: the
+  LIS3DH (orientation, knock; MatrixPortals), BH1750 (light), DS3231
+  (real-time clock), PAJ7620U2 (gestures), and on the wall clock its board's
+  PCF85063 (real-time clock) and QMI8658 (knock). The clock remembers which it
+  had; one of those missing at a start makes the panel say `SENSOR` for 2 s
+  and turns the status pixel red. The web app's System section lists every
+  sensor - found, found on a later try, missing, or not fitted - with its
+  address and what answers on the I2C bus, and **Forget** for a sensor the
+  clock no longer has. (On 2026-10-21 the MatrixPortal S3 came up once without
+  its LIS3DH, stuck in portrait until the next start; the cause is not known.)
+  The M4 has no flash block for the record, so it remembers none and reports
+  none missing
 - **Automatic summer/winter time** for every timezone in the menu (rules from the
   IANA tz database), or a fixed summer or winter time
 - **On-screen menu** with the UP and DOWN buttons: brightness, auto brightness,
@@ -207,6 +221,8 @@ in the wall's own 192x128 LEDs.
    sensors, `DIED3` after the WiFi join started (the clock already runs then),
    `DIED4` after it joined. A start that runs for 15 s clears it. The
    breadcrumb lives in flash, so it survives the detour through the bootloader.
+   `SENSOR` for 2 s: a sensor found at an earlier start is missing (web app,
+   System).
 
    For the MatrixPortal M4, select its environment and put the board into the
    bootloader via **double reset** first:
@@ -976,7 +992,8 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
   - **the clock's status**, only while its status pixel is red: a new home WiFi
     that does not join ("Home WiFi does not join" / its name), or a time sync
     that keeps failing ("Time sync is failing" / "last good 18 Oct 03:00"),
-    beside the warning sign in yellow;
+    else a sensor found before that is missing now ("Sensor missing" /
+    "QMI8658"), beside the warning sign in yellow;
   - **the clock change**, from 24 hours before until 12 hours after it, when
     daylight saving is set to auto: "Clocks go back 1 h" / "tonight at 3:00"
     (the time on the clock before it), then "Clocks went back 1 h" / "last
@@ -1050,7 +1067,7 @@ form-encoded POSTs, answers are JSON:
 
 | Request | What it does |
 |---|---|
-| `GET /api/state` | settings, the lists the page offers, hardware found, WiFi, system |
+| `GET /api/state` | settings, the lists the page offers, hardware found (with `hw.sensors`: every sensor the board supports, found on which try, missing), WiFi, system |
 | `GET /api/status` | brightness, light, time and its source, rotation, screen, the info band's sources and items, the Home Assistant link (the page asks every 2 s) |
 | `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
 | `POST /api/live` | tries settings live, in RAM only |
@@ -1058,6 +1075,7 @@ form-encoded POSTs, answers are JSON:
 | `POST /api/discard` | puts the stored settings back |
 | `POST /api/time` | sets the time, from the phone or typed |
 | `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
+| `POST /api/sensor-forget` | `id=<sensor>` (`accel`, `light`, `rtc`, `gesture`, `boardRtc`, `motion`, as `hw.sensors` in `/api/state` lists them): a sensor this clock no longer has is no longer reported missing |
 | `POST /api/gif` | plays a GIF now (on the face) |
 | `POST /api/card` | the wall clock: reads its microSD card again, as soon as no GIF plays |
 | `POST /api/pack` | a GIF pack as the body (`application/octet-stream`), written into the ffat partition (see [GIF pack](#gif-pack)) |
