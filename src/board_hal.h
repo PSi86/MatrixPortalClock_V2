@@ -233,6 +233,13 @@ const uint8_t WALL_CHAIN = 6;
 const uint8_t WALL_SCALE = 3;
 const int16_t WALL_CANVAS_X = 0, WALL_CANVAS_Y = 0;
 const int16_t WALL_BAND_Y = 96, WALL_BAND_H = 32;   // the band's rows, below the canvas (showBand())
+static_assert(WALL_BAND_H <= 32, "retintStep() keeps a bit for each of the band's rows");
+// After a new brightness the wall's picture goes through the new tables this
+// many LEDs a pass (retintStep()): four of the canvas's rows (64 x 3 x 3 LEDs
+// each, about 0.9 ms), or twelve of the band's. All of it at once held the
+// loop 42 ms (2026-10-22, the canvas 29.8 ms and the band 12 ms; writing the
+// LEDs, about 1.5 us each, not the cache's write-back to PSRAM).
+const uint16_t WALL_RETINT_LEDS = 4 * 64 * WALL_SCALE * WALL_SCALE;
 // The panels' supply gives 7.5 A at most (Peter, 2026-10-18). Measured on its
 // 5 V side the same day (bus at 16 MHz, buffer in PSRAM): the wall dark 555 mA,
 // one panel in white 564-567 mA more at brightness 160 and 451 mA at 128, so
@@ -400,30 +407,21 @@ class PanelCanvas : public GFXcanvas16 {
 #endif
     if (_native) { endNative(); }
     const uint16_t *src = getBuffer();
-    uint16_t *held = _held[0];
-    static uint8_t run[WALL_W * 3];   // one wall row of the run, red green blue
     for (int16_t y = 0; y < HEIGHT; y++) {
+      const uint16_t *s = src + y * WIDTH;
+      uint16_t *held = _held[0] + y * WIDTH;
       int16_t x = 0;
       while (x < WIDTH) {
-        int i = y * WIDTH + x;
-        if (src[i] == held[i] && !_stale[0]) { x++; continue; }
+        if (s[x] == held[x] && !_stale[0]) { x++; continue; }
         int16_t from = x;
-        uint8_t *o = run;
-        while (x < WIDTH && (src[y * WIDTH + x] != held[y * WIDTH + x] || _stale[0])) {
-          uint16_t c = src[y * WIDTH + x];
-          uint8_t r = c >> 11, g = (c >> 5) & 0x3F, b = c & 0x1F;
-          uint8_t rv = _lut[0][(r << 3) | (r >> 2)], gv = _lut[1][(g << 2) | (g >> 4)], bv = _lut[2][(b << 3) | (b >> 2)];
-          for (uint8_t k = 0; k < WALL_SCALE; k++) { *o++ = rv; *o++ = gv; *o++ = bv; }
-          held[y * WIDTH + x] = c;
-          x++;
+        while (x < WIDTH && (s[x] != held[x] || _stale[0])) { held[x] = s[x]; x++; }
+        canvasSpan(y, from, x, held);
 #if defined(CLOCK_DEBUG)
-          pushed++;
+        pushed += x - from;
 #endif
-        }
-        int16_t wx = WALL_CANVAS_X + from * WALL_SCALE, n = (x - from) * WALL_SCALE;
-        for (uint8_t k = 0; k < WALL_SCALE; k++) { wallSpan(wx, WALL_CANVAS_Y + y * WALL_SCALE + k, n, run); }
       }
     }
+    if (_stale[0]) { _retint = 0; }   // all of it went through the tables as they are
     _stale[0] = false;
     _shownValid = false;   // the canvas wrote over what a native picture left
     writeBackRows();
@@ -439,6 +437,94 @@ class PanelCanvas : public GFXcanvas16 {
     for (uint8_t row = 0; _touched != 0 && row < 32; row++) {
       if (_touched & (1UL << row)) { _dma->writeBackRow(row); _touched &= ~(1UL << row); }
     }
+  }
+
+  // Canvas pixels x0 .. x1 - 1 of row y in the colours c (that row's), onto
+  // the wall through the tables as they are, each as a WALL_SCALE x
+  // WALL_SCALE block.
+  void canvasSpan(int16_t y, int16_t x0, int16_t x1, const uint16_t *c) {
+    static uint8_t run[WALL_W * 3];   // one wall row of the run, red green blue
+    uint8_t *o = run;
+    for (int16_t x = x0; x < x1; x++) {
+      uint8_t r = c[x] >> 11, g = (c[x] >> 5) & 0x3F, b = c[x] & 0x1F;
+      uint8_t rv = _lut[0][(r << 3) | (r >> 2)], gv = _lut[1][(g << 2) | (g >> 4)], bv = _lut[2][(b << 3) | (b >> 2)];
+      for (uint8_t k = 0; k < WALL_SCALE; k++) { *o++ = rv; *o++ = gv; *o++ = bv; }
+    }
+    int16_t wx = WALL_CANVAS_X + x0 * WALL_SCALE, n = (x1 - x0) * WALL_SCALE;
+    for (uint8_t k = 0; k < WALL_SCALE; k++) { wallSpan(wx, WALL_CANVAS_Y + y * WALL_SCALE + k, n, run); }
+  }
+
+  // The band's pixels x0 .. x1 - 1 of its row y in the colours c (that row's),
+  // through the tables as they are.
+  void bandSpan(int16_t y, int16_t x0, int16_t x1, const uint16_t *c) {
+    static uint8_t run[WALL_W * 3];
+    uint8_t *o = run;
+    for (int16_t x = x0; x < x1; x++) {
+      uint8_t r = c[x] >> 11, g = (c[x] >> 5) & 0x3F, b = c[x] & 0x1F;
+      *o++ = _lut[0][(r << 3) | (r >> 2)];
+      *o++ = _lut[1][(g << 2) | (g >> 4)];
+      *o++ = _lut[2][(b << 3) | (b >> 2)];
+    }
+    wallSpan(x0, WALL_BAND_Y + y, x1 - x0, run);
+  }
+
+  // A new brightness: every row the wall shows has to go through the new
+  // tables, a few a pass (retintStep()), the canvas's first, then the band's.
+  // Like a long path split into stages: the same work as before, but no pass
+  // holds the loop for all of it. Meanwhile a row is at most one step of
+  // light behind the others, for about 50 ms.
+  void retintAll() {
+    if (HEIGHT > 32) { forgetHeld(); return; }   // one bit a row
+    _retint = HEIGHT == 32 ? 0xFFFFFFFFUL : (1UL << HEIGHT) - 1;
+    if (_bandHeld) { _bandRetint = WALL_BAND_H == 32 ? 0xFFFFFFFFUL : (1UL << WALL_BAND_H) - 1; }
+    else           { _bandStale = true; }   // nothing to take the band's rows from: drawn anew whole
+  }
+
+  // On every pass: up to WALL_RETINT_LEDS of the rows a new brightness left
+  // behind, from what show() and showBand() last wrote there (_held,
+  // _bandHeld). Nothing while a GIF or a test picture holds the wall, nor
+  // while a whole picture is due anyway (_stale, _bandStale).
+  void retintStep() {
+    if (_stale[0]) { _retint = 0; }
+    if (_bandStale) { _bandRetint = 0; }
+    if (!_dma || _testing || _native || (_retint == 0 && _bandRetint == 0)) { return; }
+#if defined(CLOCK_DEBUG)
+    uint32_t t0 = micros();
+#endif
+    uint16_t budget = WALL_RETINT_LEDS;
+    const uint16_t canvasRow = (uint16_t)WIDTH * WALL_SCALE * WALL_SCALE;
+    while (_retint != 0 && budget >= canvasRow) {
+      while (!(_retint & (1UL << _retintRow))) { _retintRow = (uint8_t)((_retintRow + 1) % HEIGHT); }
+      canvasSpan(_retintRow, 0, WIDTH, _held[0] + _retintRow * WIDTH);
+      _retint &= ~(1UL << _retintRow);
+      budget -= canvasRow;
+#if defined(CLOCK_DEBUG)
+      _dbgRetintRows++;
+#endif
+    }
+    while (_bandRetint != 0 && budget >= WALL_W) {
+      while (!(_bandRetint & (1UL << _bandRetintRow))) { _bandRetintRow = (uint8_t)((_bandRetintRow + 1) % WALL_BAND_H); }
+      bandSpan(_bandRetintRow, 0, WALL_W, _bandHeld + _bandRetintRow * WALL_W);
+      _bandRetint &= ~(1UL << _bandRetintRow);
+      budget -= WALL_W;
+#if defined(CLOCK_DEBUG)
+      _dbgRetintRows++;
+#endif
+    }
+    writeBackRows();
+#if defined(CLOCK_DEBUG)
+    uint32_t us = micros() - t0;
+    _dbgRetintSteps++;
+    if (us > _dbgRetintMaxUs) { _dbgRetintMaxUs = us; }
+    if (millis() - _dbgRetintSince >= 2000 || (_retint == 0 && _bandRetint == 0)) {   // every 2 s, and when done
+      if (consoleLevel >= 2) {   // a running figure (console.h)
+        Console.printf("retint: %lu passes, %lu rows, longest %lu us\n", (unsigned long)_dbgRetintSteps,
+                      (unsigned long)_dbgRetintRows, (unsigned long)_dbgRetintMaxUs);
+      }
+      _dbgRetintSteps = _dbgRetintRows = _dbgRetintMaxUs = 0;
+      _dbgRetintSince = millis();
+    }
+#endif
   }
 
   // Wall row y from wall column x to the right: n pixels at driver values (3
@@ -505,11 +591,11 @@ class PanelCanvas : public GFXcanvas16 {
   // WALL_W x WALL_BAND_H in canvas colours, turned into driver values through
   // the same tables as the canvas. Only what changed since the last call is
   // written, a run of neighbours at a time - all of it after anything else
-  // wrote over its rows (a GIF, a test picture, another brightness). Nothing
-  // while a GIF or a test picture holds the wall.
+  // wrote over its rows (a GIF, a test picture); a new brightness reaches it
+  // through retintStep(). Nothing while a GIF or a test picture holds the
+  // wall.
   void showBand(const uint16_t *src) {
     if (!_dma || _testing || _native || !src) { _bandStale = true; return; }
-    static uint8_t run[WALL_W * 3];
     for (int16_t y = 0; y < WALL_BAND_H; y++) {
       const uint16_t *s = src + y * WALL_W;
       uint16_t *held = _bandHeld ? _bandHeld + y * WALL_W : nullptr;
@@ -517,19 +603,14 @@ class PanelCanvas : public GFXcanvas16 {
       while (x < WALL_W) {
         if (held && !_bandStale && s[x] == held[x]) { x++; continue; }
         int16_t from = x;
-        uint8_t *o = run;
         while (x < WALL_W && (!held || _bandStale || s[x] != held[x])) {
-          uint16_t c = s[x];
-          uint8_t r = c >> 11, g = (c >> 5) & 0x3F, b = c & 0x1F;
-          *o++ = _lut[0][(r << 3) | (r >> 2)];
-          *o++ = _lut[1][(g << 2) | (g >> 4)];
-          *o++ = _lut[2][(b << 3) | (b >> 2)];
-          if (held) { held[x] = c; }
+          if (held) { held[x] = s[x]; }
           x++;
         }
-        wallSpan(from, WALL_BAND_Y + y, x - from, run);
+        bandSpan(y, from, x, s);
       }
     }
+    if (_bandStale) { _bandRetint = 0; }   // all of it went through the tables as they are
     _bandStale = false;
     writeBackRows();
   }
@@ -624,10 +705,11 @@ class PanelCanvas : public GFXcanvas16 {
   // Brightness of the whole panel, 0..255: 0 switches it dark (through the OE
   // time), anything else sets the light the colour values give (see above),
   // at least PANEL_BRIGHT_FLOOR. Another brightness rebuilds the tables, and
-  // when they came out different, the next shows write every pixel. Often
-  // they do not: on the S3 the brightness keeps to blue's steps, which are
-  // coarse at the dark end (brightness 36 to 40 give the same tables), and on
-  // the wall clock's planes one step of light is about two of brightness.
+  // when they came out different, the next shows write every pixel - on the
+  // wall clock retintStep() does, a few rows a pass. Often they do not: on
+  // the S3 the brightness keeps to blue's steps, which are coarse at the dark
+  // end (brightness 36 to 40 give the same tables), and on the wall clock's
+  // planes one step of light is about two of brightness.
   void setBrightness(uint8_t b) {
     if (!_dma) { return; }
 #if BOARD_WAVESHARE_WALL
@@ -644,7 +726,13 @@ class PanelCanvas : public GFXcanvas16 {
     if (b == _bright) { return; }
     if (_bright == 0) { _dma->setBrightness8(PANEL_OE_FULL); }
     _bright = b;
-    if (buildLuts()) { forgetHeld(); }
+    if (buildLuts()) {
+#if BOARD_WAVESHARE_WALL
+      retintAll();
+#else
+      forgetHeld();
+#endif
+    }
   }
 
   // The driver's value for colour c (0 red, 1 green, 2 blue) of the canvas
@@ -856,6 +944,12 @@ class PanelCanvas : public GFXcanvas16 {
   uint16_t  _planeLight[8] = {};  // reckonPlaneLight()
   uint16_t *_bandHeld = nullptr;  // what showBand() left in the band's rows, canvas colours (PSRAM)
   bool      _bandStale = true;    // ... and something wrote over them since
+  uint32_t  _retint = 0;          // canvas rows not through the current tables yet, a bit each (retintAll())
+  uint32_t  _bandRetint = 0;      // the band's rows, the same
+  uint8_t   _retintRow = 0, _bandRetintRow = 0;   // where retintStep() goes on
+#if defined(CLOCK_DEBUG)
+  uint32_t  _dbgRetintSteps = 0, _dbgRetintRows = 0, _dbgRetintMaxUs = 0, _dbgRetintSince = 0;
+#endif
 #endif
   uint16_t  _light[3][256];
   uint8_t   _order[3][256];
