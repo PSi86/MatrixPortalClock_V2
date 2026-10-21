@@ -205,8 +205,10 @@ in the wall's own 192x128 LEDs.
    is moved over once, as described there.
 
    **Console:** only the debug builds have one (`adafruit_matrixportal_s3_debug`,
-   `waveshare_wallclock_debug`) and the test builds; the release builds write
-   nothing and take no commands (since 2026-10-21). `pio device monitor` (115200
+   `waveshare_wallclock_debug`, and the `..._verbose` ones) and the test builds;
+   the release builds write nothing and take no commands (since 2026-10-21), not
+   even the core's own errors (`CORE_DEBUG_LEVEL=0`). Only the chip's ROM prints
+   its few lines at every start. `pio device monitor` (115200
    baud) on the same port. Open it with DTR and RTS low, as `platformio.ini` sets
    for the monitor (`monitor_dtr = 0`, `monitor_rts = 0`): a tool that opens the
    port with both raised - pyserial's default - restarts the clock.
@@ -219,7 +221,7 @@ in the wall's own 192x128 LEDs.
    |---|---|
    | 1 | the start, the sensors, errors and changes of state: the WiFi, the time, Home Assistant, fetches, GIFs, inputs; of the core's own lines only its errors |
    | 2 | and the running figures: the light every second, the frames and the face's passes every second or two (`frames`, `show:`, `face N:`), the RAM every 30 s |
-   | 3 | and the core's WiFi and HTTP lines, which the core builds in or leaves out as it is compiled: `$env:PLATFORMIO_BUILD_FLAGS = '-UCORE_DEBUG_LEVEL -DCORE_DEBUG_LEVEL=4 -DCLOCK_LOG=2'` before `pio run -e ..._debug` |
+   | 3 | and the core's WiFi and HTTP lines, which the core builds in or leaves out as it is compiled: the environments `adafruit_matrixportal_s3_verbose` and `waveshare_wallclock_verbose` |
 
    Its commands on every board: `log 1|2`, `fetch` (every source of the info
    band due now), `lan on|off` (the web app on the home network); the wall
