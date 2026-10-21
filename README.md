@@ -136,7 +136,7 @@ dropped before the web server and WiFi work that followed.
   90° steps to match how the panel is held (both portrait and both landscape
   positions)
 - **Automatic brightness** via an external BH1750 light sensor: a configurable
-  lux → brightness mapping dims the clock once per second to match the room
+  lux → brightness mapping fades the clock to the room's light within seconds
 - NTP time synchronization with a daily resync. The WiFi is switched on one
   minute before the sync time and off again after the sync, unless the info band
   data still needs it. A sync that has not worked out after a minute, on a clock
@@ -434,7 +434,7 @@ because whatever waited took the panel the moment it was free.
   default) or 2 minutes, at a random time from half to one and a half times
   that.
 - **Quiet** (the GIF section): **quiet hours** from one hour to another, and a
-  **dark room** below a light level in lux (the light sensor's 10 s average) -
+  **dark room** below a light level in lux (the light sensor's filtered light) -
   no GIFs and no extras of their own accord then. Both are off by default; what
   an input asks for still plays.
 
@@ -1281,10 +1281,15 @@ drive the master brightness automatically. Wire it to the board's I²C pins
 (SDA/SCL, 3V3, GND — e.g. via the STEMMA QT connector); it shares the bus with
 the accelerometer.
 
-The sensor is read **once per second** and feeds a **10 s moving average**; the
-averaged lux sets a brightness target that the display **fades to smoothly every
-frame** instead of stepping once per second. The averaged lux is mapped to a
-brightness through a configurable linear curve, set on the AP config page:
+The sensor is read **five times a second**. The median of the last 13 readings
+(2.6 s) is filtered in log units with 1 s, so a hand in front of the sensor for
+up to about a second - a gesture - changes nothing, and a lamp switched on or off
+shows half its change after about 2 s and nearly all of it after 2 to 4 s (until
+2026-10-21 a 10 s moving average: 5 to 6 s and 8 to 10 s). The brightness then
+**fades** to the target at an even pace in log units - at most a factor of 2.7 a
+second, slowing over its last part - and only once the target is 4 % away, so a
+light that only wavers moves nothing. The filtered lux is mapped to a brightness
+through a configurable linear curve, set on the AP config page:
 
 | Field | Meaning |
 |---|---|
@@ -1802,8 +1807,12 @@ blue really gives sets the share all three colours aim at: white stays white
 blue's steps, up to 21 % off the one asked for. Measured through this path,
 blue stayed within 0.94 to 1.07 of red at every brightness and green within 1.00
 to 1.13 (the widest at the darkest, where red gives the sensor only about 1.6 lx),
-where the OE time had left blue at 0 to 0.62 of red. A brightness step costs one
-full frame to the driver, 3.6 ms.
+where the OE time had left blue at 0 to 0.62 of red. A brightness step whose
+tables differ costs a full frame for each of the driver's two buffers, 3.6 ms
+each; one with the same tables (often at the dark end: brightness 36 to 40 give
+the same) costs nothing. Blue's steps are also why a fade at the dark end shows
+jumps: between brightness 30 and 70 there are about 8 steps of light, +47 % from
+26 to 27 and +29 % from 40 to 41.
 
 Two more settings matter on the MatrixPortal S3 (`PanelCanvas` in
 `src/board_hal.h`):
