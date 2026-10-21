@@ -128,6 +128,7 @@ const int16_t FEED_ERR_JSON  = -100;
 
 struct FeedResult {
   uint8_t  feed;
+  int32_t  lat, lon;        // the place it was fetched for (FeedJob's)
   int16_t  status;          // HTTP status; below 0 HTTPClient's error, or FEED_ERR_JSON
   uint8_t  count;           // items in item[]
   BandItem item[FEED_ITEMS_MAX];
@@ -522,6 +523,8 @@ const uint32_t FEED_TASK_STACK = 10240;
 inline void feedRun(const FeedJob &job, FeedResult &r) {
   memset(&r, 0, sizeof(r));
   r.feed     = job.feed;
+  r.lat      = job.lat;
+  r.lon      = job.lon;
   r.bytes    = -1;
   r.heapFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   uint32_t t0 = millis();

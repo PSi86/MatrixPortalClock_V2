@@ -221,12 +221,13 @@ void faceBlobLoad(FaceBlob &b, Store &store) {
   }
 }
 
+// Whether it is stored.
 template <typename Store>
-void faceBlobSave(FaceBlob &b, Store &store) {
+bool faceBlobSave(FaceBlob &b, Store &store) {
   b.data[0] = (uint8_t)b.magic;
   b.data[1] = (uint8_t)(b.magic >> 8);
   b.data[2] = b.rev;
-  store.write(b.data, b.size);
+  return store.write(b.data, b.size);
 }
 
 // The web app's values for a face's settings, live or to be saved: each key

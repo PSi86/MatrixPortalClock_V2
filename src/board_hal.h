@@ -891,7 +891,9 @@ class SettingsBlobStore {
     return true;
   }
 
-  void write(const void *src, size_t size) { _prefs.putBytes(_key, src, size); }
+  // Whether the blob is stored: false when the flash could not be written
+  // (NVS full or damaged), which the web app then reports.
+  bool write(const void *src, size_t size) { return _prefs.putBytes(_key, src, size) == size; }
 
  private:
   Preferences _prefs;
@@ -902,7 +904,7 @@ template <typename T>
 class SettingsStore : public SettingsBlobStore {
  public:
   bool read(T &dst) { return SettingsBlobStore::read(&dst, sizeof(T)); }
-  void write(T &src) { SettingsBlobStore::write(&src, sizeof(T)); }
+  bool write(T &src) { return SettingsBlobStore::write(&src, sizeof(T)); }
 };
 
 
