@@ -14,8 +14,8 @@
      2  and the running figures: the light every second, the frames and the
         face's passes every second or two, the RAM every 30 s
      3  and the core's own WiFi and HTTP lines, which the core builds in or
-        leaves out as it is compiled: a build with CORE_DEBUG_LEVEL=4 as well
-        (README, "Console")
+        leaves out as it is compiled: the ..._verbose environments
+        (platformio.ini; CORE_DEBUG_LEVEL=4, CLOCK_LOG=2)
    ---------------------------------------------------------------------- */
 #ifndef CONSOLE_H
 #define CONSOLE_H
