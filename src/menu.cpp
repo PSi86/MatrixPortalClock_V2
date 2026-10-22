@@ -5,6 +5,7 @@
 #include <Fonts/TomThumb.h>    // 3x5, for the menu
 #include "brightness.h"
 #include "clock_state.h"
+#include "hotspot.h"
 #include "clock_time.h"
 #include "console.h"
 #include "input.h"

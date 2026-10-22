@@ -5,6 +5,7 @@
 #include <RevEng_PAJ7620.h>
 #include "brightness.h"
 #include "clock_state.h"
+#include "hotspot.h"
 #include "console.h"
 #include "face.h"
 #include "gif_player.h"

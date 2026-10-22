@@ -6,6 +6,7 @@
 #include "board_hal.h"
 #include "brightness.h"
 #include "clock_state.h"
+#include "hotspot.h"
 #include "clock_time.h"
 #include "ha_link.h"
 #include "item_icons.h"

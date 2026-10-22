@@ -38,6 +38,7 @@ uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b);   // a colour at t
 bool gifPlaying();   // a GIF has the panel, its decoder up
 
 // The watchface on show (main.cpp), and the moment it is drawn for.
+void faceUpdate();     // one pass of the face on the panel
 FaceNow faceMoment();
 Watchface &faceFor(uint8_t id);
 
@@ -49,21 +50,16 @@ const uint8_t BOOT_STAGE_WIFI  = 3;   // the WiFi join started (the clock runs w
 const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined
 extern bool bootStageCleared;         // breadcrumb cleared after the first healthy seconds
 
-extern bool apActive;   // the hotspot is open: it has the radio
-void startAPMode();
-void stopAPMode();
-
 // The knock (knock.h): the LIS3DH's, or the wall clock's QMI8658's.
 extern Knock knock;
 #define knockOK knock.found()
 
-// What the panel is drawn in right now (the hotspot info is landscape
-// however the panel is held).
+// How the panel is held (the accelerometer's reading after the debounce),
+// and what it is drawn in right now (the hotspot info is landscape however
+// the panel is held).
+extern uint8_t deviceRotation;
 extern uint8_t screenRotation;
-
-// The hotspot's password; also the web app's on the home network until
-// another is set there.
-#define AP_PASS "clock1234"   // must be >= 8 characters
+void setScreenRotation(uint8_t rot);
 
 // The screens: exactly one owns the panel at a time; they lie on top of each
 // other, and closing one uncovers the one beneath (setScreen(),
@@ -93,7 +89,6 @@ extern uint32_t wallOutputStops;   // the panel output's stops since the start (
 #endif
 
 // The web server, beside the loop, and the answers of its JSON interface.
-extern WiFiServer apServer;
 void webUpdate(bool listening, bool lan);
 String getParam(const String &query, const String &key);
 void sendJson(Print &c, JsonDocument &doc, int code = 200);
