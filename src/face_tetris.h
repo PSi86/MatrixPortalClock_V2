@@ -13,6 +13,10 @@
 // The palette is six hues exactly 60 degrees apart. Because the classes are a
 // proper colouring and the mapping is injective, touching pieces can never end
 // up within 60 degrees of each other - no run-time check needed.
+//
+// To a full hour all four digits are built anew, with an effect from the
+// original game: the rows cleared, the level-up colours or a rocket (the hour
+// change, thr; section "The change to a full hour" below).
 #ifndef FACE_TETRIS_H
 #define FACE_TETRIS_H
 
@@ -51,7 +55,7 @@ const uint8_t TETRIS_PALETTE[TETRIS_COLOUR_CLASSES][3] = {
 // Fields added later go on the end and are filled in by revision, so a blob
 // written by an earlier firmware keeps everything it had.
 #define TETRIS_SETTINGS_MAGIC 0x7E71
-#define TETRIS_SETTINGS_REV   3   // 1 = drop and spin, 2 = adds the shake, 3 = on a time change too
+#define TETRIS_SETTINGS_REV   4   // 1 = drop and spin, 2 = adds the shake, 3 = on a time change too, 4 = the hour change
 
 // How the digits come apart: the break-up effect.
 const uint8_t BREAKUP_COLLAPSE = 0;  // the stack gives way and drops
@@ -61,6 +65,15 @@ const uint8_t BREAKUP_RANDOM   = 3;  // one of the three, drawn each time
 const uint8_t BREAKUP_COUNT    = 4;
 const uint8_t TETRIS_KNOCK_LEVEL_MAX      = 10;   // the knock's sensitivity, stored here (shk)
 
+// What the change to a full hour plays (Peter, 2026-10-23): all four digits
+// built anew, with an effect from the original game.
+const uint8_t HOUR_LINE_CLEAR = 0;   // the old time's rows flash and vanish, four at a time, then the build
+const uint8_t HOUR_COLOURS    = 1;   // the build, then the blocks run through the colours, as at a level-up
+const uint8_t HOUR_ROCKET     = 2;   // the build, then a rocket lifts off between the hours and the minutes
+const uint8_t HOUR_RANDOM     = 3;   // one of the three, drawn each hour
+const uint8_t HOUR_OFF        = 4;   // the plain change, as every minute
+const uint8_t HOUR_COUNT      = 5;
+
 struct TetrisSettings {
   uint16_t magic;
   uint8_t  rev;
@@ -68,7 +81,8 @@ struct TetrisSettings {
   uint16_t spinMs;      // average milliseconds between quarter turns
   uint8_t  knockLevel;  // 0 = knocking the clock does nothing, 1..10 sensitivity
   uint8_t  breakUp;  // the break-up effect: how the digits come apart, see BREAKUP_*
-  uint8_t  unusedRev3;  // was shakeOnChange (rev 3); since 2026-10-08 a changing digit always breaks up
+  uint8_t  hourAnim;    // what the change to a full hour plays, see HOUR_* (rev 4; until 2026-10-08 the byte
+                        // was shakeOnChange, unused since)
 };
 
 const TetrisSettings TETRIS_DEFAULTS = {
@@ -77,18 +91,21 @@ const TetrisSettings TETRIS_DEFAULTS = {
   260,   // and turns a quarter every 260 ms on average
   6,     // reacts to a knock, not to someone walking past
   3,     // a different way of coming apart each time
-  0
+  HOUR_RANDOM   // a different hour animation each hour
 };
 
 // The Tetris settings for the web app and the store (face.h). shk, the knock's
 // sensitivity, is kept here, where it has always been stored.
 const char *const TETRIS_SHS_LABELS[] = { "Collapse", "Scatter", "Clear rows", "Random each time" };   // by value: BREAKUP_*
 static_assert(sizeof(TETRIS_SHS_LABELS) / sizeof(TETRIS_SHS_LABELS[0]) == BREAKUP_COUNT, "a name per break-up effect");
+const char *const TETRIS_THR_LABELS[] = { "Line clear", "Level-up colours", "Rocket", "Random each hour", "Off" };   // by value: HOUR_*
+static_assert(sizeof(TETRIS_THR_LABELS) / sizeof(TETRIS_THR_LABELS[0]) == HOUR_COUNT, "a name per hour animation");
 const SettingParam TETRIS_PARAMS[] = {
   { "tdrop", SETTING_FIELD(TetrisSettings, dropMs),     PARAM_RANGE,  PARAM_LIVE,               TETRIS_DROP_MIN, TETRIS_DROP_MAX,        LOAD_CLAMP,   nullptr },
   { "tspin", SETTING_FIELD(TetrisSettings, spinMs),     PARAM_RANGE,  PARAM_LIVE,               TETRIS_SPIN_MIN, TETRIS_SPIN_MAX,        LOAD_CLAMP,   nullptr },
   { "shk",   SETTING_FIELD(TetrisSettings, knockLevel), PARAM_RANGE,  PARAM_LIVE | PARAM_KNOCK, 0,               TETRIS_KNOCK_LEVEL_MAX, LOAD_CLAMP,   nullptr },
   { "shs",   SETTING_FIELD(TetrisSettings, breakUp),    PARAM_CHOICE, PARAM_LIVE,               0,               BREAKUP_COUNT - 1,      LOAD_DEFAULT, TETRIS_SHS_LABELS },
+  { "thr",   SETTING_FIELD(TetrisSettings, hourAnim),   PARAM_CHOICE, PARAM_LIVE | PARAM_PLAYS, 0,               HOUR_COUNT - 1,         LOAD_DEFAULT, TETRIS_THR_LABELS },
 };
 
 // A blob of an older revision, the same idea as the main settings: rev 1 only
@@ -100,7 +117,7 @@ inline void tetrisMigrate(uint8_t *data, uint8_t rev) {
     t.knockLevel = TETRIS_DEFAULTS.knockLevel;
     t.breakUp = TETRIS_DEFAULTS.breakUp;
   }
-  if (rev < 3) { t.unusedRev3 = 0; }
+  if (rev < 4) { t.hourAnim = TETRIS_DEFAULTS.hourAnim; }   // the byte held 0 since rev 3
 }
 
 class TetrisFace : public Watchface {
@@ -124,6 +141,13 @@ class TetrisFace : public Watchface {
     if (now.turn != _rotation) {
       for (uint8_t i = 0; i < 4; i++) { _breaking[i] = false; }
       layout(now);
+    }
+
+    // The change to a full hour, on the pass that began the hour and before
+    // pushTime() would start the plain change: all four digits come apart.
+    // Only digits that stand can: a face that is just building plays none.
+    if (now.hourTick && now.set && now.minute == 0 && _s.hourAnim != HOUR_OFF && !breakingUp() && allStanding()) {
+      startHour(now, pickHour());
     }
 
     // A digit that has finished coming apart is marked unknown, so the next
@@ -150,27 +174,33 @@ class TetrisFace : public Watchface {
 
     pushTime(now);
 
-    _colonOn = (now.local % 2) == 0;   // 1 Hz blink, in step with the seconds
-
     // Turning runs on its own clock, so a flick between two fall steps has to be
     // painted when it happens - otherwise the drop rate would quietly limit how
     // finely the rotation setting can act.
     uint8_t spinPending = allPendingTurns(now.ms);
 
     bool stepDue = !_settled && (now.ms - _stepLast >= _s.dropMs);
-    bool changed = _colonOn != _colonDrawn || spinPending != _spinDrawn;
+    if (stepDue) {
+      _stepLast = now.ms;
+      step(now.ms);
+    }
+    // The hour change's effect, once its build stands - after the fall step,
+    // which may just have finished it: its frames are changes.
+    bool effectMoved = stepHour(now);
+
+    // 1 Hz blink, in step with the seconds; off while the rocket flies, which
+    // passes through the colon's place (after the effect's step, which may
+    // just have started or ended it).
+    _colonOn = (now.local % 2) == 0 && !rocketFlies();
+
+    bool changed = _colonOn != _colonDrawn || spinPending != _spinDrawn || effectMoved;
     // Debris moving is a change in itself, so while anything is coming apart the
     // face repaints on the animation's clock rather than waiting to be asked.
     // breakUpEnded matters just as much: on the pass where the last piece leaves,
     // nothing is moving any more and nothing has "changed", so without it the
     // face would leave the previous frame - debris and all - standing on the
     // panel for the whole pause.
-    if (!stepDue && !changed && !breakUpEnded && !(anyBreakingUp && breakUpDue)) { return false; }
-    if (stepDue) {
-      _stepLast = now.ms;
-      step(now.ms);
-    }
-    return true;
+    return stepDue || changed || breakUpEnded || (anyBreakingUp && breakUpDue);
   }
 
   // The digits, or the ones coming apart, and the colon. The palette follows
@@ -187,13 +217,17 @@ class TetrisFace : public Watchface {
       if (_breaking[i]) { drawBreakUp(g, i, paint); } else { drawDigit(g, i, originX(i), originY(i), now.ms); }
     }
     if (!now.set) { drawDashes(g, paint); }
-    // The colon keeps its own beat and is never touched by the animations. It is
-    // the one thing on this face that shows real time passing, so it has to stay
-    // on the second, whatever the digits are doing. Hiding it while everything was
-    // coming apart, as an earlier version did, made it drop out mid-phase on a
-    // knock and reappear off-beat as the new digits arrived.
+    // The colon keeps its own beat and is not touched by the digits' animations.
+    // It is the one thing on this face that shows real time passing, so it has to
+    // stay on the second, whatever the digits are doing. Hiding it while everything
+    // was coming apart, as an earlier version did, made it drop out mid-phase on a
+    // knock and reappear off-beat as the new digits arrived. The one exception is
+    // the hour's rocket, which flies through its place: the two over each other
+    // were not pleasant (Peter, 2026-10-23), so the colon is off for its 2.8 s and
+    // comes back on its beat (update()).
     if (_colonOn) { drawColon(g, paint); }
     _colonDrawn = _colonOn;
+    if (rocketFlies()) { drawRocket(g, now, paint); }
     // After the step, because a piece may have landed and the next one armed.
     _spinDrawn = allPendingTurns(now.ms);
   }
@@ -202,16 +236,19 @@ class TetrisFace : public Watchface {
   // built, or blocks are still falling - for the time's change or for the
   // animation a knock asked for: what the clock plans itself waits for both.
   // (K7 of the face refactor: until 2026-10-20 the face counted as at rest in
-  // the beat, and something could start in it.)
+  // the beat, and something could start in it.) The hour change counts until
+  // its effect is over.
   bool busy(const FaceNow &now) const override {
-    if (breakingUp() || !_settled) { return true; }
+    if (breakingUp() || !_settled || _hourPart != PART_NONE) { return true; }
     if (now.set) {
       for (uint8_t i = 0; i < 4; i++) { if (_digits[i].value > 9) { return true; } }
     }
     return false;
   }
 
-  bool offers(FaceTrigger why) const override { return why == TRIGGER_ACTION || why == TRIGGER_PREVIEW_CHANGE; }
+  bool offers(FaceTrigger why) const override {
+    return why == TRIGGER_ACTION || why == TRIGGER_PREVIEW_CHANGE || why == TRIGGER_PREVIEW_ANIMATION;
+  }
 
   // The input's animation: all four digits come apart and are built anew -
   // unless they are coming apart already, or the last effect ended less than
@@ -224,27 +261,52 @@ class TetrisFace : public Watchface {
   // 15 s or so at a drop pace of 90 ms, by the build's length (Peter: what
   // the user asks for is granted).
   // The web app's preview of a setting tried there is the same run, now or
-  // not at all.
+  // not at all. The hour change's effect - the rows cleared, the colours, the
+  // rocket - is not cut short: a knock then does nothing; one in its build
+  // takes the build over as any knock does, and the effect still due is
+  // dropped (Peter, 2026-10-23).
+  // A new choice of the hour change, tried in the web app, plays it once
+  // with the time on show (TRIGGER_PREVIEW_ANIMATION); Off plays nothing.
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override {
+    if (why == TRIGGER_PREVIEW_ANIMATION) {
+      if (_s.hourAnim == HOUR_OFF) { return OUTCOME_NONE; }
+      if (!now.set || hourEffectRuns() || breakingUp() || now.ms - _breakUpEndedAt < FACE_REST_MS) { return OUTCOME_REFUSED; }
+      startHour(now, pickHour());
+      return OUTCOME_PLAYED;
+    }
     if (why != TRIGGER_ACTION && why != TRIGGER_PREVIEW_CHANGE) { return OUTCOME_NONE; }
-    if (breakingUp() || now.ms - _breakUpEndedAt < FACE_REST_MS) { return OUTCOME_REFUSED; }
+    if (hourEffectRuns() || breakingUp() || now.ms - _breakUpEndedAt < FACE_REST_MS) { return OUTCOME_REFUSED; }
+    _hourPart = PART_NONE;   // a build of the hour change taken over: its effect is not played
     breakUpAll(now.ms);
     return OUTCOME_PLAYED;
   }
 
   // Its change starts at the minute: the digits that change break up, and are
-  // built anew.
+  // built anew. To a full hour all four, with the hour's effect after them (or
+  // the rows cleared before them); with Random each hour the longest of the
+  // three, as the one that plays is drawn only then.
   FaceSpan changeSpan(const FaceNow &now, time_t minute) const override {
     FaceSpan s = { 0, 0 };
     if (!now.set) { return s; }
-    if (minute != _spanFor || _s.dropMs != _spanDrop || _rotation != _spanTurn) {
+    if (minute != _spanFor || _s.dropMs != _spanDrop || _rotation != _spanTurn || _s.hourAnim != _spanHour) {
       uint8_t from[4], to[4];
       faceDigits(minute - 60, true, from, 0xFF);
       faceDigits(minute, true, to, 0xFF);
-      _spanTail = (unsigned long)BREAKUP_MAX_MS + HOLD_MS + (unsigned long)buildSteps(to, from) * _s.dropMs;
+      if (clockMinute(minute) == 0 && _s.hourAnim != HOUR_OFF) {
+        unsigned long build = (unsigned long)buildSteps(to, nullptr) * _s.dropMs;
+        _spanTail = 0;
+        for (uint8_t style = 0; style < HOUR_RANDOM; style++) {
+          if (_s.hourAnim != HOUR_RANDOM && _s.hourAnim != style) { continue; }
+          unsigned long t = hourLength(style, build);
+          if (t > _spanTail) { _spanTail = t; }
+        }
+      } else {
+        _spanTail = (unsigned long)BREAKUP_MAX_MS + HOLD_MS + (unsigned long)buildSteps(to, from) * _s.dropMs;
+      }
       _spanFor = minute;
       _spanDrop = _s.dropMs;
       _spanTurn = _rotation;
+      _spanHour = _s.hourAnim;
     }
     s.tail = _spanTail;
     return s;
@@ -252,10 +314,12 @@ class TetrisFace : public Watchface {
 
 #if defined(FACE_FRAME_LOG)
   // Test builds: a scene starts with the face afresh - a new layout and drop,
-  // no rest after an effect.
+  // no rest after an effect, no hour change under way.
   void testReset() {
     _rotation = 0xFF;
     _breakUpEndedAt = 0;
+    _hourPart = PART_NONE;
+    _hueShift = 0;
   }
 #endif
 
@@ -277,6 +341,16 @@ class TetrisFace : public Watchface {
   // The longest break-up, measured on the PC (tools.local/refactor/host,
   // 2026-10-20): rows cleared take 0.9 s, the others up to 0.6 s upright.
   static const uint16_t BREAKUP_MAX_MS        = 900;
+  // The hour change's line clear: the old time's rows go four at a time from
+  // the bottom, as four lines cleared at once in the game - each group lit
+  // white three times, then gone, and the rows above drop into the gap. Not a
+  // choice of the break-up effect: the hour change's own.
+  static const uint8_t  BREAKUP_FOUR_ROWS   = BREAKUP_COUNT;
+  static const uint8_t  FOUR_ROWS           = 4;
+  static const uint8_t  FOUR_BLINK_STEPS    = 3;   // lit, then its colours, each this many steps
+  static const uint8_t  FOUR_GROUP_STEPS    = 6 * FOUR_BLINK_STEPS;   // three times lit, the last half already gone
+  static const uint16_t FOUR_ROWS_MS =
+      (uint16_t)((TETRIS_GRID_H + FOUR_ROWS - 1) / FOUR_ROWS) * FOUR_GROUP_STEPS * BREAKUP_STEP_MS;
   // All of this is per digit, not per display: the animation takes all four apart
   // at once, but a minute change only replaces the digits that actually
   // changed, and those have to come apart on their own while the rest stand
@@ -500,6 +574,8 @@ class TetrisFace : public Watchface {
       _holdUntil[i] = 0;   // a rotation rebuilds at once, it does not wait
     }
     _settled = false;
+    _hourPart = PART_NONE;   // a turn rebuilds: an hour change under way is over
+    _hueShift = 0;
   }
 
   // Hand the current HH:MM to the four digits. Only a digit whose value really
@@ -594,7 +670,9 @@ class TetrisFace : public Watchface {
         if (cx < 0) { cx = 0; }
       }
 
-      uint16_t col = _pal[s.hue[TETRIS_PIECE_CLASS(rec)]];
+      // The hour's level-up colours move every piece on through the palette
+      // together: the colouring stays proper, touching pieces apart.
+      uint16_t col = _pal[(s.hue[TETRIS_PIECE_CLASS(rec)] + _hueShift) % TETRIS_COLOUR_CLASSES];
       int      bx  = originX + cx * TETRIS_CELL;
       int      by  = originY + (bottom - (TETRIS_SIZE[orient] & 0x0F) + 1) * TETRIS_CELL;
       for (uint8_t c = 0; c < 4; c++) {
@@ -667,12 +745,13 @@ class TetrisFace : public Watchface {
   // one still in the air simply goes with the rest of the build.
   void breakUpDigit(uint8_t d, uint8_t style) {
     Digit &s = _digits[d];
+    bool rows = (style == BREAKUP_CLEAR || style == BREAKUP_FOUR_ROWS);   // these two take rows away, on a grid
     _breakUpOf[d]    = style;
     _debrisCount[d]      = 0;
     _breakUpSteps[d]      = 0;
     _rowTick[d]  = 0;
-    _rowsLeft[d] = (style == BREAKUP_CLEAR) ? TETRIS_GRID_H : 0;
-    if (style == BREAKUP_CLEAR) { memset(_clearGrid[d], 0, TETRIS_GRID_W * TETRIS_GRID_H); }
+    _rowsLeft[d] = rows ? TETRIS_GRID_H : 0;
+    if (rows) { memset(_clearGrid[d], 0, TETRIS_GRID_W * TETRIS_GRID_H); }
     if (s.value > 9) { return; }   // nothing standing there, so nothing to throw
 
     uint8_t total   = TETRIS_PIECES_PER_DIGIT[s.value];
@@ -685,7 +764,7 @@ class TetrisFace : public Watchface {
       uint16_t rec    = pieceAt(s.value, s.variant, p);
       uint8_t  orient = TETRIS_PIECE_ORIENT(rec);
       uint8_t  colour = s.hue[TETRIS_PIECE_CLASS(rec)];
-      if (style == BREAKUP_CLEAR) {
+      if (rows) {
         for (uint8_t c = 0; c < 4; c++) {
           uint8_t cell = TETRIS_SHAPE[orient][c];
           uint8_t gx = TETRIS_PIECE_X(rec) + (cell >> 4);
@@ -732,6 +811,18 @@ class TetrisFace : public Watchface {
   bool stepBreakUp(uint8_t d, int16_t panelH) {
     if (++_breakUpSteps[d] > 150) { return true; }   // never let it hang
 
+    if (_breakUpOf[d] == BREAKUP_FOUR_ROWS) {
+      if (++_rowTick[d] < FOUR_GROUP_STEPS) { return false; }
+      _rowTick[d] = 0;
+      uint8_t n = (_rowsLeft[d] < FOUR_ROWS) ? _rowsLeft[d] : FOUR_ROWS;
+      for (int r = TETRIS_GRID_H - 1; r >= (int)n; r--) {   // the rows above drop into the gap
+        memcpy(&_clearGrid[d][r * TETRIS_GRID_W], &_clearGrid[d][(r - n) * TETRIS_GRID_W], TETRIS_GRID_W);
+      }
+      memset(&_clearGrid[d][0], 0, (size_t)n * TETRIS_GRID_W);
+      _rowsLeft[d] -= n;
+      return _rowsLeft[d] == 0;
+    }
+
     if (_breakUpOf[d] == BREAKUP_CLEAR) {
       if (++_rowTick[d] < ROW_FLASH_STEPS) { return false; }
       _rowTick[d] = 0;
@@ -770,6 +861,25 @@ class TetrisFace : public Watchface {
 
   // Draw the one digit that is coming apart.
   void drawBreakUp(Adafruit_GFX &g, uint8_t d, const FacePaint &paint) const {
+    if (_breakUpOf[d] == BREAKUP_FOUR_ROWS) {
+      // The group going: the bottom rows, lit white, in their colours, lit,
+      // ... and in the last blink already gone.
+      uint8_t n = (_rowsLeft[d] < FOUR_ROWS) ? _rowsLeft[d] : FOUR_ROWS;
+      uint8_t blink = _rowTick[d] / FOUR_BLINK_STEPS;   // 0..5
+      uint16_t white = paint.visible(255, 255, 255);
+      int ox = originX(d), oy = originY(d);
+      for (uint8_t gy = 0; gy < TETRIS_GRID_H; gy++) {
+        bool going = gy >= TETRIS_GRID_H - n;
+        if (going && blink == 5) { continue; }
+        for (uint8_t gx = 0; gx < TETRIS_GRID_W; gx++) {
+          uint8_t v = _clearGrid[d][gy * TETRIS_GRID_W + gx];
+          if (!v) { continue; }
+          uint16_t col = (going && (blink & 1) == 0) ? white : _pal[v - 1];
+          g.fillRect(ox + gx * TETRIS_CELL, oy + gy * TETRIS_CELL, TETRIS_CELL, TETRIS_CELL, col);
+        }
+      }
+      return;
+    }
     if (_breakUpOf[d] == BREAKUP_CLEAR) {
       bool flash = (_rowTick[d] == ROW_FLASH_STEPS - 1);
       uint16_t white = paint.visible(255, 255, 255);
@@ -792,6 +902,171 @@ class TetrisFace : public Watchface {
         uint8_t cell = TETRIS_SHAPE[f.orient][c];
         g.fillRect(bx + (cell >> 4) * TETRIS_CELL, by + (cell & 0x0F) * TETRIS_CELL,
                    TETRIS_CELL, TETRIS_CELL, col);
+      }
+    }
+  }
+
+  /* ----------------------------------------------------------------------
+     The change to a full hour (Peter, 2026-10-23)
+
+     All four digits come apart - the line clear takes the old time's rows
+     away four at a time, the others use the break-up effect - and are built
+     anew; then, for the colours and the rocket, the effect plays over the
+     time that stands. In parts: PART_REBUILD from the start until every
+     digit stands again, PART_EFFECT until the effect is over.
+     ------------------------------------------------------------------------- */
+  static const uint8_t  PART_NONE = 0, PART_REBUILD = 1, PART_EFFECT = 2;
+  // Level-up colours: every piece's colour moves on a hue per step, twice
+  // round the six, and the last step is its own colours again.
+  static const uint16_t COLOUR_STEP_MS = 200;
+  static const uint8_t  COLOUR_STEPS   = 2 * TETRIS_COLOUR_CLASSES;
+  static const uint16_t COLOURS_MS     = COLOUR_STEPS * COLOUR_STEP_MS;
+  // The rocket: it stands ROCKET_STAND_MS on its flame with smoke spreading,
+  // then lifts off, faster and faster, and has left the panel by ROCKET_MS.
+  static const uint16_t ROCKET_STEP_MS  = 40;
+  static const uint16_t ROCKET_STAND_MS = 900;
+  static const uint16_t ROCKET_MS       = 2800;
+  static const uint8_t  ROCKET_W = 6, ROCKET_H = 9, ROCKET_FLAME = 3;
+  static const uint8_t  SMOKE_PUFFS = 4;          // to each side
+  static const uint16_t SMOKE_LIFE_MS = 1400;
+  // Own pixel art after the rocket Game Boy Tetris launches: nose and fins
+  // red (R), the body light grey (W), a blue window (B).
+  static constexpr const char *ROCKET_ROWS[ROCKET_H] = {
+    "..RR..",
+    ".RRRR.",
+    ".WWWW.",
+    ".WBBW.",
+    ".WBBW.",
+    ".WWWW.",
+    ".WWWW.",
+    "RWWWWR",
+    "RR..RR",
+  };
+
+  // Every digit has blocks standing: the hour change has something to take apart.
+  bool allStanding() const {
+    for (uint8_t i = 0; i < 4; i++) { if (_digits[i].value > 9 || _digits[i].piece == 0) { return false; } }
+    return true;
+  }
+
+  // Every digit built to its last piece.
+  bool allBuilt() const {
+    for (uint8_t i = 0; i < 4; i++) {
+      const Digit &s = _digits[i];
+      if (s.value > 9 || s.piece < TETRIS_PIECES_PER_DIGIT[s.value]) { return false; }
+    }
+    return true;
+  }
+
+  uint8_t pickHour() const {
+    uint8_t style = _s.hourAnim;
+    if (style >= HOUR_RANDOM) { style = (uint8_t)faceRandom(HOUR_RANDOM); }
+    return style;
+  }
+
+  bool hourEffectRuns() const { return _hourPart == PART_EFFECT; }
+  bool rocketFlies() const { return _hourPart == PART_EFFECT && _hourStyle == HOUR_ROCKET; }
+
+  // The hour change begins: all four come apart together.
+  void startHour(const FaceNow &now, uint8_t style) {
+    _hourStyle = style;
+    _hourPart  = PART_REBUILD;
+    _hueShift  = 0;
+    _breakUpStepLast = now.ms;
+    uint8_t apart = (style == HOUR_LINE_CLEAR) ? BREAKUP_FOUR_ROWS : pickBreakUp();
+    for (uint8_t d = 0; d < 4; d++) { breakUpDigit(d, apart); }
+    Console.printf("Tetris: the hour change, %s\n", TETRIS_THR_LABELS[style]);
+  }
+
+  // On every pass: once the rebuild stands, the effect begins (the line clear
+  // has none); the effect steps on its own clock. Whether its picture moved.
+  bool stepHour(const FaceNow &now) {
+    if (_hourPart == PART_REBUILD) {
+      if (breakingUp() || !_settled || !allBuilt()) { return false; }
+      if (_hourStyle == HOUR_LINE_CLEAR) { endHour(now); return false; }
+      _hourPart    = PART_EFFECT;
+      _effectAt    = now.ms;
+      _effectFrame = 0xFFFF;
+      _rocketSeed  = (uint8_t)faceRandom(256);
+    }
+    if (_hourPart != PART_EFFECT) { return false; }
+    unsigned long t = now.ms - _effectAt;
+    bool colours = (_hourStyle == HOUR_COLOURS);
+    if (t >= (colours ? COLOURS_MS : ROCKET_MS)) { endHour(now); return true; }
+    uint16_t frame = (uint16_t)(t / (colours ? COLOUR_STEP_MS : ROCKET_STEP_MS));
+    if (frame == _effectFrame) { return false; }
+    _effectFrame = frame;
+    if (colours) { _hueShift = (uint8_t)((frame + 1) % TETRIS_COLOUR_CLASSES); }
+    return true;
+  }
+
+  void endHour(const FaceNow &now) {
+    _hourPart = PART_NONE;
+    _hueShift = 0;
+    _breakUpEndedAt = now.ms;   // the rest after an animation, as after a break-up
+  }
+
+  // How long the hour change takes with this style, its build `build` ms.
+  unsigned long hourLength(uint8_t style, unsigned long build) const {
+    unsigned long apart  = (style == HOUR_LINE_CLEAR) ? FOUR_ROWS_MS : BREAKUP_MAX_MS;
+    unsigned long effect = (style == HOUR_COLOURS) ? COLOURS_MS : (style == HOUR_ROCKET) ? ROCKET_MS : 0;
+    return apart + HOLD_MS + build + effect;
+  }
+
+  // The rocket, in the middle of the panel: in landscape in the gap between
+  // the hours and the minutes (x 29..34), upright over the digits. Smoke
+  // puffs spread from its foot while it stands and fade; then it lifts off,
+  // faster and faster, a short trail below its flame.
+  void drawRocket(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) const {
+    unsigned long t = now.ms - _effectAt;
+    if (t >= ROCKET_MS) { return; }
+    int x0 = now.w / 2 - ROCKET_W / 2;
+    int y0 = now.h - ROCKET_FLAME - ROCKET_H;   // its top while it stands, the flame below it on the panel
+    int lift = 0;
+    bool flying = t > ROCKET_STAND_MS;
+    if (flying) {
+      unsigned long f = t - ROCKET_STAND_MS, fly = ROCKET_MS - ROCKET_STAND_MS;
+      unsigned long dist = (unsigned long)(y0 + ROCKET_H + ROCKET_FLAME + 1);   // until the flame has left the top
+      lift = (int)(dist * f / fly * f / fly);
+    }
+    int top = y0 - lift;
+
+    // Smoke, behind the rocket: a puff to each side every 170 ms while it
+    // stands, drifting out a pixel per 100 ms and fading over SMOKE_LIFE_MS.
+    for (uint8_t i = 0; i < SMOKE_PUFFS; i++) {
+      unsigned long born = 150UL + i * 170UL;
+      if (t < born) { break; }
+      unsigned long age = t - born;
+      if (age >= SMOKE_LIFE_MS) { continue; }
+      uint8_t grey = (uint8_t)(150UL * (SMOKE_LIFE_MS - age) / SMOKE_LIFE_MS);
+      uint16_t c = paint.color(grey, grey, grey);
+      int dx = 2 + (int)(age / 100);
+      int y = now.h - 2 - ((_rocketSeed >> i) & 1);
+      g.fillRect(x0 - dx, y, 2, 2, c);
+      g.fillRect(x0 + ROCKET_W - 2 + dx, y, 2, 2, c);
+    }
+
+    // The flame under its middle: one row as it lights, then two or three,
+    // flickering; in flight a trail of two fading pixels below it.
+    uint16_t frame = (uint16_t)(t / ROCKET_STEP_MS);
+    uint8_t flick = (uint8_t)((frame * 7U + _rocketSeed) % 3U);
+    uint8_t len = (t < 300) ? 1 : (flick != 0 ? 3 : 2);
+    for (uint8_t r = 0; r < len; r++) {
+      uint16_t c = (r == 0) ? paint.color(255, 230, 0) : paint.color(255, r == 1 ? 120 : 60, 0);
+      g.fillRect(x0 + 2, top + ROCKET_H + r, 2, 1, c);
+    }
+    if (flying) {
+      g.fillRect(x0 + 2, top + ROCKET_H + len, 2, 1, paint.color(90, 90, 90));
+      g.fillRect(x0 + 2, top + ROCKET_H + len + 1, 2, 1, paint.color(45, 45, 45));
+    }
+
+    // The rocket itself.
+    for (uint8_t r = 0; r < ROCKET_H; r++) {
+      for (uint8_t c = 0; c < ROCKET_W; c++) {
+        char k = ROCKET_ROWS[r][c];
+        if (k == '.') { continue; }
+        uint16_t col = (k == 'R') ? paint.color(255, 40, 30) : (k == 'B') ? paint.color(40, 120, 255) : paint.color(200, 200, 210);
+        g.drawPixel(x0 + c, top + r, col);
       }
     }
   }
@@ -825,10 +1100,18 @@ class TetrisFace : public Watchface {
   unsigned long _breakUpStepLast = 0;                   // one clock for all of them, they step together
   unsigned long _holdUntil[4] = {0, 0, 0, 0};    // empty space before the rebuild starts
   unsigned long _breakUpEndedAt = 0;   // when the last effect had run its course
+  // The hour change (startHour()).
+  uint8_t       _hourPart    = PART_NONE;        // none, its rebuild, its effect
+  uint8_t       _hourStyle   = HOUR_LINE_CLEAR;  // the one playing: HOUR_LINE_CLEAR, HOUR_COLOURS or HOUR_ROCKET
+  uint8_t       _hueShift    = 0;                // the level-up colours' shift; 0 = the pieces' own colours
+  unsigned long _effectAt    = 0;                // millis() the effect began
+  uint16_t      _effectFrame = 0xFFFF;           // its frame last stepped
+  uint8_t       _rocketSeed  = 0;                // the flame's flicker and the smoke, drawn when it begins
   // The tail of the last span asked for, kept: the rules for the panel ask on
-  // every pass, and it changes only with the minute, the pace or the turn.
+  // every pass, and it changes only with the minute, the pace, the turn or
+  // the hour change chosen.
   mutable time_t        _spanFor  = 0;
-  mutable uint8_t       _spanDrop = 0, _spanTurn = 0xFF;
+  mutable uint8_t       _spanDrop = 0, _spanTurn = 0xFF, _spanHour = 0xFF;
   mutable unsigned long _spanTail = 0;
 };
 
