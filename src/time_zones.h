@@ -14,6 +14,7 @@
 #ifndef TIME_ZONES_H
 #define TIME_ZONES_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -55,6 +56,9 @@ const char *tzRule(int32_t offset);
 // Whether daylight saving is in effect at this UTC instant under a POSIX TZ
 // rule (nullptr: never), decided by the C library.
 bool dstActiveAt(const char *rule, time_t utc);
+
+// An offset from UTC as "UTC+1", "UTC-11" or "UTC+5:30".
+void formatOffset(char *buf, size_t size, long offset);
 
 #if defined(CLOCK_DEBUG)
 // Debug build only: dstActiveAt() against the 2026 changes, printed.

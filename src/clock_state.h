@@ -15,6 +15,10 @@
 
 // millis() at the start of the loop's pass.
 extern unsigned long millisNow;
+// The time on the panel as the timekeeper counts it, and what changed on this
+// pass (timekeeper()).
+extern uint8_t hourNow, minuteNow, secondNow;
+extern bool secondTrigger, minuteTrigger, hourTrigger;
 
 // The panel: what is on it has to be drawn anew (a setting, a status that shows).
 extern bool panelDirty;

@@ -1,6 +1,7 @@
 // The zones' daylight saving (time_zones.h).
 #include "time_zones.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include "console.h"
 
@@ -63,3 +64,12 @@ void dstSelfTest() {
   Console.print("DST self-test: "); Console.print(ok); Console.print('/'); Console.print(total); Console.println(" ok");
 }
 #endif
+
+// An offset from UTC as "UTC+1", "UTC-11" or "UTC+5:30".
+void formatOffset(char *buf, size_t size, long offset) {
+  char sign = (offset < 0) ? '-' : '+';
+  long magnitude = (offset < 0) ? -offset : offset;
+  unsigned hours = magnitude / 3600, minutes = (magnitude % 3600) / 60;
+  if (minutes) { snprintf(buf, size, "UTC%c%u:%02u", sign, hours, minutes); }
+  else         { snprintf(buf, size, "UTC%c%u", sign, hours); }
+}
