@@ -493,10 +493,10 @@ bool       noticeCardsRound = false;   // the steps on the panel are cards of th
 #if BAND_ON_PANEL
 // The wall clock's info band (bandUpdate()): the turn on show - an item by
 // source and tag, or one of the clock's own: the clock change, the date, the
-// sun and the moon - and the picture it draws into.
+// sun, the moon and the room - and the picture it draws into.
 GFXcanvas16 bandPicture(WALL_W, WALL_BAND_H);
-enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON };
-const uint8_t BAND_LOCAL_FIRST = TURN_STATUS, BAND_LOCAL_COUNT = 5;   // the clock's own, in their order
+enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON, TURN_ROOM };
+const uint8_t BAND_LOCAL_FIRST = TURN_STATUS, BAND_LOCAL_COUNT = 6;   // the clock's own, in their order
 struct BandTurn { uint8_t kind, feed; uint32_t tag; };
 // The clock's own turns as they stand, worked out once a minute (bandLocalUpdate()).
 struct BandLocal { bool on; uint8_t icon, severity; char text[64]; };   // its parts set apart by " | " (bandWrap())
@@ -8178,6 +8178,18 @@ void bandLocalUpdate() {
   bandDateLines(bandLocal[TURN_DATE - BAND_LOCAL_FIRST]);
   bandSunLines(bandLocal[TURN_SUN - BAND_LOCAL_FIRST]);
   bandMoonLines(bandLocal[TURN_MOON - BAND_LOCAL_FIRST]);
+  bandRoomLines(bandLocal[TURN_ROOM - BAND_LOCAL_FIRST]);
+}
+
+// The room's temperature and humidity from the board's SHTC3, filtered:
+// "Indoor 22.4°C | humidity 48%". Off until it gave a reading.
+void bandRoomLines(BandLocal &l) {
+  l.on = roomValid;
+  l.icon = ICON_INDOOR;
+  if (!roomValid) { l.text[0] = '\0'; return; }
+  long t = lroundf(roomTemp * 10.0f);   // tenths, without the C library's float printing
+  snprintf(l.text, sizeof(l.text), "Indoor %s%ld.%ld°C | humidity %ld%%", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10,
+           lroundf(roomHum));
 }
 
 // The band's picture as the turn stands, onto the wall.
