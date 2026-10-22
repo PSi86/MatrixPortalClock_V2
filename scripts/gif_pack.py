@@ -1,7 +1,7 @@
 # The GIF pack: all the GIFs of the MatrixPortal S3 (none is built into the
 # firmware since the flash layout of 2026-10-09), in the board's ffat
 # partition (4544 KB), which the clock uses for nothing else. The firmware
-# reads it at start-up (section "GIF pack" in the sketch).
+# reads it at start-up (src/gif_player.cpp, section "GIF pack").
 #
 # As a PlatformIO script (extra_scripts of the S3 env) it adds two targets:
 #   pio run -e adafruit_matrixportal_s3 -t gifpack

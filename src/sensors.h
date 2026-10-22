@@ -9,7 +9,7 @@
    up to SENSOR_TRIES times, SENSOR_RETRY_MS apart, and a try that fails is
    said on the console with whether the part answered on its address at all.
 
-   The sketch remembers which sensors were found at earlier starts (its
+   The clock remembers which sensors were found at earlier starts (its
    "sensors" record). One of those missing now turns the status pixel red, the
    start says SENSOR, and the web app lists it, with "Forget" for a sensor the
    clock no longer has.

@@ -20,7 +20,7 @@
      made the panel output stop on 2026-10-18 - and the copy into PSRAM is the
      CPU's. Its SHA-1 is checked against the index.
    - speed: every GIF read once and checked, for the console.
-   loop() sends it jobs and takes its results (gifCardUpdate() in the sketch);
+   loop() sends it jobs and takes its results (gifCardUpdate() in gif_player.cpp);
    it never waits for the card.
    ------------------------------------------------------------------------- */
 #pragma once

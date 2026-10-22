@@ -10,7 +10,7 @@
 
    A scene is a plan of actions on a timeline, in milliseconds from its
    start. What the face shows at any moment follows from the plan and the
-   time alone (at()), so the sketch plans it backwards from the minute and
+   time alone (at()), so the face (face_aliens.h) plans it backwards from the minute and
    draws it on whatever pass the loop has.
    ---------------------------------------------------------------------- */
 #pragma once
