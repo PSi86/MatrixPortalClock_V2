@@ -163,6 +163,29 @@ Settings settings;
 // upload, not just a restart: in NVS (board_hal.h).
 SettingsStore<Settings> clockStore;
 
+// The web app's keys for them (settings_table.h). A stored value is checked
+// in applySettings(): the daylight saving mode and the fly-in time are moved
+// into their ranges, a watchface the firmware does not know becomes the
+// classic one, the colours are made full ones; nothing else ever was.
+const SettingParam CLOCK_PARAMS[] = {
+  { "wf",     SETTING_FIELD(Settings, watchface),         PARAM_RANGE,    PARAM_LIVE,                0,                  WATCHFACE_COUNT - 1, LOAD_DEFAULT, nullptr },
+  { "tz",     0, 0,                                       PARAM_SPECIAL,  0,                         0,                  0,                   LOAD_KEEP,    nullptr },   // seconds, as the zone list offers them (applyParams())
+  { "dst",    SETTING_FIELD(Settings, dst),               PARAM_RANGE,    0,                         DST_WINTER,         DST_AUTO,            LOAD_CLAMP,   nullptr },
+  { "bright", SETTING_FIELD(Settings, brightness),        PARAM_RANGE,    PARAM_LIVE,                0,                  255,                 LOAD_KEEP,    nullptr },
+  { "speed",  SETTING_FIELD(Settings, classic.flyInTime), PARAM_SCALED,   PARAM_LIVE,                FLY_IN_MIN_MS / 10, FLY_IN_MAX_MS / 10,  LOAD_CLAMP,   nullptr },
+  { "digit",  (uint8_t)offsetof(Settings, classic.digitR), 3, PARAM_COLOUR, PARAM_LIVE | PARAM_REDRAW, 0,                  0,                   LOAD_KEEP,    nullptr },
+  { "trail",  (uint8_t)offsetof(Settings, classic.trailR), 3, PARAM_COLOUR, PARAM_LIVE | PARAM_REDRAW, 0,                  0,                   LOAD_KEEP,    nullptr },
+  { "dirs",   0, 0,                                       PARAM_SPECIAL,  0,                         0,                  0,                   LOAD_KEEP,    nullptr },   // sent as dir0 .. dir5 (applyParams())
+  { "synch",  SETTING_FIELD(Settings, syncHour),          PARAM_RANGE,    0,                         0,                  23,                  LOAD_KEEP,    nullptr },
+  { "syncm",  SETTING_FIELD(Settings, syncMinute),        PARAM_RANGE,    0,                         0,                  59,                  LOAD_KEEP,    nullptr },
+  { "autob",  SETTING_FIELD(Settings, autoBright),        PARAM_CHECKBOX, PARAM_LIVE,                0,                  1,                   LOAD_KEEP,    nullptr },
+  { "luxd",   SETTING_FIELD(Settings, luxDark),           PARAM_RANGE,    PARAM_LIVE,                0,                  65535,               LOAD_KEEP,    nullptr },
+  { "luxb",   SETTING_FIELD(Settings, luxBright),         PARAM_RANGE,    PARAM_LIVE,                1,                  65535,               LOAD_KEEP,    nullptr },
+  { "brmin",  SETTING_FIELD(Settings, brightMin),         PARAM_RANGE,    PARAM_LIVE,                0,                  255,                 LOAD_KEEP,    nullptr },
+  { "brmax",  SETTING_FIELD(Settings, brightMax),         PARAM_RANGE,    PARAM_LIVE,                0,                  255,                 LOAD_KEEP,    nullptr },
+};
+SettingsTable clockTable = SETTING_TABLE(settings, DEFAULTS, CLOCK_PARAMS);
+
 // Input profiles -------------------------------------------------------------
 // The tables and the rules they are checked against are in input_map.h; the
 // config page picks one, stored as its position in this list. So the order is
@@ -202,6 +225,19 @@ const uint16_t SYNC_DAYS_MAX = 366;
 const UiSettings UI_DEFAULTS = { UI_SETTINGS_MAGIC, UI_SETTINGS_REV, 0, 7, 0, 0 };
 UiSettings uiSettings;
 SettingsStore<UiSettings> uiStore;
+// The web app's keys for them (settings_table.h), with the Inputs page's two
+// lists, whose blobs of their own are taken by their own code
+// (applyKeysForm(), applyNoticeKeysForm()). The input profile and the
+// sensor's mount count only once the Inputs page passed its check: a save
+// it fails stores nothing at all (apiSave()).
+const SettingParam UI_PARAMS[] = {
+  { "prof",   SETTING_FIELD(UiSettings, inputProfile), PARAM_RANGE,   0, 0, INPUT_PROFILE_COUNT - 1, LOAD_DEFAULT, nullptr },
+  { "syncd",  SETTING_FIELD(UiSettings, syncDays),     PARAM_RANGE,   0, 0, SYNC_DAYS_MAX,           LOAD_DEFAULT, nullptr },
+  { "gmount", SETTING_FIELD(UiSettings, gestureMount), PARAM_RANGE,   0, 0, 3,                       LOAD_MASK,    nullptr },
+  { "keys",   0, 0,                                    PARAM_SPECIAL, 0, 0, 0,                       LOAD_KEEP,    nullptr },   // sent as k0, k1 ...
+  { "closes", 0, 0,                                    PARAM_SPECIAL, 0, 0, 0,                       LOAD_KEEP,    nullptr },   // sent as cset, c0, c1 ...
+};
+SettingsTable uiTable = SETTING_TABLE(uiSettings, UI_DEFAULTS, UI_PARAMS);
 
 // Face shortcuts: what each face event does (input_map.h: FACE_EVENTS), as
 // FACE_ACTIONS codes. A blob of its own (NVS key "keys"); nothing stored means
@@ -246,6 +282,17 @@ const GifSettings GIF_DEFAULTS = { GIF_SETTINGS_MAGIC, GIF_SETTINGS_REV, 1, 2, 3
                                    GIF_BRIGHT_MIN_DEFAULT, GIF_BRIGHT_TIMES_DEFAULT, { 0 } };
 GifSettings gifSettings;
 SettingsStore<GifSettings> gifStore;
+// The web app's keys for them (settings_table.h); the longest time between
+// two GIFs is at least the shortest (gifSettingsCheck()).
+const SettingParam GIF_PARAMS[] = {
+  { "gifr",   SETTING_FIELD(GifSettings, randomOn),    PARAM_CHECKBOX, 0, 0,                    1,                    LOAD_BOOL,  nullptr },
+  { "gifmin", SETTING_FIELD(GifSettings, minMinutes),  PARAM_RANGE,    0, 1,                    GIF_MINUTES_MAX,      LOAD_CLAMP, nullptr },
+  { "gifmax", SETTING_FIELD(GifSettings, maxMinutes),  PARAM_RANGE,    0, 1,                    GIF_MINUTES_MAX,      LOAD_CLAMP, nullptr },
+  { "gifsec", SETTING_FIELD(GifSettings, seconds),     PARAM_RANGE,    0, GIF_SECONDS_MIN,      GIF_SECONDS_MAX,      LOAD_CLAMP, nullptr },
+  { "gifbr",  SETTING_FIELD(GifSettings, minBright),   PARAM_RANGE,    0, 0,                    255,                  LOAD_KEEP,  nullptr },
+  { "gifbx",  SETTING_FIELD(GifSettings, brightTimes), PARAM_TENTHS,   0, GIF_BRIGHT_TIMES_MIN, GIF_BRIGHT_TIMES_MAX, LOAD_CLAMP, nullptr },
+};
+SettingsTable gifTable = SETTING_TABLE(gifSettings, GIF_DEFAULTS, GIF_PARAMS);
 
 // GIF playback state (the section "GIF playback" at the end of the sketch).
 #if BOARD_WAVESHARE_WALL
@@ -405,6 +452,15 @@ const uint8_t DECOR_EXTRAS_MINUTES[DECOR_EXTRAS_MAX + 1] = { 0, 60, 30, 15, 10, 
 const DecorSettings DECOR_DEFAULTS = { DECOR_SETTINGS_MAGIC, DECOR_SETTINGS_REV, 5, 0, 0, 0 };
 DecorSettings decorSettings;
 SettingsStore<DecorSettings> decorStore;
+// The web app's keys for them (settings_table.h); a new pace of the extras
+// draws the next one anew (applyDecorParams()).
+const SettingParam DECOR_PARAMS[] = {
+  { "dxr", SETTING_FIELD(DecorSettings, extras),    PARAM_RANGE, 0, 0, DECOR_EXTRAS_MAX, LOAD_DEFAULT, nullptr },
+  { "dqf", SETTING_FIELD(DecorSettings, quietFrom), PARAM_RANGE, 0, 0, 23,               LOAD_DEFAULT, nullptr },
+  { "dqt", SETTING_FIELD(DecorSettings, quietTo),   PARAM_RANGE, 0, 0, 23,               LOAD_DEFAULT, nullptr },
+  { "ddk", SETTING_FIELD(DecorSettings, darkLux),   PARAM_RANGE, 0, 0, 60000,            LOAD_KEEP,    nullptr },
+};
+SettingsTable decorTable = SETTING_TABLE(decorSettings, DECOR_DEFAULTS, DECOR_PARAMS);
 unsigned long extrasDueAt = 0;          // the next extra of a face; 0 = not drawn yet
 unsigned long infoCardsEndedAt = 0;     // a GIF keeps ROUND_GIF_GAP_MS after info cards
 
@@ -431,6 +487,21 @@ const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
 const uint8_t ROUND_CHOICES[] = { 0, 5, 10, 15, 20, 30, 60 };
 FeedSettings feedSettings;
 SettingsStore<FeedSettings> feedStore;
+// The web app's keys for them (settings_table.h). The place and the info
+// round have their own code (applyFeedParams()), and the round is the 64x32
+// clock's alone: the wall clock shows the items in its band.
+const SettingParam FEED_PARAMS[] = {
+  { "feedw",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_WEATHER,  0, LOAD_KEEP, nullptr },
+  { "feeda",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_WARNINGS, 0, LOAD_KEEP, nullptr },
+  { "feedq",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_AIR,      0, LOAD_KEEP, nullptr },
+  { "afr",    SETTING_FIELD(FeedSettings, frames), PARAM_CHECKBOX, 0, 0,             1, LOAD_KEEP, nullptr },
+  { "lat",    0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },   // degrees, "" for none
+  { "lon",    0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },
+#if !BAND_ON_PANEL
+  { "iround", 0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },   // minutes, one of ROUND_CHOICES
+#endif
+};
+SettingsTable feedTable = SETTING_TABLE(feedSettings, FEED_DEFAULTS, FEED_PARAMS);
 
 // Per source: when it is due, and how its last fetch went.
 struct FeedRun {
@@ -1186,6 +1257,16 @@ uint16_t sensorsMissing = 0;
 // temperature, and its humidity worked out for the room's (roomTempNow()).
 uint16_t sensorWarmth   = 0;
 const uint16_t SENSOR_WARMTH_MAX = 200;   // 20.0 C
+#if BOARD_WAVESHARE_WALL
+// The web app's key for it (settings_table.h): degrees with one decimal from
+// the web app, tenths in /api/state. A stored one is checked where the
+// record is read (sensorsCheck()).
+const uint16_t SENSOR_WARMTH_NONE = 0;
+const SettingParam SENSOR_PARAMS[] = {
+  { "toff", 0, 2, PARAM_TENTHS, 0, 0, SENSOR_WARMTH_MAX, LOAD_KEEP, nullptr },
+};
+SettingsTable sensorTable = SETTING_TABLE(sensorWarmth, SENSOR_WARMTH_NONE, SENSOR_PARAMS);
+#endif
 SettingsStore<SensorRecord> sensorStore;
 RTC_DS3231 rtc;
 bool rtcOK        = false;   // a DS3231 answered at boot
@@ -1453,7 +1534,7 @@ void testPlanParse(const String &plan);
 // The faces' settings
 void loadFaceSettings();
 bool saveFaceSettings();
-FaceOutcome applyFaceParams(const String &q, bool live);
+FaceOutcome applyFaceParams(const String &q, bool live, bool previews);
 FaceOutcome previewOutcome(FaceOutcome a, FaceOutcome b);
 FaceNow faceMoment();
 void faceUpdate();
@@ -1611,11 +1692,8 @@ void webAnswer(WebConn &w);
 void webSend(WebConn &w);
 void webClose(WebConn &w, bool dropped);
 void webAfter();
-uint8_t hexVal(char c);
 String urldecode(const String &s);
 String getParam(const String &query, const String &key);
-void parseHexColor(const String &s, uint8_t &r, uint8_t &g, uint8_t &b);
-String toHex(uint8_t r, uint8_t g, uint8_t b);
 void applyParams(const String &q);
 String applyWifiForm(const String &body);
 void printAgo(Print &c, unsigned long at);
@@ -1625,7 +1703,6 @@ String applyKeysForm(const String &q);
 void gifSettingsCheck();
 void loadGifSettings();
 bool saveGifSettings();
-long tenthsOf(const String &v);
 void applyGifParams(const String &q);
 void gifGammaInit();
 void gifScheduleNext();
@@ -2626,13 +2703,11 @@ void climateUpdate() {
 // decimal, 0 to 20); absent keeps it. Says whether it is stored, or nothing
 // changed.
 bool applySensorParams(const String &q) {
-  String v = getParam(q, "toff");
-  if (!v.length()) { return true; }
-  uint16_t w = (uint16_t)constrain(tenthsOf(v), 0L, (long)SENSOR_WARMTH_MAX);
-  if (w == sensorWarmth) { return true; }
-  sensorWarmth = w;
+  uint16_t was = sensorWarmth;
+  settingsApply(sensorTable, [&q](const char *key) { return getParam(q, key); }, false);   // SENSOR_PARAMS
+  if (sensorWarmth == was) { return true; }
   bandLocalDone = false;   // the band's room anew
-  Console.printf("SHTC3: %u.%u C warmer than the room\n", w / 10, w % 10);
+  Console.printf("SHTC3: %u.%u C warmer than the room\n", sensorWarmth / 10, sensorWarmth % 10);
   return saveSensorRecord();
 }
 
@@ -3430,9 +3505,8 @@ void drawNoticeMarker() {
 static_assert(TETRIS_KNOCK_LEVEL_MAX == KNOCK_LEVEL_MAX, "the stored knock sensitivity and knock.h agree on its range");
 
 TetrisSettings tetrisSettings;
-FaceBlob tetrisBlob = { "tetris", TETRIS_SETTINGS_MAGIC, TETRIS_SETTINGS_REV, WATCHFACE_TETRIS_ID,
-                        (uint8_t *)&tetrisSettings, sizeof(TetrisSettings), (const uint8_t *)&TETRIS_DEFAULTS,
-                        TETRIS_PARAMS, sizeof(TETRIS_PARAMS) / sizeof(TETRIS_PARAMS[0]), tetrisMigrate };
+FaceBlob tetrisBlob = { "tetris", TETRIS_SETTINGS_MAGIC, TETRIS_SETTINGS_REV, WATCHFACE_TETRIS_ID, sizeof(TetrisSettings),
+                        SETTING_TABLE(tetrisSettings, TETRIS_DEFAULTS, TETRIS_PARAMS), tetrisMigrate };
 TetrisFace tetrisFace(tetrisSettings);
 
 /* ----------------------------------------------------------------------
@@ -3469,9 +3543,8 @@ void knockFollowSetting() {
    their own, and the face.
    ====================================================================== */
 MuncherSettings muncherSettings;
-FaceBlob muncherBlob = { "muncher", MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV, WATCHFACE_MUNCHER_ID,
-                         (uint8_t *)&muncherSettings, sizeof(MuncherSettings), (const uint8_t *)&MUNCHER_DEFAULTS,
-                         MUNCHER_PARAMS, sizeof(MUNCHER_PARAMS) / sizeof(MUNCHER_PARAMS[0]), muncherMigrate };
+FaceBlob muncherBlob = { "muncher", MUNCHER_SETTINGS_MAGIC, MUNCHER_SETTINGS_REV, WATCHFACE_MUNCHER_ID, sizeof(MuncherSettings),
+                         SETTING_TABLE(muncherSettings, MUNCHER_DEFAULTS, MUNCHER_PARAMS), muncherMigrate };
 MuncherFace muncherFace(muncherSettings);
 
 #if defined(CLOCK_DEBUG)
@@ -3507,9 +3580,8 @@ void muncherSelfTest() {
    own, and the face.
    ====================================================================== */
 AliensSettings aliensSettings;
-FaceBlob aliensBlob = { "aliens", ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, WATCHFACE_ALIENS_ID,
-                        (uint8_t *)&aliensSettings, sizeof(AliensSettings), (const uint8_t *)&ALIENS_DEFAULTS,
-                        ALIENS_PARAMS, sizeof(ALIENS_PARAMS) / sizeof(ALIENS_PARAMS[0]), aliensMigrate };
+FaceBlob aliensBlob = { "aliens", ALIENS_SETTINGS_MAGIC, ALIENS_SETTINGS_REV, WATCHFACE_ALIENS_ID, sizeof(AliensSettings),
+                        SETTING_TABLE(aliensSettings, ALIENS_DEFAULTS, ALIENS_PARAMS), aliensMigrate };
 AliensFace aliensFace(aliensSettings);
 
 #if defined(CLOCK_DEBUG)
@@ -3579,6 +3651,15 @@ FaceBlob *const FACE_BLOBS[] = {
 const uint8_t FACE_BLOB_COUNT = sizeof(FACE_BLOBS) / sizeof(FACE_BLOBS[0]);
 SettingsBlobStore faceStores[FACE_BLOB_COUNT];
 
+// Every table of settings (settings_table.h), for /api/state: the values, the
+// names of the choices and what the web app needs to send them back.
+SettingsTable *const SETTINGS_TABLES[] = {
+  &clockTable, &tetrisBlob.table, &muncherBlob.table, &aliensBlob.table, &uiTable, &gifTable, &decorTable, &feedTable,
+#if BOARD_WAVESHARE_WALL
+  &sensorTable,
+#endif
+};
+
 void loadFaceSettings() {
   for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobLoad(*FACE_BLOBS[i], faceStores[i]); }
   knockFollowSetting();    // the sensor, not the sketch, holds the threshold
@@ -3591,24 +3672,25 @@ bool saveFaceSettings() {
 }
 
 // The web app's face settings, live or to be saved. A setting that redraws
-// redraws, the knock's sensitivity goes to the sensor, and - live, on the
-// face shown - a new watchface animation plays once, and pv asks to see what
-// a control changed: now or not at all, and the page is told which. The page says outright when such a control was used:
+// redraws, the knock's sensitivity goes to the sensor, and - with previews,
+// live on a face not just chosen, on the face shown - a new watchface
+// animation plays once, and pv asks to see what a control changed: now or not
+// at all, and the page is told which. The page says outright when such a control was used:
 // comparing the values instead, as this did at first, was unreliable, since
 // the updates sent while a slider was dragged had already pushed the final
 // value across, and the release looked like no change at all.
-FaceOutcome applyFaceParams(const String &q, bool live) {
+FaceOutcome applyFaceParams(const String &q, bool live, bool previews) {
   FaceOutcome shown = OUTCOME_NONE;
   for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) {
     FaceBlob &b = *FACE_BLOBS[i];
-    uint8_t came = faceBlobApply(b, [&q](const char *key) { return getParam(q, key); });
+    uint8_t came = settingsApply(b.table, [&q](const char *key) { return getParam(q, key); }, live);
     if (came & PARAM_REDRAW) { panelDirty = true; }
     if (came & PARAM_KNOCK)  { knockFollowSetting(); }
-    if (live && (came & PARAM_PLAYS) && settings.watchface == b.face) {
+    if (previews && (came & PARAM_PLAYS) && settings.watchface == b.face) {
       shown = previewOutcome(shown, faceFor(b.face).request(faceMoment(), TRIGGER_PREVIEW_ANIMATION));
     }
   }
-  if (!live || !getParam(q, "pv").length()) { return shown; }
+  if (!previews || !getParam(q, "pv").length()) { return shown; }
   return previewOutcome(shown, faceFor(settings.watchface).request(faceMoment(), TRIGGER_PREVIEW_CHANGE));
 }
 
@@ -4453,9 +4535,7 @@ void loadUiSettings() {
   if (uiSettings.magic != UI_SETTINGS_MAGIC) { uiSettings = UI_DEFAULTS; }
   if (uiSettings.rev < 2) { uiSettings.syncDays = UI_DEFAULTS.syncDays; }
   if (uiSettings.rev < 3) { uiSettings.gestureMount = UI_DEFAULTS.gestureMount; uiSettings.reserved = 0; }
-  if (uiSettings.inputProfile >= INPUT_PROFILE_COUNT) { uiSettings.inputProfile = 0; }
-  if (uiSettings.syncDays > SYNC_DAYS_MAX) { uiSettings.syncDays = UI_DEFAULTS.syncDays; }
-  uiSettings.gestureMount &= 3;
+  settingsCheck(uiTable);   // the profile, the sync days, the sensor's mount (UI_PARAMS)
   Console.print("Input profile: "); Console.println(INPUT_PROFILES[uiSettings.inputProfile].name);
 }
 
@@ -4515,9 +4595,7 @@ bool saveSettings() {
 
 // Push settings into the runtime globals that drive the clock.
 void applySettings() {
-  if (settings.dst > DST_AUTO) { settings.dst = DST_AUTO; }
-  if (settings.watchface >= WATCHFACE_COUNT) { settings.watchface = WATCHFACE_CLASSIC; }
-  settings.classic.flyInTime = constrain(settings.classic.flyInTime, FLY_IN_MIN_MS / 10, FLY_IN_MAX_MS / 10);
+  settingsCheck(clockTable);   // the daylight saving mode, the watchface, the fly-in time (CLOCK_PARAMS)
   syncTimeHour   = settings.syncHour;
   syncTimeMinute = settings.syncMinute;
   // Enforce full colors (the trail is dimmed at render time, not by the swatch).
@@ -6354,13 +6432,8 @@ void webAfter() {
 
 /* ---- HTTP helpers -------------------------------------------------------- */
 
-uint8_t hexVal(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return 0;
-}
-
+// (hexVal(), parseHexColor(), toHex() and tenthsOf(), which read the web
+// app's values, are in settings_table.h.)
 String urldecode(const String &s) {
   String out;
   for (unsigned int i = 0; i < s.length(); i++) {
@@ -6390,45 +6463,21 @@ String getParam(const String &query, const String &key) {
   return String();
 }
 
-void parseHexColor(const String &s, uint8_t &r, uint8_t &g, uint8_t &b) {
-  String t = s;
-  if (t.startsWith("#")) { t = t.substring(1); }
-  if (t.length() >= 6) {
-    r = (hexVal(t[0]) << 4) | hexVal(t[1]);
-    g = (hexVal(t[2]) << 4) | hexVal(t[3]);
-    b = (hexVal(t[4]) << 4) | hexVal(t[5]);
-  }
-}
-
-String toHex(uint8_t r, uint8_t g, uint8_t b) {
-  char buf[8];
-  sprintf(buf, "#%02x%02x%02x", r, g, b);
-  return String(buf);
-}
-
-// Apply submitted form values to the settings struct (with validation).
+// The web app's settings to be saved: the clock's, the faces' and the
+// Inputs page's profile and mount with the sync days, each as its table has
+// it (settings_table.h), and the two with code of their own, the zone and
+// the sides the classic face's digits come from.
 void applyParams(const String &q) {
-  String v;
-  v = getParam(q, "tz");     if (v.length()) { settings.tzOffset = (int32_t)v.toInt(); } // seconds, from the dropdown
-  v = getParam(q, "dst");    if (v.length()) { settings.dst = constrain(v.toInt(), DST_WINTER, DST_AUTO); }
-  v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
-  applyFaceParams(q, false);   // the faces' own settings (face.h)
-  v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "speed");  if (v.length()) { settings.classic.flyInTime  = flyInUnits(v.toInt()); }   // ms
-  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); panelDirty = true; }
-  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); panelDirty = true; }
+  auto get = [&q](const char *key) { return getParam(q, key); };
+  String v = getParam(q, "tz");
+  if (v.length()) { settings.tzOffset = (int32_t)v.toInt(); }   // seconds, from the dropdown
+  if (settingsApply(clockTable, get, false) & PARAM_REDRAW) { panelDirty = true; }   // a colour sent
+  applyFaceParams(q, false, false);   // the faces' own settings (face.h)
   for (int i = 0; i < 6; i++) {
     v = getParam(q, "dir" + String(i));
     if (v.length()) { settings.classic.dir[i] = constrain(v.toInt(), 0, 3); }
   }
-  v = getParam(q, "synch");  if (v.length()) { settings.syncHour   = constrain(v.toInt(), 0, 23); }
-  v = getParam(q, "syncm");  if (v.length()) { settings.syncMinute = constrain(v.toInt(), 0, 59); }
-  settings.autoBright = (getParam(q, "autob") == "on") ? 1 : 0; // checkbox: absent when unchecked
-  v = getParam(q, "luxd");   if (v.length()) { settings.luxDark   = (uint16_t)constrain(v.toInt(), 0, 65535); }
-  v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
-  v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "syncd");  if (v.length()) { uiSettings.syncDays = constrain(v.toInt(), 0, SYNC_DAYS_MAX); }
+  settingsApply(uiTable, get, false);
 }
 
 // The home WiFi form (/wifi, POST). Returns what is wrong with it, or "" once
@@ -6469,22 +6518,17 @@ void printAgo(Print &c, unsigned long at) {
 // no reboot. The clock is being rendered every frame, so changes show instantly.
 // Returns what became of a preview the page asked for (OUTCOME_NONE: none).
 FaceOutcome applyLiveParams(const String &q) {
-  String v;
   uint8_t faceBefore = settings.watchface;
-  v = getParam(q, "wf");     if (v.length()) { settings.watchface = constrain(v.toInt(), 0, WATCHFACE_COUNT - 1); }
-  v = getParam(q, "bright"); if (v.length()) { settings.brightness = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "autob");  if (v.length()) { settings.autoBright = (v == "on") ? 1 : 0; } // updateBrightness() re-seeds the fade
-  v = getParam(q, "luxd");   if (v.length()) { settings.luxDark   = (uint16_t)constrain(v.toInt(), 0, 65535); }
-  v = getParam(q, "luxb");   if (v.length()) { settings.luxBright = (uint16_t)constrain(v.toInt(), 1, 65535); }
-  v = getParam(q, "brmin");  if (v.length()) { settings.brightMin = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "brmax");  if (v.length()) { settings.brightMax = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "speed");  if (v.length()) { settings.classic.flyInTime = flyInUnits(v.toInt()); }   // ms
-  v = getParam(q, "digit");  if (v.length()) { parseHexColor(v, settings.classic.digitR, settings.classic.digitG, settings.classic.digitB); panelDirty = true; }
-  v = getParam(q, "trail");  if (v.length()) { parseHexColor(v, settings.classic.trailR, settings.classic.trailG, settings.classic.trailB); panelDirty = true; }
+  // The clock's settings tried live (PARAM_LIVE in CLOCK_PARAMS): the
+  // watchface, the brightness and its sensor's mapping - updateBrightness()
+  // re-seeds the fade - and the classic face's fly-in and colours.
+  if (settingsApply(clockTable, [&q](const char *key) { return getParam(q, key); }, true) & PARAM_REDRAW) {
+    panelDirty = true;   // a colour sent
+  }
   // The faces' own settings, and what the page asks to see - but a face just
   // chosen shows itself as it comes (the Tetris digits drop, the others show
   // the time) and plays no preview with it: it has planned nothing yet.
-  return applyFaceParams(q, settings.watchface == faceBefore);
+  return applyFaceParams(q, true, settings.watchface == faceBefore);
 }
 
 
@@ -6509,11 +6553,7 @@ String applyKeysForm(const String &q) {
     return "None of the inputs found would open the menu, so nothing was saved. "
            "Give one of them \"open the menu\".";
   }
-  String v = getParam(q, "prof");
-  if (v.length()) { uiSettings.inputProfile = constrain(v.toInt(), 0, INPUT_PROFILE_COUNT - 1); }
-  v = getParam(q, "gmount");
-  if (v.length()) { uiSettings.gestureMount = constrain(v.toInt(), 0, 3); }
-  memcpy(faceKeys, codes, sizeof(codes));
+  memcpy(faceKeys, codes, sizeof(codes));   // the page's profile and mount follow with the rest (UI_PARAMS)
   faceKeysOwn = true;
   return String();
 }
@@ -6537,11 +6577,8 @@ String applyKeysForm(const String &q) {
 
 // Keeps the settings in range: whole minutes, the maximum not below the minimum.
 void gifSettingsCheck() {
-  gifSettings.randomOn   = gifSettings.randomOn ? 1 : 0;
-  gifSettings.minMinutes = constrain(gifSettings.minMinutes, (uint16_t)1, GIF_MINUTES_MAX);
-  gifSettings.maxMinutes = constrain(gifSettings.maxMinutes, gifSettings.minMinutes, GIF_MINUTES_MAX);
-  gifSettings.seconds    = constrain(gifSettings.seconds, GIF_SECONDS_MIN, GIF_SECONDS_MAX);
-  gifSettings.brightTimes = constrain(gifSettings.brightTimes, GIF_BRIGHT_TIMES_MIN, GIF_BRIGHT_TIMES_MAX);
+  settingsCheck(gifTable);   // each within its range (GIF_PARAMS)
+  if (gifSettings.maxMinutes < gifSettings.minMinutes) { gifSettings.maxMinutes = gifSettings.minMinutes; }
 }
 
 void loadGifSettings() {
@@ -6569,25 +6606,9 @@ bool saveGifSettings() {
   return gifStore.write(gifSettings);
 }
 
-// A number such as 2, 2.5 or 2,5 in tenths, without the C library's float
-// parser (it would cost 7 KB of flash for this one field).
-long tenthsOf(const String &v) {
-  int dot = v.indexOf('.');
-  if (dot < 0) { dot = v.indexOf(','); }
-  long tenths = (dot < 0 ? v : v.substring(0, dot)).toInt() * 10;
-  if (dot >= 0 && dot + 1 < (int)v.length() && isDigit(v.charAt(dot + 1))) { tenths += v.charAt(dot + 1) - '0'; }
-  return tenths;
-}
-
 // The GIF section of the config page (/save).
 void applyGifParams(const String &q) {
-  String v;
-  gifSettings.randomOn = (getParam(q, "gifr") == "on") ? 1 : 0;   // checkbox: absent when unticked
-  v = getParam(q, "gifmin"); if (v.length()) { gifSettings.minMinutes = constrain(v.toInt(), 1, GIF_MINUTES_MAX); }
-  v = getParam(q, "gifmax"); if (v.length()) { gifSettings.maxMinutes = constrain(v.toInt(), 1, GIF_MINUTES_MAX); }
-  v = getParam(q, "gifsec"); if (v.length()) { gifSettings.seconds = constrain(v.toInt(), GIF_SECONDS_MIN, GIF_SECONDS_MAX); }
-  v = getParam(q, "gifbr");  if (v.length()) { gifSettings.minBright = constrain(v.toInt(), 0, 255); }
-  v = getParam(q, "gifbx");  if (v.length()) { gifSettings.brightTimes = (uint8_t)constrain(tenthsOf(v), (long)GIF_BRIGHT_TIMES_MIN, (long)GIF_BRIGHT_TIMES_MAX); }
+  settingsApply(gifTable, [&q](const char *key) { return getParam(q, key); }, false);   // GIF_PARAMS
   gifSettingsCheck();
   matrix.setBrightness(panelBrightness());     // a GIF on show takes the new lowest at once
 }
@@ -8165,9 +8186,7 @@ void loadDecorSettings() {
   decorStore.begin("deco");
   decorStore.read(decorSettings);
   if (decorSettings.magic != DECOR_SETTINGS_MAGIC) { decorSettings = DECOR_DEFAULTS; }   // written with the next save
-  if (decorSettings.extras > DECOR_EXTRAS_MAX) { decorSettings.extras = DECOR_DEFAULTS.extras; }
-  if (decorSettings.quietFrom > 23) { decorSettings.quietFrom = 0; }
-  if (decorSettings.quietTo > 23)   { decorSettings.quietTo = 0; }
+  settingsCheck(decorTable);   // the extras' pace and the quiet hours (DECOR_PARAMS)
 }
 
 bool saveDecorSettings() {
@@ -8178,15 +8197,9 @@ bool saveDecorSettings() {
 
 // The web app's extras and quiet; a new pace of the extras draws the next anew.
 void applyDecorParams(const String &q) {
-  String v;
-  v = getParam(q, "dxr");
-  if (v.length()) {
-    uint8_t x = constrain(v.toInt(), 0, DECOR_EXTRAS_MAX);
-    if (x != decorSettings.extras) { decorSettings.extras = x; extrasDueAt = 0; }
-  }
-  v = getParam(q, "dqf"); if (v.length()) { decorSettings.quietFrom = constrain(v.toInt(), 0, 23); }
-  v = getParam(q, "dqt"); if (v.length()) { decorSettings.quietTo = constrain(v.toInt(), 0, 23); }
-  v = getParam(q, "ddk"); if (v.length()) { decorSettings.darkLux = constrain(v.toInt(), 0, 60000); }
+  uint8_t pace = decorSettings.extras;
+  settingsApply(decorTable, [&q](const char *key) { return getParam(q, key); }, false);   // DECOR_PARAMS
+  if (decorSettings.extras != pace) { extrasDueAt = 0; }
 }
 
 // Whether a face event closes a notice on the panel (the Inputs page).
@@ -9168,12 +9181,8 @@ bool microDegreesOf(const String &v, int32_t limit, int32_t &out) {
 // the place; a place that cannot be read keeps the one stored.
 void applyFeedParams(const String &q) {
   uint8_t wasOn = feedSettings.on;
-  uint8_t on = 0;
-  if (getParam(q, "feedw") == "on") { on |= (uint8_t)(1 << FEED_WEATHER); }   // checkboxes: absent when unticked
-  if (getParam(q, "feeda") == "on") { on |= (uint8_t)(1 << FEED_WARNINGS); }
-  if (getParam(q, "feedq") == "on") { on |= (uint8_t)(1 << FEED_AIR); }
-  feedSettings.on = on;
-  feedSettings.frames = getParam(q, "afr") == "on" ? 1 : 0;
+  feedSettings.on &= (uint8_t)((1 << FEED_COUNT) - 1);   // a bit for no source never stays (the form never set one)
+  settingsApply(feedTable, [&q](const char *key) { return getParam(q, key); }, false);   // the sources and the frames (FEED_PARAMS)
   String iround = getParam(q, "iround");
   if (iround.length() && roundChoice(iround.toInt()) && iround.toInt() != feedSettings.roundMinutes) {
     feedSettings.roundMinutes = (uint8_t)iround.toInt();
@@ -9427,52 +9436,19 @@ void apiState(Print &c) {
   panel.add(BOARD_PANEL_H);
 
   JsonObject s = d["settings"].to<JsonObject>();
-  s["wf"] = settings.watchface;
-  s["digit"] = toHex(settings.classic.digitR, settings.classic.digitG, settings.classic.digitB);
-  s["trail"] = toHex(settings.classic.trailR, settings.classic.trailG, settings.classic.trailB);
-  s["speed"] = settings.classic.flyInTime * 10;   // ms
+  for (SettingsTable *t : SETTINGS_TABLES) { settingsJson(*t, s); }   // each as its table has it: wf .. toff
+  s["tz"] = settings.tzOffset;
   JsonArray dirs = s["dirs"].to<JsonArray>();
   for (uint8_t i = 0; i < 6; i++) { dirs.add(settings.classic.dir[i]); }
-  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) { faceBlobJson(*FACE_BLOBS[i], s); }   // tdrop .. anap
-  s["autob"] = settings.autoBright != 0;
-  s["bright"] = settings.brightness;
-  s["luxd"] = settings.luxDark;
-  s["luxb"] = settings.luxBright;
-  s["brmin"] = settings.brightMin;
-  s["brmax"] = settings.brightMax;
-  s["tz"] = settings.tzOffset;
-  s["dst"] = settings.dst;
-  s["synch"] = settings.syncHour;
-  s["syncm"] = settings.syncMinute;
-  s["syncd"] = uiSettings.syncDays;
-  s["prof"] = uiSettings.inputProfile;
-  s["gmount"] = uiSettings.gestureMount;
   JsonArray keys = s["keys"].to<JsonArray>();
   for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) { keys.add(faceKeys[i]); }
   JsonArray closes = s["closes"].to<JsonArray>();   // per face event: whether it closes a notice
   for (uint8_t i = 0; i < FACE_EVENT_COUNT; i++) { closes.add(noticeCloses[i] != 0); }
-  s["gifr"] = gifSettings.randomOn != 0;
-  s["gifmin"] = gifSettings.minMinutes;
-  s["gifmax"] = gifSettings.maxMinutes;
-  s["gifsec"] = gifSettings.seconds;
-  s["gifbr"] = gifSettings.minBright;
-  s["gifbx"] = gifSettings.brightTimes;   // tenths
-  s["dxr"] = decorSettings.extras;
-  s["dqf"] = decorSettings.quietFrom;
-  s["dqt"] = decorSettings.quietTo;
-  s["ddk"] = decorSettings.darkLux;
-#if BOARD_WAVESHARE_WALL
-  s["toff"] = sensorWarmth;   // tenths: the SHTC3's warmth over the room
-#endif
   char deg[16];
   feedDegrees(deg, sizeof(deg), feedSettings.lat);
   s["lat"] = feedSettings.located ? deg : "";
   feedDegrees(deg, sizeof(deg), feedSettings.lon);
   s["lon"] = feedSettings.located ? deg : "";
-  s["feedw"] = feedOn(FEED_WEATHER);
-  s["feeda"] = feedOn(FEED_WARNINGS);
-  s["feedq"] = feedOn(FEED_AIR);
-  s["afr"] = feedSettings.frames != 0;
 #if BAND_ON_PANEL
   d["band"] = true;       // the information takes turns in the band: no info round
 #else
@@ -9521,8 +9497,8 @@ void apiState(Print &c) {
       if (faceActionOffered(a, e.event)) { offered.add(a); }
     }
   }
-  for (uint8_t i = 0; i < FACE_BLOB_COUNT; i++) {   // the faces' choices by value: shs, mst .. anap
-    faceBlobLists(*FACE_BLOBS[i], [&lists](const char *key, const char *const *labels, uint8_t n) {
+  for (SettingsTable *t : SETTINGS_TABLES) {   // the choices by value, with names in their tables: shs, mst .. anap
+    settingsLists(*t, [&lists](const char *key, const char *const *labels, uint8_t n) {
       JsonArray a = lists[key].to<JsonArray>();
       for (uint8_t k = 0; k < n; k++) { a.add(labels[k]); }
     });
@@ -9531,6 +9507,26 @@ void apiState(Print &c) {
   for (uint8_t i = 0; i <= DECOR_EXTRAS_MAX; i++) {
     uint8_t m = DECOR_EXTRAS_MINUTES[i];
     dxr.add(m ? String("about every ") + m + " min" : String("never"));
+  }
+#if !BAND_ON_PANEL
+  JsonArray rounds = lists["iround"].to<JsonArray>();   // the info round's choices, in minutes (0 = never)
+  for (uint8_t m : ROUND_CHOICES) { rounds.add(m); }
+#endif
+  // What the web app needs to send each setting back: per key its kind, its
+  // range as stored, and whether it is tried live (settings_table.h). Not
+  // the days between syncs without a real-time clock to keep the time
+  // meanwhile, nor the gesture sensor's mount without the sensor: the page
+  // does not offer them then.
+  JsonObject form = lists["form"].to<JsonObject>();
+  for (SettingsTable *t : SETTINGS_TABLES) {
+    settingsForm(*t, [&form](const char *key, const char *kind, uint16_t lo, uint16_t hi, bool live) {
+      if ((!rtcSync && !strcmp(key, "syncd")) || (!gestureOK && !strcmp(key, "gmount"))) { return; }
+      JsonArray a = form[key].to<JsonArray>();
+      a.add(kind);
+      a.add(lo);
+      a.add(hi);
+      a.add(live);
+    });
   }
 
   JsonObject hw = d["hw"].to<JsonObject>();

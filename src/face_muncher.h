@@ -65,11 +65,11 @@ const char *const MUNCHER_MPEL_LABELS[] = { "One LED", "Side by side", "One abov
 static_assert(sizeof(MUNCHER_MST_LABELS) / sizeof(MUNCHER_MST_LABELS[0]) == muncher::STYLE_COUNT, "a name per change style");
 static_assert(sizeof(MUNCHER_MKN_LABELS) / sizeof(MUNCHER_MKN_LABELS[0]) == MUNCHER_ANIM_COUNT, "a name per scene");
 static_assert(sizeof(MUNCHER_MPEL_LABELS) / sizeof(MUNCHER_MPEL_LABELS[0]) == MUNCHER_PELLETS_COUNT, "a name per pellet");
-const FaceParam MUNCHER_PARAMS[] = {
-  { "mst",   offsetof(MuncherSettings, style),   1, PARAM_CHOICE, 0,            0, muncher::STYLE_COUNT - 1,  MUNCHER_MST_LABELS },
-  { "mkn",   offsetof(MuncherSettings, animation),   1, PARAM_CHOICE, PARAM_PLAYS,  0, MUNCHER_ANIM_COUNT - 1,   MUNCHER_MKN_LABELS },
-  { "mpace", offsetof(MuncherSettings, paceMs),  1, PARAM_RANGE,  0,            MUNCHER_PACE_MIN, MUNCHER_PACE_MAX, nullptr },
-  { "mpel",  offsetof(MuncherSettings, pellets), 1, PARAM_CHOICE, PARAM_REDRAW, 0, MUNCHER_PELLETS_COUNT - 1, MUNCHER_MPEL_LABELS },
+const SettingParam MUNCHER_PARAMS[] = {
+  { "mst",   SETTING_FIELD(MuncherSettings, style),     PARAM_CHOICE, PARAM_LIVE,                0,                muncher::STYLE_COUNT - 1,  LOAD_DEFAULT, MUNCHER_MST_LABELS },
+  { "mkn",   SETTING_FIELD(MuncherSettings, animation), PARAM_CHOICE, PARAM_LIVE | PARAM_PLAYS,  0,                MUNCHER_ANIM_COUNT - 1,    LOAD_DEFAULT, MUNCHER_MKN_LABELS },
+  { "mpace", SETTING_FIELD(MuncherSettings, paceMs),    PARAM_RANGE,  PARAM_LIVE,                MUNCHER_PACE_MIN, MUNCHER_PACE_MAX,          LOAD_CLAMP,   nullptr },
+  { "mpel",  SETTING_FIELD(MuncherSettings, pellets),   PARAM_CHOICE, PARAM_LIVE | PARAM_REDRAW, 0,                MUNCHER_PELLETS_COUNT - 1, LOAD_DEFAULT, MUNCHER_MPEL_LABELS },
 };
 
 // Rev 1 had a spare byte where the pellets are.

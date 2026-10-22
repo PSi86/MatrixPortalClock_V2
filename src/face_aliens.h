@@ -59,11 +59,11 @@ const char *const ALIENS_ANAP_LABELS[] = { "Off", "Now and then" };
 static_assert(sizeof(ALIENS_AST_LABELS) / sizeof(ALIENS_AST_LABELS[0]) == aliens::STYLE_COUNT, "a name per change style");
 static_assert(sizeof(ALIENS_ACOL_LABELS) / sizeof(ALIENS_ACOL_LABELS[0]) == ALIENS_COLOURS_COUNT, "a name per colouring");
 static_assert(sizeof(ALIENS_AKN_LABELS) / sizeof(ALIENS_AKN_LABELS[0]) == ALIENS_ANIM_COUNT, "a name per scene");
-const FaceParam ALIENS_PARAMS[] = {
-  { "ast",  offsetof(AliensSettings, style),   1, PARAM_CHOICE, 0,            0, aliens::STYLE_COUNT - 1,  ALIENS_AST_LABELS },
-  { "acol", offsetof(AliensSettings, colours), 1, PARAM_CHOICE, PARAM_REDRAW, 0, ALIENS_COLOURS_COUNT - 1, ALIENS_ACOL_LABELS },
-  { "akn",  offsetof(AliensSettings, animation),   1, PARAM_CHOICE, PARAM_PLAYS,  0, ALIENS_ANIM_COUNT - 1,   ALIENS_AKN_LABELS },
-  { "anap", offsetof(AliensSettings, nap),     1, PARAM_FLAG,   0,            0, 1,                        ALIENS_ANAP_LABELS },
+const SettingParam ALIENS_PARAMS[] = {
+  { "ast",  SETTING_FIELD(AliensSettings, style),     PARAM_CHOICE, PARAM_LIVE,                0, aliens::STYLE_COUNT - 1,  LOAD_DEFAULT, ALIENS_AST_LABELS },
+  { "acol", SETTING_FIELD(AliensSettings, colours),   PARAM_CHOICE, PARAM_LIVE | PARAM_REDRAW, 0, ALIENS_COLOURS_COUNT - 1, LOAD_DEFAULT, ALIENS_ACOL_LABELS },
+  { "akn",  SETTING_FIELD(AliensSettings, animation), PARAM_CHOICE, PARAM_LIVE | PARAM_PLAYS,  0, ALIENS_ANIM_COUNT - 1,    LOAD_DEFAULT, ALIENS_AKN_LABELS },
+  { "anap", SETTING_FIELD(AliensSettings, nap),       PARAM_FLAG,   PARAM_LIVE,                0, 1,                        LOAD_BOOL,    ALIENS_ANAP_LABELS },
 };
 
 // An older blob: the trial build's (rev 1: look, style, idle, colours after

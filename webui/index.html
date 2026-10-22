@@ -252,7 +252,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="group-title">Change</div>
         <div class="row">
           <div><label class="lbl" for="speed">Fly-in time</label><div class="hint">How long every fly-in takes; all digits land together. Asked for, all six fly in at the next second.</div></div>
-          <div class="range"><input type="range" id="speed" min="100" max="850" step="10" data-live><output for="speed"></output></div>
+          <div class="range"><input type="range" id="speed" step="10"><output for="speed"></output></div>
         </div>
         <div class="row stack"><div><div class="lbl">Where each digit flies in from</div><div class="hint">Tap a digit to turn its arrow; the old digit flies out the other side. Kept by Save.</div></div><div class="dirs" id="dirs"></div></div>
       </div>
@@ -269,11 +269,11 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         </div>
         <div class="row">
           <div><label class="lbl" for="tdrop">Drop pace</label><div class="hint">Milliseconds per block row as the new digits are built; higher is slower.</div></div>
-          <div class="range"><input type="range" id="tdrop" min="20" max="250" data-live data-pv><output for="tdrop"></output></div>
+          <div class="range"><input type="range" id="tdrop" data-pv><output for="tdrop"></output></div>
         </div>
         <div class="row">
           <div><label class="lbl" for="tspin">Turn pace</label><div class="hint">Milliseconds between quarter turns; higher is calmer.</div></div>
-          <div class="range"><input type="range" id="tspin" min="80" max="1500" step="10" data-live data-pv><output for="tspin"></output></div>
+          <div class="range"><input type="range" id="tspin" step="10" data-pv><output for="tspin"></output></div>
         </div>
       </div>
       <div class="card" data-for-face="2">
@@ -284,7 +284,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         </div>
         <div class="row">
           <div><label class="lbl" for="mpace">Pace</label><div class="hint">Milliseconds per pixel; higher is slower. The change ends as the minute begins; to a full hour the hour show follows.</div></div>
-          <div class="range"><input type="range" id="mpace" min="20" max="80" data-live data-pv><output for="mpace"></output></div>
+          <div class="range"><input type="range" id="mpace" data-pv><output for="mpace"></output></div>
         </div>
       </div>
       <div class="card" data-for-face="2">
@@ -326,7 +326,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="group-title">Now and then</div>
         <div class="row">
           <div><label class="lbl" for="dxr">How often</label><div class="hint">The face's own scenes between changes - the Aliens' saucer, an alien shooting back, a waking block; the Muncher's fruit - shared by the faces. Never around the time's change; one that has no room when it is due is left out. None in the quiet hours set under GIFs.</div></div>
-          <div class="range"><input type="range" id="dxr" min="0" max="6"><output for="dxr"></output></div>
+          <div class="range"><input type="range" id="dxr"><output for="dxr"></output></div>
         </div>
         <div class="row" id="anapRow">
           <div><div class="lbl">Waking blocks</div><div class="hint">Among them, a single block waking as an alien for a moment and turning back.</div></div>
@@ -344,16 +344,16 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         </div>
         <div class="row">
           <div><label class="lbl" for="brightR" id="brightLbl">Brightness</label><div class="hint">The panel shows <span id="effB" style="font-family:var(--mono)">–</span> now.</div></div>
-          <div class="range"><input type="range" id="brightR" min="0" max="255" data-live><output for="brightR"></output></div>
+          <div class="range"><input type="range" id="brightR"><output for="brightR"></output></div>
         </div>
         <div id="autoRows">
           <div class="row">
             <div><div class="lbl">Room light</div><div class="hint">Dark and bright end of the scale, in lux.</div></div>
-            <div class="pair"><label>Dark<input type="number" id="luxd" min="0" max="65535" data-live></label><label>Bright<input type="number" id="luxb" min="1" max="65535" data-live></label></div>
+            <div class="pair"><label>Dark<input type="number" id="luxd"></label><label>Bright<input type="number" id="luxb"></label></div>
           </div>
           <div class="row">
             <div><div class="lbl">Panel brightness</div><div class="hint">At the dark and the bright end.</div></div>
-            <div class="pair"><label>At least<input type="number" id="brmin" min="0" max="255" data-live></label><label>At most<input type="number" id="brmax" min="0" max="255" data-live></label></div>
+            <div class="pair"><label>At least<input type="number" id="brmin"></label><label>At most<input type="number" id="brmax"></label></div>
           </div>
         </div>
       </div>
@@ -378,15 +378,15 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <label class="switch"><input type="checkbox" id="gifr" aria-label="Show GIFs now and then"><span></span></label>
         </div>
         <div class="row"><div class="lbl">Minutes between two GIFs</div>
-          <div class="pair"><label>At least<input type="number" id="gifmin" min="1" max="1440"></label><label>At most<input type="number" id="gifmax" min="1" max="1440"></label></div>
+          <div class="pair"><label>At least<input type="number" id="gifmin"></label><label>At most<input type="number" id="gifmax"></label></div>
         </div>
         <div class="row">
           <div><label class="lbl" for="gifsec">Seconds a GIF plays</label><div class="hint">In whole loops: as many as fit, at least one.</div></div>
-          <div class="range"><input type="range" id="gifsec" min="2" max="60"><output for="gifsec"></output></div>
+          <div class="range"><input type="range" id="gifsec"><output for="gifsec"></output></div>
         </div>
         <div class="row">
           <div><div class="lbl">Brightness while a GIF plays</div><div class="hint">At least this, and at least this many times the clock's.</div></div>
-          <div class="pair"><label>At least<input type="number" id="gifbr" min="0" max="255"></label><label>Times the clock's<input type="number" id="gifbx" min="1" max="5" step="0.1"></label></div>
+          <div class="pair"><label>At least<input type="number" id="gifbr"></label><label>Times the clock's<input type="number" id="gifbx" step="0.1"></label></div>
         </div>
         <div class="row">
           <div class="lbl">Try one</div>
@@ -401,7 +401,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         </div>
         <div class="row">
           <div><label class="lbl" for="ddk">Dark room</label><div class="hint">No GIFs and no extras of their own accord while the room is darker than this, in lux (the light sensor's filtered light, a few seconds behind); 0: off.</div></div>
-          <input type="number" id="ddk" min="0" max="60000">
+          <input type="number" id="ddk">
         </div>
       </div>
     </section>
@@ -435,7 +435,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="row stack"><div class="lbl">What the clock knows</div><div class="hint" id="roundLine"></div><ul class="items" id="items"></ul></div>
         <div class="row" id="roundRow">
           <div><label class="lbl" for="iround">Info round</label><div class="hint">Every card once more, one after the other, about 4 s each, on the clock’s time - every 15 min at :00, :15, :30 and :45 - 3 s after the face has shown the new time. A GIF gives way to it.</div></div>
-          <select id="iround"><option value="0">never</option><option value="5">every 5 min (:00, :05 …)</option><option value="10">every 10 min (:00, :10 …)</option><option value="15">every 15 min (:00, :15 …)</option><option value="20">every 20 min (:00, :20, :40)</option><option value="30">every 30 min (:00, :30)</option><option value="60">every hour (:00)</option></select>
+          <select id="iround"></select>
         </div>
         <div class="row row-switch" id="afrRow">
           <div><div class="lbl">Frame round an alert</div><div class="hint">An alert's banner, and the card of a DWD warning, get a frame in the colour of its level: the DWD's yellow, orange, red or violet, red for an alert from Home Assistant that gives none.</div></div>
@@ -458,7 +458,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         </div>
         <div class="row" id="shkRow">
           <div><label class="lbl" for="shk">Knock sensitivity</label><div class="hint">0 switches the knock off; 10 reacts to a light tap. What a knock does is set below.</div></div>
-          <div class="range"><input type="range" id="shk" min="0" max="10" data-live><output for="shk"></output></div>
+          <div class="range"><input type="range" id="shk"><output for="shk"></output></div>
         </div>
         <div class="row" id="gmountRow">
           <div><label class="lbl" for="gmount">Gesture sensor turned</label><div class="hint">If a swipe up acts as another direction, try the next.</div></div>
@@ -566,7 +566,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="row stack"><div><div class="lbl">Sensors</div><div class="hint" id="sensorHint"></div></div><dl class="kv" id="sensorKv"></dl></div>
         <div class="row" id="toffRow" hidden>
           <div><label class="lbl" for="toff">Board warmth</label><div class="hint">How much warmer the SHTC3 is than the room, in °C: the board around it warms it. Taken off its temperature, and its humidity worked out for the room’s. <span id="toffNow"></span></div></div>
-          <input type="number" id="toff" min="0" max="20" step="0.1">
+          <input type="number" id="toff" step="0.1">
         </div>
       </div>
     </section>
@@ -594,9 +594,6 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var DIR_ARROWS = ['↓', '←', '↑', '→'];        // the way a digit moves when it comes from the top, right, bottom, left
   var DIR_NAMES = ['from the top', 'from the right', 'from the bottom', 'from the left'];
   var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠', '〜', '❅', '♨', '▦', '❦', '⌂'];   // ItemIcon in band_data.h
-  // What the page edits; ssid and the WiFi password go through their own form.
-  var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'mst', 'mkn', 'mpace', 'mpel', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
-    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda', 'feedq', 'afr', 'iround', 'ast', 'acol', 'akn', 'anap', 'dxr', 'dqf', 'dqt', 'ddk', 'toff'];
   var S = null, saved = null, cur = null, gone = false, auth = '';
   try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
   function headers(extra) { var h = extra || {}; if (auth) { h.Authorization = 'Basic ' + btoa('clock:' + auth); } return h; }
@@ -637,47 +634,48 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     return Object.keys(o).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(o[k]); }).join('&');
   }
   function has(k) { return S && S.settings && S.settings[k] !== undefined; }
+  // What the clock says of each setting this page sends it (lists.form, from the clock's tables): the kind,
+  // the range as the clock keeps it, and whether it is tried live. The page sends exactly these keys, in
+  // the form each kind wants, and takes a field's range from here; ssid and the WiFi password go through
+  // their own form.
+  function form() { return (S && S.lists && S.lists.form) || {}; }
+  function isLive(k) { var f = form()[k]; return !!(f && f[3]); }
+  // A field's range as the page shows it: tenths as numbers with a decimal, a time kept in tens of ms in ms.
+  function setLimits(el, k) {
+    var f = form()[k];
+    if (!f || ['range', 'choice', 'tenths', 'tens'].indexOf(f[0]) < 0) { return; }
+    var shown = function (v) { return f[0] === 'tenths' ? v / 10 : f[0] === 'tens' ? v * 10 : v; };
+    el.min = shown(f[1]); el.max = shown(f[2]);
+  }
 
   // ---- what goes to the clock --------------------------------------------------------------------
   function liveForm(pv) {
-    var o = { bright: cur.bright, autob: cur.autob ? 'on' : 'off', luxd: cur.luxd, luxb: cur.luxb, brmin: cur.brmin, brmax: cur.brmax,
-      speed: cur.speed, digit: cur.digit, trail: cur.trail };
-    if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
-    if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; o.mpel = cur.mpel; }
-    if (S.hw.aliens) { o.ast = cur.ast; o.acol = cur.acol; o.akn = cur.akn; o.anap = cur.anap; }
+    var o = {};
+    Object.keys(form()).forEach(function (k) {
+      if (isLive(k)) { o[k] = form()[k][0] === 'checkbox' ? (cur[k] ? 'on' : 'off') : cur[k]; }
+    });
     if (pv) { o.pv = 1; }
     return enc(o);
   }
   function saveForm() {
-    var o = { tz: cur.tz, dst: cur.dst, bright: cur.bright, speed: cur.speed, digit: cur.digit, trail: cur.trail,
-      synch: cur.synch, syncm: cur.syncm, luxd: cur.luxd, luxb: cur.luxb, brmin: cur.brmin, brmax: cur.brmax, prof: cur.prof };
-    if (cur.autob) { o.autob = 'on'; }   // checkboxes: absent when off, as the old page sent them
-    for (var i = 0; i < 6; i++) { o['dir' + i] = cur.dirs[i]; }
-    if (S.hw.tetris) { o.wf = cur.wf; o.tdrop = cur.tdrop; o.tspin = cur.tspin; o.shk = cur.shk; o.shs = cur.shs; }
-    if (S.hw.muncher) { o.mst = cur.mst; o.mkn = cur.mkn; o.mpace = cur.mpace; o.mpel = cur.mpel; }
-    if (S.hw.aliens) { o.ast = cur.ast; o.acol = cur.acol; o.akn = cur.akn; o.anap = cur.anap; }
-    if (S.hw.rtcSync) { o.syncd = cur.syncd; }
-    if (S.hw.gesture) { o.gmount = cur.gmount; }
-    S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } });
-    if (has('closes')) {   // ticks: absent when off; cset says they were sent
+    var o = {};
+    Object.keys(form()).forEach(function (k) {
+      var kind = form()[k][0];
+      if (kind === 'checkbox') { if (cur[k]) { o[k] = 'on'; } }   // absent when off, as the old page sent them
+      else if (kind === 'tenths') { o[k] = (cur[k] / 10).toFixed(1); }
+      else if (kind === 'special') { saveSpecial(o, k); }
+      else { o[k] = cur[k]; }
+    });
+    return enc(o);
+  }
+  // The settings with code of their own on the clock.
+  function saveSpecial(o, k) {
+    if (k === 'dirs') { for (var i = 0; i < 6; i++) { o['dir' + i] = cur.dirs[i]; } }
+    else if (k === 'keys') { S.lists.events.forEach(function (e, i) { if (e.fitted) { o['k' + i] = cur.keys[i]; } }); }
+    else if (k === 'closes') {   // ticks: absent when off; cset says they were sent
       o.cset = 1;
       S.lists.events.forEach(function (e, i) { if (e.fitted && cur.closes[i]) { o['c' + i] = 'on'; } });
-    }
-    if (has('gifr')) {
-      o.gifmin = cur.gifmin; o.gifmax = cur.gifmax; o.gifsec = cur.gifsec; o.gifbr = cur.gifbr; o.gifbx = (cur.gifbx / 10).toFixed(1);
-      if (cur.gifr) { o.gifr = 'on'; }
-    }
-    if (has('dxr')) { o.dxr = cur.dxr; o.dqf = cur.dqf; o.dqt = cur.dqt; o.ddk = cur.ddk; }
-    if (has('toff')) { o.toff = (cur.toff / 10).toFixed(1); }
-    if (has('lat')) {
-      o.lat = cur.lat; o.lon = cur.lon;
-      if (cur.feedw) { o.feedw = 'on'; }
-      if (cur.feeda) { o.feeda = 'on'; }
-      if (cur.feedq) { o.feedq = 'on'; }
-      if (cur.afr) { o.afr = 'on'; }
-      if (has('iround')) { o.iround = cur.iround; }
-    }
-    return enc(o);
+    } else { o[k] = cur[k]; }   // the zone, the place, the info round: as they are
   }
   var liveTimer = null, livePv = false;
   function sendLive(pv) {
@@ -695,7 +693,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   // ---- unsaved changes ------------------------------------------------------------------------------
   function diffCount() {
     var n = 0;
-    KEYS.forEach(function (k) { if (has(k) && JSON.stringify(saved[k]) !== JSON.stringify(cur[k])) { n++; } });
+    Object.keys(form()).forEach(function (k) { if (has(k) && JSON.stringify(saved[k]) !== JSON.stringify(cur[k])) { n++; } });
     return n;
   }
   // Some input found opens the menu - or the clock has no input at all (the
@@ -718,19 +716,22 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   }
 
   // ---- controls ---------------------------------------------------------------------------------------
+  // A setting the clock tries live goes to it at once (isLive()); pv asks it to show what the control changed.
   function setRange(id, key, unit, fmt) {
     var el = document.getElementById(id), out = el.nextElementSibling;
     var show = function () { out.textContent = (fmt ? fmt(+el.value) : el.value) + (unit || ''); };
+    setLimits(el, key);
     el.value = cur[key]; show();
     if (!el.dataset.bound) {
       el.dataset.bound = 1;
       el.addEventListener('input', function () { cur[key] = +el.value; show(); changed(); });
       // Taken over by the clock when the slider is let go of, as on the old page.
-      el.addEventListener('change', function () { cur[key] = +el.value; show(); changed(); if (el.hasAttribute('data-live')) { sendLive(el.hasAttribute('data-pv')); } });
+      el.addEventListener('change', function () { cur[key] = +el.value; show(); changed(); if (isLive(key)) { sendLive(el.hasAttribute('data-pv')); } });
     }
   }
   function setNumber(id, key, scale) {
     var el = document.getElementById(id);
+    setLimits(el, key);
     el.value = scale ? (cur[key] / scale).toFixed(1) : cur[key];
     if (!el.dataset.bound) {
       el.dataset.bound = 1;
@@ -739,24 +740,24 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         else { cur[key] = el.value.trim(); }
         changed();
       });
-      el.addEventListener('change', function () { if (el.hasAttribute('data-live')) { sendLive(false); } });
+      el.addEventListener('change', function () { if (isLive(key)) { sendLive(false); } });
     }
   }
-  function setCheck(id, key, after, live, pv) {
+  function setCheck(id, key, after, pv) {
     var el = document.getElementById(id);
     el.checked = !!cur[key];
     if (!el.dataset.bound) {
       el.dataset.bound = 1;
-      el.addEventListener('change', function () { cur[key] = el.checked; if (after) { after(); } changed(); if (live) { sendLive(pv); } });
+      el.addEventListener('change', function () { cur[key] = el.checked; if (after) { after(); } changed(); if (isLive(key)) { sendLive(pv); } });
     }
     if (after) { after(); }
   }
-  function setSeg(el, key, live, pv) {
+  function setSeg(el, key, pv) {
     var show = function () { $$('button', el).forEach(function (b) { b.setAttribute('aria-pressed', +b.dataset.v === cur[key] ? 'true' : 'false'); }); };
     if (!el.dataset.bound) {
       el.dataset.bound = 1;
       $$('button', el).forEach(function (b) {
-        b.addEventListener('click', function () { cur[key] = +b.dataset.v; show(); changed(); if (live) { sendLive(pv); } });
+        b.addEventListener('click', function () { cur[key] = +b.dataset.v; show(); changed(); if (isLive(key)) { sendLive(pv); } });
       });
     }
     show();
@@ -767,7 +768,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       PAL.forEach(function (c) {
         var b = document.createElement('button');
         b.type = 'button'; b.className = 'sw'; b.style.background = c; b.dataset.c = c; b.setAttribute('aria-label', 'Colour ' + c);
-        b.addEventListener('click', function () { cur[key] = c; show(); changed(); sendLive(false); });
+        b.addEventListener('click', function () { cur[key] = c; show(); changed(); if (isLive(key)) { sendLive(false); } });
         box.appendChild(b);
       });
     }
@@ -904,7 +905,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       setRange('tdrop', 'tdrop', ' ms'); setRange('tspin', 'tspin', ' ms');
       var shs = $('#shs');
       if (!shs.children.length) { [3, 0, 1, 2].forEach(function (v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists.shs[v]; shs.appendChild(b); }); }
-      setSeg(shs, 'shs', true, true);
+      setSeg(shs, 'shs', true);
     }
     if (S.hw.muncher) {
       // A new pace shows a change of the minutes' ones; a new knock shows its scene (the clock sees the new
@@ -913,7 +914,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       [['mst', false, [0, 1, 2]], ['mpel', false, [0, 1, 2, 3]], ['mkn', false, [0, 1, 3, 2]]].forEach(function (m) {
         var el = $('#' + m[0]);
         if (!el.children.length) { m[2].forEach(function (v) { if (S.lists[m[0]][v] === undefined) { return; } var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists[m[0]][v]; el.appendChild(b); }); }
-        setSeg(el, m[0], true, m[1]);
+        setSeg(el, m[0], m[1]);
       });
       setRange('mpace', 'mpace', ' ms');
     }
@@ -922,14 +923,14 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       [['ast', false], ['acol', false], ['akn', false], ['anap', false]].forEach(function (m) {
         var el = $('#' + m[0]);
         if (!el.children.length) { S.lists[m[0]].forEach(function (t, v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = t; el.appendChild(b); }); }
-        setSeg(el, m[0], true, m[1]);
+        setSeg(el, m[0], m[1]);
       });
     }
     // The knock's sensitivity: an input setting, kept with the Tetris settings.
     $('#shkRow').hidden = !S.hw.knock;
     if (S.hw.tetris) { setRange('shk', 'shk', '', function (v) { return v === 0 ? 'off' : v; }); }
     // Brightness
-    setCheck('autob', 'autob', showAuto, true, false);
+    setCheck('autob', 'autob', showAuto, false);
     setRange('brightR', 'bright');
     ['luxd', 'luxb', 'brmin', 'brmax'].forEach(function (k) { setNumber(k, k); });
     $('#autoRow').hidden = !S.hw.lux && !cur.autob;
@@ -982,6 +983,16 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#roundRow').hidden = !has('iround');
     if (has('iround')) {
       var ir = $('#iround');
+      if (!ir.children.length) {   // the clock's choices (lists.iround), in minutes, each with the minutes it falls on
+        S.lists.iround.forEach(function (m) {
+          var o = document.createElement('option'), at = [];
+          for (var t = 0; m && t < 60; t += m) { at.push(':' + pad(t)); }
+          o.value = m;
+          o.textContent = !m ? 'never' : m === 60 ? 'every hour (:00)'
+            : 'every ' + m + ' min (' + (at.length > 3 ? at.slice(0, 2).join(', ') + ' …' : at.join(', ')) + ')';
+          ir.appendChild(o);
+        });
+      }
       ir.value = String(cur.iround);
       if (!ir.dataset.bound) { ir.dataset.bound = 1; ir.addEventListener('change', function () { cur.iround = +ir.value; changed(); }); }
     }

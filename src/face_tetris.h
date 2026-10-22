@@ -84,11 +84,11 @@ const TetrisSettings TETRIS_DEFAULTS = {
 // sensitivity, is kept here, where it has always been stored.
 const char *const TETRIS_SHS_LABELS[] = { "Collapse", "Scatter", "Clear rows", "Random each time" };   // by value: BREAKUP_*
 static_assert(sizeof(TETRIS_SHS_LABELS) / sizeof(TETRIS_SHS_LABELS[0]) == BREAKUP_COUNT, "a name per break-up effect");
-const FaceParam TETRIS_PARAMS[] = {
-  { "tdrop", offsetof(TetrisSettings, dropMs),     1, PARAM_RANGE,  0,           TETRIS_DROP_MIN, TETRIS_DROP_MAX,       nullptr },
-  { "tspin", offsetof(TetrisSettings, spinMs),     2, PARAM_RANGE,  0,           TETRIS_SPIN_MIN, TETRIS_SPIN_MAX,       nullptr },
-  { "shk",   offsetof(TetrisSettings, knockLevel), 1, PARAM_RANGE,  PARAM_KNOCK, 0,               TETRIS_KNOCK_LEVEL_MAX,       nullptr },
-  { "shs",   offsetof(TetrisSettings, breakUp), 1, PARAM_CHOICE, 0,           0,               BREAKUP_COUNT - 1, TETRIS_SHS_LABELS },
+const SettingParam TETRIS_PARAMS[] = {
+  { "tdrop", SETTING_FIELD(TetrisSettings, dropMs),     PARAM_RANGE,  PARAM_LIVE,               TETRIS_DROP_MIN, TETRIS_DROP_MAX,        LOAD_CLAMP,   nullptr },
+  { "tspin", SETTING_FIELD(TetrisSettings, spinMs),     PARAM_RANGE,  PARAM_LIVE,               TETRIS_SPIN_MIN, TETRIS_SPIN_MAX,        LOAD_CLAMP,   nullptr },
+  { "shk",   SETTING_FIELD(TetrisSettings, knockLevel), PARAM_RANGE,  PARAM_LIVE | PARAM_KNOCK, 0,               TETRIS_KNOCK_LEVEL_MAX, LOAD_CLAMP,   nullptr },
+  { "shs",   SETTING_FIELD(TetrisSettings, breakUp),    PARAM_CHOICE, PARAM_LIVE,               0,               BREAKUP_COUNT - 1,      LOAD_DEFAULT, TETRIS_SHS_LABELS },
 };
 
 // A blob of an older revision, the same idea as the main settings: rev 1 only
