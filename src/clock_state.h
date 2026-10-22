@@ -84,9 +84,6 @@ void bootStatus(const char *msg);   // a status line while setup() runs
 void drawCenteredLines(const char *first, const char *second, uint16_t color);   // one or two lines of Picopixel, centred
 bool screenIsLandscape();        // the panel is drawn wider than tall
 
-#if BOARD_WAVESHARE_WALL
-extern uint32_t wallOutputStops;   // the panel output's stops since the start (the console's "panel")
-#endif
 
 // The web server, beside the loop, and the answers of its JSON interface.
 void webUpdate(bool listening, bool lan);
