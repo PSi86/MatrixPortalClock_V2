@@ -25,6 +25,7 @@ extern unsigned long millisNow;
 extern uint8_t hourNow, minuteNow, secondNow;
 extern bool secondTrigger, minuteTrigger, hourTrigger;
 extern unsigned long secondStartedAt;   // millis() when the second on show began
+extern time_t localTime;                // what the panel shows: the clock's UTC plus zone and daylight saving
 #if defined(FACE_FRAME_LOG)
 extern bool testQuiet;   // test builds: no notices and no info cards over the face (POST /api/test quiet=1)
 #endif
@@ -36,16 +37,6 @@ extern bool panelDirty;
 uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b);   // a colour at the panel's brightness, never black
 void drawFeedbackIndicator();   // the press indicator in the corner
 bool gifPlaying();   // a GIF has the panel, its decoder up
-#if BAND_ON_PANEL
-extern bool bandLocalDone;   // the wall clock's band works its own turns out anew (bandLocalUpdate())
-// The wall clock's band: what takes it (a turn: an item by source and tag,
-// or one of the clock's own), and one that takes it at once (a new notice).
-enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON, TURN_ROOM };
-struct BandTurn { uint8_t kind, feed; uint32_t tag; };
-extern BandTurn bandWant;
-extern uint8_t  bandWantRuns;
-void bandRestart();   // the band starts again at its first turn
-#endif
 
 // The watchface on show (main.cpp), and the moment it is drawn for.
 FaceNow faceMoment();

@@ -45,6 +45,7 @@ const unsigned long SYNC_LATE_MS = 60UL * 60UL * 1000UL;
 void setSyncState(SyncState next);
 bool syncStateDue(SyncState s);     // a sync is due in this state: wanted, and not done yet
 bool syncAttempting(SyncState s);   // part of an attempt, with the radio on
+bool syncOverdue();                 // a due sync counts as failed, for the status pixel
 bool ntpSyncOn();                   // the clock syncs with NTP at all
 bool syncDueAt(time_t when);        // the sync time at `when` (UTC) brings a sync
 // At start-up, after the DS3231 was read: when the last good sync was.

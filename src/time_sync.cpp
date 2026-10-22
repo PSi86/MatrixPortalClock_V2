@@ -163,6 +163,21 @@ bool syncNeedsRadio(SyncState s) {
   return s == SYNC_WAKING || syncAttempting(s);
 }
 
+// Whether a due NTP sync counts as failed, for the status pixel.
+//
+// A known-good WiFi config - one a sync has worked over - gets SYNC_LATE_MS
+// of retries first: a sync that fails now and then does not stop the clock.
+// A new config, one that has never worked yet, shows its first failure at
+// once - it was just set up, and whoever did that wants to know whether it
+// works: as soon as it fails to join, or the attempt gives up (the pause).
+// Without a WiFi stored the clock runs as it was told to, so that is not
+// counted as a new config's failure.
+bool syncOverdue() {
+  if (!syncStateDue(syncState)) { return false; }
+  if (wifiStored() && !wifiCreds.verified) { return joinOutcome == JOIN_FAILED || syncState == SYNC_PAUSED; }
+  return millisNow - syncDueSince > SYNC_LATE_MS;
+}
+
 // The one way to set the clock: UTC, and where it came from. The automatic
 // daylight saving is decided again at once for the new time. A real-time
 // clock keeps every time the clock is given; a time read from it is not

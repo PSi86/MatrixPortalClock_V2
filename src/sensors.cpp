@@ -2,6 +2,7 @@
 #include "sensors.h"
 
 #include "clock_state.h"
+#include "info_band.h"
 
 uint8_t i2cFound[16];
 #if BOARD_WAVESHARE_WALL

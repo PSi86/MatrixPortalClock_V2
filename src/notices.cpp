@@ -5,6 +5,7 @@
 #include "clock_state.h"
 #include "console.h"
 #include "face.h"
+#include "info_band.h"
 #include "item_icons.h"   // the icons and their pictures (only this file draws them)
 #include "settings.h"
 
