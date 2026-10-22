@@ -174,8 +174,6 @@ class TetrisFace : public Watchface {
 
     pushTime(now);
 
-    _colonOn = (now.local % 2) == 0;   // 1 Hz blink, in step with the seconds
-
     // Turning runs on its own clock, so a flick between two fall steps has to be
     // painted when it happens - otherwise the drop rate would quietly limit how
     // finely the rotation setting can act.
@@ -189,6 +187,11 @@ class TetrisFace : public Watchface {
     // The hour change's effect, once its build stands - after the fall step,
     // which may just have finished it: its frames are changes.
     bool effectMoved = stepHour(now);
+
+    // 1 Hz blink, in step with the seconds; off while the rocket flies, which
+    // passes through the colon's place (after the effect's step, which may
+    // just have started or ended it).
+    _colonOn = (now.local % 2) == 0 && !rocketFlies();
 
     bool changed = _colonOn != _colonDrawn || spinPending != _spinDrawn || effectMoved;
     // Debris moving is a change in itself, so while anything is coming apart the
@@ -214,16 +217,17 @@ class TetrisFace : public Watchface {
       if (_breaking[i]) { drawBreakUp(g, i, paint); } else { drawDigit(g, i, originX(i), originY(i), now.ms); }
     }
     if (!now.set) { drawDashes(g, paint); }
-    // The colon keeps its own beat and is never touched by the animations. It is
-    // the one thing on this face that shows real time passing, so it has to stay
-    // on the second, whatever the digits are doing. Hiding it while everything was
-    // coming apart, as an earlier version did, made it drop out mid-phase on a
-    // knock and reappear off-beat as the new digits arrived.
+    // The colon keeps its own beat and is not touched by the digits' animations.
+    // It is the one thing on this face that shows real time passing, so it has to
+    // stay on the second, whatever the digits are doing. Hiding it while everything
+    // was coming apart, as an earlier version did, made it drop out mid-phase on a
+    // knock and reappear off-beat as the new digits arrived. The one exception is
+    // the hour's rocket, which flies through its place: the two over each other
+    // were not pleasant (Peter, 2026-10-23), so the colon is off for its 2.8 s and
+    // comes back on its beat (update()).
     if (_colonOn) { drawColon(g, paint); }
     _colonDrawn = _colonOn;
-    // The rocket flies in front of everything, the colon included, which it
-    // passes in landscape.
-    if (_hourPart == PART_EFFECT && _hourStyle == HOUR_ROCKET) { drawRocket(g, now, paint); }
+    if (rocketFlies()) { drawRocket(g, now, paint); }
     // After the step, because a piece may have landed and the next one armed.
     _spinDrawn = allPendingTurns(now.ms);
   }
@@ -961,6 +965,7 @@ class TetrisFace : public Watchface {
   }
 
   bool hourEffectRuns() const { return _hourPart == PART_EFFECT; }
+  bool rocketFlies() const { return _hourPart == PART_EFFECT && _hourStyle == HOUR_ROCKET; }
 
   // The hour change begins: all four come apart together.
   void startHour(const FaceNow &now, uint8_t style) {

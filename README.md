@@ -1522,7 +1522,7 @@ the original game (decided 2026-10-23). The web app's Tetris card has the choice
 |---|---|
 | **Line clear** | The old time's rows go four at a time from the bottom, as four lines cleared at once in the game: each group lit white three times, then gone, the rows above dropping into the gap (1.6 s). Then the new time is built. |
 | **Level-up colours** | The digits come apart with the break-up effect and are built anew; once the time stands, every block's colour moves on through the six hues, twice round, as at a level-up in the game (2.4 s). The colours move together, so touching pieces stay apart all the way. |
-| **Rocket** | Built anew as above; then a small rocket stands at the foot of the panel on its flame, smoke spreading, and lifts off, faster and faster (2.8 s). In landscape it rises through the gap between the hours and the minutes, upright over the middle of the digits. |
+| **Rocket** | Built anew as above; then a small rocket stands at the foot of the panel on its flame, smoke spreading, and lifts off, faster and faster (2.8 s). In landscape it rises through the gap between the hours and the minutes, upright over the middle of the digits. The colon is off while it flies and comes back on its beat. |
 | **Random each hour** (default) | One of the three, drawn each hour. |
 | **Off** | The plain change, as every minute. |
 
