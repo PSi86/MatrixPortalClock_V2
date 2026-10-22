@@ -20,8 +20,11 @@ extern unsigned long millisNow;
 extern uint8_t hourNow, minuteNow, secondNow;
 extern bool secondTrigger, minuteTrigger, hourTrigger;
 
-// The panel: what is on it has to be drawn anew (a setting, a status that shows).
+// The panel: the canvas the clock draws into, and whether what is on it has
+// to be drawn anew (a setting, a status that shows).
+extern PanelCanvas matrix;
 extern bool panelDirty;
+bool gifPlaying();   // a GIF has the panel, its decoder up
 #if BAND_ON_PANEL
 extern bool bandLocalDone;   // the wall clock's band works its own turns out anew (bandLocalUpdate())
 #endif
