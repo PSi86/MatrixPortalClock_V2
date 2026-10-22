@@ -1201,6 +1201,34 @@ form-encoded POSTs, answers are JSON:
 | `POST /api/ha` | the Home Assistant link: on or off, broker, port, user, password (empty keeps the stored one) |
 | `POST /api/restart` | restarts the clock |
 
+### Settings: one table per blob
+
+Each blob of settings the web app edits has a table beside its struct (since
+2026-10-22; the watchfaces' since the face refactor): per setting the web app's
+key, where it sits in the blob, its kind, its range, whether the page tries it
+live, and what a stored value outside its range becomes when it is loaded. One
+piece of code (`src/settings_table.h`) takes the settings from `/api/save` and
+`/api/live`, checks them when they are loaded and reports them in `/api/state`.
+The keys, the stored blobs and the values in `settings` are the ones they were.
+
+`/api/state` also tells the page how to send them back, under `lists.form`:
+per key `[kind, lo, hi, live]`, the range as the clock keeps it.
+
+| kind | in `settings` | sent back as |
+|---|---|---|
+| `range`, `choice`, `flag` | the number | the number; outside its range it is moved into it |
+| `checkbox` | `true` / `false` | `on` when ticked; on a save an absent one is off, live only one that is sent counts (`on` or `off`) |
+| `tenths` | tenths (`gifbx`: 20 = twice) | the number with a decimal, `2.0` or `2,0` |
+| `tens` | ms | ms, kept in tens (the classic fly-in) |
+| `colour` | `#rrggbb` | `#rrggbb` |
+| `special` | as the setting needs | its own form: `dirs` as `dir0` .. `dir5`, `keys` as `k0` .., `closes` as `cset` with `c0` .., and `tz`, `lat`, `lon`, `iround` as they are |
+
+The page sends exactly the keys listed, so a setting the clock does not offer as
+it is - the days between time syncs without a real-time clock, the gesture
+sensor's mount without the sensor, the info round on the wall clock - is not
+sent. `lists.iround` holds the info round's choices in minutes. A new setting
+needs its field, its default, a row in its table and its control on the page.
+
 ## AP configuration
 
 Open the menu, select **Hotspot** and hold DOWN -> the board opens the access
@@ -1772,7 +1800,7 @@ which one piece of code loads, checks, takes from the web app and reports them
 all. Since 2026-10-22 the clock's own settings go through such tables too
 (`CLOCK_PARAMS`, `UI_PARAMS`, `GIF_PARAMS`, `DECOR_PARAMS`, `FEED_PARAMS` in
 `src/main.cpp`), and `/api/state` tells the web app, under `lists.form`, how to
-send each one back (see "Settings: one table per blob" below).
+send each one back (see [Settings: one table per blob](#settings-one-table-per-blob)).
 
 The same rules for every face: an animation asked for plays at once or not at
 all, and not when it would not end 3 s before the face's next change; after one,

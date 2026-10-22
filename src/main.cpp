@@ -9513,10 +9513,14 @@ void apiState(Print &c) {
   for (uint8_t m : ROUND_CHOICES) { rounds.add(m); }
 #endif
   // What the web app needs to send each setting back: per key its kind, its
-  // range as stored, and whether it is tried live (settings_table.h).
+  // range as stored, and whether it is tried live (settings_table.h). Not
+  // the days between syncs without a real-time clock to keep the time
+  // meanwhile, nor the gesture sensor's mount without the sensor: the page
+  // does not offer them then.
   JsonObject form = lists["form"].to<JsonObject>();
   for (SettingsTable *t : SETTINGS_TABLES) {
     settingsForm(*t, [&form](const char *key, const char *kind, uint16_t lo, uint16_t hi, bool live) {
+      if ((!rtcSync && !strcmp(key, "syncd")) || (!gestureOK && !strcmp(key, "gmount"))) { return; }
       JsonArray a = form[key].to<JsonArray>();
       a.add(kind);
       a.add(lo);
