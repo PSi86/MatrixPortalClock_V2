@@ -190,8 +190,11 @@ class TetrisFace : public Watchface {
 
     // 1 Hz blink, in step with the seconds; off while the rocket flies, which
     // passes through the colon's place (after the effect's step, which may
-    // just have started or ended it).
-    _colonOn = (now.local % 2) == 0 && !rocketFlies();
+    // just have started or ended it), and for the rest of the second the
+    // rocket left in: the colon comes back as a second begins, never for the
+    // last moments of one (Peter, 2026-10-23: a short flash, then a second
+    // dark, looked untidy).
+    _colonOn = (now.local % 2) == 0 && !rocketFlies() && now.local != _colonDarkIn;
 
     bool changed = _colonOn != _colonDrawn || spinPending != _spinDrawn || effectMoved;
     // Debris moving is a change in itself, so while anything is coming apart the
@@ -1001,6 +1004,7 @@ class TetrisFace : public Watchface {
   }
 
   void endHour(const FaceNow &now) {
+    if (rocketFlies()) { _colonDarkIn = now.local; }   // the colon waits for the next second
     _hourPart = PART_NONE;
     _hueShift = 0;
     _breakUpEndedAt = now.ms;   // the rest after an animation, as after a break-up
@@ -1107,6 +1111,7 @@ class TetrisFace : public Watchface {
   unsigned long _effectAt    = 0;                // millis() the effect began
   uint16_t      _effectFrame = 0xFFFF;           // its frame last stepped
   uint8_t       _rocketSeed  = 0;                // the flame's flicker and the smoke, drawn when it begins
+  time_t        _colonDarkIn = -1;               // the second the rocket ended in: the colon stays off in it
   // The tail of the last span asked for, kept: the rules for the panel ask on
   // every pass, and it changes only with the minute, the pace, the turn or
   // the hour change chosen.
