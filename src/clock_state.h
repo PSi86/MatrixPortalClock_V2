@@ -13,6 +13,7 @@
 #include <WiFi.h>
 #include "board_hal.h"
 #include "band_data.h"   // BandItem
+#include "settings_table.h"   // SettingsTable
 #include "face.h"        // FaceNow, Watchface
 #include "knock.h"       // Knock
 
@@ -28,6 +29,9 @@ extern unsigned long secondStartedAt;   // millis() when the second on show bega
 extern time_t localTime;                // what the panel shows: the clock's UTC plus zone and daylight saving
 #if defined(FACE_FRAME_LOG)
 extern bool testQuiet;   // test builds: no notices and no info cards over the face (POST /api/test quiet=1)
+#endif
+#if defined(CLOCK_DEBUG) || defined(FACE_FRAME_LOG)
+void apiTest(Print &c, const String &body);   // POST /api/test: what the scene tests need (main.cpp)
 #endif
 
 // The panel: the canvas the clock draws into, and whether what is on it has
@@ -49,6 +53,17 @@ const uint8_t BOOT_STAGE_PANEL = 2;   // panel and sensors up
 const uint8_t BOOT_STAGE_WIFI  = 3;   // the WiFi join started (the clock runs while it joins)
 const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined
 extern bool bootStageCleared;         // breadcrumb cleared after the first healthy seconds
+extern uint8_t prevBootStage;         // the stage the previous run reached
+extern bool accelOK;                  // the LIS3DH was found on I2C
+
+// The clock's settings (settings.h) and the faces' (face.h): loaded, taken
+// up, saved; every table of them, for /api/state.
+void loadSettings();
+void applySettings();     // into the runtime globals that drive the clock
+bool saveFaceSettings();
+FaceOutcome applyFaceParams(const String &q, bool live, bool previews);
+extern SettingsTable *const SETTINGS_TABLES[];
+extern const uint8_t SETTINGS_TABLE_COUNT;
 
 // The knock (knock.h): the LIS3DH's, or the wall clock's QMI8658's.
 extern Knock knock;
@@ -85,13 +100,8 @@ void drawCenteredLines(const char *first, const char *second, uint16_t color);  
 bool screenIsLandscape();        // the panel is drawn wider than tall
 
 
-// The web app's JSON interface (main.cpp): what the web server hands a
-// request to.
-struct WebConn;
-void webApi(Print &c, const String &path, bool isPost, const String &body, bool &closeHotspot, bool &syncNow, bool &restart);
-void sendWebApp(Print &c);
-void apiPackUpload(WiFiClient &client, Print &out, long length);
 #if defined(CLOCK_DEBUG)
+struct WebConn;
 // The debug build's statistics of the web server (main.cpp).
 void webStatsPass(uint32_t us);
 void webStatsDone(WebConn &w, bool dropped);

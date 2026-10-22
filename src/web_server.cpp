@@ -7,6 +7,7 @@
 #include "lan_access.h"
 #include "settings_table.h"   // hexVal()
 #include "time_sync.h"
+#include "web_api.h"
 #include "web_request.h"
 
 // What only this module calls, ahead of its use.
