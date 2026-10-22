@@ -2,6 +2,7 @@
 #include "web_server.h"
 
 #include "clock_state.h"
+#include "debug_stats.h"
 #include "console.h"
 #include "hotspot.h"
 #include "lan_access.h"
@@ -58,9 +59,7 @@ void webUpdate(bool listening, bool lan) {
     if (webConns[i].phase != WEB_FREE) { webStep(webConns[i]); }
   }
   webAfter();
-#if defined(CLOCK_DEBUG)
   webStatsPrint();
-#endif
 }
 
 static void webAccept(bool lan) {
@@ -229,9 +228,7 @@ static void webSend(WebConn &w) {
 // A connection closed - its answer out, or dropped - and its place free. What
 // its request asked for is done WEB_AFTER_MS later, answer out or not.
 static void webClose(WebConn &w, bool dropped) {
-#if defined(CLOCK_DEBUG)
   webStatsDone(w, dropped);
-#endif
   w.client.stop();
   if (w.closeHotspot || w.restart) {
     webCloseHotspot = webCloseHotspot || w.closeHotspot;

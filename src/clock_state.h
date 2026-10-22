@@ -26,6 +26,7 @@ extern unsigned long millisNow;
 extern uint8_t hourNow, minuteNow, secondNow;
 extern bool secondTrigger, minuteTrigger, hourTrigger;
 extern unsigned long secondStartedAt;   // millis() when the second on show began
+extern uint16_t panelHz;                // the panel's refresh rate, 0 until the first measurement
 extern time_t localTime;                // what the panel shows: the clock's UTC plus zone and daylight saving
 #if defined(FACE_FRAME_LOG)
 extern bool testQuiet;   // test builds: no notices and no info cards over the face (POST /api/test quiet=1)
@@ -100,12 +101,5 @@ void drawCenteredLines(const char *first, const char *second, uint16_t color);  
 bool screenIsLandscape();        // the panel is drawn wider than tall
 
 
-#if defined(CLOCK_DEBUG)
-struct WebConn;
-// The debug build's statistics of the web server (main.cpp).
-void webStatsPass(uint32_t us);
-void webStatsDone(WebConn &w, bool dropped);
-void webStatsPrint();
-#endif
 
 #endif  // CLOCK_STATE_H
