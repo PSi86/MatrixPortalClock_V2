@@ -511,7 +511,14 @@ class TetrisFace : public Watchface {
     uint8_t changeStyle = 0xFF;   // drawn once, so digits changing together match
     for (uint8_t i = 0; i < 4; i++) {
       if (_breaking[i]) { continue; }   // still coming apart, it will be rebuilt after
-      if (now.ms < _holdUntil[i]) { continue; }   // the pause after it came apart
+      // The pause after it came apart; 0 = none, and cleared once over, so an
+      // old one never reads as ahead again. Signed, so it survives the
+      // millis() wrap (the plain < left a digit blank for 49.7 days when a
+      // pause spanned the wrap; code review of 2026-10-14).
+      if (_holdUntil[i] != 0) {
+        if ((long)(now.ms - _holdUntil[i]) < 0) { continue; }
+        _holdUntil[i] = 0;
+      }
       if (d[i] == _digits[i].value) { continue; }
       // The outgoing digit breaks up rather than vanishing at once (decided by
       // Peter, 2026-10-08: the effect always counts at a time change). Only one

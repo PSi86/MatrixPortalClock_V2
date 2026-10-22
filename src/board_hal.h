@@ -768,12 +768,19 @@ class PanelCanvas : public GFXcanvas16 {
       default: break;
     }
   }
+  // Waits until a refresh period has passed since the last flip. delay() is
+  // vTaskDelay() at 1000 ticks a second and may end up to a tick early, so it
+  // waits whole ticks one short, which lets the WiFi tasks run meanwhile, and
+  // the rest on micros(): ended early, the next frame went into a buffer still
+  // on the panel (code review of 2026-10-14).
   void waitForBackBuffer() {
-    uint32_t waited = micros() - _flippedAt;
-    if (waited >= _periodUs) { return; }
-    uint32_t rest = _periodUs - waited;
-    if (rest >= 1000) { delay(rest / 1000); }   // lets the WiFi tasks run meanwhile
-    delayMicroseconds(rest % 1000);
+    for (;;) {
+      uint32_t waited = micros() - _flippedAt;
+      if (waited >= _periodUs) { return; }
+      uint32_t rest = _periodUs - waited;
+      if (rest < 2000) { delayMicroseconds(rest); return; }
+      delay(rest / 1000 - 1);
+    }
   }
 #if BOARD_WAVESHARE_WALL
   // One buffer: nothing to switch, only the time the frame went out.
@@ -1132,13 +1139,6 @@ inline uint8_t boardBootStageRead() {
 inline bool boardResetWasNormal() {
   const char *r = boardResetReasonText();
   return (strcmp(r, "POWER") == 0) || (strcmp(r, "BUTTON") == 0);
-}
-
-/* ======================================================================
-   Reboot
-   ====================================================================== */
-inline void boardReset() {
-  ESP.restart();
 }
 
 /* ======================================================================

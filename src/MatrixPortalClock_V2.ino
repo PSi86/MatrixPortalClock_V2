@@ -1136,6 +1136,11 @@ uint8_t       radioUsers   = RADIO_SYNC;      // the first sync is due at start-
 unsigned long joinAskedAt  = 0;               // millis() the join was last started, for the re-join pace
 unsigned long joinPolledAt = 0;               // millis() the station was last polled
 const unsigned long JOIN_RETRY_MS = 10000;    // between joins while the station does not connect
+// The home WiFi forgotten while joined: the station stays a moment for what
+// still has to go out over it (stationUpdate()).
+unsigned long wifiForgottenAt = 0;            // millis() it was forgotten; 0 = not since the start
+const unsigned long FORGET_ANSWER_MS = 2000;  // the web app's answer
+const unsigned long FORGET_LINK_MS   = 10000; // the Home Assistant link's goodbye, at most
 const unsigned long JOIN_POLL_MS  = 500;      // between looks at whether it has
 // A clock that has a time does not keep its radio on for a sync that does not
 // work out: after SYNC_ATTEMPT_MS it switches it off and tries again after
@@ -3227,8 +3232,22 @@ void faceCatchUp() {
   classicFace.enter(faceMoment(), ENTER_SHOWN);
 }
 
+// The millis() the second now on the panel began at: the clock's own, which
+// knows it to the millisecond (clock_time.h), not the pass that noticed it -
+// after a long pass (a WiFi scan, an upload) that was a second or more late,
+// and the changes planned from it as late (code review of 2026-10-14). Never
+// after this pass's millisNow: the clock reads millis() a moment later. The
+// test's own clock keeps its passes' time.
+unsigned long secondBeganAt() {
+#if defined(FACE_FRAME_LOG)
+  if (testVirtualOn) { return millisNow; }
+#endif
+  unsigned long at = clockState().millisAt;
+  return (long)(at - millisNow) > 0 ? millisNow : at;
+}
+
 /* Updates millisNow, localTime and the ticks. Keeps track of the looptime using delay(). */
-void timekeeper(void) { 
+void timekeeper(void) {
   /*Call this always in the beginning of an iteration in loop()
     for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain localTime with the clock_time.h helpers eg: clockHour(localTime)
     Triggers are only active for one iteration: hourTrigger -> when the hour has changed
@@ -3265,7 +3284,7 @@ void timekeeper(void) {
   if (testBegins && testVirtualReset) { testFaceReset(); }   // the face afresh, at the scene's time
 #endif
 
-  if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; secondStartedAt=millisNow; }
+  if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; secondStartedAt=secondBeganAt(); }
   else { secondTrigger=false; }
  
   if(secondTrigger && minuteNow != clockMinute(localTime)) { minuteNow=clockMinute(localTime); minuteTrigger=true; }
@@ -3727,8 +3746,18 @@ bool stationUp() { return stationState == STA_UP; }
 // Keeps the station joined while anyone needs it, and the radio off while
 // nobody does. Runs on every pass outside the hotspot and never waits.
 // Without a stored WiFi there is nothing to join, and whoever wants the
-// station simply goes on waiting.
+// station simply goes on waiting. Forgotten while joined, the station stays
+// for FORGET_ANSWER_MS, so the web app's answer gets out over it, and while
+// the Home Assistant link still holds it, so its goodbye does (up to
+// FORGET_LINK_MS). Until 2026-10-22 the radio went on the next pass: by the
+// code, before the answer went out on the home network, and before the
+// link's goodbye, so Home Assistant would have learned it from the broker's
+// last will only after the keepalive ran out (code review of 2026-10-14).
 void stationUpdate() {
+  if (!wifiStored() && stationState == STA_UP && wifiForgottenAt) {
+    unsigned long since = millisNow - wifiForgottenAt;
+    if (since < FORGET_ANSWER_MS || ((radioUsers & RADIO_HA) && since < FORGET_LINK_MS)) { return; }
+  }
   if (radioUsers == 0 || !wifiStored()) {
     if (stationState != STA_OFF) {
       if (stationState == STA_JOINING) { noteJoinFailed(); }   // read before the radio goes
@@ -3991,6 +4020,7 @@ bool forgetWifi() {
   wifiCreds.verified = 0;
   bool stored = saveWifiCreds();
   joinOutcome = JOIN_NOT_TRIED;
+  wifiForgottenAt = millisNow ? millisNow : 1;   // the station stays a moment (stationUpdate())
   Console.println("WiFi: forgotten");
   return stored;
 }
@@ -5154,7 +5184,7 @@ void fadeStep() {
 /* ======================================================================
    WLAN access point configuration mode
    ====================================================================== */
-// Bring the AP radio and its servers up (initial start and watchdog restart).
+// Bring the AP radio and its servers up (startAPMode()).
 void apRadioUp() {
   bool up = netApBegin(AP_SSID, AP_PASS);
   IPAddress ip = netApIP();
@@ -5162,7 +5192,8 @@ void apRadioUp() {
   // yet - the info screen and the DNS answers need a usable one either way.
   if ((uint32_t)ip != 0) { apIP = ip; }
   apServer.begin();
-  dnsUdp.begin(DNS_PORT); // captive portal DNS
+  // Captive portal DNS: without it a phone does not open the page by itself.
+  if (!dnsUdp.begin(DNS_PORT)) { Console.println("Captive portal DNS did NOT start"); }
   Console.print("AP "); Console.print(up ? "up" : "NOT up");
   Console.print(" at "); Console.println(apIP);
 }
@@ -8655,6 +8686,7 @@ bool microDegreesOf(const String &v, int32_t limit, int32_t &out) {
 // The info band section of the config page (/save). Both fields empty clear
 // the place; a place that cannot be read keeps the one stored.
 void applyFeedParams(const String &q) {
+  uint8_t wasOn = feedSettings.on;
   uint8_t on = 0;
   if (getParam(q, "feedw") == "on") { on |= (uint8_t)(1 << FEED_WEATHER); }   // checkboxes: absent when unticked
   if (getParam(q, "feeda") == "on") { on |= (uint8_t)(1 << FEED_WARNINGS); }
@@ -8697,6 +8729,11 @@ void applyFeedParams(const String &q) {
   }
   for (uint8_t f = 0; f < FEED_COUNT; f++) {
     if (!feedOn(f)) { bandDropFeed(f); }   // a source switched off takes its items with it
+    // One switched on is due at once. Its due time was left as it was: after
+    // more than 24.8 days of uptime the signed comparison in feedDueWithin()
+    // read an old one as ahead, and the source waited up to that long again
+    // (code review of 2026-10-14).
+    else if (!(wasOn & (1 << f))) { feedRuns[f].dueAt = millisNow; }
   }
 }
 
