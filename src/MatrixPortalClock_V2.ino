@@ -996,7 +996,8 @@ unsigned long luxLnAt = 0;                 // millis() of its last reading
 // (AUTOBRIGHT_END_MS), and only once the target is AUTOBRIGHT_BAND away, so a
 // light that only wavers moves nothing. The panel takes a new value at most
 // every AUTOBRIGHT_STEP_MS: on the S3 every brightness whose tables differ
-// writes two whole frames (3.65 ms each), on the wall clock one (about 40 ms).
+// writes two whole frames (3.65 ms each); the wall clock writes its picture
+// again a few rows a pass (PanelCanvas::retintStep(), 42 ms in all).
 uint8_t       autoBrightTarget = 128;        // sensor brightness the fade moves toward
 float         autoBrightLn = 0.0f;           // the brightness now, in log units (sub-unit precision)
 bool          autoBrightMoving = false;      // a fade under way
@@ -2030,6 +2031,9 @@ void updateBrightness() {
     // panel), so the screens that only repaint on a change have to repaint.
     panelDirty = true;
   }
+#if BOARD_WAVESHARE_WALL
+  matrix.retintStep();   // a new brightness reaches the wall's rows a few at a time
+#endif
 }
 
 // The brightness the panel runs at: the clock's, and while a GIF plays the
@@ -8223,7 +8227,7 @@ void bandUpdate() {
     int16_t x = moved >= bandTurnRuns * pass ? -(int16_t)bandRunWidth : WALL_W - (int16_t)(moved % pass);
     if (x != bandRunLastX) { bandDraw(); return; }
   }
-  if (matrix.bandStale()) { bandDraw(); }   // a GIF, a test picture or a new brightness wrote over it
+  if (matrix.bandStale()) { bandDraw(); }   // a GIF or a test picture wrote over it
 }
 
 #if defined(CLOCK_DEBUG)
