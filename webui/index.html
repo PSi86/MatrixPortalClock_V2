@@ -359,63 +359,6 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       </div>
     </section>
 
-    <section class="sec" id="time" data-title="Time">
-      <div class="sec-head"><h2>Time</h2><p>The clock keeps UTC; zone and daylight saving are added for the face.</p></div>
-      <div class="card">
-        <div class="row stack">
-          <div class="status"><span class="dot" id="timeDot"></span><span id="timeLine"></span></div>
-          <div class="ctl"><button class="btn" type="button" id="phoneBtn">Set from this device</button><span class="note">or type the clock's local time:</span></div>
-          <div class="pair"><label>Date<input type="date" id="tdate"></label><label>Time<input type="time" id="ttime"></label></div>
-          <div class="ctl"><button class="btn" type="button" id="typedBtn">Set date and time</button></div>
-        </div>
-        <div class="row"><label class="lbl" for="tz">Time zone</label><select id="tz"></select></div>
-        <div class="row"><div class="lbl">Daylight saving</div>
-          <div class="seg" id="dst" role="group" aria-label="Daylight saving">
-            <button type="button" data-v="2">By the zone</button><button type="button" data-v="1">Summer</button><button type="button" data-v="0">Winter</button>
-          </div>
-        </div>
-        <div class="row">
-          <div><label class="lbl" for="sync">Internet time sync</label><div class="hint" id="syncHint"></div></div>
-          <input type="time" id="sync">
-        </div>
-        <div class="row" id="syncdRow">
-          <div><label class="lbl" for="syncd">Sync interval</label><div class="hint">The real-time clock keeps the time in between.</div></div>
-          <select id="syncd"><option value="1">daily</option><option value="7">every 7 days</option><option value="30">every 30 days</option><option value="91">every 3 months</option><option value="182">every 6 months</option><option value="365">every 12 months</option><option value="0">never (no WiFi needed)</option></select>
-        </div>
-      </div>
-    </section>
-
-    <section class="sec" id="inputs" data-title="Inputs">
-      <div class="sec-head"><h2>Buttons, knock and gestures</h2><p>What each input found does on the face. The menu, the hotspot screen and the start follow the profile.</p></div>
-      <div class="card">
-        <div class="row stack"><div class="lbl">Found</div><div class="chips" id="found"></div></div>
-        <div class="row">
-          <div><label class="lbl" for="prof">Profile</label><div class="hint">Choosing one fills the face below with its own.</div></div>
-          <select id="prof"></select>
-        </div>
-        <div class="row" id="shkRow">
-          <div><label class="lbl" for="shk">Knock sensitivity</label><div class="hint">0 switches the knock off; 10 reacts to a light tap. What a knock does is set below.</div></div>
-          <div class="range"><input type="range" id="shk" min="0" max="10" data-live><output for="shk"></output></div>
-        </div>
-        <div class="row" id="gmountRow">
-          <div><label class="lbl" for="gmount">Gesture sensor turned</label><div class="hint">If a swipe up acts as another direction, try the next.</div></div>
-          <select id="gmount"><option value="0">not turned</option><option value="1">90° clockwise</option><option value="2">180°</option><option value="3">90° counter-clockwise</option></select>
-        </div>
-        <div class="row stack" id="gtRow" hidden>
-          <div><div class="lbl">Gesture test</div><div class="hint">The panel shows every gesture instead of doing it: big, the direction the clock takes; on top (S) the sensor’s own; below the count (G), the turn set above (M), the panel’s rotation (R) and what the sensor sees in front of it (N brightness/size). Grey: left out, too soon after the last. Any button ends it, and so do 3 minutes without a gesture.</div></div>
-          <div class="ctl"><button class="btn" type="button" id="gtBtn">Start on the panel</button><span class="note" id="gtNote"></span></div>
-          <label class="close"><input type="checkbox" id="gtTune"> Wave settings of PixArt’s datasheet v1.5 (until the next restart)</label>
-          <ul class="items" id="gtList"></ul>
-        </div>
-        <div class="row stack">
-          <div><div class="lbl">On the face</div><div class="hint">Giving a button's twice or three times something to do makes its single press wait 0.4 s for the next.</div>
-            <div class="hint" id="closeHint" hidden>Ticked inputs close an alert or a message on the panel and go on to the next one; nothing else they do runs then.</div></div>
-          <div class="shortcuts" id="shortcuts"></div>
-          <div class="err" id="scErr" hidden>None of these opens the menu. Give one of them “open the menu”.</div>
-        </div>
-      </div>
-    </section>
-
     <section class="sec" id="gifs" data-title="GIFs">
       <div class="sec-head"><h2>GIFs</h2><p>Now and then a GIF takes the panel; holding UP on the face plays one at once.</p></div>
       <div class="card">
@@ -503,32 +446,69 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div class="ctl"><button class="btn" type="button" id="msgShow">Show notifications now</button></div>
         </div>
       </div>
-      <div class="card" id="haCard" hidden>
-        <div class="group-title">Home Assistant</div>
-        <div class="row row-switch">
-          <div><div class="lbl">Link to Home Assistant<span class="badge always">needs continuous network access</span></div><div class="status" style="margin-top:2px"><span class="dot" id="haDot"></span><span class="hint" style="margin:0" id="haLine"></span></div></div>
-          <label class="switch"><input type="checkbox" id="haOn" aria-label="Link to Home Assistant"><span></span></label>
-        </div>
-        <div class="row stack" id="haNeedRow" hidden><div class="need" id="haNeed"></div></div>
+    </section>
+
+    <section class="sec" id="inputs" data-title="Inputs">
+      <div class="sec-head"><h2>Buttons, knock and gestures</h2><p>What each input found does on the face. The menu, the hotspot screen and the start follow the profile.</p></div>
+      <div class="card">
+        <div class="row stack"><div class="lbl">Found</div><div class="chips" id="found"></div></div>
         <div class="row">
-          <div><div class="lbl">Broker</div><div class="hint">Home Assistant’s address, with the Mosquitto add-on installed.</div></div>
-          <div class="pair"><label>Address<input type="text" id="haHost" maxlength="63" autocomplete="off" placeholder="homeassistant.local"></label><label>Port<input type="number" id="haPort" min="1" max="65535"></label></div>
+          <div><label class="lbl" for="prof">Profile</label><div class="hint">Choosing one fills the face below with its own.</div></div>
+          <select id="prof"></select>
         </div>
-        <div class="row"><label class="lbl" for="haUser">User</label><input type="text" id="haUser" maxlength="63" autocomplete="off"></div>
-        <div class="row"><div><label class="lbl" for="haPw">Password</label><div class="hint">Of the Home Assistant user for the clock.</div></div><input type="password" id="haPw" maxlength="63" autocomplete="new-password"></div>
+        <div class="row" id="shkRow">
+          <div><label class="lbl" for="shk">Knock sensitivity</label><div class="hint">0 switches the knock off; 10 reacts to a light tap. What a knock does is set below.</div></div>
+          <div class="range"><input type="range" id="shk" min="0" max="10" data-live><output for="shk"></output></div>
+        </div>
+        <div class="row" id="gmountRow">
+          <div><label class="lbl" for="gmount">Gesture sensor turned</label><div class="hint">If a swipe up acts as another direction, try the next.</div></div>
+          <select id="gmount"><option value="0">not turned</option><option value="1">90° clockwise</option><option value="2">180°</option><option value="3">90° counter-clockwise</option></select>
+        </div>
+        <div class="row stack" id="gtRow" hidden>
+          <div><div class="lbl">Gesture test</div><div class="hint">The panel shows every gesture instead of doing it: big, the direction the clock takes; on top (S) the sensor’s own; below the count (G), the turn set above (M), the panel’s rotation (R) and what the sensor sees in front of it (N brightness/size). Grey: left out, too soon after the last. Any button ends it, and so do 3 minutes without a gesture.</div></div>
+          <div class="ctl"><button class="btn" type="button" id="gtBtn">Start on the panel</button><span class="note" id="gtNote"></span></div>
+          <label class="close"><input type="checkbox" id="gtTune"> Wave settings of PixArt’s datasheet v1.5 (until the next restart)</label>
+          <ul class="items" id="gtList"></ul>
+        </div>
+        <div class="row stack">
+          <div><div class="lbl">On the face</div><div class="hint">Giving a button's twice or three times something to do makes its single press wait 0.4 s for the next.</div>
+            <div class="hint" id="closeHint" hidden>Ticked inputs close an alert or a message on the panel and go on to the next one; nothing else they do runs then.</div></div>
+          <div class="shortcuts" id="shortcuts"></div>
+          <div class="err" id="scErr" hidden>None of these opens the menu. Give one of them “open the menu”.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="time" data-title="Time">
+      <div class="sec-head"><h2>Time</h2><p>The clock keeps UTC; zone and daylight saving are added for the face.</p></div>
+      <div class="card">
+        <div class="row stack">
+          <div class="status"><span class="dot" id="timeDot"></span><span id="timeLine"></span></div>
+          <div class="ctl"><button class="btn" type="button" id="phoneBtn">Set from this device</button><span class="note">or type the clock's local time:</span></div>
+          <div class="pair"><label>Date<input type="date" id="tdate"></label><label>Time<input type="time" id="ttime"></label></div>
+          <div class="ctl"><button class="btn" type="button" id="typedBtn">Set date and time</button></div>
+        </div>
+        <div class="row"><label class="lbl" for="tz">Time zone</label><select id="tz"></select></div>
+        <div class="row"><div class="lbl">Daylight saving</div>
+          <div class="seg" id="dst" role="group" aria-label="Daylight saving">
+            <button type="button" data-v="2">By the zone</button><button type="button" data-v="1">Summer</button><button type="button" data-v="0">Winter</button>
+          </div>
+        </div>
         <div class="row">
-          <div><div class="lbl">Values to Home Assistant</div><div class="hint">The light in lux, and on the wall clock the room’s temperature and humidity. A change goes out at most this often; an unchanged value still at least this often, so Home Assistant sees the sensor alive.</div></div>
-          <div class="pair"><label>At most every (s)<input type="number" id="haMin" min="5" max="255"></label><label>At least every (min)<input type="number" id="haMax" min="1" max="255"></label></div>
+          <div><label class="lbl" for="sync">Internet time sync</label><div class="hint" id="syncHint"></div></div>
+          <input type="time" id="sync">
         </div>
-        <div class="row stack"><div class="note" id="haTopics"></div></div>
-        <div class="row"><div class="note" id="haNote"></div><div class="ctl"><button class="btn primary" type="button" id="haSave">Save Home Assistant link</button></div></div>
-        <div class="row stack"><div class="err" id="haErr" hidden></div></div>
+        <div class="row" id="syncdRow">
+          <div><label class="lbl" for="syncd">Sync interval</label><div class="hint">The real-time clock keeps the time in between.</div></div>
+          <select id="syncd"><option value="1">daily</option><option value="7">every 7 days</option><option value="30">every 30 days</option><option value="91">every 3 months</option><option value="182">every 6 months</option><option value="365">every 12 months</option><option value="0">never (no WiFi needed)</option></select>
+        </div>
       </div>
     </section>
 
     <section class="sec" id="net" data-title="Network">
-      <div class="sec-head"><h2>Home WiFi</h2><p>The network the clock fetches its time and data over.</p></div>
+      <div class="sec-head"><h2>Network</h2><p>The home WiFi the clock fetches its time and data over, and the clock on the home network.</p></div>
       <div class="card">
+        <div class="group-title">Home WiFi</div>
         <div class="row stack"><div class="status"><span class="dot" id="wifiDot"></span><span id="wifiLine"></span></div></div>
         <div class="row stack" id="netsRow"><div class="lbl">Networks in range</div><div class="networks" id="networks"></div><div class="note" id="netsNote"></div></div>
         <div class="row"><label class="lbl" for="ssid">Network name</label><input type="text" id="ssid" maxlength="32" autocomplete="off"></div>
@@ -549,6 +529,30 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         </div>
         <div class="row"><div class="note" id="lanNote"></div><div class="ctl"><button class="btn primary" type="button" id="lanSave">Save home network access</button></div></div>
         <div class="row stack"><div class="err" id="lanErr" hidden></div></div>
+      </div>
+    </section>
+
+    <section class="sec" id="ha" data-title="Home Assistant" hidden>
+      <div class="sec-head"><h2>Home Assistant</h2><p>The clock’s link to Home Assistant: items and messages for the clock, and the clock’s sensors back as entities.</p></div>
+      <div class="card" id="haCard">
+        <div class="row row-switch">
+          <div><div class="lbl">Link to Home Assistant<span class="badge always">needs continuous network access</span></div><div class="status" style="margin-top:2px"><span class="dot" id="haDot"></span><span class="hint" style="margin:0" id="haLine"></span></div></div>
+          <label class="switch"><input type="checkbox" id="haOn" aria-label="Link to Home Assistant"><span></span></label>
+        </div>
+        <div class="row stack" id="haNeedRow" hidden><div class="need" id="haNeed"></div></div>
+        <div class="row">
+          <div><div class="lbl">Broker</div><div class="hint">Home Assistant’s address, with the Mosquitto add-on installed.</div></div>
+          <div class="pair"><label>Address<input type="text" id="haHost" maxlength="63" autocomplete="off" placeholder="homeassistant.local"></label><label>Port<input type="number" id="haPort" min="1" max="65535"></label></div>
+        </div>
+        <div class="row"><label class="lbl" for="haUser">User</label><input type="text" id="haUser" maxlength="63" autocomplete="off"></div>
+        <div class="row"><div><label class="lbl" for="haPw">Password</label><div class="hint">Of the Home Assistant user for the clock.</div></div><input type="password" id="haPw" maxlength="63" autocomplete="new-password"></div>
+        <div class="row">
+          <div><div class="lbl">Values to Home Assistant</div><div class="hint">The light in lux, and on the wall clock the room’s temperature and humidity. A change goes out at most this often; an unchanged value still at least this often, so Home Assistant sees the sensor alive.</div></div>
+          <div class="pair"><label>At most every (s)<input type="number" id="haMin" min="5" max="255"></label><label>At least every (min)<input type="number" id="haMax" min="1" max="255"></label></div>
+        </div>
+        <div class="row stack"><div class="note" id="haTopics"></div></div>
+        <div class="row"><div class="note" id="haNote"></div><div class="ctl"><button class="btn primary" type="button" id="haSave">Save Home Assistant link</button></div></div>
+        <div class="row stack"><div class="err" id="haErr" hidden></div></div>
       </div>
     </section>
 
@@ -883,6 +887,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     // Sections the clock has.
     $('#gifs').hidden = !has('gifr');
     $('#band').hidden = !has('lat');
+    $('#ha').hidden = !S.ha;
     $('#facePick').hidden = !S.hw.tetris;
     $('#faceMuncher').hidden = !S.hw.muncher;
     $('#faceAliens').hidden = !S.hw.aliens;
@@ -988,7 +993,6 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       ? 'The alerts and messages once more over the face, with their text, and the band again from its first item - as “show notifications” on the Inputs page does.'
       : 'Everything above once more on the panel - alerts and messages with their text, then the cards - as “show notifications” on the Inputs page does.';
     $('#msgRow').hidden = !has('closes') || S.mode === 'ap';   // over the face only, not while the hotspot is open
-    $('#haCard').hidden = !S.ha;
     if (S.ha) { fillHa(); }
     // WiFi
     $('#ssid').value = S.settings.ssid;
