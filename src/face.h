@@ -16,9 +16,14 @@
 #include <Adafruit_GFX.h>
 #include "clock_time.h"
 
-// Optional things - an animation asked for, an extra, a GIF, info cards - end
-// this long before the time's next change starts (concept doc, tab "Panel
-// priorities", decided 2026-10-12): the change is seen from its start.
+// What the clock plans itself - an extra, a GIF of its own accord, info
+// cards - ends this long before the time's next change starts (concept doc,
+// tab "Panel priorities", decided 2026-10-12): the change is seen from its
+// start. What the user asks for is granted unless there is a clear reason
+// against it (Peter, 2026-10-22): a GIF may run into the change, the Tetris
+// and classic animations may meet it; only the Muncher's and the Aliens'
+// scenes must have ended when their change has to start, or one of the two
+// would be cut off.
 const unsigned long FACE_GUARD_MS = 3000;
 
 // After an animation of a face has ended, the next one asked for waits this
@@ -28,11 +33,13 @@ const unsigned long FACE_GUARD_MS = 3000;
 // events per knock - and without a rest one knock could play two.
 const unsigned long FACE_REST_MS = 1000;
 
-// Whether something of `len` ms, starting now, ends FACE_GUARD_MS before a
-// change that starts at `startAt` (millis()). The one check every face and the
-// core ask; unsigned arithmetic survives the millis() wrap.
-inline bool faceFits(unsigned long startAt, unsigned long now, unsigned long len) {
-  return (long)(startAt - now) >= (long)(len + FACE_GUARD_MS);
+// Whether something of `len` ms, starting now, ends `guard` ms before a
+// change that starts at `startAt` (millis()): FACE_GUARD_MS for what the
+// clock plans itself, 0 for a scene the user asked for. The one check every
+// face and the core ask; unsigned arithmetic survives the millis() wrap.
+inline bool faceFits(unsigned long startAt, unsigned long now, unsigned long len,
+                     unsigned long guard = FACE_GUARD_MS) {
+  return (long)(startAt - now) >= (long)(len + guard);
 }
 
 // The four digits HH MM of a moment, d[0] the tens of the hours; `none` in
@@ -139,7 +146,10 @@ class Watchface {
   virtual bool update(const FaceNow &now) = 0;
   // Its picture, the whole canvas, without the core's marks.
   virtual void draw(Adafruit_GFX &g, const FaceNow &now, const FacePaint &paint) = 0;
-  // Whether the time's change is under way: the picture moves for it.
+  // Whether the time's change is under way, or another animation of the
+  // face - one the user asked for, or an extra: what the clock plans itself
+  // waits for all of them (Peter, 2026-10-22). Never what moves all the
+  // time, as the classic face's seconds.
   virtual bool busy(const FaceNow &now) const = 0;
   // The span of its change to the minute that begins at `minute` (local
   // time): as it has planned it, or as it would plan it - the hour's longer

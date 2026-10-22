@@ -358,8 +358,14 @@ const uint32_t CARD_LOOP_MAX_MS = 25000;
    round, new cards); the faces' extras; GIFs of their own accord; the
    plain face.
 
-   The time's change - every face's, the hour's included - is protected:
-   whatever is optional ends PANEL_GUARD_BEFORE_MS before it starts.
+   The time's change - every face's, the hour's included - is protected
+   from what the clock plans itself: that ends PANEL_GUARD_BEFORE_MS before
+   it starts, and waits as well while an animation the user asked for runs
+   (Watchface::busy()). What the user asks for is granted unless there is a
+   clear reason against it (Peter, 2026-10-22): a GIF may run into the
+   change or start during it, the Tetris and classic animations may meet it;
+   the Muncher's and the Aliens' scenes must have ended when their change
+   has to start, and an animation already running is not started again.
    Messages and information come at a fixed place in the minute,
    PANEL_INFO_AFTER_MS after the change and before second
    PANEL_INFO_HALF_S, so they show at times one can count on; what comes
@@ -6178,14 +6184,16 @@ bool gifStart(int16_t i, bool ownAccord) {
   gifLoopTime = gifLoopMs(data, size, gifFrames);
   uint32_t playMs = gifSettings.seconds * 1000UL;
   gifLoopsPlanned = (gifLoopTime > 0 && gifLoopTime <= playMs) ? (uint16_t)(playMs / gifLoopTime) : 1;
-  // Its whole loops end before the time's next change - and, of its own
-  // accord, ROUND_GIF_GAP_MS before an info round - or it does not start.
-  // Checked once, against what it plays (K6 of the face refactor: until
-  // 2026-10-20 a GIF of its own accord was checked against the seconds set
-  // first, which let one through whose loops ran longer, and held one back
-  // whose loops were shorter).
+  // Of its own accord, its whole loops end before the time's next change and
+  // ROUND_GIF_GAP_MS before an info round, or it does not start. Checked
+  // once, against what it plays (K6 of the face refactor: until 2026-10-20 a
+  // GIF of its own accord was checked against the seconds set first, which
+  // let one through whose loops ran longer, and held one back whose loops
+  // were shorter). One the user asked for plays whole even into the change -
+  // the user may miss it, or see the rest of it after (Peter, 2026-10-22;
+  // until then it had to end before the change too).
   uint32_t lenMs = gifLoopTime > 0 ? min<uint32_t>((uint32_t)gifLoopsPlanned * gifLoopTime, GIF_PLAY_MAX_MS) : playMs;
-  if (!panelFitsBeforeChange(lenMs) || (ownAccord && roundNextIn() < lenMs + ROUND_GIF_GAP_MS)) {
+  if (ownAccord && (!panelFitsBeforeChange(lenMs) || roundNextIn() < lenMs + ROUND_GIF_GAP_MS)) {
     Console.printf("GIF %s: its %lu ms have no room before the time's change, dropped\n", name, (unsigned long)lenMs);
     gifPlayer->decoder.close();
     delete gifPlayer;
@@ -6211,16 +6219,6 @@ bool gifStart(int16_t i, bool ownAccord) {
   return true;
 }
 
-// What an input asks for plays now or not at all (Peter, 2026-10-12): not
-// during the face's change or a scene of it, and not when it would run into
-// the next change (gifStart()). A GIF kept for after a scene played right
-// after the time's change.
-bool gifRequestFits() {
-  if (faceTimeShown()) { return true; }
-  Console.println("GIF: asked for during the face's change or scene, dropped");
-  return false;
-}
-
 // The GIF to play next: a random one of the pack's; of the card's the one
 // read ahead (gifCardUpdate()), -1 while none is ready.
 int16_t gifNext() {
@@ -6230,16 +6228,20 @@ int16_t gifNext() {
   return gifPick();
 }
 
-// A GIF now (FN_PLAY_GIF): on the face only, and only one that fits.
+// A GIF now (FN_PLAY_GIF): on the face only, now or not at all (Peter,
+// 2026-10-12) - also during the face's change or a scene of it, and into the
+// next change (Peter, 2026-10-22: what the user asks for is granted; the face
+// catches up behind it). Until then it was dropped there.
 void gifPlayNow() {
-  if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
+  if (screen != SCREEN_FACE) { return; }
   if (!gifStart(gifNext(), false)) { gifScheduleNext(); }
 }
 
-// The last GIF shown once more (FN_GIF_AGAIN): on the face only; a random one
-// when none has played yet or the last no longer fits the panel as it is held.
+// The last GIF shown once more (FN_GIF_AGAIN): on the face only, as
+// gifPlayNow(); a random one when none has played yet or the last no longer
+// fits the panel as it is held.
 void gifPlayAgain() {
-  if (screen != SCREEN_FACE || !gifRequestFits()) { return; }
+  if (screen != SCREEN_FACE) { return; }
   int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifNext();
   if (!gifStart(i, false)) { gifScheduleNext(); }
 }
@@ -9448,9 +9450,10 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     sendJson(c, d);
   } else if (path == "/api/gif") {
     bool onFace = (screen == SCREEN_FACE);
-    // Not during the face's change or a scene of it, nor into the next change:
-    // then it is dropped, not kept (Peter, 2026-10-12). Whether it played says
-    // why not: on the face, with GIFs to play, it found no room.
+    // Over the face, now or not at all, also during or into the time's change
+    // (gifPlayNow()). Whether it played says why not: on the face, with GIFs
+    // to play, it could not be opened this moment (the card's next one not
+    // read yet, no RAM for the decoder).
     if (onFace) { gifPlayNow(); }
     bool playing = onFace && screen == SCREEN_GIF;
     JsonDocument d;
