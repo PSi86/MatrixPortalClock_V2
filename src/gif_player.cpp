@@ -10,6 +10,7 @@
 #include "brightness.h"
 #include "clock_state.h"
 #include "notices.h"
+#include "panel_rules.h"
 #include "settings.h"
 
 // What only this module calls, ahead of its use.

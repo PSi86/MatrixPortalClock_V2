@@ -7,6 +7,7 @@
 #include "face.h"
 #include "info_band.h"
 #include "item_icons.h"   // the icons and their pictures (only this file draws them)
+#include "panel_rules.h"
 #include "settings.h"
 
 // What only this module calls, ahead of its use.
@@ -81,7 +82,7 @@ bool       noticeCardsRound = false;   // the steps on the panel are cards of th
 // that cannot start within ROUND_LATEST_MS of its minute is left out. A GIF of
 // its own accord gives way to it, and waits ROUND_GIF_GAP_MS after it.
 const unsigned long CARD_MS = 4000;                 // a card with its two lines
-// (ROUND_GIF_GAP_MS, at least this between a round and a GIF: clock_state.h.)
+// (ROUND_GIF_GAP_MS, at least this between a round and a GIF: panel_rules.h.)
 const unsigned long ROUND_AFTER_FACE_MS = 3000;
 const unsigned long ROUND_LATEST_MS = 60000;
 static char   cardLine[2][8];                       // the two lines, in the font's code page (CP437)

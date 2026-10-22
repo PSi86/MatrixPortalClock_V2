@@ -87,13 +87,6 @@ int8_t faceEventIndex(InputEvent ev);
 bool faceEventFitted(InputEvent ev);
 bool closesBanner(InputEvent ev);   // the event closes a banner (not a knock, not a hand that comes near)
 
-// Who takes the panel, and when (the panel rules, main.cpp).
-const unsigned long ROUND_GIF_GAP_MS = 60000;   // at least this between an info round and a GIF
-bool panelFitsBeforeChange(unsigned long ms);   // something this long ends before the face's next change
-bool decorFree(unsigned long ms, bool gif);     // decoration of its own accord may take the panel now
-bool infoSlotOpen(unsigned long ms);            // messages and new cards this long may come up now
-unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms);   // a random time outside the changes' slots
-
 #if BOARD_WAVESHARE_WALL
 extern uint32_t wallOutputStops;   // the panel output's stops since the start (the console's "panel")
 #endif
