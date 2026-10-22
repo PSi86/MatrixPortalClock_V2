@@ -49,7 +49,8 @@ struct NoConsole {
 static NoConsole Console;
 #endif
 
-// The log level now (above); 0 without a console.
-static uint8_t consoleLevel = CLOCK_CONSOLE ? CLOCK_LOG : 0;
+// The log level now (above); 0 without a console. One for the whole clock,
+// however many files include this (inline: the console's "log 2" reaches all).
+inline uint8_t consoleLevel = CLOCK_CONSOLE ? CLOCK_LOG : 0;
 
 #endif  // CONSOLE_H

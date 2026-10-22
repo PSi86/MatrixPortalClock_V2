@@ -72,7 +72,7 @@ struct InputMapping { InputEvent event; InputContext context; InputFunction func
 // else uses 2x or 3x, so a short press of DOWN acts at once, and one of UP
 // waits 0.4 s for a second on a clock with messages. An event without a row
 // does nothing.
-constexpr InputMapping PROFILE_DEFAULT[] = {
+inline constexpr InputMapping PROFILE_DEFAULT[] = {
   { EV_UP_SHORT,       CTX_FACE,    FN_OPEN_MENU      },
   { EV_DOWN_SHORT,     CTX_FACE,    FN_OPEN_MENU      },
   { EV_DOWN_HOLD,      CTX_FACE,    FN_OPEN_MENU      },
@@ -91,7 +91,7 @@ constexpr InputMapping PROFILE_DEFAULT[] = {
 // Profile "Classic clicks": on the face the controls the clock has always had -
 // UP 1x, 2x, 3x and held - plus DOWN held for the menu, which works as in the
 // default profile. 3x still closes the hotspot again.
-constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
+inline constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
   { EV_UP_SHORT,       CTX_FACE,    FN_CYCLE_DST      },
   { EV_UP_2X,          CTX_FACE,    FN_TOGGLE_AUTO    },
   { EV_UP_3X,          CTX_FACE,    FN_TOGGLE_HOTSPOT },
@@ -114,7 +114,7 @@ constexpr InputMapping PROFILE_CLASSIC_CLICKS[] = {
 // row: in the tests of 2026-10-10 the sensor reported hardly any wave, and
 // circles came in the wrong direction now and then, so the clock leaves both
 // out.
-constexpr InputMapping GESTURES_DEFAULT[] = {
+inline constexpr InputMapping GESTURES_DEFAULT[] = {
   { EV_SWIPE_UP,         CTX_FACE,    FN_OPEN_MENU      },
   { EV_SWIPE_DOWN,       CTX_FACE,    FN_OPEN_MENU      },
   { EV_SWIPE_RIGHT,      CTX_FACE,    FN_OPEN_MENU      },
@@ -187,6 +187,25 @@ CHECK_PROFILE(PROFILE_DEFAULT);
 CHECK_PROFILE(PROFILE_CLASSIC_CLICKS);
 CHECK_GESTURES(GESTURES_DEFAULT);
 
+// The profiles the config page offers, stored as the position in this list.
+// So the order is part of the stored data: new profiles go on the end, none
+// is ever moved.
+struct InputProfile {
+  const char         *name;          // as the config page offers it
+  const InputMapping *rows;          // the buttons and the knock
+  uint8_t             count;
+  const InputMapping *gestures;      // the gesture sensor
+  uint8_t             gestureCount;
+  bool                blinkClicks;   // confirm 1x/2x/3x with blinks of the board LED
+};
+inline constexpr InputProfile INPUT_PROFILES[] = {
+  { "Default",        PROFILE_DEFAULT,        PROFILE_ROWS(PROFILE_DEFAULT),
+                      GESTURES_DEFAULT,       PROFILE_ROWS(GESTURES_DEFAULT),       false },
+  { "Classic clicks", PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS),
+                      GESTURES_DEFAULT,       PROFILE_ROWS(GESTURES_DEFAULT),       true  },
+};
+constexpr uint8_t INPUT_PROFILE_COUNT = sizeof(INPUT_PROFILES) / sizeof(INPUT_PROFILES[0]);
+
 // ----------------------------------------------------------------------------
 // Face shortcuts (concept doc: "Face shortcuts"). On the face every event of a
 // fitted source can be given one of FACE_ACTIONS on the config page's Inputs
@@ -196,7 +215,7 @@ CHECK_GESTURES(GESTURES_DEFAULT);
 // its action's code - so neither is ever reordered: a new event or action goes
 // at the end.
 struct FaceEvent { InputEvent event; const char *label; const char *word; };
-constexpr FaceEvent FACE_EVENTS[] = {
+inline constexpr FaceEvent FACE_EVENTS[] = {
   { EV_UP_SHORT,    "UP pressed",                       "" },
   { EV_UP_2X,       "UP pressed twice",                 "" },
   { EV_UP_3X,       "UP pressed three times",           "" },
@@ -218,12 +237,15 @@ constexpr FaceEvent FACE_EVENTS[] = {
   { EV_APPROACH,    "Hand comes near and stays",        "" },
 };
 constexpr uint8_t FACE_EVENT_COUNT = sizeof(FACE_EVENTS) / sizeof(FACE_EVENTS[0]);
+// The stored blobs keyed by face event (the face shortcuts, what closes a
+// notice) have room for this many, for face events added later.
+const uint8_t FACE_KEYS_MAX = 32;
 
 // What an action needs to be offered: a held button (it runs while the button
 // stays down), GIF playback, the info band data (alerts and messages).
 enum FaceActionNeeds : uint8_t { NEEDS_NOTHING, NEEDS_HOLD, NEEDS_GIFS, NEEDS_MESSAGES };
 struct FaceAction { uint8_t code; InputFunction function; FaceActionNeeds needs; const char *label; const char *word; };
-constexpr FaceAction FACE_ACTIONS[] = {
+inline constexpr FaceAction FACE_ACTIONS[] = {
   { 0, FN_NONE,           NEEDS_NOTHING, "nothing",                                      ""      },
   { 1, FN_OPEN_MENU,      NEEDS_NOTHING, "open the menu",                                "menu"  },
   { 2, FN_PLAY_GIF,       NEEDS_GIFS,    "play random GIF",                              "GIF"   },

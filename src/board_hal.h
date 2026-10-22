@@ -42,6 +42,10 @@
   #define BOARD_PANEL_H 32
 #endif
 
+// The wall clock shows the info band's items in its band below the face
+// (bandUpdate()); the 64x32 clock has no room for one and shows them over the face.
+#define BAND_ON_PANEL BOARD_WAVESHARE_WALL
+
 /* ======================================================================
    Pins
    ====================================================================== */

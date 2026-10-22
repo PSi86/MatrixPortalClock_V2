@@ -21,6 +21,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "board_hal.h"   // BoardBusLock: the board's own bus is shared
 
 class Qmi8658 {
  public:

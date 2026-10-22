@@ -10,13 +10,14 @@
 //     GPIO13, its edges counted by an interrupt.
 //
 // The sensitivity, 0 (off) to KNOCK_LEVEL_MAX, is stored with the Tetris
-// face's settings (shk), where it has always been. Included by the sketch
-// only, after board_hal.h: the interrupt is defined here, outside its struct.
+// face's settings (shk), where it has always been. The wall clock's
+// interrupt is defined in knock.cpp.
 #ifndef KNOCK_H
 #define KNOCK_H
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "board_hal.h"   // which board, and its pins
 #if BOARD_WAVESHARE_WALL
 #include "imu_qmi8658.h"
 #endif
@@ -41,19 +42,14 @@ const unsigned long KNOCK_ARM_MS   = 300;    // after a (re)start the chip's own
 // level 1 the most the chip takes.
 const uint8_t KNOCK_WOM_MG[KNOCK_LEVEL_MAX + 1] = { 0, 255, 200, 160, 130, 100, 80, 64, 50, 40, 30 };
 
-// INT1's interrupt. A struct's member, defined outside it: in IRAM an inline
-// function's literals land elsewhere, and the linker refuses that.
+// INT1's interrupt, defined in knock.cpp: in IRAM an inline function's
+// literals land elsewhere, and the linker refuses that, so it is defined
+// once, in a file of its own.
 struct KnockIsr {
   static volatile uint32_t edges;            // INT1's edges since the start
   static volatile unsigned long edgeAt;      // millis() of the last
   static void edge();
 };
-volatile uint32_t KnockIsr::edges = 0;
-volatile unsigned long KnockIsr::edgeAt = 0;
-void IRAM_ATTR KnockIsr::edge() {
-  edges = edges + 1;
-  edgeAt = millis();
-}
 #else
 // The LIS3DH's own interrupt generator compares against a fixed threshold,
 // which would fire on gravity alone as soon as the clock is tilted. Its
