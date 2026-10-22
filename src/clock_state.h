@@ -50,6 +50,35 @@ extern bool apActive;   // the hotspot is open: it has the radio
 // (an item that comes again later is new again).
 void noticeForget(const BandItem &it);
 
+// The screens: exactly one owns the panel at a time; they lie on top of each
+// other, and closing one uncovers the one beneath (setScreen(),
+// openScreen(), closeScreen()).
+enum Screen : uint8_t {
+  SCREEN_BOOT,             // status lines while setup() runs
+  SCREEN_FACE,             // the clock face, classic or Tetris
+  SCREEN_MENU,             // the menu list
+  SCREEN_EDITOR,           // the editor of one menu item
+  SCREEN_BANNER,           // a short confirmation after a change, over the screen it confirms
+  SCREEN_HOTSPOT_INFO,     // config AP up, no client yet: SSID, password and IP
+  SCREEN_HOTSPOT_PREVIEW,  // config AP up and a client connected: the live clock
+  SCREEN_GIF,              // a GIF in place of the face, over it in the stack
+  SCREEN_GESTURE_TEST,     // every gesture shown instead of done, over the face (the web app's Inputs section)
+};
+extern Screen screen;      // the screen on top, the one on the panel
+void openScreen(Screen next);
+void closeScreen();
+
+// Who takes the panel, and when (the panel rules, main.cpp).
+const unsigned long ROUND_GIF_GAP_MS = 60000;   // at least this between an info round and a GIF
+bool panelFitsBeforeChange(unsigned long ms);   // something this long ends before the face's next change
+bool decorFree(unsigned long ms, bool gif);     // decoration of its own accord may take the panel now
+unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms);   // a random time outside the changes' slots
+unsigned long roundNextIn();                    // ms to the next info round
+
+#if BOARD_WAVESHARE_WALL
+extern uint32_t wallOutputStops;   // the panel output's stops since the start (the console's "panel")
+#endif
+
 // The web server, beside the loop, and the answers of its JSON interface.
 extern WiFiServer apServer;
 void webUpdate(bool listening, bool lan);
