@@ -10,7 +10,7 @@ Fetches the time from the local network via NTP and offers a WiFi configuration 
 
 One code base, two boards, both ESP32-S3. `src/board_hal.h` holds everything that
 differs between them - matrix and button pins, the panel driver's setup, the board's
-own I2C bus - so the sketch itself is board independent.
+own I2C bus - so the rest of the code is board independent.
 
 | | MatrixPortal S3 | Wall clock |
 |---|---|---|
@@ -674,9 +674,9 @@ status line per source says when it was last fetched, or why it failed.
   the console reports the internal RAM free before each fetch and the lowest
   since the start.
 
-The code is in `src/band_data.h` (the items, the two sources, the fetch task)
-and at the end of the sketch (when the sources are due, the items, the config
-page section).
+The code is in `src/band_data.h` (the items, the two sources, the fetch task),
+`src/feeds.cpp` (when the sources are due, what their results bring) and
+`src/band_items.cpp` (the items from every source).
 
 ## Home Assistant link
 
@@ -991,8 +991,8 @@ Message entity sends the text alone, so its messages are information.
   (2026-10-10) the S3's image has 1,441,648 bytes, 393,360 less than its app
   slot.
 
-The code is in `src/ha_link.h` (the client, its task and the topics) and at the
-end of the sketch (when it runs, what arrives, the card's part).
+The code is in `src/ha_link.h` (the client, its task and the topics) and
+`src/home_assistant.cpp` (when it runs, what arrives, the web app's part).
 
 ## Alerts, messages and info on the panel
 
@@ -1134,7 +1134,7 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
   back after the GIF. The band is dark while the hotspot is open and until the
   clock has its time.
 
-The band is drawn in `bandUpdate()` at the end of the sketch into a picture of
+The band is drawn in `bandUpdate()` (`src/info_band.cpp`) into a picture of
 its own and written onto the wall by `PanelCanvas::showBand()` in
 `src/board_hal.h`, which writes only what changed.
 
@@ -1515,7 +1515,7 @@ all the digits involved always come apart the same way.
 **The sensor raises the knock itself.** Its own interrupt generator watches for
 it and pulls INT1, which is wired to GPIO15 — not documented on Adafruit's pinout
 page, but the board schematic has the LIS3DH's INT1 on the same net as the
-ESP32-S3's IO15. The sketch only reads that pin. Sampling the sensor instead cost
+ESP32-S3's IO15. The clock only reads that pin. Sampling the sensor instead cost
 four I2C transactions 50 times a second and still left a 20 ms gap between reads
 that a short tap could slip through.
 
@@ -1799,7 +1799,7 @@ web app's key, where it sits in the face's blob, its kind and range), through
 which one piece of code loads, checks, takes from the web app and reports them
 all. Since 2026-10-22 the clock's own settings go through such tables too
 (`CLOCK_PARAMS`, `UI_PARAMS`, `GIF_PARAMS`, `DECOR_PARAMS`, `FEED_PARAMS` in
-`src/main.cpp`), and `/api/state` tells the web app, under `lists.form`, how to
+`src/settings.cpp`), and `/api/state` tells the web app, under `lists.form`, how to
 send each one back (see [Settings: one table per blob](#settings-one-table-per-blob)).
 
 The same rules for every face: an animation asked for plays at once or not at
@@ -2073,6 +2073,46 @@ GPIO header:
 - The clock follows only a DS3231 once a minute, not the PCF85063: its crystal
   is no better than the ESP32's.
 - The console's `rtc` shows what each chip holds against the clock.
+
+## Code layout
+
+Until 2026-10-22 everything but the watchfaces and the drivers was one file,
+`src/MatrixPortalClock_V2.ino`, of more than 10,000 lines. It is now
+`src/main.cpp` and a module per part of the clock: a header with what the part
+offers, and a `.cpp` with its code and its own state, which the rest cannot
+reach.
+
+| File | What it holds |
+|---|---|
+| `main.cpp` | `setup()` and `loop()`, the screen stack, the orientation, the knock's gates, the watchfaces and their settings, the timekeeper, the clock's settings loaded and taken up |
+| `clock_state.h` | what `main.cpp` shares with the modules: its state and the functions they call |
+| `settings.h/.cpp`, `classic_settings.h` | the stored settings: structs, defaults, tables, loading and saving |
+| `settings_table.h` | the tables' machinery: one row per setting for loading, saving, live changes and `/api/state` |
+| `time_zones.h/.cpp` | the zones the clock offers and their daylight saving rules, with their self-test |
+| `time_sync.h/.cpp` | NTP, the real-time clocks, the clock's daylight saving, the sync's state |
+| `wifi_station.h/.cpp` | the home WiFi's credentials and the station joined to it |
+| `sensors.h/.cpp` | the sensors found at the start and remembered, and the ones missing now |
+| `brightness.h/.cpp` | the light sensor, the auto-brightness, the fade, the room climate |
+| `feeds.h/.cpp`, `band_items.h/.cpp` | when the info band's own sources are fetched; the items from every source |
+| `notices.h/.cpp` | the items on the 64x32 clock: notices, info cards, the info round, the icons drawn |
+| `info_band.h/.cpp` | the info band on the wall clock |
+| `panel_rules.h/.cpp` | who takes the panel and when, and the faces' extras |
+| `gif_player.h/.cpp` | GIFs on the panel, the GIF pack, the wall clock's microSD card |
+| `input.h/.cpp` | the buttons, the gesture sensor and its test, the face shortcuts, the press indicator |
+| `menu.h/.cpp` | the on-screen menu, its editors, the banners |
+| `hotspot.h/.cpp` | the clock's own access point, its captive portal and its screens |
+| `web_server.h/.cpp`, `web_api.h/.cpp` | the web server beside the loop; the web app and its JSON interface |
+| `lan_access.h/.cpp`, `home_assistant.h/.cpp` | the web app on the home network; the Home Assistant link |
+| `console_cmds.h/.cpp`, `debug_stats.h/.cpp` | the console's commands; the debug build's running figures |
+| `face*.h`, `muncher.h`, `aliens.h`, `tetris_digits.h` | the watchfaces |
+| `board_hal.h`, `knock.h`, `ha_link.h`, `band_data.h`, `gif_card.h`, ... | drivers and clients, header-only |
+
+A module that needs something of another includes that one's header; what
+it needs of `main.cpp` is in `clock_state.h`. Every header compiles on its
+own, and any number of `.cpp` files may include it: a table several of them
+read is `inline`, so the image holds it once. A change to one file rebuilds
+that file and links anew: about 12 s for any of them, `main.cpp` included,
+where the one large file took 32 s (S3 release build, 2026-10-22).
 
 ## Libraries
 
