@@ -1175,6 +1175,12 @@ uint8_t i2cFound[16];        // the addresses that answered at boot, one bit eac
 uint8_t  sensorTries[SENSOR_COUNT] = {};
 uint16_t sensorsSeen    = 0;
 uint16_t sensorsMissing = 0;
+// How much warmer the wall clock's SHTC3 is than the room, in tenths of a
+// degree, as the web app sets it: the board around it warms it (34.3 C and
+// 31 % in a room of about 24 C and 50 %, 2026-10-22). Taken off its
+// temperature, and its humidity worked out for the room's (roomTempNow()).
+uint16_t sensorWarmth   = 0;
+const uint16_t SENSOR_WARMTH_MAX = 200;   // 20.0 C
 SettingsStore<SensorRecord> sensorStore;
 RTC_DS3231 rtc;
 bool rtcOK        = false;   // a DS3231 answered at boot
@@ -2122,6 +2128,43 @@ void climateUpdate() {
   } else if (++climateFailures <= 10) {
     Console.println("SHTC3: did not start a measurement");
   }
+}
+
+// The web app's Sensors section: the SHTC3's warmth (toff, degrees with one
+// decimal, 0 to 20); absent keeps it. Says whether it is stored, or nothing
+// changed.
+bool applySensorParams(const String &q) {
+  String v = getParam(q, "toff");
+  if (!v.length()) { return true; }
+  uint16_t w = (uint16_t)constrain(tenthsOf(v), 0L, (long)SENSOR_WARMTH_MAX);
+  if (w == sensorWarmth) { return true; }
+  sensorWarmth = w;
+  bandLocalDone = false;   // the band's room anew
+  Console.printf("SHTC3: %u.%u C warmer than the room\n", w / 10, w % 10);
+  return saveSensorRecord();
+}
+
+// Water's saturation vapour pressure at t degrees Celsius, in hPa (Magnus,
+// over water).
+float saturationHpa(float t) {
+  return 6.112f * expf(17.62f * t / (243.12f + t));
+}
+
+// The room's temperature: the SHTC3's, filtered, less the board's warmth
+// (sensorWarmth).
+float roomTempNow() {
+  return roomTemp - sensorWarmth / 10.0f;
+}
+
+// The room's humidity. The air at the sensor holds as much water as the
+// room's, but it is warmer there, so its relative humidity is lower: worked
+// out for the room's temperature through the saturation vapour pressure - a
+// fixed share off would be wrong. The conversion also scales the sensor's
+// own error (about x1.8 from 34 to 24 C). At most 100 %.
+float roomHumNow() {
+  if (sensorWarmth == 0) { return roomHum; }
+  float h = roomHum * saturationHpa(roomTemp) / saturationHpa(roomTempNow());
+  return h > 100.0f ? 100.0f : h;
 }
 #endif
 
@@ -3320,6 +3363,13 @@ void boardBusScan() {
 
 /* ---- The sensors, remembered ------------------------------------------------ */
 
+// The record as it stands: the sensors seen and the SHTC3's warmth. Says
+// whether it is stored.
+bool saveSensorRecord() {
+  SensorRecord rec = { SENSOR_RECORD_MAGIC, sensorsSeen, sensorWarmth };
+  return sensorStore.write(rec);
+}
+
 // After the sensors were set up: which of those found at an earlier start are
 // missing now, and the ones found remembered. A sensor this board does not
 // support is never counted.
@@ -3327,16 +3377,14 @@ void sensorsCheck() {
   SensorRecord rec = { SENSOR_RECORD_MAGIC, 0, 0 };
   sensorStore.begin("sensors");
   if (!sensorStore.read(rec) || rec.magic != SENSOR_RECORD_MAGIC) { rec = { SENSOR_RECORD_MAGIC, 0, 0 }; }
+  sensorWarmth = rec.warmth <= SENSOR_WARMTH_MAX ? rec.warmth : 0;
   uint16_t supported = sensorsSupported(), found = 0;
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     if (sensorTries[i]) { found |= (uint16_t)(1 << i); }
   }
   sensorsMissing = (uint16_t)(rec.seen & supported & ~found);
   sensorsSeen = (uint16_t)((rec.seen | found) & supported);
-  if (sensorsSeen != rec.seen) {
-    rec.seen = sensorsSeen;
-    sensorStore.write(rec);
-  }
+  if (sensorsSeen != rec.seen) { saveSensorRecord(); }
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     if (sensorsMissing & (1 << i)) {
       Console.printf("%s missing - found at an earlier start; the web app can forget it\n", SENSOR_KINDS[i].chip);
@@ -3354,8 +3402,7 @@ bool sensorForget(const String &key) {
     if (sensorsSeen & bit) {
       sensorsSeen &= (uint16_t)~bit;
       sensorsMissing &= (uint16_t)~bit;
-      SensorRecord rec = { SENSOR_RECORD_MAGIC, sensorsSeen, 0 };
-      sensorStore.write(rec);
+      saveSensorRecord();
       panelDirty = true;   // the status pixel may go
 #if BAND_ON_PANEL
       bandLocalDone = false;   // and the band's status line
@@ -8181,15 +8228,16 @@ void bandLocalUpdate() {
   bandRoomLines(bandLocal[TURN_ROOM - BAND_LOCAL_FIRST]);
 }
 
-// The room's temperature and humidity from the board's SHTC3, filtered:
-// "Indoor 22.4°C | humidity 48%". Off until it gave a reading.
+// The room's temperature and humidity from the board's SHTC3, filtered and
+// corrected for its warmth: "Indoor 22.4°C | humidity 48%". Off until it gave
+// a reading.
 void bandRoomLines(BandLocal &l) {
   l.on = roomValid;
   l.icon = ICON_INDOOR;
   if (!roomValid) { l.text[0] = '\0'; return; }
-  long t = lroundf(roomTemp * 10.0f);   // tenths, without the C library's float printing
+  long t = lroundf(roomTempNow() * 10.0f);   // tenths, without the C library's float printing
   snprintf(l.text, sizeof(l.text), "Indoor %s%ld.%ld°C | humidity %ld%%", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10,
-           lroundf(roomHum));
+           lroundf(roomHumNow()));
 }
 
 // The band's picture as the turn stands, onto the wall.
@@ -8775,9 +8823,11 @@ void apiStatusInto(JsonDocument &d) {
   d["bright"] = effectiveBrightness;
   if (lastLux >= 0) { d["lux"] = serialized(String(lastLux, 1)); } else { d["lux"] = nullptr; }
 #if BOARD_WAVESHARE_WALL
-  if (roomValid) {   // the room's, filtered; absent without the sensor
-    d["temp"] = serialized(String(roomTemp, 1));
-    d["hum"] = lroundf(roomHum);
+  if (roomValid) {   // the room's, filtered and corrected; absent without the sensor
+    d["temp"] = serialized(String(roomTempNow(), 1));
+    d["hum"] = lroundf(roomHumNow());
+    d["tempSensor"] = serialized(String(roomTemp, 1));   // as the sensor reads, for its warmth
+    d["humSensor"] = lroundf(roomHum);
   }
 #endif
   d["clockSet"] = clockIsSet();
@@ -8891,6 +8941,9 @@ void apiState(Print &c) {
   s["dqf"] = decorSettings.quietFrom;
   s["dqt"] = decorSettings.quietTo;
   s["ddk"] = decorSettings.darkLux;
+#if BOARD_WAVESHARE_WALL
+  s["toff"] = sensorWarmth;   // tenths: the SHTC3's warmth over the room
+#endif
   char deg[16];
   feedDegrees(deg, sizeof(deg), feedSettings.lat);
   s["lat"] = feedSettings.located ? deg : "";
@@ -9310,6 +9363,9 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
   stored &= saveDecorSettings();
   applyFeedParams(body);
   stored &= saveFeedSettings();
+#if BOARD_WAVESHARE_WALL
+  stored &= applySensorParams(body);
+#endif
   if (!stored) {
     Console.println("Settings from the web app: NOT all stored, the flash could not be written");
     sendJsonError(c, 500, "Not saved in full: the clock could not write its flash. The settings work now; "
@@ -9795,14 +9851,14 @@ bool haValueNow(uint8_t i, float &v, char *payload, size_t size) {
 #if BOARD_WAVESHARE_WALL
     case HA_VALUE_TEMP: {
       if (!roomValid) { return false; }
-      v = roomTemp;
+      v = roomTempNow();
       long t = lroundf(v * 10.0f);   // tenths, without the C library's float printing
       snprintf(payload, size, "%s%ld.%ld", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10);
       return true;
     }
     case HA_VALUE_HUM:
       if (!roomValid) { return false; }
-      v = roomHum;
+      v = roomHumNow();
       snprintf(payload, size, "%ld", lroundf(v));
       return true;
 #endif

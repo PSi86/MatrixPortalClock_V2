@@ -107,12 +107,13 @@ inline uint8_t sensorBegin(SensorId id, bool (*begin)()) {
 }
 
 // What the sketch keeps from start to start: the sensors found at an earlier
-// start and not forgotten, one bit each by SensorId.
+// start and not forgotten, one bit each by SensorId; and how much warmer the
+// wall clock's SHTC3 is than the room, which the web app sets.
 const uint32_t SENSOR_RECORD_MAGIC = 0x534E5352UL;   // "SNSR"
 struct SensorRecord {
   uint32_t magic;
   uint16_t seen;
-  uint16_t unused;
+  uint16_t warmth;   // tenths of a degree taken off the SHTC3's temperature (was unused, 0)
 };
 
 #endif  // SENSORS_H

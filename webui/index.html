@@ -560,6 +560,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       </div>
       <div class="card">
         <div class="row stack"><div><div class="lbl">Sensors</div><div class="hint" id="sensorHint"></div></div><dl class="kv" id="sensorKv"></dl></div>
+        <div class="row" id="toffRow" hidden>
+          <div><label class="lbl" for="toff">Board warmth</label><div class="hint">How much warmer the SHTC3 is than the room, in °C: the board around it warms it. Taken off its temperature, and its humidity worked out for the room’s. <span id="toffNow"></span></div></div>
+          <input type="number" id="toff" min="0" max="20" step="0.1">
+        </div>
       </div>
     </section>
   </main>
@@ -588,7 +592,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var ICONS = ['', '☀', '☾', '⛅', '☁', '☁', '≋', '☂', '☂', '❄', '⚡', '⚠', '〜', '❅', '♨', '▦', '❦', '⌂'];   // ItemIcon in band_data.h
   // What the page edits; ssid and the WiFi password go through their own form.
   var KEYS = ['wf', 'digit', 'trail', 'speed', 'dirs', 'tdrop', 'tspin', 'shk', 'shs', 'mst', 'mkn', 'mpace', 'mpel', 'autob', 'bright', 'luxd', 'luxb', 'brmin', 'brmax',
-    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda', 'feedq', 'afr', 'iround', 'ast', 'acol', 'akn', 'anap', 'dxr', 'dqf', 'dqt', 'ddk'];
+    'tz', 'dst', 'synch', 'syncm', 'syncd', 'prof', 'gmount', 'keys', 'closes', 'gifr', 'gifmin', 'gifmax', 'gifsec', 'gifbr', 'gifbx', 'lat', 'lon', 'feedw', 'feeda', 'feedq', 'afr', 'iround', 'ast', 'acol', 'akn', 'anap', 'dxr', 'dqf', 'dqt', 'ddk', 'toff'];
   var S = null, saved = null, cur = null, gone = false, auth = '';
   try { auth = sessionStorage.getItem('mc-auth') || ''; } catch (e) { /* no storage */ }
   function headers(extra) { var h = extra || {}; if (auth) { h.Authorization = 'Basic ' + btoa('clock:' + auth); } return h; }
@@ -660,6 +664,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       if (cur.gifr) { o.gifr = 'on'; }
     }
     if (has('dxr')) { o.dxr = cur.dxr; o.dqf = cur.dqf; o.dqt = cur.dqt; o.ddk = cur.ddk; }
+    if (has('toff')) { o.toff = (cur.toff / 10).toFixed(1); }
     if (has('lat')) {
       o.lat = cur.lat; o.lon = cur.lon;
       if (cur.feedw) { o.feedw = 'on'; }
@@ -1053,6 +1058,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     });
     row('I2C bus', '', S.hw.i2c.length ? S.hw.i2c.join(' ') : 'nothing answers');
     if (S.hw.i2cBoard) { row('Board’s bus', '', S.hw.i2cBoard.length ? S.hw.i2cBoard.join(' ') : 'nothing answers'); }
+    $('#toffRow').hidden = !has('toff');
+    if (has('toff')) { setNumber('toff', 'toff', 10); }
   }
   function forgetSensor(s) {
     api('/api/sensor-forget', 'id=' + encodeURIComponent(s.id)).then(function () { return load(); })
@@ -1160,6 +1167,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#mLux').textContent = st.lux === null || st.lux === undefined ? 'no sensor' : st.lux + ' lux';
     $('#mRoomBox').hidden = st.temp === undefined;
     if (st.temp !== undefined) { $('#mRoom').textContent = st.temp + ' °C · ' + st.hum + ' %'; }
+    $('#toffNow').textContent = st.tempSensor === undefined ? '' : 'The sensor itself reads ' + st.tempSensor + ' °C and ' + st.humSensor + ' % now.';
     $('#mTime').textContent = st.clockSet ? st.clock + ' · ' + st.src : 'not set';
     $('#timeLine').textContent = st.timeLine;
     $('#timeDot').className = 'dot ' + (st.clockSet ? 'ok' : 'warn');
