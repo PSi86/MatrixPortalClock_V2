@@ -14,7 +14,8 @@
 #include "board_hal.h"
 #include "band_data.h"   // BandItem
 #include "face.h"        // FaceNow, Watchface
-#include "input_map.h"   // InputEvent
+#include "input_map.h"   // InputFunction
+#include "knock.h"       // Knock
 
 const char *fwVersion();   // the commit the build comes from and its date (FW_VERSION)
 
@@ -35,7 +36,6 @@ extern bool testQuiet;   // test builds: no notices and no info cards over the f
 extern PanelCanvas matrix;
 extern bool panelDirty;
 uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b);   // a colour at the panel's brightness, never black
-void drawFeedbackIndicator();   // the press indicator in the corner
 bool gifPlaying();   // a GIF has the panel, its decoder up
 
 // The watchface on show (main.cpp), and the moment it is drawn for.
@@ -51,6 +51,16 @@ const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined
 extern bool bootStageCleared;         // breadcrumb cleared after the first healthy seconds
 
 extern bool apActive;   // the hotspot is open: it has the radio
+void startAPMode();
+void stopAPMode();
+
+// The knock (knock.h): the LIS3DH's, or the wall clock's QMI8658's.
+extern Knock knock;
+#define knockOK knock.found()
+
+// What the panel is drawn in right now (the hotspot info is landscape
+// however the panel is held).
+extern uint8_t screenRotation;
 
 // The hotspot's password; also the web app's on the home network until
 // another is set there.
@@ -73,6 +83,19 @@ enum Screen : uint8_t {
 extern Screen screen;      // the screen on top, the one on the panel
 void openScreen(Screen next);
 void closeScreen();
+Screen screenBeneath();          // the screen a banner on top confirms
+void bootStatus(const char *msg);   // a status line while setup() runs
+
+// The menu, and the functions an input runs there or on the face.
+void menuOpen();
+void navigate(InputFunction fn, uint8_t steps);
+void cycleDstMode();
+void toggleAutoBrightWithBanner();
+void showHints();
+// The menu's look: its colours and its 3x5 font.
+uint16_t uiInk();
+uint16_t uiQuiet();
+void uiTiny(int16_t x, int16_t top, const char *s, uint16_t colour);
 
 // A banner: a short text over the screen it confirms, or a step of the
 // notices on show (notices.h).
@@ -81,11 +104,6 @@ extern BannerKind    bannerKind;
 extern unsigned long bannerAt;   // millis() the banner came up
 void bannerOpen();
 void showBanner(const char *first, const char *second, uint8_t r, uint8_t g, uint8_t b);
-
-// The inputs: the face events (input_map.h) as this clock has them.
-int8_t faceEventIndex(InputEvent ev);
-bool faceEventFitted(InputEvent ev);
-bool closesBanner(InputEvent ev);   // the event closes a banner (not a knock, not a hand that comes near)
 
 #if BOARD_WAVESHARE_WALL
 extern uint32_t wallOutputStops;   // the panel output's stops since the start (the console's "panel")
