@@ -9,6 +9,7 @@
 #include <miniz.h>             // inflate in ROM (tinfl), for the pack's deflated GIFs
 #include "brightness.h"
 #include "clock_state.h"
+#include "web_server.h"
 #include "console_cmds.h"   // wallOutputStops
 #include "notices.h"
 #include "panel_rules.h"

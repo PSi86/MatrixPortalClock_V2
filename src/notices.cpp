@@ -3,6 +3,7 @@
 
 #include "band_items.h"
 #include "clock_state.h"
+#include "web_server.h"
 #include "console.h"
 #include "face.h"
 #include "info_band.h"

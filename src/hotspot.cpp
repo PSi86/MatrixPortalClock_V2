@@ -5,6 +5,7 @@
 #include <Fonts/Picopixel.h>
 #include "brightness.h"
 #include "clock_state.h"
+#include "web_server.h"
 #include "console.h"
 #include "home_assistant.h"
 #include "input.h"

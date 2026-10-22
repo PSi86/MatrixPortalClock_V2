@@ -4,6 +4,7 @@
 
 #include "band_items.h"
 #include "clock_state.h"
+#include "web_server.h"
 #include "clock_time.h"
 #include "console.h"
 #include "lan_access.h"

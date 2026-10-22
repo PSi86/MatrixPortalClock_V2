@@ -6,6 +6,7 @@
 #include <math.h>
 #include <BH1750FVI.h>
 #include "clock_state.h"
+#include "web_server.h"
 #include "info_band.h"
 #include "face.h"        // FADE_GAMMA
 #include "sensors.h"

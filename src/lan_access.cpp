@@ -6,6 +6,7 @@
 #include <mbedtls/base64.h>
 #include "board_hal.h"
 #include "clock_state.h"
+#include "web_server.h"
 #include "hotspot.h"
 #include "wifi_station.h"   // the station it holds joined while it is on
 

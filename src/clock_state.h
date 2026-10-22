@@ -85,10 +85,17 @@ void drawCenteredLines(const char *first, const char *second, uint16_t color);  
 bool screenIsLandscape();        // the panel is drawn wider than tall
 
 
-// The web server, beside the loop, and the answers of its JSON interface.
-void webUpdate(bool listening, bool lan);
-String getParam(const String &query, const String &key);
-void sendJson(Print &c, JsonDocument &doc, int code = 200);
-void sendJsonError(Print &c, int code, const char *text);
+// The web app's JSON interface (main.cpp): what the web server hands a
+// request to.
+struct WebConn;
+void webApi(Print &c, const String &path, bool isPost, const String &body, bool &closeHotspot, bool &syncNow, bool &restart);
+void sendWebApp(Print &c);
+void apiPackUpload(WiFiClient &client, Print &out, long length);
+#if defined(CLOCK_DEBUG)
+// The debug build's statistics of the web server (main.cpp).
+void webStatsPass(uint32_t us);
+void webStatsDone(WebConn &w, bool dropped);
+void webStatsPrint();
+#endif
 
 #endif  // CLOCK_STATE_H
