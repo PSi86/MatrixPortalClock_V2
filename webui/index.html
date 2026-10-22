@@ -516,6 +516,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         </div>
         <div class="row"><label class="lbl" for="haUser">User</label><input type="text" id="haUser" maxlength="63" autocomplete="off"></div>
         <div class="row"><div><label class="lbl" for="haPw">Password</label><div class="hint">Of the Home Assistant user for the clock.</div></div><input type="password" id="haPw" maxlength="63" autocomplete="new-password"></div>
+        <div class="row">
+          <div><div class="lbl">Values to Home Assistant</div><div class="hint">The light in lux, and on the wall clock the room’s temperature and humidity. A change goes out at most this often; an unchanged value still at least this often, so Home Assistant sees the sensor alive.</div></div>
+          <div class="pair"><label>At most every (s)<input type="number" id="haMin" min="5" max="255"></label><label>At least every (min)<input type="number" id="haMax" min="1" max="255"></label></div>
+        </div>
         <div class="row stack"><div class="note" id="haTopics"></div></div>
         <div class="row"><div class="note" id="haNote"></div><div class="ctl"><button class="btn primary" type="button" id="haSave">Save Home Assistant link</button></div></div>
         <div class="row stack"><div class="err" id="haErr" hidden></div></div>
@@ -1098,6 +1102,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#haOn').checked = h.on;
     $('#haHost').value = h.host; $('#haPort').value = h.port; $('#haUser').value = h.user;
     $('#haPw').value = ''; $('#haPw').placeholder = h.hasPassword ? 'unchanged' : 'none stored';
+    $('#haMin').value = h.minS; $('#haMax').value = h.maxMin;
     $('#haTopics').textContent = 'Items go to ' + h.topics + 'item/<name>, retained: JSON with text, icon, level (info or alert) and until (Unix time), and if wanted severity, intensity, chance and short (the card’s two lines, “a|b”). '
       + 'Messages go to ' + h.topics + 'message, or to the clock’s “Message” entity in Home Assistant.';
     $('#haNote').textContent = S.mode === 'ap' ? 'Kept at once; the link starts when the hotspot closes.' : 'Kept at once; the link starts again with it.';
@@ -1406,7 +1411,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   $('#haSave').addEventListener('click', function () {
     var err = $('#haErr'); err.hidden = true;
     api('/api/ha', enc({ on: $('#haOn').checked ? 'on' : 'off', host: $('#haHost').value.trim(), port: $('#haPort').value,
-      user: $('#haUser').value.trim(), pw: $('#haPw').value })).then(function (r) {
+      user: $('#haUser').value.trim(), pw: $('#haPw').value, hamin: $('#haMin').value, hamax: $('#haMax').value })).then(function (r) {
       S.ha = r.ha; fillHa();
       toast(r.ha.on ? 'Home Assistant link saved.' : 'Home Assistant link is off.');
     }).catch(function (e) { err.textContent = e.message; err.hidden = false; });

@@ -16,6 +16,10 @@
      mpclock/<id>/status       the clock to Home Assistant, retained: online,
                                or offline as the last will
      mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux
+     mpclock/<id>/temperature  and the room's temperature (C) and humidity (%),
+     mpclock/<id>/humidity     on the wall clock (its board's SHTC3); each value
+                               when it changed, at most and at least as often
+                               as the web app sets
      homeassistant/<component>/<id>/<object>/config
                                the clock to Home Assistant, retained: MQTT
                                discovery, so the clock is a device without YAML
@@ -78,7 +82,7 @@ struct HaCmd {
 
 // What the worker and the client's task read while the client exists: the
 // loop sets it before HA_CMD_START and leaves it alone until HA_IN_STOPPED.
-const uint8_t HA_ANNOUNCE_MAX = 2;   // discovery configs: the message entity and the light sensor
+const uint8_t HA_ANNOUNCE_MAX = 4;   // discovery configs: the message entity, the light, the room's temperature and humidity
 struct HaLink {
   esp_mqtt_client_handle_t client = nullptr;   // only the worker touches it
   QueueHandle_t in = nullptr;                  // to the loop

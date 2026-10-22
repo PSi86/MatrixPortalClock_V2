@@ -597,13 +597,14 @@ const unsigned long LAN_LOCK_MS = 30UL * 1000UL;
 // clock's login there, a blob of its own (NVS key "ha"). The password is kept
 // as typed, as the home WiFi's is: the broker needs it so.
 #define HA_SETTINGS_MAGIC 0x4A11
-#define HA_SETTINGS_REV   1
+#define HA_SETTINGS_REV   2
 struct HaSettings {
   uint16_t magic;
   uint8_t  rev;
   uint8_t  on;            // 1 = linked
   uint16_t port;          // the broker's
-  uint8_t  reserved[2];
+  uint8_t  minS;          // a changed value goes out at most this often, s (rev 2; was reserved)
+  uint8_t  maxMin;        // an unchanged one still this often, min (rev 2; was reserved)
   char     host[64];      // the broker's name or address
   char     user[64];
   char     pass[64];
@@ -611,6 +612,8 @@ struct HaSettings {
 HaSettings haSettings;
 SettingsStore<HaSettings> haStore;
 const uint16_t HA_PORT_DEFAULT = 1883;
+const uint8_t  HA_MIN_S_DEFAULT = 60, HA_MAX_MIN_DEFAULT = 15;   // Peter, 2026-10-22
+const uint8_t  HA_MIN_S_LOW = 5;   // the shortest the web app takes
 
 // What the link does, for the config page.
 enum HaState : uint8_t {
@@ -632,9 +635,26 @@ bool          haChanged = false;      // new settings: the client starts again w
 unsigned long haFailedAt = 0;         // millis() the client last failed to start; 0 = it did not
 char          haError[80] = "";       // what went wrong last, until the next connect
 time_t        haUpSince = 0;          // UTC of the connect
-unsigned long haLightAt = 0;          // millis() the light was last sent; 0 = not since the connect
 uint32_t      haLostSeen = 0;         // haLink().lost as last reported
-const unsigned long HA_LIGHT_MS = 60UL * 1000UL;   // the light sensor's lux to Home Assistant
+// The sensors' values for Home Assistant, each on its own topic: a value goes
+// out when it moved by its step since it was last sent, at most every
+// haSettings.minS, and unchanged still every haSettings.maxMin, so Home
+// Assistant sees the sensor alive (haSendValues()). Inside the clock they are
+// read as often as they need: the light five times a second, the room every
+// 5 s.
+enum HaValueId : uint8_t { HA_VALUE_LIGHT, HA_VALUE_TEMP, HA_VALUE_HUM, HA_VALUE_COUNT };
+struct HaValue {
+  const char *suffix;   // its topic past the clock's prefix
+  float step;           // what it must move by to count as changed
+  bool relative;        // the step a share of the value (at least 1)
+  float last;           // as last sent
+  unsigned long at;     // millis() it was last sent; 0 = not since the connect
+};
+HaValue haValues[HA_VALUE_COUNT] = {
+  { "light",       0.10f, true,  0, 0 },   // 10 %, at least 1 lx (Peter, 2026-10-22)
+  { "temperature", 0.20f, false, 0, 0 },   // 0.2 C
+  { "humidity",    1.00f, false, 0, 0 },   // 1 %
+};
 const unsigned long HA_RETRY_MS = 60UL * 1000UL;   // after the client failed to start
 const unsigned long HA_STOP_WAIT_MS = 2000;        // the hotspot waits this long for the goodbye
 const uint8_t  SOURCE_HA = FEED_COUNT;   // BandItem.feed of what Home Assistant sent
@@ -9620,6 +9640,9 @@ void loadHaSettings() {
     memset(&haSettings, 0, sizeof(haSettings));
     haSettings.port = HA_PORT_DEFAULT;
   }
+  // Rev 2 brings the two intervals, in what rev 1 held as reserved (0).
+  if (haSettings.minS < HA_MIN_S_LOW) { haSettings.minS = HA_MIN_S_DEFAULT; }
+  if (haSettings.maxMin == 0)         { haSettings.maxMin = HA_MAX_MIN_DEFAULT; }
   haTopics(haId());
   if (haSettings.on) {
     Console.printf("Home Assistant: on, broker %s:%u, topics %s...\n", haSettings.host, haSettings.port, haLink().prefix);
@@ -9668,18 +9691,38 @@ void haBuildAnnounce() {
 
   snprintf(l.announceTopic[1], sizeof(l.announceTopic[1]), "homeassistant/sensor/%s/light/config", id);
   l.announce[1] = "";
-  if (luxOK) {
-    JsonDocument light;
-    light["name"] = "Light";
-    light["unique_id"] = String(netHostname()) + "-light";
-    light["state_topic"] = String(l.prefix) + "light";
-    light["device_class"] = "illuminance";
-    light["unit_of_measurement"] = "lx";
-    light["state_class"] = "measurement";
-    light["availability_topic"] = l.status;
-    light["device"] = dev;
-    serializeJson(light, l.announce[1]);
+  if (luxOK) { haSensorConfig(l.announce[1], dev, "Light", "light", "illuminance", "lx", -1); }
+#if BOARD_WAVESHARE_WALL
+  // The room's temperature and humidity, from the board's SHTC3. A board
+  // without one announces neither (no topic).
+  snprintf(l.announceTopic[2], sizeof(l.announceTopic[2]), "homeassistant/sensor/%s/temperature/config", id);
+  snprintf(l.announceTopic[3], sizeof(l.announceTopic[3]), "homeassistant/sensor/%s/humidity/config", id);
+  l.announce[2] = "";
+  l.announce[3] = "";
+  if (climateOK) {
+    haSensorConfig(l.announce[2], dev, "Temperature", "temperature", "temperature", "°C", 1);
+    haSensorConfig(l.announce[3], dev, "Humidity", "humidity", "humidity", "%", 0);
   }
+#endif
+}
+
+// A sensor's discovery config: its name, its topic past the clock's prefix
+// (haValues), Home Assistant's device class and unit, and the decimals it
+// shows (-1: Home Assistant's choice).
+void haSensorConfig(String &out, const JsonDocument &dev, const char *name, const char *suffix, const char *deviceClass,
+                    const char *unit, int8_t decimals) {
+  HaLink &l = haLink();
+  JsonDocument s;
+  s["name"] = name;
+  s["unique_id"] = String(netHostname()) + "-" + suffix;
+  s["state_topic"] = String(l.prefix) + suffix;
+  s["device_class"] = deviceClass;
+  s["unit_of_measurement"] = unit;
+  s["state_class"] = "measurement";
+  if (decimals >= 0) { s["suggested_display_precision"] = decimals; }
+  s["availability_topic"] = l.status;
+  s["device"] = dev;
+  serializeJson(s, out);
 }
 
 void haFailed() {
@@ -9728,9 +9771,64 @@ void haStopLink(bool wait) {
   }
 }
 
+// A value's figure now, and its payload; false when there is none (no sensor,
+// or no reading yet).
+bool haValueNow(uint8_t i, float &v, char *payload, size_t size) {
+  switch (i) {
+    case HA_VALUE_LIGHT:
+      if (!luxOK || luxAvg < 0) { return false; }
+      v = luxAvg;   // the filtered light the brightness follows
+      snprintf(payload, size, "%ld", lroundf(v));
+      return true;
+#if BOARD_WAVESHARE_WALL
+    case HA_VALUE_TEMP: {
+      if (!roomValid) { return false; }
+      v = roomTemp;
+      long t = lroundf(v * 10.0f);   // tenths, without the C library's float printing
+      snprintf(payload, size, "%s%ld.%ld", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10);
+      return true;
+    }
+    case HA_VALUE_HUM:
+      if (!roomValid) { return false; }
+      v = roomHum;
+      snprintf(payload, size, "%ld", lroundf(v));
+      return true;
+#endif
+    default:
+      return false;
+  }
+}
+
+// While connected, on every pass: each value that is due (haValues).
+void haSendValues() {
+  unsigned long minMs = haSettings.minS * 1000UL, maxMs = haSettings.maxMin * 60000UL;
+  for (uint8_t i = 0; i < HA_VALUE_COUNT; i++) {
+    HaValue &hv = haValues[i];
+    HaCmd c = {};
+    float v;
+    if (!haValueNow(i, v, c.payload, sizeof(c.payload))) { continue; }
+    unsigned long since = millisNow - hv.at;
+    float step = hv.relative ? max(1.0f, hv.step * hv.last) : hv.step;
+    bool changed = fabsf(v - hv.last) >= step;
+    if (hv.at != 0 && since < maxMs && !(changed && since >= minMs)) { continue; }
+    c.kind = HA_CMD_SEND;
+    strlcpy(c.suffix, hv.suffix, sizeof(c.suffix));
+    if (!haCommand(c)) { return; }   // the worker's queue is full: on a later pass
+    hv.last = v;
+    hv.at = millisNow ? millisNow : 1;
+  }
+}
+
+// Every value goes out again at once: after a connect, and when Home
+// Assistant has started anew.
+void haValuesAgain() {
+  for (uint8_t i = 0; i < HA_VALUE_COUNT; i++) { haValues[i].at = 0; }
+}
+
 // On every pass outside the hotspot: takes what the worker and the client's
 // task passed on, has the client run while the link is on and has what it
-// needs, and sends the light now and then. Never waits for the network.
+// needs, and sends the sensors' values when they are due. Never waits for the
+// network.
 void haUpdate() {
   static HaIn m;   // 0.5 KB, off the loop's stack
   while (haLink().in && xQueueReceive(haLink().in, &m, 0) == pdTRUE) { haApply(m); }
@@ -9743,12 +9841,8 @@ void haUpdate() {
   if (haPhase == HA_PHASE_STARTING || haPhase == HA_PHASE_RUNNING) {
     if (!want || haChanged) {
       haStopLink(false);
-    } else if (haState == HA_UP && luxOK && lastLux >= 0 && (haLightAt == 0 || millisNow - haLightAt >= HA_LIGHT_MS)) {
-      HaCmd c = {};
-      c.kind = HA_CMD_SEND;
-      strlcpy(c.suffix, "light", sizeof(c.suffix));
-      snprintf(c.payload, sizeof(c.payload), "%ld", lroundf(lastLux));
-      if (haCommand(c)) { haLightAt = millisNow ? millisNow : 1; }
+    } else if (haState == HA_UP) {
+      haSendValues();
     }
     return;
   }
@@ -9785,7 +9879,7 @@ void haApply(const HaIn &m) {
       haState   = HA_UP;
       haUpSince = clockIsSet() ? clockNow() : 0;
       haError[0] = '\0';
-      haLightAt = 0;
+      haValuesAgain();
       haDropItems();   // the broker sends the retained ones anew at once
       Console.printf("Home Assistant: connected to %s:%u\n", haSettings.host, haSettings.port);
       break;
@@ -9809,7 +9903,7 @@ void haApply(const HaIn &m) {
           HaCmd c = {};
           c.kind = HA_CMD_ANNOUNCE;
           haCommand(c);
-          haLightAt = 0;
+          haValuesAgain();
         }
       } else if (strncmp(m.topic, "item/", 5) == 0) {
         haItem(m.topic + 5, m.payload, m.len);
@@ -9973,6 +10067,8 @@ void haSettingsInto(JsonObject o) {
   o["user"] = haSettings.user;
   o["hasPassword"] = haSettings.pass[0] != 0;
   o["topics"] = haLink().prefix;
+  o["minS"] = haSettings.minS;
+  o["maxMin"] = haSettings.maxMin;
 }
 
 // What the link does, for the page. The hotspot stops it while it is open.
@@ -9993,8 +10089,10 @@ void haStatusInto(JsonObject o) {
 }
 
 // /api/ha: on (on or off), host, port, user and pw (empty keeps the one
-// stored, unless the user is cleared too). Taken at once: the client starts
-// again with it.
+// stored, unless the user is cleared too), and hamin (s) and hamax (min), the
+// sensors' values at most and at least that often (haValues; absent keeps
+// them). Taken at once: another link starts the client again with it, the
+// intervals count from the next value.
 void apiHa(Print &c, const String &body) {
   bool on = getParam(body, "on") == "on";
   String host = getParam(body, "host"), user = getParam(body, "user"), pw = getParam(body, "pw");
@@ -10013,20 +10111,36 @@ void apiHa(Print &c, const String &body) {
     return;
   }
   if (on && !host.length()) { sendJsonError(c, 400, "Enter the broker's address to switch the link on."); return; }
+  // The values' intervals (haValues); absent keeps them.
+  String minText = getParam(body, "hamin"), maxText = getParam(body, "hamax");
+  long minS = minText.length() ? minText.toInt() : haSettings.minS;
+  long maxMin = maxText.length() ? maxText.toInt() : haSettings.maxMin;
+  if (minS < HA_MIN_S_LOW || minS > 255) { sendJsonError(c, 400, "Send at most every 5 to 255 s."); return; }
+  if (maxMin < 1 || maxMin > 255) { sendJsonError(c, 400, "Send at least every 1 to 255 min."); return; }
+  if (maxMin * 60 < minS) { sendJsonError(c, 400, "The longest interval must not be shorter than the shortest."); return; }
   bool wasOn = haSettings.on != 0;
+  HaSettings before = haSettings;
   strlcpy(haSettings.host, host.c_str(), sizeof(haSettings.host));
   haSettings.port = (uint16_t)port;
   strlcpy(haSettings.user, user.c_str(), sizeof(haSettings.user));
   if (pw.length())         { strlcpy(haSettings.pass, pw.c_str(), sizeof(haSettings.pass)); }
   else if (!user.length()) { haSettings.pass[0] = '\0'; }   // a password belongs to a user
   haSettings.on = on ? 1 : 0;
+  haSettings.minS = (uint8_t)minS;
+  haSettings.maxMin = (uint8_t)maxMin;
   bool stored = saveHaSettings();
-  haChanged = true;
-  haFailedAt = 0;
-  haError[0] = '\0';
+  // Only another link starts the client anew; the intervals count at once.
+  bool relink = haSettings.on != before.on || haSettings.port != before.port ||
+                strcmp(haSettings.host, before.host) != 0 || strcmp(haSettings.user, before.user) != 0 ||
+                strcmp(haSettings.pass, before.pass) != 0;
+  if (relink) {
+    haChanged = true;
+    haFailedAt = 0;
+    haError[0] = '\0';
+  }
   if (wasOn && !on) { bandDropFeed(SOURCE_HA); }   // switched off, the link takes its items with it
-  Console.printf("Home Assistant: %s, broker %s:%u%s\n", on ? "on" : "off", haSettings.host, haSettings.port,
-                pw.length() ? ", new password" : "");
+  Console.printf("Home Assistant: %s, broker %s:%u%s, values at most every %u s, at least every %u min\n", on ? "on" : "off",
+                haSettings.host, haSettings.port, pw.length() ? ", new password" : "", haSettings.minS, haSettings.maxMin);
   if (!stored) {
     sendJsonError(c, 500, "Not saved: the clock could not write its flash. The link works so until the next restart.");
     return;
