@@ -15,6 +15,7 @@
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include "clock_time.h"
+#include "console.h"          // the faces log their changes and scenes
 #include "settings_table.h"
 
 // What the clock plans itself - an extra, a GIF of its own accord, info
@@ -217,7 +218,7 @@ bool faceBlobSave(FaceBlob &b, Store &store) {
 // frames - also when the code that draws them has moved.
 #if defined(FACE_FRAME_LOG)
 struct FaceRandom {
-  static uint32_t state;
+  static inline uint32_t state = 0x9E3779B9u;   // one for every file that includes this
   static void seed(uint32_t s) { state = s ? s : 0x9E3779B9u; }
   static uint32_t next() {   // xorshift32
     uint32_t x = state;
@@ -225,7 +226,6 @@ struct FaceRandom {
     return state = x;
   }
 };
-uint32_t FaceRandom::state = 0x9E3779B9u;
 inline long faceRandom(long howbig) { return howbig <= 0 ? 0 : (long)(FaceRandom::next() % (uint32_t)howbig); }
 inline long faceRandom(long howsmall, long howbig) {
   return howsmall >= howbig ? howsmall : howsmall + faceRandom(howbig - howsmall);

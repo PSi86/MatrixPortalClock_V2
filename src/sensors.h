@@ -19,6 +19,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "board_hal.h"   // which board: the sensors it supports
 
 enum SensorId : uint8_t {
   SENSOR_ACCEL,      // LIS3DH, on the MatrixPortals' board

@@ -20,6 +20,7 @@
 #include <esp_heap_caps.h>
 #include <mbedtls/platform.h>
 #include <freertos/idf_additions.h>
+#include "board_hal.h"   // which board: where the fetch task and its TLS buffers get their RAM
 #include "clock_time.h"
 
 // ---- Items ----------------------------------------------------------------

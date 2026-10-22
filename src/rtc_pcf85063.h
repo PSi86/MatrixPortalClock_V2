@@ -24,6 +24,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "board_hal.h"   // BoardBusLock: the board's own bus is shared
 #include <RTClib.h>   // DateTime: the same calendar sums as for the DS3231
 
 class Pcf85063 {
