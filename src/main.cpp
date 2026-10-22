@@ -19,6 +19,7 @@ Todo Concept:
 
 ------------------------------------------------------------------------- */
 
+#include <Arduino.h>        // the Arduino core (the .ino conversion added it until 2026-10-22)
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
 #include "sensors.h"        // the sensors each board supports, tried at the start and remembered
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
@@ -74,7 +75,7 @@ Todo Concept:
 // The wall clock shows the items in its band below the face (bandUpdate());
 // the 64x32 clocks have no room for one and show them over the face.
 #define BAND_ON_PANEL BOARD_WAVESHARE_WALL
-struct BandTurn;                       // named by prototypes generated from this sketch
+struct BandTurn;                       // named by the declarations ahead of the code, on every board
 struct BandLocal;
 #if BAND_ON_PANEL
 #include "sky.h"               // sunrise, sunset and the moon's phase for the band
@@ -799,10 +800,6 @@ unsigned long gestureNearAt = 0;        // when the sensor was last asked what i
 int16_t  gestureNearBright = -1;        // the object in view: its brightness and size; -1 = nothing in view
 int16_t  gestureNearSize   = -1;
 uint8_t  gestureWaves = 0;              // the sensor's wave count (0xB7) as last read in the test
-const char *gestureRawName(uint8_t g);  // declared here: the sketch's generated prototypes miss these
-const char *gestureWord(uint8_t ev);
-const char *gestureLeftOut(uint8_t ev);
-Gesture gestureDecode(uint8_t r43, uint8_t r44);
 unsigned long approachPolledAt = 0;
 unsigned long objectNearSince  = 0;   // 0 = nothing near
 unsigned long objectGoneSince  = 0;
@@ -965,9 +962,6 @@ unsigned long webAfterAt = 0;   // millis() they are done; 0 = none waits
 // The classic watchface (face_classic.h), on every board, with its settings
 // inside the clock's.
 ClassicFace classicFace(settings.classic);
-// The face of a watchface number. Declared here: the prototypes Arduino
-// generates leave out a function that returns a reference.
-Watchface &faceFor(uint8_t id);
 
 // Orientation handling -----------------------------------------------------
 // The MatrixPortal S3 has an onboard LIS3DH accelerometer. We read gravity and
@@ -1338,6 +1332,493 @@ uint8_t       editTimeField  = TF_HOUR;
 const uint8_t BRIGHT_LEVELS    = 16;
 const float   BRIGHT_PHASE_MIN = 0.2585f;  // perceptual position of brightness 13
 const int8_t  BRIGHT_TRIM_MAX  = 8;
+
+/* ----------------------------------------------------------------------
+   The functions of this file, declared ahead of the code so that each
+   can be called before its definition. Until 2026-10-22 the sketch was an
+   .ino, whose conversion wrote these declarations itself; the five it
+   missed stood here and there by hand. They follow the order of the
+   functions, under their sections. A part that moves into a module of
+   its own takes its declarations along to its header.
+   ---------------------------------------------------------------------- */
+// Daylight saving
+bool dstActiveAt(const char *rule, time_t utc);
+bool dstInEffect();
+void setDstMode(uint8_t mode);
+void updateAutoDst();
+void dstSelfTest();
+// setup() and loop()
+void setup(void);
+void loop(void);
+// Screens
+bool screenShowsFace(Screen s);
+Screen screenBeneath();
+void leaveScreen(Screen s);
+void showScreen(Screen next);
+void setScreen(Screen next);
+void openScreen(Screen next);
+void closeScreen();
+bool inputIdleFor(unsigned long ms);
+void updateScreenTimeouts();
+void apShowClock();
+void updateApDisplay();
+// Orientation
+void applyOrientation(uint8_t rot);
+void setScreenRotation(uint8_t rot);
+bool screenIsLandscape();
+uint8_t sensorRotation();
+void adoptSensorRotation();
+void updateOrientation();
+void followDeviceRotation();
+// Auto-brightness
+uint8_t mapLuxToBrightness(float lux);
+float luxMedian();
+void updateBrightness();
+void climateUpdate();
+bool applySensorParams(const String &q);
+float saturationHpa(float t);
+float roomTempNow();
+float roomHumNow();
+uint8_t panelBrightness();
+bool brightnessIsTrim();
+uint8_t brightnessLevel(uint8_t b);
+uint8_t levelBrightness(uint8_t level);
+int8_t brightnessTrim(uint8_t b);
+uint8_t trimBrightness(int8_t trim);
+void brightnessStep(int delta);
+void brightnessKeep();
+void drawCenteredText(const char *msg, uint16_t color);
+void drawCenteredLines(const char *first, const char *second, uint16_t color);
+void bootStatus(const char *msg);
+// Banners
+void dstColour(uint8_t &r, uint8_t &g, uint8_t &b);
+void bannerOpen();
+void showBanner(const char *first, const char *second, uint8_t r, uint8_t g, uint8_t b);
+void showHints();
+void showTimeBanner();
+void drawBanner();
+void formatClockTime(char *buf, size_t size, time_t local);
+void formatOffset(char *buf, size_t size, long offset);
+// On-screen menu: drawing
+uint16_t uiInk();
+uint16_t uiQuiet();
+uint16_t uiAccent();
+void uiTiny(int16_t x, int16_t top, const char *s, uint16_t colour);
+void uiSmall(int16_t x, int16_t top, const char *s, uint16_t colour);
+int16_t uiTextWidth(const char *s, const GFXfont *font, uint8_t size);
+void uiTinyRight(int16_t right, int16_t top, const char *s, uint16_t colour);
+void drawList(const char *title, const char *const *labels, uint8_t count, uint8_t focus, const char *value);
+bool menuItemShown(MenuItem item);
+void menuItemValue(MenuItem item, char *buf, size_t size);
+void drawMenu();
+void presentUi();
+uint16_t rawPixelIndex(int16_t x, int16_t y);
+void playSlide(int8_t dir);
+void drawBrightnessScale(int16_t y);
+void drawBrightEditor();
+void formatZoneTime(char *buf, size_t size, uint8_t zone, uint8_t dstMode);
+int16_t marqueeShift(int16_t textW, int16_t boxW, unsigned long since);
+bool zoneCityScrolls();
+void drawZoneEditor();
+void drawDstEditor();
+int16_t drawTimeFieldText(int16_t x, int16_t top, const char *text, bool focused);
+void drawTimeEditor();
+bool editorMoving();
+void drawEditor();
+void updatePanelRate();
+void debugMemoryLog();
+void apLoopStats(uint32_t webUs, uint32_t panelUs);
+void frameStatsAdd(uint32_t drawUs, uint32_t showUs);
+void facePassStats(uint32_t us);
+void loopGapStats();
+void webStatsPass(uint32_t us);
+void webStatsDone(WebConn &w, bool dropped);
+void webStatsPrint();
+void faceFrameDrawn();
+bool syncOverdue();
+void drawStatusPixel();
+void drawHotspotMark();
+void drawNoticeMarker();
+// The knock: knock.h senses it
+bool knockIsReal();
+void updateKnock();
+void knockFollowSetting();
+// Muncher watchface
+void muncherSelfTest();
+// Aliens watchface
+void aliensSelfTest();
+void testFaceReset();
+void testPlanRun();
+void testPlanParse(const String &plan);
+// The faces' settings
+void loadFaceSettings();
+bool saveFaceSettings();
+FaceOutcome applyFaceParams(const String &q, bool live);
+FaceOutcome previewOutcome(FaceOutcome a, FaceOutcome b);
+FaceNow faceMoment();
+void faceUpdate();
+Watchface &faceFor(uint8_t id);
+void faceShow();
+uint8_t activeWatchface();
+void faceCatchUp();
+unsigned long secondBeganAt();
+void timekeeper(void);
+void setSyncState(SyncState next);
+bool syncStateDue(SyncState s);
+bool syncAttempting(SyncState s);
+bool syncNeedsRadio(SyncState s);
+void setClockTo(time_t utc, TimeSource source);
+void i2cScan();
+void boardBusScan();
+bool saveSensorRecord();
+void sensorsCheck();
+bool sensorForget(const String &key);
+void rtcBegin();
+void rtcWrite(time_t utc);
+void pcfSet(time_t utc);
+void rtcFollow();
+void wallRtcReport();
+time_t rtcRead();
+bool ntpSyncOn();
+bool syncDueAt(time_t when);
+time_t localToUtc(time_t local);
+String clockStatusText();
+String timeStatusText();
+void noteJoinFailed();
+bool wifiStored();
+void stationJoin();
+bool stationUp();
+void stationUpdate();
+void loadSyncRecord();
+void saveSyncRecord();
+void ntpAsk();
+void syncSchedule();
+void timeSync_WifiLib();
+void printWifiStatus();
+// Settings persistence
+long tzTotalOffset();
+void loadSettings();
+void loadUiSettings();
+bool saveUiSettings();
+void loadWifiCreds();
+bool saveWifiCreds();
+bool forgetWifi();
+bool saveSettings();
+void applySettings();
+uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright);
+uint16_t scaledColor(uint8_t r, uint8_t g, uint8_t b);
+uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b);
+void normalizeColorFull(uint8_t &r, uint8_t &g, uint8_t &b);
+// Input
+InputContext contextOf(Screen s);
+InputContext inputContext();
+// Face shortcuts
+int8_t faceEventIndex(InputEvent ev);
+bool faceEventFitted(InputEvent ev);
+bool faceActionOffered(uint8_t code, InputEvent ev);
+void faceKeysOfProfile(uint8_t profile, uint8_t *codes);
+bool faceEventCountsForMenu(InputEvent ev);
+bool faceKeysReachMenu(const uint8_t *codes);
+void loadFaceKeys();
+bool saveFaceKeys();
+InputFunction mappedFunction(InputEvent ev, InputContext ctx);
+bool clicksCounted(const Button &b);
+uint8_t clickCount(InputEvent ev);
+bool closesBanner(InputEvent ev);
+void runFunction(InputFunction fn, uint8_t steps);
+void faceAnimationStart();
+void holdStep(InputFunction fn);
+void holdEnd(InputFunction fn);
+InputFunction handleInput(InputEvent ev, uint8_t steps);
+InputEvent closeSequence(Button &b);
+InputEvent stepButton(Button &b);
+uint8_t burstSteps(const Button &b);
+bool anyButtonDown();
+void updateInput();
+void gestureBegin();
+InputEvent gestureEvent(Gesture g);
+const char *gestureLeftOut(uint8_t ev);
+void updateGestures();
+void updateApproach();
+const char *gestureRawName(uint8_t g);
+const char *gestureWord(uint8_t ev);
+void gestureRemember(uint8_t raw, uint8_t ev, bool taken, uint8_t r43, uint8_t r44);
+bool gestureReadRegs(uint8_t reg, uint8_t *values, uint8_t count);
+bool gestureWriteReg(uint8_t reg, uint8_t value);
+bool gestureReadRaw(uint8_t &r43, uint8_t &r44);
+void gestureTune(bool on);
+Gesture gestureDecode(uint8_t r43, uint8_t r44);
+bool gestureTestStart();
+void gestureTestStop();
+void gestureTestUpdate();
+void drawGestureTest();
+bool gestureHeldAtBoot();
+// On-screen menu: what the functions do there
+void menuOpen();
+void navigate(InputFunction fn, uint8_t steps);
+MenuItem menuStep(MenuItem from, int8_t dir);
+void menuNavigate(InputFunction fn);
+void menuEnter(MenuItem item);
+void menuToggle(MenuItem item);
+void menuAction(MenuItem item);
+uint8_t zoneIndex(int32_t offset);
+uint8_t dstOptionIndex(uint8_t mode);
+void editorOpen(MenuItem item);
+void timeEditorOpen();
+int16_t daysInMonth(int16_t year, int16_t month);
+void timeEditorStep(int delta);
+void timeEditorCommit();
+void editorNavigate(InputFunction fn, uint8_t steps);
+void editorStep(int delta);
+void editorCommit();
+void editorRevert();
+void feedbackConfirm(uint8_t clicks);
+bool feedbackLit();
+void updateFeedbackLed();
+void drawFeedbackIndicator();
+void cycleDstMode();
+void toggleAutoBright();
+void toggleAutoBrightWithBanner();
+// Perceptually linear brightness fade
+void fadeStart();
+void fadeStep();
+// WLAN access point configuration mode
+void apRadioUp();
+void startAPMode();
+void scanNetworks();
+void stopAPMode();
+void consoleCommands();
+void wallCommand(const char *line);
+void wallOutputWatch();
+void wallGdmaList();
+void wallCryptoTest(bool external);
+void apFallback();
+void apAutoClose();
+uint8_t apInfoRotation();
+void drawAPScreen();
+String dnsQueryName(const byte *buf, int len);
+void handleDNS();
+void sendNoContent(Print &c);
+void sendCaptiveRedirect(Print &c);
+void handleAP();
+// The web server, beside the loop
+void webUpdate(bool listening, bool lan);
+void webAccept(bool lan);
+void webStep(WebConn &w);
+void webReadHead(WebConn &w);
+void webReadBody(WebConn &w);
+void webAnswer(WebConn &w);
+void webSend(WebConn &w);
+void webClose(WebConn &w, bool dropped);
+void webAfter();
+uint8_t hexVal(char c);
+String urldecode(const String &s);
+String getParam(const String &query, const String &key);
+void parseHexColor(const String &s, uint8_t &r, uint8_t &g, uint8_t &b);
+String toHex(uint8_t r, uint8_t g, uint8_t b);
+void applyParams(const String &q);
+String applyWifiForm(const String &body);
+void printAgo(Print &c, unsigned long at);
+FaceOutcome applyLiveParams(const String &q);
+String applyKeysForm(const String &q);
+// GIF playback
+void gifSettingsCheck();
+void loadGifSettings();
+bool saveGifSettings();
+long tenthsOf(const String &v);
+void applyGifParams(const String &q);
+void gifGammaInit();
+void gifScheduleNext();
+int16_t gifCount();
+bool gifFits(int16_t i);
+int16_t gifPick();
+void gifDrawLine(GIFDRAW *d);
+bool gifStart(int16_t i, bool ownAccord);
+int16_t gifNext();
+void gifPlayNow();
+void gifPlayAgain();
+void gifUpdate();
+void gifSourceClose(uint8_t how);
+void gifEnd();
+void gifDispose();
+void gifRender();
+void drawGif();
+uint32_t gifLoopMs(const uint8_t *d, uint32_t n, uint16_t &frames);
+// GIF pack
+void gifPackLoad();
+bool gifPackMappable(const GifPackEntry &e);
+bool gifPackCrcOk(const GifPackEntry &e);
+bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size);
+void gifPackClose();
+// GIFs from the card
+void gifCardBegin();
+void gifCardSend(uint8_t kind, int16_t index);
+void gifCardFreeSlot(uint8_t s);
+int16_t gifCardNext();
+bool gifCardOpen(int16_t i, const uint8_t *&data, uint32_t &size);
+void gifCardClose(uint8_t how);
+void gifCardRemount();
+void gifCardResult();
+void gifCardUpdate();
+void gifCardCommand(const char *line);
+// Info band data
+void loadFeedSettings();
+bool saveFeedSettings();
+bool feedOn(uint8_t f);
+bool feedsReady();
+bool feedDueWithin(uint8_t f, unsigned long early);
+int8_t feedDue(unsigned long early);
+void bandWhen(char *buf, size_t size, time_t utc);
+void printBandItem(const char *mark, const BandItem &it);
+void bandFindNextUntil();
+void bandRemoveAt(uint8_t i);
+int8_t bandFind(uint8_t f, const char *key);
+void bandPut(const BandItem &n);
+void bandRemove(uint8_t f, const char *key);
+void bandExpire();
+bool isMessage(const BandItem &it);
+bool isNotice(const BandItem &it);
+uint8_t noticeIcon(const BandItem &it);
+int8_t noticeSeenIndex(uint8_t feed, uint32_t tag);
+void noticeForget(const BandItem &it);
+void noticeSeenAdd(const BandItem &it);
+bool infoIsNew(const BandItem &it);
+uint8_t infoRank(const BandItem &it);
+uint8_t infoOrder(uint8_t *order, bool newOnly);
+bool noticeBefore(uint8_t x, uint8_t y);
+uint8_t noticeOrder(uint8_t *order, bool newOnly);
+void noticeAddStep(const BandItem &it, uint8_t phase);
+int8_t noticeItem(const NoticeStep &s);
+bool noticeStepsSame(uint8_t a, uint8_t b);
+void textToCp437(char *dst, const char *src, size_t size);
+void panelSeparators(char *s);
+bool noticeStepShow(uint8_t i);
+bool noticeStart();
+void noticeAdvance(bool nextNotice);
+void noticeStepsForNew();
+uint8_t noticesShowAgain();
+bool faceTimeShown();
+bool infoRoundReady();
+unsigned long roundNextIn();
+bool roundChoice(long minutes);
+bool infoCardsStart(bool round);
+void infoCardsEnded();
+void noticesUpdate();
+unsigned long noticeNewMs();
+// Who takes the panel, and when: the rules
+unsigned long faceChangeIn();
+bool panelFitsBeforeChange(unsigned long ms);
+void panelWatch();
+unsigned long panelRestMs();
+bool decorQuiet();
+bool infoSlotOpen(unsigned long ms);
+bool decorFree(unsigned long ms, bool gif);
+void panelMinuteOf(unsigned long at, time_t &minute, unsigned long &inMinute);
+bool panelInChangeSlot(unsigned long at, unsigned long ms);
+unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms);
+void extrasScheduleNext();
+bool extrasDue();
+void extrasUpdate();
+void loadDecorSettings();
+bool saveDecorSettings();
+void applyDecorParams(const String &q);
+bool noticeClosedBy(InputEvent ev);
+void loadNoticeKeys();
+bool saveNoticeKeys();
+void applyNoticeKeysForm(const String &q);
+IconRgb levelRgb(uint8_t severity);
+IconRgb airRgb(uint8_t band);
+IconRgb chanceRgb(IconRgb c, uint8_t chance);
+IconRgb roleRgb(uint8_t role, const IconLook &look);
+void drawItemIconOn(Adafruit_GFX &g, int16_t x, int16_t y, const IconLook &look);
+void drawItemIcon(int16_t x, int16_t y, const IconLook &look);
+void warningIconSelfTest();
+void drawAlertBanner();
+CardLayout cardLayout();
+int16_t cardLineWidth(const char *s, uint8_t size);
+void drawCardLine(const char *s, int16_t x, int16_t y, uint8_t size, uint16_t colour);
+void drawCardBanner();
+void drawRunBanner();
+// The info band on the wall clock
+int8_t bandItemOf(const BandTurn &t);
+bool bandTurnSame(const BandTurn &a, const BandTurn &b);
+uint8_t bandTurnList(BandTurn *t);
+uint8_t bandIconOf(const BandItem &it);
+int16_t bandTextX(const BandTurn &t);
+uint32_t bandLook(const BandTurn &t);
+bool bandWrap(const char *s, uint8_t chars, char lines[2][32]);
+int isoWeek(int year, int yday, int wday);
+void bandDateLines(BandLocal &l);
+bool clockShiftNear(const char *rule, time_t now, time_t &at, bool &forward);
+void bandShiftLines(BandLocal &l);
+void bandHhmm(char *buf, size_t size, double minutes);
+void bandSunLines(BandLocal &l);
+void bandMoonLines(BandLocal &l);
+void bandStatusLines(BandLocal &l);
+void bandLocalUpdate();
+void bandRoomLines(BandLocal &l);
+void bandDraw();
+void bandStart(const BandTurn &t, uint8_t runs);
+void bandNext();
+void bandRestart();
+void bandUpdate();
+void bandSelfTest();
+void bandHide();
+void feedFailed(uint8_t f, const char *why);
+void feedRetrySelfTest();
+void feedApply(const FeedResult &res);
+void feedsUpdate();
+bool microDegreesOf(const String &v, int32_t limit, int32_t &out);
+void applyFeedParams(const String &q);
+// The web app
+void sendWebApp(Print &c);
+void sendPreviewOutcome(Print &c, FaceOutcome o);
+void sendJsonError(Print &c, int code, const char *text);
+String homeWifiStatusText();
+uint32_t programSize();
+void apiStatusInto(JsonDocument &d);
+void apiState(Print &c);
+void apiGestures(Print &c);
+void apiPanel(Print &c);
+void apiPackUpload(WiFiClient &client, Print &out, long length);
+size_t packRead(WiFiClient &client, uint8_t *buf, size_t want);
+void packDrain(WiFiClient &client, long left);
+void drawPackProgress(uint32_t done, uint32_t total);
+void apiSetTime(Print &c, const String &q);
+void apiSave(Print &c, const String &body, bool &closeHotspot);
+void webApi(Print &c, const String &path, bool isPost, const String &body, bool &closeHotspot, bool &syncNow, bool &restart);
+void loadLanSettings();
+bool saveLanSettings();
+void lanWantRadio();
+void lanHash(const char *pw, uint8_t out[32]);
+void lanSetPassword(const char *pw);
+bool lanPasswordIs(const char *pw);
+bool lanAuthorized(Print &c, const String &auth);
+void apiLan(Print &c, const String &body);
+void lanStop();
+void lanUpdate();
+// The Home Assistant link
+void loadHaSettings();
+bool saveHaSettings();
+void haBuildAnnounce();
+void haSensorConfig(String &out, const JsonDocument &dev, const char *name, const char *suffix, const char *deviceClass, const char *unit, int8_t decimals);
+void haFailed();
+void haStartLink();
+void haStopLink(bool wait);
+bool haValueNow(uint8_t i, float &v, char *payload, size_t size);
+void haSendValues();
+void haValuesAgain();
+void haUpdate();
+void haApply(const HaIn &m);
+void haDropItems();
+void haErrorText(const HaIn &m);
+bool haNameOk(const char *name);
+void haIconLook(JsonDocument &doc, BandItem &it);
+void haItem(const char *name, const char *payload, uint16_t len);
+void haMessage(const char *payload, uint16_t len);
+void haSettingsInto(JsonObject o);
+void haStatusInto(JsonObject o);
+void apiHa(Print &c, const String &body);
 
 /* ======================================================================
    Daylight saving

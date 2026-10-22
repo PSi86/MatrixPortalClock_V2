@@ -10,9 +10,9 @@
    built (static_assert at the end), so a profile that would lock the user out
    never reaches a clock. The checks are single-expression recursive constexpr
    functions, as C++11 had them (the M4, dropped on 2026-10-21, built with
-   -std=gnu++11). They live in a header because the .ino preprocessor writes a
-   plain prototype for every function in the sketch, which a constexpr
-   definition would then contradict.
+   -std=gnu++11). They live in a header because the sketch was an .ino until
+   2026-10-22, whose conversion wrote a plain prototype for every function
+   in it, which a constexpr definition would have contradicted.
    ------------------------------------------------------------------------- */
 #pragma once
 
