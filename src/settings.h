@@ -165,6 +165,7 @@ static_assert(sizeof(FeedSettings) == 16, "FeedSettings keeps the size stored bl
 extern const FeedSettings FEED_DEFAULTS;
 // The info round's choices, in minutes (0 = never): each divides the hour.
 inline constexpr uint8_t ROUND_CHOICES[] = { 0, 5, 10, 15, 20, 30, 60 };
+bool roundChoice(long minutes);   // one of them
 extern FeedSettings feedSettings;
 extern SettingsStore<FeedSettings> feedStore;
 extern SettingsTable feedTable;

@@ -202,3 +202,8 @@ bool saveFeedSettings() {
   feedSettings.rev   = FEED_SETTINGS_REV;
   return feedStore.write(feedSettings);
 }
+
+bool roundChoice(long minutes) {
+  for (uint8_t c : ROUND_CHOICES) { if (c == minutes) { return true; } }
+  return false;
+}

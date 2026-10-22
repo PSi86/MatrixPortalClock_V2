@@ -74,6 +74,7 @@ bool panelFitsBeforeChange(unsigned long ms);   // something this long ends befo
 bool decorFree(unsigned long ms, bool gif);     // decoration of its own accord may take the panel now
 unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms);   // a random time outside the changes' slots
 unsigned long roundNextIn();                    // ms to the next info round
+extern unsigned long roundMinuteAt;             // millis() the info round's minute began; 0 = no round waits
 
 #if BOARD_WAVESHARE_WALL
 extern uint32_t wallOutputStops;   // the panel output's stops since the start (the console's "panel")
