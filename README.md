@@ -420,9 +420,26 @@ because whatever waited took the panel the moment it was free.
   editor, banners, the gesture test, what an input asks for); alerts; the time's
   change; messages; information (the info round, new cards); the faces' extras;
   GIFs of their own accord; the plain face.
-- **The time's change is protected**, on every face, the hour's included:
-  anything optional ends 3 s before it starts (a GIF's whole loops counted) and
-  does not start while it runs. Alerts come at once, also over a change.
+- **The time's change is protected** from what the clock plans itself, on
+  every face, the hour's included: that ends 3 s before it starts (a GIF's whole
+  loops counted), does not start while it runs, and waits as well while an
+  animation the user asked for runs. Alerts come at once, also over a change.
+- **What the user asks for is granted** unless there is a clear reason against
+  it (Peter, 2026-10-22): a GIF asked for plays during the face's change or a
+  scene and into the next change - the user may miss the change, or see the
+  rest of it after; the Tetris and classic animations may meet the change, which
+  takes them over as a knock takes over a knock's build. The clear reasons: the
+  Muncher's and the Aliens' scenes must have ended when their change has to
+  start (it would cut them off, or come late), and do not start while it runs;
+  an animation already running is not started again (the Tetris digits coming
+  apart, the classic digits flying); and after one ends the next waits 1 s,
+  since a knock reports itself 2 to 7 times. Until then a knock was refused in
+  up to the minute's last 15 s or so on the Tetris face, from about :55 on the
+  classic one, and a GIF asked for whenever it would not end 3 s before the
+  change. Measured on the S3 (`tools.local/wishes_check.py`, debug builds of
+  main and of the change): a Tetris knock 5 s before the minute and a GIF 2 s
+  before it now play, a classic knock taken in second :58 too; the Muncher's
+  and the Aliens' scenes still play 40 s before and are refused 2 s before.
 - **Messages and information at a fixed place in the minute:** 3 s after the
   change and before second :30; what comes later waits for the next minute, so
   they show at times one can count on. A message waits for a GIF's end.
@@ -438,9 +455,8 @@ because whatever waited took the panel the moment it was free.
   has no room for it - dropped`); a random time that falls into the slot around a change
   is drawn anew straight away - the slot each face's own change, as long as it
   really is, the Aliens' hour wave and the Muncher's hour show included. A GIF or a face scene asked for by an input
-  (button, gesture, knock, the web app) plays at once or not at all: during the
-  face's change or a scene it is dropped (`GIF: asked for during the face's
-  change or scene, dropped`), and so is one that would run into the next change.
+  (button, gesture, knock, the web app) plays at once or not at all, by the
+  rules above.
 - **Now and then** (the face section's card **Now and then**, its slider **How often**,
   shared by the faces that have such scenes):
   how often the Aliens' saucer, an alien shooting back and a waking block, and
@@ -1561,16 +1577,16 @@ minute begins. The console says when it was, against the clock's own second:
 `Muncher: the new time stands at :00.000`. It is stepped by the time since it started, so a screen that was on top
 for a while, or a loop held up by a request, does not put it behind; a time that
 moved without a change (set by hand, corrected by a sync) is walked right at once.
-No GIF starts while the muncher walks, nor when its whole loops would not end
-3 s before the next change starts ([Who takes the panel](#who-takes-the-panel)):
-in a first test a GIF came up during a change and the new time showed only at
-:04.7, when it had ended. One asked for by an input (*play random GIF*, *play last
-GIF again*, the web app's button) plays at once or not at all: during a scene it
-is dropped (`GIF: asked for during the face's change or scene, dropped`). Played at
-once, such a GIF covered the change to midnight on 2026-10-11 (most likely started
-by a knock, on *play last GIF again*; knocks are not logged); kept for the scene's
-end, as from then to 2026-10-12, it played right after the time's change (Peter).
-The same goes for the Aliens face.
+No GIF of its own accord starts while the muncher walks, nor when its whole
+loops would not end 3 s before the next change starts ([Who takes the
+panel](#who-takes-the-panel)): in a first test a GIF came up during a change and
+the new time showed only at :04.7, when it had ended. One asked for by an input
+(*play random GIF*, *play last GIF again*, the web app's button) plays at once,
+also during a scene or the change and into it (Peter, 2026-10-22): the face
+walks on behind it by the time since its start. Until then it was dropped there
+(on 2026-10-11 a GIF on *play last GIF again*, most likely from a knock, had
+covered the change to midnight; from then to 2026-10-12 one was kept for the
+scene's end). The same goes for the Aliens face.
 
 **Change**, one of three: *Mixed* (the default) eats the whole old digit and
 walks the new one when one digit changes, and walks only the segments that differ
