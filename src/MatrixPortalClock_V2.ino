@@ -65,6 +65,7 @@ Todo Concept:
 #include <esp_timer.h>
 #include "rtc_pcf85063.h"      // the board's own real-time clock
 #include "imu_qmi8658.h"       // its motion sensor, for the knock
+#include "shtc3.h"             // its temperature and humidity sensor
 #include "gif_card.h"          // its microSD card, the GIFs' source while one is in
 #endif
 
@@ -492,10 +493,10 @@ bool       noticeCardsRound = false;   // the steps on the panel are cards of th
 #if BAND_ON_PANEL
 // The wall clock's info band (bandUpdate()): the turn on show - an item by
 // source and tag, or one of the clock's own: the clock change, the date, the
-// sun and the moon - and the picture it draws into.
+// sun, the moon and the room - and the picture it draws into.
 GFXcanvas16 bandPicture(WALL_W, WALL_BAND_H);
-enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON };
-const uint8_t BAND_LOCAL_FIRST = TURN_STATUS, BAND_LOCAL_COUNT = 5;   // the clock's own, in their order
+enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON, TURN_ROOM };
+const uint8_t BAND_LOCAL_FIRST = TURN_STATUS, BAND_LOCAL_COUNT = 6;   // the clock's own, in their order
 struct BandTurn { uint8_t kind, feed; uint32_t tag; };
 // The clock's own turns as they stand, worked out once a minute (bandLocalUpdate()).
 struct BandLocal { bool on; uint8_t icon, severity; char text[64]; };   // its parts set apart by " | " (bandWrap())
@@ -596,13 +597,14 @@ const unsigned long LAN_LOCK_MS = 30UL * 1000UL;
 // clock's login there, a blob of its own (NVS key "ha"). The password is kept
 // as typed, as the home WiFi's is: the broker needs it so.
 #define HA_SETTINGS_MAGIC 0x4A11
-#define HA_SETTINGS_REV   1
+#define HA_SETTINGS_REV   2
 struct HaSettings {
   uint16_t magic;
   uint8_t  rev;
   uint8_t  on;            // 1 = linked
   uint16_t port;          // the broker's
-  uint8_t  reserved[2];
+  uint8_t  minS;          // a changed value goes out at most this often, s (rev 2; was reserved)
+  uint8_t  maxMin;        // an unchanged one still this often, min (rev 2; was reserved)
   char     host[64];      // the broker's name or address
   char     user[64];
   char     pass[64];
@@ -610,6 +612,8 @@ struct HaSettings {
 HaSettings haSettings;
 SettingsStore<HaSettings> haStore;
 const uint16_t HA_PORT_DEFAULT = 1883;
+const uint8_t  HA_MIN_S_DEFAULT = 60, HA_MAX_MIN_DEFAULT = 15;   // Peter, 2026-10-22
+const uint8_t  HA_MIN_S_LOW = 5;   // the shortest the web app takes
 
 // What the link does, for the config page.
 enum HaState : uint8_t {
@@ -631,9 +635,26 @@ bool          haChanged = false;      // new settings: the client starts again w
 unsigned long haFailedAt = 0;         // millis() the client last failed to start; 0 = it did not
 char          haError[80] = "";       // what went wrong last, until the next connect
 time_t        haUpSince = 0;          // UTC of the connect
-unsigned long haLightAt = 0;          // millis() the light was last sent; 0 = not since the connect
 uint32_t      haLostSeen = 0;         // haLink().lost as last reported
-const unsigned long HA_LIGHT_MS = 60UL * 1000UL;   // the light sensor's lux to Home Assistant
+// The sensors' values for Home Assistant, each on its own topic: a value goes
+// out when it moved by its step since it was last sent, at most every
+// haSettings.minS, and unchanged still every haSettings.maxMin, so Home
+// Assistant sees the sensor alive (haSendValues()). Inside the clock they are
+// read as often as they need: the light five times a second, the room every
+// 5 s.
+enum HaValueId : uint8_t { HA_VALUE_LIGHT, HA_VALUE_TEMP, HA_VALUE_HUM, HA_VALUE_COUNT };
+struct HaValue {
+  const char *suffix;   // its topic past the clock's prefix
+  float step;           // what it must move by to count as changed
+  bool relative;        // the step a share of the value (at least 1)
+  float last;           // as last sent
+  unsigned long at;     // millis() it was last sent; 0 = not since the connect
+};
+HaValue haValues[HA_VALUE_COUNT] = {
+  { "light",       0.10f, true,  0, 0 },   // 10 %, at least 1 lx (Peter, 2026-10-22)
+  { "temperature", 0.20f, false, 0, 0 },   // 0.2 C
+  { "humidity",    1.00f, false, 0, 0 },   // 1 %
+};
 const unsigned long HA_RETRY_MS = 60UL * 1000UL;   // after the client failed to start
 const unsigned long HA_STOP_WAIT_MS = 2000;        // the hotspot waits this long for the goodbye
 const uint8_t  SOURCE_HA = FEED_COUNT;   // BandItem.feed of what Home Assistant sent
@@ -1016,6 +1037,24 @@ const unsigned long AUTOBRIGHT_STEP_MS = 40; // the panel's new value at most th
 // darker, 255 = much brighter) and effectiveBrightness is the result.
 uint8_t       effectiveBrightness = 128;
 
+#if BOARD_WAVESHARE_WALL
+// The room's temperature and humidity: the board's SHTC3 (shtc3.h), read
+// every CLIMATE_READ_MS - room air changes slowly, and the chip sleeps in
+// between, so it hardly warms itself - and filtered over CLIMATE_TAU_MS, so
+// the band and Home Assistant do not follow the sensor's last digit.
+Shtc3         climate;
+bool          climateOK = false;         // found at start-up
+bool          roomValid = false;         // a reading came
+float         roomTemp = 0.0f;           // degrees Celsius, filtered
+float         roomHum = 0.0f;            // percent relative humidity, filtered
+unsigned long roomAt = 0;                // millis() of the last reading
+unsigned long climateStartedAt = 0;      // millis() a measurement was started; 0 = none under way
+unsigned long climateDueAt = 0;          // millis() the last one was due
+uint16_t      climateFailures = 0;       // readings that did not come, since start-up
+const unsigned long CLIMATE_READ_MS = 5000;
+const float   CLIMATE_TAU_MS = 30000.0f;
+#endif
+
 //Time Related Variables
 uint16_t panelHz = 0;            // measured panel refresh rate, 0 until the first measurement
 unsigned long panelRateLast = 0; // start of the running refresh-rate measurement
@@ -1136,6 +1175,12 @@ uint8_t i2cFound[16];        // the addresses that answered at boot, one bit eac
 uint8_t  sensorTries[SENSOR_COUNT] = {};
 uint16_t sensorsSeen    = 0;
 uint16_t sensorsMissing = 0;
+// How much warmer the wall clock's SHTC3 is than the room, in tenths of a
+// degree, as the web app sets it: the board around it warms it (34.3 C and
+// 31 % in a room of about 24 C and 50 %, 2026-10-22). Taken off its
+// temperature, and its humidity worked out for the room's (roomTempNow()).
+uint16_t sensorWarmth   = 0;
+const uint16_t SENSOR_WARMTH_MAX = 200;   // 20.0 C
 SettingsStore<SensorRecord> sensorStore;
 RTC_DS3231 rtc;
 bool rtcOK        = false;   // a DS3231 answered at boot
@@ -1468,6 +1513,10 @@ void setup(void) {
   // the board's QMI8658; before loadFaceKeys(), which asks what was found
   sensorTries[SENSOR_MOTION] = sensorBegin(SENSOR_MOTION, []() { return knock.imuBegin(Wire1); });
   knock.begin(Wire1, sensorTries[SENSOR_MOTION] != 0);
+  // and its SHTC3, the room's temperature and humidity
+  sensorTries[SENSOR_CLIMATE] = sensorBegin(SENSOR_CLIMATE, []() { return climate.begin(Wire1); });
+  climateOK = sensorTries[SENSOR_CLIMATE] != 0;
+  if (climateOK) { Console.printf("SHTC3 found, ID 0x%04X\n", climate.id()); }
 #endif
   sensorsCheck();         // which of those found before are missing now
   loadFaceKeys();         // needs to know which sensors were found
@@ -1637,6 +1686,9 @@ void loop(void) {
 #endif
     updateOrientation();// the info screen and the preview follow the panel as well
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
+#if BOARD_WAVESHARE_WALL
+    climateUpdate();   // the room's temperature and humidity, for the web app
+#endif
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
 #if BAND_ON_PANEL
     bandHide();        // no band beside the hotspot's screens
@@ -1660,6 +1712,9 @@ void loop(void) {
   updateOrientation();  // rotate the display to match how the panel is held
   updateKnock();        // a knock does what the Inputs page maps it to
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
+#if BOARD_WAVESHARE_WALL
+  climateUpdate();      // the room's temperature and humidity
+#endif
   updateScreenTimeouts();
   panelWatch();         // when the face's change ends, for who takes the panel next
   noticesUpdate();      // a new alert or message comes up, before a GIF that is due
@@ -2036,6 +2091,82 @@ void updateBrightness() {
   matrix.retintStep();   // a new brightness reaches the wall's rows a few at a time
 #endif
 }
+
+#if BOARD_WAVESHARE_WALL
+// On every pass: every CLIMATE_READ_MS a measurement started, and read
+// Shtc3::MEASURE_MS later, so the loop never waits for it.
+void climateUpdate() {
+  if (!climateOK) { return; }
+  if (climateStartedAt != 0) {
+    if (millisNow - climateStartedAt < Shtc3::MEASURE_MS) { return; }
+    climateStartedAt = 0;
+    float t, h;
+    if (!climate.read(t, h)) {
+      if (++climateFailures <= 10) { Console.println("SHTC3: no reading"); }
+      return;
+    }
+    if (!roomValid) {
+      roomTemp = t;
+      roomHum = h;
+      roomValid = true;
+      Console.printf("SHTC3: %.1f C, %.0f %% humidity\n", t, h);
+    } else {
+      float a = 1.0f - expf(-(float)(millisNow - roomAt) / CLIMATE_TAU_MS);
+      roomTemp += (t - roomTemp) * a;
+      roomHum += (h - roomHum) * a;
+    }
+    roomAt = millisNow;
+    if (consoleLevel >= 2) {   // a running figure (console.h)
+      Console.printf("Room %.2f C %.1f %% -> %.2f C %.1f %%\n", t, h, roomTemp, roomHum);
+    }
+    return;
+  }
+  if (climateDueAt != 0 && millisNow - climateDueAt < CLIMATE_READ_MS) { return; }
+  climateDueAt = millisNow ? millisNow : 1;
+  if (climate.start()) {
+    climateStartedAt = millisNow ? millisNow : 1;
+  } else if (++climateFailures <= 10) {
+    Console.println("SHTC3: did not start a measurement");
+  }
+}
+
+// The web app's Sensors section: the SHTC3's warmth (toff, degrees with one
+// decimal, 0 to 20); absent keeps it. Says whether it is stored, or nothing
+// changed.
+bool applySensorParams(const String &q) {
+  String v = getParam(q, "toff");
+  if (!v.length()) { return true; }
+  uint16_t w = (uint16_t)constrain(tenthsOf(v), 0L, (long)SENSOR_WARMTH_MAX);
+  if (w == sensorWarmth) { return true; }
+  sensorWarmth = w;
+  bandLocalDone = false;   // the band's room anew
+  Console.printf("SHTC3: %u.%u C warmer than the room\n", w / 10, w % 10);
+  return saveSensorRecord();
+}
+
+// Water's saturation vapour pressure at t degrees Celsius, in hPa (Magnus,
+// over water).
+float saturationHpa(float t) {
+  return 6.112f * expf(17.62f * t / (243.12f + t));
+}
+
+// The room's temperature: the SHTC3's, filtered, less the board's warmth
+// (sensorWarmth).
+float roomTempNow() {
+  return roomTemp - sensorWarmth / 10.0f;
+}
+
+// The room's humidity. The air at the sensor holds as much water as the
+// room's, but it is warmer there, so its relative humidity is lower: worked
+// out for the room's temperature through the saturation vapour pressure - a
+// fixed share off would be wrong. The conversion also scales the sensor's
+// own error (about x1.8 from 34 to 24 C). At most 100 %.
+float roomHumNow() {
+  if (sensorWarmth == 0) { return roomHum; }
+  float h = roomHum * saturationHpa(roomTemp) / saturationHpa(roomTempNow());
+  return h > 100.0f ? 100.0f : h;
+}
+#endif
 
 // The brightness the panel runs at: the clock's, and while a GIF plays the
 // higher of the GIFs' own lowest (gifSettings.minBright) and a multiple of the
@@ -3232,6 +3363,13 @@ void boardBusScan() {
 
 /* ---- The sensors, remembered ------------------------------------------------ */
 
+// The record as it stands: the sensors seen and the SHTC3's warmth. Says
+// whether it is stored.
+bool saveSensorRecord() {
+  SensorRecord rec = { SENSOR_RECORD_MAGIC, sensorsSeen, sensorWarmth };
+  return sensorStore.write(rec);
+}
+
 // After the sensors were set up: which of those found at an earlier start are
 // missing now, and the ones found remembered. A sensor this board does not
 // support is never counted.
@@ -3239,16 +3377,14 @@ void sensorsCheck() {
   SensorRecord rec = { SENSOR_RECORD_MAGIC, 0, 0 };
   sensorStore.begin("sensors");
   if (!sensorStore.read(rec) || rec.magic != SENSOR_RECORD_MAGIC) { rec = { SENSOR_RECORD_MAGIC, 0, 0 }; }
+  sensorWarmth = rec.warmth <= SENSOR_WARMTH_MAX ? rec.warmth : 0;
   uint16_t supported = sensorsSupported(), found = 0;
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     if (sensorTries[i]) { found |= (uint16_t)(1 << i); }
   }
   sensorsMissing = (uint16_t)(rec.seen & supported & ~found);
   sensorsSeen = (uint16_t)((rec.seen | found) & supported);
-  if (sensorsSeen != rec.seen) {
-    rec.seen = sensorsSeen;
-    sensorStore.write(rec);
-  }
+  if (sensorsSeen != rec.seen) { saveSensorRecord(); }
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     if (sensorsMissing & (1 << i)) {
       Console.printf("%s missing - found at an earlier start; the web app can forget it\n", SENSOR_KINDS[i].chip);
@@ -3266,8 +3402,7 @@ bool sensorForget(const String &key) {
     if (sensorsSeen & bit) {
       sensorsSeen &= (uint16_t)~bit;
       sensorsMissing &= (uint16_t)~bit;
-      SensorRecord rec = { SENSOR_RECORD_MAGIC, sensorsSeen, 0 };
-      sensorStore.write(rec);
+      saveSensorRecord();
       panelDirty = true;   // the status pixel may go
 #if BAND_ON_PANEL
       bandLocalDone = false;   // and the band's status line
@@ -8090,6 +8225,19 @@ void bandLocalUpdate() {
   bandDateLines(bandLocal[TURN_DATE - BAND_LOCAL_FIRST]);
   bandSunLines(bandLocal[TURN_SUN - BAND_LOCAL_FIRST]);
   bandMoonLines(bandLocal[TURN_MOON - BAND_LOCAL_FIRST]);
+  bandRoomLines(bandLocal[TURN_ROOM - BAND_LOCAL_FIRST]);
+}
+
+// The room's temperature and humidity from the board's SHTC3, filtered and
+// corrected for its warmth: "Indoor 22.4°C | humidity 48%". Off until it gave
+// a reading.
+void bandRoomLines(BandLocal &l) {
+  l.on = roomValid;
+  l.icon = ICON_INDOOR;
+  if (!roomValid) { l.text[0] = '\0'; return; }
+  long t = lroundf(roomTempNow() * 10.0f);   // tenths, without the C library's float printing
+  snprintf(l.text, sizeof(l.text), "Indoor %s%ld.%ld°C | humidity %ld%%", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10,
+           lroundf(roomHumNow()));
 }
 
 // The band's picture as the turn stands, onto the wall.
@@ -8674,6 +8822,14 @@ const char *timeSourceText() {
 void apiStatusInto(JsonDocument &d) {
   d["bright"] = effectiveBrightness;
   if (lastLux >= 0) { d["lux"] = serialized(String(lastLux, 1)); } else { d["lux"] = nullptr; }
+#if BOARD_WAVESHARE_WALL
+  if (roomValid) {   // the room's, filtered and corrected; absent without the sensor
+    d["temp"] = serialized(String(roomTempNow(), 1));
+    d["hum"] = lroundf(roomHumNow());
+    d["tempSensor"] = serialized(String(roomTemp, 1));   // as the sensor reads, for its warmth
+    d["humSensor"] = lroundf(roomHum);
+  }
+#endif
   d["clockSet"] = clockIsSet();
   if (clockIsSet()) {
     time_t local = clockNow() + tzTotalOffset();
@@ -8785,6 +8941,9 @@ void apiState(Print &c) {
   s["dqf"] = decorSettings.quietFrom;
   s["dqt"] = decorSettings.quietTo;
   s["ddk"] = decorSettings.darkLux;
+#if BOARD_WAVESHARE_WALL
+  s["toff"] = sensorWarmth;   // tenths: the SHTC3's warmth over the room
+#endif
   char deg[16];
   feedDegrees(deg, sizeof(deg), feedSettings.lat);
   s["lat"] = feedSettings.located ? deg : "";
@@ -9204,6 +9363,9 @@ void apiSave(Print &c, const String &body, bool &closeHotspot) {
   stored &= saveDecorSettings();
   applyFeedParams(body);
   stored &= saveFeedSettings();
+#if BOARD_WAVESHARE_WALL
+  stored &= applySensorParams(body);
+#endif
   if (!stored) {
     Console.println("Settings from the web app: NOT all stored, the flash could not be written");
     sendJsonError(c, 500, "Not saved in full: the clock could not write its flash. The settings work now; "
@@ -9546,6 +9708,9 @@ void loadHaSettings() {
     memset(&haSettings, 0, sizeof(haSettings));
     haSettings.port = HA_PORT_DEFAULT;
   }
+  // Rev 2 brings the two intervals, in what rev 1 held as reserved (0).
+  if (haSettings.minS < HA_MIN_S_LOW) { haSettings.minS = HA_MIN_S_DEFAULT; }
+  if (haSettings.maxMin == 0)         { haSettings.maxMin = HA_MAX_MIN_DEFAULT; }
   haTopics(haId());
   if (haSettings.on) {
     Console.printf("Home Assistant: on, broker %s:%u, topics %s...\n", haSettings.host, haSettings.port, haLink().prefix);
@@ -9594,18 +9759,38 @@ void haBuildAnnounce() {
 
   snprintf(l.announceTopic[1], sizeof(l.announceTopic[1]), "homeassistant/sensor/%s/light/config", id);
   l.announce[1] = "";
-  if (luxOK) {
-    JsonDocument light;
-    light["name"] = "Light";
-    light["unique_id"] = String(netHostname()) + "-light";
-    light["state_topic"] = String(l.prefix) + "light";
-    light["device_class"] = "illuminance";
-    light["unit_of_measurement"] = "lx";
-    light["state_class"] = "measurement";
-    light["availability_topic"] = l.status;
-    light["device"] = dev;
-    serializeJson(light, l.announce[1]);
+  if (luxOK) { haSensorConfig(l.announce[1], dev, "Light", "light", "illuminance", "lx", -1); }
+#if BOARD_WAVESHARE_WALL
+  // The room's temperature and humidity, from the board's SHTC3. A board
+  // without one announces neither (no topic).
+  snprintf(l.announceTopic[2], sizeof(l.announceTopic[2]), "homeassistant/sensor/%s/temperature/config", id);
+  snprintf(l.announceTopic[3], sizeof(l.announceTopic[3]), "homeassistant/sensor/%s/humidity/config", id);
+  l.announce[2] = "";
+  l.announce[3] = "";
+  if (climateOK) {
+    haSensorConfig(l.announce[2], dev, "Temperature", "temperature", "temperature", "°C", 1);
+    haSensorConfig(l.announce[3], dev, "Humidity", "humidity", "humidity", "%", 0);
   }
+#endif
+}
+
+// A sensor's discovery config: its name, its topic past the clock's prefix
+// (haValues), Home Assistant's device class and unit, and the decimals it
+// shows (-1: Home Assistant's choice).
+void haSensorConfig(String &out, const JsonDocument &dev, const char *name, const char *suffix, const char *deviceClass,
+                    const char *unit, int8_t decimals) {
+  HaLink &l = haLink();
+  JsonDocument s;
+  s["name"] = name;
+  s["unique_id"] = String(netHostname()) + "-" + suffix;
+  s["state_topic"] = String(l.prefix) + suffix;
+  s["device_class"] = deviceClass;
+  s["unit_of_measurement"] = unit;
+  s["state_class"] = "measurement";
+  if (decimals >= 0) { s["suggested_display_precision"] = decimals; }
+  s["availability_topic"] = l.status;
+  s["device"] = dev;
+  serializeJson(s, out);
 }
 
 void haFailed() {
@@ -9654,9 +9839,64 @@ void haStopLink(bool wait) {
   }
 }
 
+// A value's figure now, and its payload; false when there is none (no sensor,
+// or no reading yet).
+bool haValueNow(uint8_t i, float &v, char *payload, size_t size) {
+  switch (i) {
+    case HA_VALUE_LIGHT:
+      if (!luxOK || luxAvg < 0) { return false; }
+      v = luxAvg;   // the filtered light the brightness follows
+      snprintf(payload, size, "%ld", lroundf(v));
+      return true;
+#if BOARD_WAVESHARE_WALL
+    case HA_VALUE_TEMP: {
+      if (!roomValid) { return false; }
+      v = roomTempNow();
+      long t = lroundf(v * 10.0f);   // tenths, without the C library's float printing
+      snprintf(payload, size, "%s%ld.%ld", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10);
+      return true;
+    }
+    case HA_VALUE_HUM:
+      if (!roomValid) { return false; }
+      v = roomHumNow();
+      snprintf(payload, size, "%ld", lroundf(v));
+      return true;
+#endif
+    default:
+      return false;
+  }
+}
+
+// While connected, on every pass: each value that is due (haValues).
+void haSendValues() {
+  unsigned long minMs = haSettings.minS * 1000UL, maxMs = haSettings.maxMin * 60000UL;
+  for (uint8_t i = 0; i < HA_VALUE_COUNT; i++) {
+    HaValue &hv = haValues[i];
+    HaCmd c = {};
+    float v;
+    if (!haValueNow(i, v, c.payload, sizeof(c.payload))) { continue; }
+    unsigned long since = millisNow - hv.at;
+    float step = hv.relative ? max(1.0f, hv.step * hv.last) : hv.step;
+    bool changed = fabsf(v - hv.last) >= step;
+    if (hv.at != 0 && since < maxMs && !(changed && since >= minMs)) { continue; }
+    c.kind = HA_CMD_SEND;
+    strlcpy(c.suffix, hv.suffix, sizeof(c.suffix));
+    if (!haCommand(c)) { return; }   // the worker's queue is full: on a later pass
+    hv.last = v;
+    hv.at = millisNow ? millisNow : 1;
+  }
+}
+
+// Every value goes out again at once: after a connect, and when Home
+// Assistant has started anew.
+void haValuesAgain() {
+  for (uint8_t i = 0; i < HA_VALUE_COUNT; i++) { haValues[i].at = 0; }
+}
+
 // On every pass outside the hotspot: takes what the worker and the client's
 // task passed on, has the client run while the link is on and has what it
-// needs, and sends the light now and then. Never waits for the network.
+// needs, and sends the sensors' values when they are due. Never waits for the
+// network.
 void haUpdate() {
   static HaIn m;   // 0.5 KB, off the loop's stack
   while (haLink().in && xQueueReceive(haLink().in, &m, 0) == pdTRUE) { haApply(m); }
@@ -9669,12 +9909,8 @@ void haUpdate() {
   if (haPhase == HA_PHASE_STARTING || haPhase == HA_PHASE_RUNNING) {
     if (!want || haChanged) {
       haStopLink(false);
-    } else if (haState == HA_UP && luxOK && lastLux >= 0 && (haLightAt == 0 || millisNow - haLightAt >= HA_LIGHT_MS)) {
-      HaCmd c = {};
-      c.kind = HA_CMD_SEND;
-      strlcpy(c.suffix, "light", sizeof(c.suffix));
-      snprintf(c.payload, sizeof(c.payload), "%ld", lroundf(lastLux));
-      if (haCommand(c)) { haLightAt = millisNow ? millisNow : 1; }
+    } else if (haState == HA_UP) {
+      haSendValues();
     }
     return;
   }
@@ -9711,7 +9947,7 @@ void haApply(const HaIn &m) {
       haState   = HA_UP;
       haUpSince = clockIsSet() ? clockNow() : 0;
       haError[0] = '\0';
-      haLightAt = 0;
+      haValuesAgain();
       haDropItems();   // the broker sends the retained ones anew at once
       Console.printf("Home Assistant: connected to %s:%u\n", haSettings.host, haSettings.port);
       break;
@@ -9735,7 +9971,7 @@ void haApply(const HaIn &m) {
           HaCmd c = {};
           c.kind = HA_CMD_ANNOUNCE;
           haCommand(c);
-          haLightAt = 0;
+          haValuesAgain();
         }
       } else if (strncmp(m.topic, "item/", 5) == 0) {
         haItem(m.topic + 5, m.payload, m.len);
@@ -9899,6 +10135,8 @@ void haSettingsInto(JsonObject o) {
   o["user"] = haSettings.user;
   o["hasPassword"] = haSettings.pass[0] != 0;
   o["topics"] = haLink().prefix;
+  o["minS"] = haSettings.minS;
+  o["maxMin"] = haSettings.maxMin;
 }
 
 // What the link does, for the page. The hotspot stops it while it is open.
@@ -9919,8 +10157,10 @@ void haStatusInto(JsonObject o) {
 }
 
 // /api/ha: on (on or off), host, port, user and pw (empty keeps the one
-// stored, unless the user is cleared too). Taken at once: the client starts
-// again with it.
+// stored, unless the user is cleared too), and hamin (s) and hamax (min), the
+// sensors' values at most and at least that often (haValues; absent keeps
+// them). Taken at once: another link starts the client again with it, the
+// intervals count from the next value.
 void apiHa(Print &c, const String &body) {
   bool on = getParam(body, "on") == "on";
   String host = getParam(body, "host"), user = getParam(body, "user"), pw = getParam(body, "pw");
@@ -9939,20 +10179,36 @@ void apiHa(Print &c, const String &body) {
     return;
   }
   if (on && !host.length()) { sendJsonError(c, 400, "Enter the broker's address to switch the link on."); return; }
+  // The values' intervals (haValues); absent keeps them.
+  String minText = getParam(body, "hamin"), maxText = getParam(body, "hamax");
+  long minS = minText.length() ? minText.toInt() : haSettings.minS;
+  long maxMin = maxText.length() ? maxText.toInt() : haSettings.maxMin;
+  if (minS < HA_MIN_S_LOW || minS > 255) { sendJsonError(c, 400, "Send at most every 5 to 255 s."); return; }
+  if (maxMin < 1 || maxMin > 255) { sendJsonError(c, 400, "Send at least every 1 to 255 min."); return; }
+  if (maxMin * 60 < minS) { sendJsonError(c, 400, "The longest interval must not be shorter than the shortest."); return; }
   bool wasOn = haSettings.on != 0;
+  HaSettings before = haSettings;
   strlcpy(haSettings.host, host.c_str(), sizeof(haSettings.host));
   haSettings.port = (uint16_t)port;
   strlcpy(haSettings.user, user.c_str(), sizeof(haSettings.user));
   if (pw.length())         { strlcpy(haSettings.pass, pw.c_str(), sizeof(haSettings.pass)); }
   else if (!user.length()) { haSettings.pass[0] = '\0'; }   // a password belongs to a user
   haSettings.on = on ? 1 : 0;
+  haSettings.minS = (uint8_t)minS;
+  haSettings.maxMin = (uint8_t)maxMin;
   bool stored = saveHaSettings();
-  haChanged = true;
-  haFailedAt = 0;
-  haError[0] = '\0';
+  // Only another link starts the client anew; the intervals count at once.
+  bool relink = haSettings.on != before.on || haSettings.port != before.port ||
+                strcmp(haSettings.host, before.host) != 0 || strcmp(haSettings.user, before.user) != 0 ||
+                strcmp(haSettings.pass, before.pass) != 0;
+  if (relink) {
+    haChanged = true;
+    haFailedAt = 0;
+    haError[0] = '\0';
+  }
   if (wasOn && !on) { bandDropFeed(SOURCE_HA); }   // switched off, the link takes its items with it
-  Console.printf("Home Assistant: %s, broker %s:%u%s\n", on ? "on" : "off", haSettings.host, haSettings.port,
-                pw.length() ? ", new password" : "");
+  Console.printf("Home Assistant: %s, broker %s:%u%s, values at most every %u s, at least every %u min\n", on ? "on" : "off",
+                haSettings.host, haSettings.port, pw.length() ? ", new password" : "", haSettings.minS, haSettings.maxMin);
   if (!stored) {
     sendJsonError(c, 500, "Not saved: the clock could not write its flash. The link works so until the next restart.");
     return;
