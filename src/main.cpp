@@ -26,6 +26,7 @@ Todo Concept:
 #include "time_zones.h"     // the zones the clock offers and their daylight saving
 #include "clock_state.h"    // what this file shares with the modules below
 #include "settings.h"       // the clock's stored settings
+#include "wifi_station.h"   // the home WiFi and the station joined to it
 #include "lan_access.h"     // the web app on the home network
 #include "input_map.h"      // input events, functions and the profiles mapping them
 #include "face.h"           // what the watchfaces share
@@ -469,24 +470,7 @@ const uint8_t  SOURCE_HA = FEED_COUNT;   // BandItem.feed of what Home Assistant
 const uint8_t  HA_MESSAGES_MAX = 4;      // messages kept at a time, as items "*msg1" ... (no item name has a '*')
 const uint16_t HA_MESSAGE_S = 3600;      // how long a message counts when it does not say
 
-// Home WiFi --------------------------------------------------------------------
-// Stored in flash (NVS key "wifi") and
-// changed on the config page. arduino_secrets.h is optional: on the first
-// start of a clock that has nothing stored, the credentials compiled in from
-// it are copied into flash, once - after that the stored ones count, and a
-// WiFi forgotten on the config page stays forgotten.
-#define WIFI_CREDS_MAGIC 0x57F1
-#define WIFI_CREDS_REV   1
-struct WifiCreds {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  verified;  // 1 once a sync over this WiFi has worked: a known-good config.
-                      // 0 for a new one - its failures show at once (syncOverdue())
-  char     ssid[33];   // up to 32 bytes, NUL-terminated; empty = no WiFi stored
-  char     pass[64];   // WPA2: 8 to 63 characters, NUL-terminated
-};
-WifiCreds wifiCreds;
-SettingsStore<WifiCreds> wifiStore;
+// (The home WiFi and the station joined to it: wifi_station.h.)
 
 // Networks in range, from the scan the hotspot makes when it opens, strongest
 // first; the config page offers them. A name seen from several access points
@@ -497,13 +481,6 @@ SeenNetwork seenNetworks[SEEN_MAX];
 uint8_t     seenCount = 0;
 bool        scanFailed = false;   // the last scan did not run at all (not: found nothing)
 
-// How the last join of the home WiFi went, for the config page. The radio is
-// off between syncs, so "connected" is something that happened, with a time.
-enum JoinOutcome : uint8_t { JOIN_NOT_TRIED, JOIN_SUCCEEDED, JOIN_FAILED };
-JoinOutcome   joinOutcome    = JOIN_NOT_TRIED;
-uint8_t       joinFailStatus = 0;   // the station's wl_status_t when it failed
-int8_t        joinRssi       = 0;   // the signal when it succeeded
-unsigned long joinOutcomeAt  = 0;   // millis() of the outcome
 
 // Buttons ------------------------------------------------------------------
 // UP_BUTTON_PIN / DOWN_BUTTON_PIN come from board_hal.h (the MatrixPortal S3:
@@ -699,12 +676,7 @@ const unsigned long KNOCK_START_QUIET_MS = 3000;  // after setup(): plugging the
 const unsigned long KNOCK_AFTER_TURN_MS      = 1200;  // after a turn
 unsigned long setupDoneAt  = 0;   // millis() at the end of setup()
 unsigned long rotatedAt    = 0;   // millis() when the device rotation last changed
-// Boot breadcrumb stages, written to flash while starting (see board_hal.h).
-const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
-const uint8_t BOOT_STAGE_START = 1;   // setup() entered
-const uint8_t BOOT_STAGE_PANEL = 2;   // panel and sensors up
-const uint8_t BOOT_STAGE_WIFI  = 3;   // the WiFi join started (the clock runs while it joins)
-const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined
+// (The boot breadcrumb's stages: clock_state.h.)
 uint8_t prevBootStage = BOOT_STAGE_CLEAR;
 bool bootStageCleared = false;        // breadcrumb cleared after the first healthy seconds
 bool dstAutoActive = false;           // DST_AUTO: whether summer time is in effect now (derived from UTC, not stored)
@@ -913,28 +885,6 @@ unsigned long syncPausedSince  = 0;           // millis() the pause began
 unsigned long syncLastAsk  = 0;               // millis() of the last ask, for the retry pace
 const unsigned long NTP_RETRY_MS  = 3000;     // between asks while a sync is due
 
-// The station - the clock joined to the home WiFi - is shared: the NTP sync,
-// the info band's sources, the web app on the home network and the Home
-// Assistant link each say while they need it (radioUsers), and
-// the radio is off while nobody does (stationUpdate()). The sync's need
-// follows its state (setSyncState()). The hotspot takes the radio over while
-// it is open.
-enum StationState : uint8_t {
-  STA_OFF,       // radio off
-  STA_JOINING,   // joining the home WiFi, again every JOIN_RETRY_MS until it connects
-  STA_UP,        // connected
-};
-StationState  stationState = STA_OFF;
-uint8_t       radioUsers   = RADIO_SYNC;      // RadioUser bits (clock_state.h); the first sync is due at start-up (syncState)
-unsigned long joinAskedAt  = 0;               // millis() the join was last started, for the re-join pace
-unsigned long joinPolledAt = 0;               // millis() the station was last polled
-const unsigned long JOIN_RETRY_MS = 10000;    // between joins while the station does not connect
-// The home WiFi forgotten while joined: the station stays a moment for what
-// still has to go out over it (stationUpdate()).
-unsigned long wifiForgottenAt = 0;            // millis() it was forgotten; 0 = not since the start
-const unsigned long FORGET_ANSWER_MS = 2000;  // the web app's answer
-const unsigned long FORGET_LINK_MS   = 10000; // the Home Assistant link's goodbye, at most
-const unsigned long JOIN_POLL_MS  = 500;      // between looks at whether it has
 // A clock that has a time does not keep its radio on for a sync that does not
 // work out: after SYNC_ATTEMPT_MS it switches it off and tries again after
 // SYNC_PAUSE_MS. Without a time it keeps trying, since it has nothing to show.
@@ -1252,22 +1202,14 @@ bool syncDueAt(time_t when);
 time_t localToUtc(time_t local);
 String clockStatusText();
 String timeStatusText();
-void noteJoinFailed();
-bool wifiStored();
-void stationJoin();
-void stationUpdate();
 void loadSyncRecord();
 void saveSyncRecord();
 void ntpAsk();
 void syncSchedule();
 void timeSync_WifiLib();
-void printWifiStatus();
 // Settings persistence
 long tzTotalOffset();
 void loadSettings();
-void loadWifiCreds();
-bool saveWifiCreds();
-bool forgetWifi();
 void applySettings();
 uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright);
 uint16_t scaledColor(uint8_t r, uint8_t g, uint8_t b);
@@ -3877,85 +3819,6 @@ String timeStatusText() {
   return s;
 }
 
-// A join that has not connected: keep why, for the config page.
-void noteJoinFailed() {
-  joinOutcome    = JOIN_FAILED;
-  joinFailStatus = netStaStatus();
-  joinOutcomeAt  = millisNow;
-}
-
-// Why a join failed, from the station's state when it gave up.
-const char *joinFailText(uint8_t status) {
-  switch (status) {
-    case WL_NO_SSID_AVAIL:   return "network not found";
-    case WL_CONNECT_FAILED:  return "the network refused the connection (wrong password?)";
-    case WL_CONNECTION_LOST: return "connection lost";
-    default:                 return "no connection";
-  }
-}
-
-// Whether a home WiFi is stored at all.
-bool wifiStored() {
-  return wifiCreds.ssid[0] != '\0';
-}
-
-// Start joining the home WiFi, or start again. Never waits for it.
-void stationJoin() {
-  Console.print("Joining WiFi "); Console.println(wifiCreds.ssid);
-  netStaBegin(wifiCreds.ssid, wifiCreds.pass);   // also arms a fresh NTP sync
-  joinAskedAt  = millisNow;
-  stationState = STA_JOINING;
-}
-
-bool stationUp() { return stationState == STA_UP; }
-
-// Keeps the station joined while anyone needs it, and the radio off while
-// nobody does. Runs on every pass outside the hotspot and never waits.
-// Without a stored WiFi there is nothing to join, and whoever wants the
-// station simply goes on waiting. Forgotten while joined, the station stays
-// for FORGET_ANSWER_MS, so the web app's answer gets out over it, and while
-// the Home Assistant link still holds it, so its goodbye does (up to
-// FORGET_LINK_MS). Until 2026-10-22 the radio went on the next pass: by the
-// code, before the answer went out on the home network, and before the
-// link's goodbye, so Home Assistant would have learned it from the broker's
-// last will only after the keepalive ran out (code review of 2026-10-14).
-void stationUpdate() {
-  if (!wifiStored() && stationState == STA_UP && wifiForgottenAt) {
-    unsigned long since = millisNow - wifiForgottenAt;
-    if (since < FORGET_ANSWER_MS || ((radioUsers & RADIO_HA) && since < FORGET_LINK_MS)) { return; }
-  }
-  if (radioUsers == 0 || !wifiStored()) {
-    if (stationState != STA_OFF) {
-      if (stationState == STA_JOINING) { noteJoinFailed(); }   // read before the radio goes
-      netRadioOff();
-      Console.println("Disabled Wifi");
-      stationState = STA_OFF;
-    }
-    return;
-  }
-  if (stationState == STA_OFF) { stationJoin(); return; }
-  // Looked at twice a second, not on every pass.
-  if (millisNow - joinPolledAt < JOIN_POLL_MS) { return; }
-  joinPolledAt = millisNow;
-  if (stationState == STA_JOINING) {
-    if (netStaConnected()) {
-      Console.println("Connected to WiFi");
-      printWifiStatus();
-      netDnsSettle();   // before stationUp(): what looks names up waits for it (board_hal.h)
-      if (!bootStageCleared) { boardBootStageWrite(BOOT_STAGE_RUN); }
-      joinOutcome   = JOIN_SUCCEEDED;
-      joinRssi      = netStaRssi();
-      joinOutcomeAt = millisNow;
-      stationState  = STA_UP;
-    } else if (millisNow - joinAskedAt >= JOIN_RETRY_MS) {
-      noteJoinFailed();
-      stationJoin();   // not joined after all this time: start the join again
-    }
-  } else if (!netStaConnected()) {
-    Console.println("WiFi connection lost");
-    stationJoin();
-  }
-}
 
 // At start-up, after the DS3231 was read: when the last good sync was, if one
 // is stored and the clock has its time from the RTC. A stored sync later than
@@ -4075,27 +3938,6 @@ void timeSync_WifiLib() {
   if (minuteTrigger) { syncSchedule(); }
 }
 
-// Prints Wifi connection status, SSID, IP and RSSI to console.
-// The numeric status is wl_status_t: 0 = idle, 3 = connected, 6 = disconnected.
-void printWifiStatus() {
-  Console.print("WiFi Status: ");
-  Console.println(WiFi.status());
-
-  // print the SSID of the network you're attached to:
-  Console.print("SSID: ");
-  Console.println(WiFi.SSID());
-
-  // print your board's IP address:
-  IPAddress ip = WiFi.localIP();
-  Console.print("IP Address: ");
-  Console.println(ip);
-
-  // print the received signal strength:
-  long rssi = WiFi.RSSI();
-  Console.print("signal strength (dBm): ");
-  Console.println(rssi);
-}
-
 /* ======================================================================
    Settings persistence
    ====================================================================== */
@@ -4127,47 +3969,6 @@ void loadSettings() {
   }
   loadFaceSettings();   // the faces' own blobs
   applySettings();
-}
-
-// The home WiFi from flash. A clock that has never stored one takes the
-// credentials the build brings (arduino_secrets.h), and stores them - once:
-// from then on the stored ones count, also when they have been forgotten.
-void loadWifiCreds() {
-  wifiStore.begin("wifi");
-  wifiStore.read(wifiCreds);
-  if (wifiCreds.magic == WIFI_CREDS_MAGIC) {
-    wifiCreds.ssid[sizeof(wifiCreds.ssid) - 1] = '\0';   // whatever is stored, the strings end
-    wifiCreds.pass[sizeof(wifiCreds.pass) - 1] = '\0';
-    return;
-  }
-  memset(&wifiCreds, 0, sizeof(wifiCreds));
-#if defined(SECRET_SSID) && defined(SECRET_PASS)
-  strncpy(wifiCreds.ssid, SECRET_SSID, sizeof(wifiCreds.ssid) - 1);
-  strncpy(wifiCreds.pass, SECRET_PASS, sizeof(wifiCreds.pass) - 1);
-  if (wifiStored()) {
-    saveWifiCreds();
-    Console.println("WiFi: the credentials of the build were copied into flash");
-  }
-#endif
-}
-
-bool saveWifiCreds() {
-  wifiCreds.magic = WIFI_CREDS_MAGIC;
-  wifiCreds.rev   = WIFI_CREDS_REV;
-  return wifiStore.write(wifiCreds);
-}
-
-// Forget WiFi: an empty entry is stored, not none, so the credentials of the
-// build are not copied in again at the next start. Says whether it is stored.
-bool forgetWifi() {
-  memset(wifiCreds.ssid, 0, sizeof(wifiCreds.ssid));
-  memset(wifiCreds.pass, 0, sizeof(wifiCreds.pass));
-  wifiCreds.verified = 0;
-  bool stored = saveWifiCreds();
-  joinOutcome = JOIN_NOT_TRIED;
-  wifiForgottenAt = millisNow ? millisNow : 1;   // the station stays a moment (stationUpdate())
-  Console.println("WiFi: forgotten");
-  return stored;
 }
 
 // Push settings into the runtime globals that drive the clock.

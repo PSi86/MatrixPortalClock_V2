@@ -15,11 +15,13 @@
 // millis() at the start of the loop's pass.
 extern unsigned long millisNow;
 
-// The station: who needs it joined, each with its bit in radioUsers. The
-// radio is on while any does.
-enum RadioUser : uint8_t { RADIO_SYNC = 0x01, RADIO_FEEDS = 0x02, RADIO_LAN = 0x04, RADIO_HA = 0x08 };
-extern uint8_t radioUsers;
-bool stationUp();
+// Boot breadcrumb stages, written to flash while starting (see board_hal.h).
+const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
+const uint8_t BOOT_STAGE_START = 1;   // setup() entered
+const uint8_t BOOT_STAGE_PANEL = 2;   // panel and sensors up
+const uint8_t BOOT_STAGE_WIFI  = 3;   // the WiFi join started (the clock runs while it joins)
+const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined
+extern bool bootStageCleared;         // breadcrumb cleared after the first healthy seconds
 
 // The hotspot's password; also the web app's on the home network until
 // another is set there.
