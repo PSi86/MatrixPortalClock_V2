@@ -20,6 +20,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "board_hal.h"   // which board: the sensors it supports
+#include "settings_table.h"
 
 enum SensorId : uint8_t {
   SENSOR_ACCEL,      // LIS3DH, on the MatrixPortals' board
@@ -116,5 +117,39 @@ struct SensorRecord {
   uint16_t seen;
   uint16_t warmth;   // tenths of a degree taken off the SHTC3's temperature (was unused, 0)
 };
+
+// ---- At this start and from start to start (sensors.cpp) ---------------------
+extern uint8_t i2cFound[16];        // the addresses that answered at boot, one bit each (i2cScan())
+#if BOARD_WAVESHARE_WALL
+extern uint8_t i2cBoardFound[16];   // the same on the board's own bus (boardBusScan())
+#endif
+// The try each was found on at this start (0: not found), those found at an
+// earlier start and not forgotten, and of those the ones missing now - for
+// them the status pixel is red and the start says SENSOR.
+extern uint8_t  sensorTries[SENSOR_COUNT];
+extern uint16_t sensorsSeen;
+extern uint16_t sensorsMissing;
+// How much warmer the wall clock's SHTC3 is than the room, in tenths of a
+// degree, as the web app sets it: the board around it warms it (34.3 C and
+// 31 % in a room of about 24 C and 50 %, 2026-10-22). Taken off its
+// temperature, and its humidity worked out for the room's (roomTempNow()).
+extern uint16_t sensorWarmth;
+const uint16_t SENSOR_WARMTH_MAX = 200;   // 20.0 C
+#if BOARD_WAVESHARE_WALL
+extern SettingsTable sensorTable;   // the web app's key for it (settings_table.h)
+#endif
+
+// At boot: which addresses answer on the I2C bus, for the console and the
+// config page's system section.
+void i2cScan();
+#if BOARD_WAVESHARE_WALL
+void boardBusScan();   // the same for the wall clock board's own bus
+#endif
+bool saveSensorRecord();   // the record as it stands; whether it is stored
+// After the sensors were set up: which of those found at an earlier start are
+// missing now, and the ones found remembered.
+void sensorsCheck();
+// The web app's "Forget"; false for a key that names no sensor.
+bool sensorForget(const String &key);
 
 #endif  // SENSORS_H

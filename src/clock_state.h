@@ -11,9 +11,16 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include "board_hal.h"
 
 // millis() at the start of the loop's pass.
 extern unsigned long millisNow;
+
+// The panel: what is on it has to be drawn anew (a setting, a status that shows).
+extern bool panelDirty;
+#if BAND_ON_PANEL
+extern bool bandLocalDone;   // the wall clock's band works its own turns out anew (bandLocalUpdate())
+#endif
 
 // Boot breadcrumb stages, written to flash while starting (see board_hal.h).
 const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
