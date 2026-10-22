@@ -12,6 +12,7 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include "board_hal.h"
+#include "band_data.h"   // BandItem
 
 // millis() at the start of the loop's pass.
 extern unsigned long millisNow;
@@ -40,6 +41,10 @@ extern bool bootStageCleared;         // breadcrumb cleared after the first heal
 // The hotspot's password; also the web app's on the home network until
 // another is set there.
 #define AP_PASS "clock1234"   // must be >= 8 characters
+
+// The notices on the 64x32 clock: an item that goes is forgotten as seen
+// (an item that comes again later is new again).
+void noticeForget(const BandItem &it);
 
 // The web server, beside the loop, and the answers of its JSON interface.
 extern WiFiServer apServer;
