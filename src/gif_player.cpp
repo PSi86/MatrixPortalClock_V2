@@ -9,6 +9,7 @@
 #include <miniz.h>             // inflate in ROM (tinfl), for the pack's deflated GIFs
 #include "brightness.h"
 #include "clock_state.h"
+#include "notices.h"
 #include "settings.h"
 
 // What only this module calls, ahead of its use.

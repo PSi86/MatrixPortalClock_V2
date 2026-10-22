@@ -7,6 +7,7 @@
 #include "clock_time.h"
 #include "console.h"
 #include "lan_access.h"
+#include "notices.h"
 #include "settings.h"
 #include "time_sync.h"
 #include "wifi_station.h"

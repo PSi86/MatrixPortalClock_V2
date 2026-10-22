@@ -13,6 +13,8 @@
 #include <WiFi.h>
 #include "board_hal.h"
 #include "band_data.h"   // BandItem
+#include "face.h"        // FaceNow, Watchface
+#include "input_map.h"   // InputEvent
 
 const char *fwVersion();   // the commit the build comes from and its date (FW_VERSION)
 
@@ -22,15 +24,32 @@ extern unsigned long millisNow;
 // pass (timekeeper()).
 extern uint8_t hourNow, minuteNow, secondNow;
 extern bool secondTrigger, minuteTrigger, hourTrigger;
+extern unsigned long secondStartedAt;   // millis() when the second on show began
+#if defined(FACE_FRAME_LOG)
+extern bool testQuiet;   // test builds: no notices and no info cards over the face (POST /api/test quiet=1)
+#endif
 
 // The panel: the canvas the clock draws into, and whether what is on it has
 // to be drawn anew (a setting, a status that shows).
 extern PanelCanvas matrix;
 extern bool panelDirty;
+uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b);   // a colour at the panel's brightness, never black
+void drawFeedbackIndicator();   // the press indicator in the corner
 bool gifPlaying();   // a GIF has the panel, its decoder up
 #if BAND_ON_PANEL
 extern bool bandLocalDone;   // the wall clock's band works its own turns out anew (bandLocalUpdate())
+// The wall clock's band: what takes it (a turn: an item by source and tag,
+// or one of the clock's own), and one that takes it at once (a new notice).
+enum BandTurnKind : uint8_t { TURN_NONE, TURN_ITEM, TURN_STATUS, TURN_SHIFT, TURN_DATE, TURN_SUN, TURN_MOON, TURN_ROOM };
+struct BandTurn { uint8_t kind, feed; uint32_t tag; };
+extern BandTurn bandWant;
+extern uint8_t  bandWantRuns;
+void bandRestart();   // the band starts again at its first turn
 #endif
+
+// The watchface on show (main.cpp), and the moment it is drawn for.
+FaceNow faceMoment();
+Watchface &faceFor(uint8_t id);
 
 // Boot breadcrumb stages, written to flash while starting (see board_hal.h).
 const uint8_t BOOT_STAGE_CLEAR = 0;   // the last run was healthy
@@ -45,10 +64,6 @@ extern bool apActive;   // the hotspot is open: it has the radio
 // The hotspot's password; also the web app's on the home network until
 // another is set there.
 #define AP_PASS "clock1234"   // must be >= 8 characters
-
-// The notices on the 64x32 clock: an item that goes is forgotten as seen
-// (an item that comes again later is new again).
-void noticeForget(const BandItem &it);
 
 // The screens: exactly one owns the panel at a time; they lie on top of each
 // other, and closing one uncovers the one beneath (setScreen(),
@@ -68,13 +83,25 @@ extern Screen screen;      // the screen on top, the one on the panel
 void openScreen(Screen next);
 void closeScreen();
 
+// A banner: a short text over the screen it confirms, or a step of the
+// notices on show (notices.h).
+enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT, BANNER_ALERT, BANNER_RUN, BANNER_CARD };
+extern BannerKind    bannerKind;
+extern unsigned long bannerAt;   // millis() the banner came up
+void bannerOpen();
+void showBanner(const char *first, const char *second, uint8_t r, uint8_t g, uint8_t b);
+
+// The inputs: the face events (input_map.h) as this clock has them.
+int8_t faceEventIndex(InputEvent ev);
+bool faceEventFitted(InputEvent ev);
+bool closesBanner(InputEvent ev);   // the event closes a banner (not a knock, not a hand that comes near)
+
 // Who takes the panel, and when (the panel rules, main.cpp).
 const unsigned long ROUND_GIF_GAP_MS = 60000;   // at least this between an info round and a GIF
 bool panelFitsBeforeChange(unsigned long ms);   // something this long ends before the face's next change
 bool decorFree(unsigned long ms, bool gif);     // decoration of its own accord may take the panel now
+bool infoSlotOpen(unsigned long ms);            // messages and new cards this long may come up now
 unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms);   // a random time outside the changes' slots
-unsigned long roundNextIn();                    // ms to the next info round
-extern unsigned long roundMinuteAt;             // millis() the info round's minute began; 0 = no round waits
 
 #if BOARD_WAVESHARE_WALL
 extern uint32_t wallOutputStops;   // the panel output's stops since the start (the console's "panel")

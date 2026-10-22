@@ -3,6 +3,7 @@
 
 #include "clock_state.h"
 #include "clock_time.h"
+#include "notices.h"
 #include "time_sync.h"
 
 // The items, from every source; only the loop touches them.

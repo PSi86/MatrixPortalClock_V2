@@ -237,6 +237,9 @@ constexpr FaceEvent FACE_EVENTS[] = {
   { EV_APPROACH,    "Hand comes near and stays",        "" },
 };
 constexpr uint8_t FACE_EVENT_COUNT = sizeof(FACE_EVENTS) / sizeof(FACE_EVENTS[0]);
+// The stored blobs keyed by face event (the face shortcuts, what closes a
+// notice) have room for this many, for face events added later.
+const uint8_t FACE_KEYS_MAX = 32;
 
 // What an action needs to be offered: a held button (it runs while the button
 // stays down), GIF playback, the info band data (alerts and messages).
