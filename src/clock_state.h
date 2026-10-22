@@ -14,6 +14,8 @@
 #include "board_hal.h"
 #include "band_data.h"   // BandItem
 
+const char *fwVersion();   // the commit the build comes from and its date (FW_VERSION)
+
 // millis() at the start of the loop's pass.
 extern unsigned long millisNow;
 // The time on the panel as the timekeeper counts it, and what changed on this
@@ -37,6 +39,8 @@ const uint8_t BOOT_STAGE_PANEL = 2;   // panel and sensors up
 const uint8_t BOOT_STAGE_WIFI  = 3;   // the WiFi join started (the clock runs while it joins)
 const uint8_t BOOT_STAGE_RUN   = 4;   // WiFi joined
 extern bool bootStageCleared;         // breadcrumb cleared after the first healthy seconds
+
+extern bool apActive;   // the hotspot is open: it has the radio
 
 // The hotspot's password; also the web app's on the home network until
 // another is set there.
