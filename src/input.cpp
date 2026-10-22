@@ -8,6 +8,7 @@
 #include "console.h"
 #include "face.h"
 #include "gif_player.h"
+#include "menu.h"
 #include "notices.h"
 #include "sensors.h"
 #include "settings.h"

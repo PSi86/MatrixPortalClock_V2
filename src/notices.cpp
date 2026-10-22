@@ -8,6 +8,7 @@
 #include "info_band.h"
 #include "input.h"
 #include "item_icons.h"   // the icons and their pictures (only this file draws them)
+#include "menu.h"
 #include "panel_rules.h"
 #include "settings.h"
 

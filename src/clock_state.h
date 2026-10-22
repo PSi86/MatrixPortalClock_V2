@@ -14,7 +14,6 @@
 #include "board_hal.h"
 #include "band_data.h"   // BandItem
 #include "face.h"        // FaceNow, Watchface
-#include "input_map.h"   // InputFunction
 #include "knock.h"       // Knock
 
 const char *fwVersion();   // the commit the build comes from and its date (FW_VERSION)
@@ -81,29 +80,13 @@ enum Screen : uint8_t {
   SCREEN_GESTURE_TEST,     // every gesture shown instead of done, over the face (the web app's Inputs section)
 };
 extern Screen screen;      // the screen on top, the one on the panel
+void setScreen(Screen next);    // a screen on its own: everything open is closed
 void openScreen(Screen next);
 void closeScreen();
 Screen screenBeneath();          // the screen a banner on top confirms
 void bootStatus(const char *msg);   // a status line while setup() runs
-
-// The menu, and the functions an input runs there or on the face.
-void menuOpen();
-void navigate(InputFunction fn, uint8_t steps);
-void cycleDstMode();
-void toggleAutoBrightWithBanner();
-void showHints();
-// The menu's look: its colours and its 3x5 font.
-uint16_t uiInk();
-uint16_t uiQuiet();
-void uiTiny(int16_t x, int16_t top, const char *s, uint16_t colour);
-
-// A banner: a short text over the screen it confirms, or a step of the
-// notices on show (notices.h).
-enum BannerKind : uint8_t { BANNER_TEXT, BANNER_TIME, BANNER_HINT, BANNER_ALERT, BANNER_RUN, BANNER_CARD };
-extern BannerKind    bannerKind;
-extern unsigned long bannerAt;   // millis() the banner came up
-void bannerOpen();
-void showBanner(const char *first, const char *second, uint8_t r, uint8_t g, uint8_t b);
+void drawCenteredLines(const char *first, const char *second, uint16_t color);   // one or two lines of Picopixel, centred
+bool screenIsLandscape();        // the panel is drawn wider than tall
 
 #if BOARD_WAVESHARE_WALL
 extern uint32_t wallOutputStops;   // the panel output's stops since the start (the console's "panel")
