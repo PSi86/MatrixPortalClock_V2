@@ -92,6 +92,7 @@ main { min-width: 0; display: grid; gap: 28px; }
 .preview-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); }
 .meta { padding: 10px 12px; min-width: 0; }
 .meta + .meta { border-left: 1px solid var(--line); }
+.meta.wide { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); }
 .meta-k { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
 .meta-v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .preview-note { padding: 10px 12px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
@@ -228,6 +229,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="meta"><div class="meta-k">Brightness</div><div class="meta-v" id="mBright">–</div></div>
         <div class="meta"><div class="meta-k">Light</div><div class="meta-v" id="mLux">–</div></div>
         <div class="meta"><div class="meta-k">Time</div><div class="meta-v" id="mTime">–</div></div>
+        <div class="meta wide" id="mRoomBox" hidden><div class="meta-k">Room</div><div class="meta-v" id="mRoom">–</div></div>
       </div>
       <div class="preview-note">The panel as the clock draws it now, shown at full strength. What you change shows on the clock at once; Save keeps it.</div>
     </div>
@@ -455,7 +457,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div class="pair"><label>From<select id="dqf"></select></label><label>To<select id="dqt"></select></label></div>
         </div>
         <div class="row">
-          <div><label class="lbl" for="ddk">Dark room</label><div class="hint">No GIFs and no extras of their own accord while the room is darker than this, in lux (the light sensor's 10 s average); 0: off.</div></div>
+          <div><label class="lbl" for="ddk">Dark room</label><div class="hint">No GIFs and no extras of their own accord while the room is darker than this, in lux (the light sensor's filtered light, a few seconds behind); 0: off.</div></div>
           <input type="number" id="ddk" min="0" max="60000">
         </div>
       </div>
@@ -1151,6 +1153,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     if (st.feeds) { feedsNow = st.feeds; showNeeds(); }
     $('#mBright').textContent = st.bright; $('#effB').textContent = st.bright;
     $('#mLux').textContent = st.lux === null || st.lux === undefined ? 'no sensor' : st.lux + ' lux';
+    $('#mRoomBox').hidden = st.temp === undefined;
+    if (st.temp !== undefined) { $('#mRoom').textContent = st.temp + ' °C · ' + st.hum + ' %'; }
     $('#mTime').textContent = st.clockSet ? st.clock + ' · ' + st.src : 'not set';
     $('#timeLine').textContent = st.timeLine;
     $('#timeDot').className = 'dot ' + (st.clockSet ? 'ok' : 'warn');

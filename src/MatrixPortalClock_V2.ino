@@ -65,6 +65,7 @@ Todo Concept:
 #include <esp_timer.h>
 #include "rtc_pcf85063.h"      // the board's own real-time clock
 #include "imu_qmi8658.h"       // its motion sensor, for the knock
+#include "shtc3.h"             // its temperature and humidity sensor
 #include "gif_card.h"          // its microSD card, the GIFs' source while one is in
 #endif
 
@@ -1016,6 +1017,24 @@ const unsigned long AUTOBRIGHT_STEP_MS = 40; // the panel's new value at most th
 // darker, 255 = much brighter) and effectiveBrightness is the result.
 uint8_t       effectiveBrightness = 128;
 
+#if BOARD_WAVESHARE_WALL
+// The room's temperature and humidity: the board's SHTC3 (shtc3.h), read
+// every CLIMATE_READ_MS - room air changes slowly, and the chip sleeps in
+// between, so it hardly warms itself - and filtered over CLIMATE_TAU_MS, so
+// the band and Home Assistant do not follow the sensor's last digit.
+Shtc3         climate;
+bool          climateOK = false;         // found at start-up
+bool          roomValid = false;         // a reading came
+float         roomTemp = 0.0f;           // degrees Celsius, filtered
+float         roomHum = 0.0f;            // percent relative humidity, filtered
+unsigned long roomAt = 0;                // millis() of the last reading
+unsigned long climateStartedAt = 0;      // millis() a measurement was started; 0 = none under way
+unsigned long climateDueAt = 0;          // millis() the last one was due
+uint16_t      climateFailures = 0;       // readings that did not come, since start-up
+const unsigned long CLIMATE_READ_MS = 5000;
+const float   CLIMATE_TAU_MS = 30000.0f;
+#endif
+
 //Time Related Variables
 uint16_t panelHz = 0;            // measured panel refresh rate, 0 until the first measurement
 unsigned long panelRateLast = 0; // start of the running refresh-rate measurement
@@ -1468,6 +1487,10 @@ void setup(void) {
   // the board's QMI8658; before loadFaceKeys(), which asks what was found
   sensorTries[SENSOR_MOTION] = sensorBegin(SENSOR_MOTION, []() { return knock.imuBegin(Wire1); });
   knock.begin(Wire1, sensorTries[SENSOR_MOTION] != 0);
+  // and its SHTC3, the room's temperature and humidity
+  sensorTries[SENSOR_CLIMATE] = sensorBegin(SENSOR_CLIMATE, []() { return climate.begin(Wire1); });
+  climateOK = sensorTries[SENSOR_CLIMATE] != 0;
+  if (climateOK) { Console.printf("SHTC3 found, ID 0x%04X\n", climate.id()); }
 #endif
   sensorsCheck();         // which of those found before are missing now
   loadFaceKeys();         // needs to know which sensors were found
@@ -1637,6 +1660,9 @@ void loop(void) {
 #endif
     updateOrientation();// the info screen and the preview follow the panel as well
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
+#if BOARD_WAVESHARE_WALL
+    climateUpdate();   // the room's temperature and humidity, for the web app
+#endif
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
 #if BAND_ON_PANEL
     bandHide();        // no band beside the hotspot's screens
@@ -1660,6 +1686,9 @@ void loop(void) {
   updateOrientation();  // rotate the display to match how the panel is held
   updateKnock();        // a knock does what the Inputs page maps it to
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
+#if BOARD_WAVESHARE_WALL
+  climateUpdate();      // the room's temperature and humidity
+#endif
   updateScreenTimeouts();
   panelWatch();         // when the face's change ends, for who takes the panel next
   noticesUpdate();      // a new alert or message comes up, before a GIF that is due
@@ -2036,6 +2065,45 @@ void updateBrightness() {
   matrix.retintStep();   // a new brightness reaches the wall's rows a few at a time
 #endif
 }
+
+#if BOARD_WAVESHARE_WALL
+// On every pass: every CLIMATE_READ_MS a measurement started, and read
+// Shtc3::MEASURE_MS later, so the loop never waits for it.
+void climateUpdate() {
+  if (!climateOK) { return; }
+  if (climateStartedAt != 0) {
+    if (millisNow - climateStartedAt < Shtc3::MEASURE_MS) { return; }
+    climateStartedAt = 0;
+    float t, h;
+    if (!climate.read(t, h)) {
+      if (++climateFailures <= 10) { Console.println("SHTC3: no reading"); }
+      return;
+    }
+    if (!roomValid) {
+      roomTemp = t;
+      roomHum = h;
+      roomValid = true;
+      Console.printf("SHTC3: %.1f C, %.0f %% humidity\n", t, h);
+    } else {
+      float a = 1.0f - expf(-(float)(millisNow - roomAt) / CLIMATE_TAU_MS);
+      roomTemp += (t - roomTemp) * a;
+      roomHum += (h - roomHum) * a;
+    }
+    roomAt = millisNow;
+    if (consoleLevel >= 2) {   // a running figure (console.h)
+      Console.printf("Room %.2f C %.1f %% -> %.2f C %.1f %%\n", t, h, roomTemp, roomHum);
+    }
+    return;
+  }
+  if (climateDueAt != 0 && millisNow - climateDueAt < CLIMATE_READ_MS) { return; }
+  climateDueAt = millisNow ? millisNow : 1;
+  if (climate.start()) {
+    climateStartedAt = millisNow ? millisNow : 1;
+  } else if (++climateFailures <= 10) {
+    Console.println("SHTC3: did not start a measurement");
+  }
+}
+#endif
 
 // The brightness the panel runs at: the clock's, and while a GIF plays the
 // higher of the GIFs' own lowest (gifSettings.minBright) and a multiple of the
@@ -8674,6 +8742,12 @@ const char *timeSourceText() {
 void apiStatusInto(JsonDocument &d) {
   d["bright"] = effectiveBrightness;
   if (lastLux >= 0) { d["lux"] = serialized(String(lastLux, 1)); } else { d["lux"] = nullptr; }
+#if BOARD_WAVESHARE_WALL
+  if (roomValid) {   // the room's, filtered; absent without the sensor
+    d["temp"] = serialized(String(roomTemp, 1));
+    d["hum"] = lroundf(roomHum);
+  }
+#endif
   d["clockSet"] = clockIsSet();
   if (clockIsSet()) {
     time_t local = clockNow() + tzTotalOffset();

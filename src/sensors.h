@@ -27,6 +27,7 @@ enum SensorId : uint8_t {
   SENSOR_GESTURE,    // PAJ7620U2
   SENSOR_BOARD_RTC,  // PCF85063, on the wall clock's board
   SENSOR_MOTION,     // QMI8658, on the wall clock's board
+  SENSOR_CLIMATE,    // SHTC3, on the wall clock's board
   SENSOR_COUNT
 };
 
@@ -45,6 +46,7 @@ const SensorKind SENSOR_KINDS[SENSOR_COUNT] = {
   { "gesture",  "PAJ7620U2", "gestures",            0x73, false },
   { "boardRtc", "PCF85063",  "real-time clock",     0x51, true },
   { "motion",   "QMI8658",   "knock",               0x6B, true },
+  { "climate",  "SHTC3",     "room temperature, humidity", 0x70, true },
 };
 
 // The sensors this board's firmware works with.
@@ -56,6 +58,7 @@ inline uint16_t sensorsSupported() {
 #if BOARD_WAVESHARE_WALL
   m |= 1 << SENSOR_BOARD_RTC;
   m |= 1 << SENSOR_MOTION;
+  m |= 1 << SENSOR_CLIMATE;
 #endif
   return m;
 }
