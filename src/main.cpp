@@ -24,6 +24,8 @@ Todo Concept:
 #include "sensors.h"        // the sensors each board supports, tried at the start and remembered
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 #include "time_zones.h"     // the zones the clock offers and their daylight saving
+#include "clock_state.h"    // what this file shares with the modules below
+#include "lan_access.h"     // the web app on the home network
 #include "input_map.h"      // input events, functions and the profiles mapping them
 #include "face.h"           // what the watchfaces share
 #include "face_classic.h"   // the classic watchface, on every board
@@ -646,31 +648,6 @@ struct NoticeKeys {
 uint8_t noticeCloses[FACE_EVENT_COUNT];
 SettingsStore<NoticeKeys> noticeKeysStore;
 
-// The web app on the home network -------------------------------------------------
-// Off until switched on with a password, from the hotspot or from the home
-// network itself. While it is on, the station stays joined (RADIO_LAN) and the
-// web server listens there too; every /api/ request needs the password (HTTP
-// Basic, any user name). Kept as a salted SHA-256 hash, never as it was typed:
-// a blob of its own (NVS key "lan").
-#define LAN_SETTINGS_MAGIC 0x1A4E
-#define LAN_SETTINGS_REV   1
-struct LanSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  on;            // 1 = reachable on the home network
-  uint8_t  hasPassword;   // 1 once a password was set
-  uint8_t  reserved[3];
-  uint8_t  salt[16];
-  uint8_t  hash[32];      // SHA-256 of salt and password
-};
-LanSettings lanSettings;
-SettingsStore<LanSettings> lanStore;
-bool          lanServing = false;        // the server listens on the home network
-uint8_t       lanFails = 0;              // wrong passwords in a row
-unsigned long lanLockedAt = 0;           // millis() of the fifth; no password is checked for LAN_LOCK_MS
-bool          lanLocked = false;
-const unsigned long LAN_LOCK_MS = 30UL * 1000UL;
-
 // The Home Assistant link ------------------------------------------------------------
 // MQTT through Home Assistant's broker (src/ha_link.h): its address and the
 // clock's login there, a blob of its own (NVS key "ha"). The password is kept
@@ -981,8 +958,7 @@ bool bootStageCleared = false;        // breadcrumb cleared after the first heal
 bool dstAutoActive = false;           // DST_AUTO: whether summer time is in effect now (derived from UTC, not stored)
 
 // WLAN access point config mode --------------------------------------------
-#define AP_SSID "MatrixClock"
-#define AP_PASS "clock1234"   // must be >= 8 characters
+#define AP_SSID "MatrixClock"   // its password: AP_PASS (clock_state.h)
 bool        apActive = false;
 #if BOARD_BUTTON_COUNT == 0
 // A clock without buttons whose gesture sensor was not found has no input to
@@ -1196,9 +1172,8 @@ enum StationState : uint8_t {
   STA_JOINING,   // joining the home WiFi, again every JOIN_RETRY_MS until it connects
   STA_UP,        // connected
 };
-enum RadioUser : uint8_t { RADIO_SYNC = 0x01, RADIO_FEEDS = 0x02, RADIO_LAN = 0x04, RADIO_HA = 0x08 };
 StationState  stationState = STA_OFF;
-uint8_t       radioUsers   = RADIO_SYNC;      // the first sync is due at start-up (syncState)
+uint8_t       radioUsers   = RADIO_SYNC;      // RadioUser bits (clock_state.h); the first sync is due at start-up (syncState)
 unsigned long joinAskedAt  = 0;               // millis() the join was last started, for the re-join pace
 unsigned long joinPolledAt = 0;               // millis() the station was last polled
 const unsigned long JOIN_RETRY_MS = 10000;    // between joins while the station does not connect
@@ -1528,7 +1503,6 @@ String timeStatusText();
 void noteJoinFailed();
 bool wifiStored();
 void stationJoin();
-bool stationUp();
 void stationUpdate();
 void loadSyncRecord();
 void saveSyncRecord();
@@ -1643,7 +1617,6 @@ void sendNoContent(Print &c);
 void sendCaptiveRedirect(Print &c);
 void handleAP();
 // The web server, beside the loop
-void webUpdate(bool listening, bool lan);
 void webAccept(bool lan);
 void webStep(WebConn &w);
 void webReadHead(WebConn &w);
@@ -1653,7 +1626,6 @@ void webSend(WebConn &w);
 void webClose(WebConn &w, bool dropped);
 void webAfter();
 String urldecode(const String &s);
-String getParam(const String &query, const String &key);
 void applyParams(const String &q);
 String applyWifiForm(const String &body);
 void printAgo(Print &c, unsigned long at);
@@ -1810,7 +1782,6 @@ void applyFeedParams(const String &q);
 // The web app
 void sendWebApp(Print &c);
 void sendPreviewOutcome(Print &c, FaceOutcome o);
-void sendJsonError(Print &c, int code, const char *text);
 String homeWifiStatusText();
 uint32_t programSize();
 void apiStatusInto(JsonDocument &d);
@@ -1824,16 +1795,6 @@ void drawPackProgress(uint32_t done, uint32_t total);
 void apiSetTime(Print &c, const String &q);
 void apiSave(Print &c, const String &body, bool &closeHotspot);
 void webApi(Print &c, const String &path, bool isPost, const String &body, bool &closeHotspot, bool &syncNow, bool &restart);
-void loadLanSettings();
-bool saveLanSettings();
-void lanWantRadio();
-void lanHash(const char *pw, uint8_t out[32]);
-void lanSetPassword(const char *pw);
-bool lanPasswordIs(const char *pw);
-bool lanAuthorized(Print &c, const String &auth);
-void apiLan(Print &c, const String &body);
-void lanStop();
-void lanUpdate();
 // The Home Assistant link
 void loadHaSettings();
 bool saveHaSettings();
@@ -5767,9 +5728,7 @@ void consoleCommands() {
     }
     bool lanOn = strcmp(line, "lan on") == 0;
     if (lanOn || strcmp(line, "lan off") == 0) {
-      lanSettings.on = lanOn ? 1 : 0;
-      saveLanSettings();
-      lanWantRadio();
+      lanSwitch(lanOn);
       Console.printf("Web app on the home network: %s\n", lanOn ? "on" : "off");
     }
 #if BOARD_WAVESHARE_WALL
@@ -7298,7 +7257,7 @@ bool feedsReady() {
 // with the radio on for its retry it would otherwise be fetched again at
 // once (an HTTP 503 three times within a second, 2026-10-18).
 bool feedDueWithin(uint8_t f, unsigned long early) {
-  if (FEEDS[f].needsAlways && !lanSettings.on) { return false; }   // needs continuous network access
+  if (FEEDS[f].needsAlways && !lanIsOn()) { return false; }   // needs continuous network access
   if (feedRuns[f].failures) { early = 0; }
   return feedOn(f) && (long)(millisNow + early - feedRuns[f].dueAt) >= 0;
 }
@@ -9157,7 +9116,7 @@ void sendWebApp(Print &c) {
   c.write(WEBUI_GZ, WEBUI_GZ_LEN);
 }
 
-void sendJson(Print &c, JsonDocument &doc, int code = 200) {
+void sendJson(Print &c, JsonDocument &doc, int code) {   // code: 200 unless given (clock_state.h)
   c.print("HTTP/1.1 "); c.print(code);
   c.println(code == 200 ? " OK" : code == 400 ? " Bad Request" : code == 404 ? " Not Found" :
             code == 413 ? " Content Too Large" : " Error");
@@ -9279,7 +9238,7 @@ void apiStatusInto(JsonDocument &d) {
     // Why it does not fetch, if it does not: the page says so.
     if (!feedSettings.located)                       { o["blocked"] = "place"; }
     else if (!wifiStored())                          { o["blocked"] = "wifi"; }
-    else if (FEEDS[f].needsAlways && !lanSettings.on) { o["blocked"] = "always"; }
+    else if (FEEDS[f].needsAlways && !lanIsOn())     { o["blocked"] = "always"; }
     else if (!clockIsSet())                          { o["blocked"] = "time"; }
     o["failures"] = r.failures;
     if (r.error[0]) { o["error"] = r.error; }
@@ -9356,8 +9315,8 @@ void apiState(Print &c) {
   s["ssid"] = wifiCreds.ssid;
 
   JsonObject lanJ = d["lan"].to<JsonObject>();
-  lanJ["on"] = lanSettings.on != 0;
-  lanJ["hasPassword"] = lanSettings.hasPassword != 0;
+  lanJ["on"] = lanIsOn();
+  lanJ["hasPassword"] = lanHasPassword();
   lanJ["defaultPassword"] = lanPasswordIs(AP_PASS);
   lanJ["host"] = netHostname();
   if (stationUp()) { lanJ["ip"] = WiFi.localIP().toString(); }
@@ -9948,162 +9907,8 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     sendJsonError(c, 404, "Unknown request.");
   }
 }
-// ---- The web app on the home network -------------------------------------------
 
-void loadLanSettings() {
-  lanStore.begin("lan");
-  lanStore.read(lanSettings);
-  if (lanSettings.magic != LAN_SETTINGS_MAGIC) {
-    memset(&lanSettings, 0, sizeof(lanSettings));
-    lanSettings.magic = LAN_SETTINGS_MAGIC;
-    lanSettings.rev = LAN_SETTINGS_REV;
-  }
-  // Like the hotspot, the access comes with a password set: the hotspot's
-  // (decided by Peter, 2026-10-08). The page says while it is still that one.
-  if (!lanSettings.hasPassword) {
-    lanSetPassword(AP_PASS);
-#if BOARD_BUTTON_COUNT == 0
-    // A clock without buttons (the wall clock) is set up on the home network:
-    // without its gesture sensor that is its only way in (Peter, 2026-10-18).
-    lanSettings.on = 1;
-#else
-    lanSettings.on = 0;
-#endif
-    saveLanSettings();
-  }
-  lanWantRadio();
-  if (lanSettings.on) { Console.printf("Web app on the home network: on, as %s.local\n", netHostname()); }
-}
-
-bool saveLanSettings() {
-  lanSettings.magic = LAN_SETTINGS_MAGIC;
-  lanSettings.rev = LAN_SETTINGS_REV;
-  return lanStore.write(lanSettings);
-}
-
-// While it is on, the station stays joined.
-void lanWantRadio() {
-  if (lanSettings.on) { radioUsers |= RADIO_LAN; } else { radioUsers &= (uint8_t)~RADIO_LAN; }
-}
-
-void lanHash(const char *pw, uint8_t out[32]) {
-  uint8_t buf[16 + 64];
-  size_t n = strnlen(pw, 63);
-  memcpy(buf, lanSettings.salt, 16);
-  memcpy(buf + 16, pw, n);
-  mbedtls_sha256(buf, 16 + n, out, 0);
-}
-
-// A new password, with a new salt.
-void lanSetPassword(const char *pw) {
-  for (uint8_t i = 0; i < 16; i += 4) {
-    uint32_t r = esp_random();
-    memcpy(lanSettings.salt + i, &r, 4);
-  }
-  lanHash(pw, lanSettings.hash);
-  lanSettings.hasPassword = 1;
-}
-
-// Whether the password is pw (used to say that the hotspot's still is).
-bool lanPasswordIs(const char *pw) {
-  uint8_t h[32];
-  lanHash(pw, h);
-  return lanSettings.hasPassword && memcmp(h, lanSettings.hash, 32) == 0;
-}
-
-// Whether a request from the home network carries the password ("Basic" and
-// base64 of "user:password", any user name). Answers it with 401 or 429 if not.
-bool lanAuthorized(Print &c, const String &auth) {
-  if (lanLocked && millisNow - lanLockedAt < LAN_LOCK_MS) {
-    sendJsonError(c, 429, "Too many wrong passwords. Wait half a minute.");
-    return false;
-  }
-  lanLocked = false;
-  bool ok = false;
-  if (lanSettings.hasPassword && auth.startsWith("Basic ")) {
-    String b64 = auth.substring(6);
-    b64.trim();
-    unsigned char dec[200];
-    size_t n = 0;
-    if (mbedtls_base64_decode(dec, sizeof(dec) - 1, &n, (const unsigned char *)b64.c_str(), b64.length()) == 0) {
-      dec[n] = '\0';
-      const char *colon = strchr((const char *)dec, ':');
-      uint8_t h[32];
-      lanHash(colon ? colon + 1 : (const char *)dec, h);
-      uint8_t diff = 0;
-      for (uint8_t i = 0; i < 32; i++) { diff |= h[i] ^ lanSettings.hash[i]; }   // the same time for every wrong byte
-      ok = (diff == 0);
-    }
-  }
-  if (ok) { lanFails = 0; return true; }
-  if (auth.length() && ++lanFails >= 5) {
-    lanFails = 0;
-    lanLocked = true;
-    lanLockedAt = millisNow;
-    Console.println("Web app: five wrong passwords - no more tries for 30 s");
-  }
-  sendJsonError(c, 401, "The clock's password is needed.");
-  return false;
-}
-
-// /api/lan: on (on or off) and a new password (pw, 8 to 63 characters,
-// optional once one is set). Switching on needs a password.
-void apiLan(Print &c, const String &body) {
-  bool on = getParam(body, "on") == "on";
-  String pw = getParam(body, "pw");
-  if (pw.length() && (pw.length() < 8 || pw.length() > 63)) {
-    sendJsonError(c, 400, "The password must be 8 to 63 characters long.");
-    return;
-  }
-  if (on && !pw.length() && !lanSettings.hasPassword) {
-    sendJsonError(c, 400, "Set a password to switch the home network access on.");
-    return;
-  }
-  if (pw.length()) { lanSetPassword(pw.c_str()); }
-  lanSettings.on = on ? 1 : 0;
-  bool stored = saveLanSettings();
-  lanWantRadio();
-  Console.printf("Web app on the home network: %s%s\n", on ? "on" : "off", pw.length() ? ", new password" : "");
-  if (!stored) {
-    sendJsonError(c, 500, "Not saved: the clock could not write its flash. This works until the next restart.");
-    return;
-  }
-  JsonDocument d;
-  d["ok"] = true;
-  d["on"] = on;
-  d["host"] = netHostname();
-  sendJson(c, d);
-}
-
-void lanStop() {
-  if (!lanServing) { return; }
-  apServer.end();
-  MDNS.end();
-  WiFi.setSleep(true);
-  lanServing = false;
-  Console.println("Web app on the home network: stopped");
-}
-
-// On every pass outside the hotspot: the server on the home network while the
-// access is on and the station is up, and one request of it.
-void lanUpdate() {
-  bool want = lanSettings.on && stationUp();
-  if (want && !lanServing) {
-    // No modem sleep while the page may be open: with it, every answer waited
-    // for the next beacon, and the page took 1.2 s to load (2026-10-08).
-    WiFi.setSleep(false);
-    apServer.begin();
-    bool named = MDNS.begin(netHostname());
-    if (named) { MDNS.addService("http", "tcp", 80); }
-    lanServing = true;
-    Console.printf("Web app on the home network: http://%s.local, http://%s\n", netHostname(),
-                  WiFi.localIP().toString().c_str());
-    if (!named) { Console.println("Web app: mDNS did not start; the address works"); }
-  } else if (!want && lanServing) {
-    lanStop();
-  }
-  webUpdate(lanServing, true);   // also without the server: a connection still open finishes
-}
+// (The web app on the home network: lan_access.h.)
 
 /* ----------------------------------------------------------------------
    The Home Assistant link (src/ha_link.h has the client and its topics):
@@ -10143,7 +9948,7 @@ bool saveHaSettings() {
 // switched on.
 const char *haBlocked() {
   if (!wifiStored())       { return "wifi"; }
-  if (!lanSettings.on)     { return "always"; }   // continuous network access
+  if (!lanIsOn())          { return "always"; }   // continuous network access
   if (!haSettings.host[0]) { return "host"; }
   return nullptr;
 }
