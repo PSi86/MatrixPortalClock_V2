@@ -23,6 +23,7 @@ Todo Concept:
 #include "board_hal.h"      // board detection: pins, WiFi/NTP, settings storage, reset
 #include "sensors.h"        // the sensors each board supports, tried at the start and remembered
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
+#include "time_zones.h"     // the zones the clock offers and their daylight saving
 #include "input_map.h"      // input events, functions and the profiles mapping them
 #include "face.h"           // what the watchfaces share
 #include "face_classic.h"   // the classic watchface, on every board
@@ -1311,45 +1312,6 @@ const unsigned long SYNC_LATE_MS = 60UL * 60UL * 1000UL;
 #endif
 
 /* ======================================================================
-   Timezones
-   ====================================================================== */
-
-// Common timezone choices. value = base UTC offset in seconds, which is what the
-// settings store, so every offset appears only once. rule = the zone's POSIX TZ
-// string from the IANA tz database (tzdata 2026.4) for zones with daylight saving,
-// used by DST_AUTO; nullptr = no daylight saving. The current setting is pre-selected.
-struct TzOption { int32_t off; const char *label; const char *rule; };
-const TzOption TZONES[] = {
-  {-39600, "(UTC-11:00) Midway",              nullptr},
-  {-36000, "(UTC-10:00) Hawaii",              nullptr},
-  {-32400, "(UTC-09:00) Alaska",              "AKST9AKDT,M3.2.0,M11.1.0"},
-  {-28800, "(UTC-08:00) Pacific (LA)",        "PST8PDT,M3.2.0,M11.1.0"},
-  {-25200, "(UTC-07:00) Mountain (Denver)",   "MST7MDT,M3.2.0,M11.1.0"},
-  {-21600, "(UTC-06:00) Central (Chicago)",   "CST6CDT,M3.2.0,M11.1.0"},
-  {-18000, "(UTC-05:00) Eastern (New York)",  "EST5EDT,M3.2.0,M11.1.0"},
-  {-14400, "(UTC-04:00) Atlantic (Halifax)",  "AST4ADT,M3.2.0,M11.1.0"},
-  {-10800, "(UTC-03:00) Buenos Aires",        nullptr},
-  {  -3600, "(UTC-01:00) Azores",             "<-01>1<+00>,M3.5.0/0,M10.5.0/1"},
-  {      0, "(UTC+00:00) London, Lisbon",     "GMT0BST,M3.5.0/1,M10.5.0"},
-  {   3600, "(UTC+01:00) Berlin, Paris",      "CET-1CEST,M3.5.0,M10.5.0/3"},
-  {   7200, "(UTC+02:00) Athens, Helsinki",   "EET-2EEST,M3.5.0/3,M10.5.0/4"},
-  {  10800, "(UTC+03:00) Moscow, Istanbul",   nullptr},
-  {  12600, "(UTC+03:30) Tehran",             nullptr},
-  {  14400, "(UTC+04:00) Dubai",              nullptr},
-  {  18000, "(UTC+05:00) Karachi",            nullptr},
-  {  19800, "(UTC+05:30) India",              nullptr},
-  {  21600, "(UTC+06:00) Dhaka",              nullptr},
-  {  25200, "(UTC+07:00) Bangkok",            nullptr},
-  {  28800, "(UTC+08:00) Beijing, Singapore", nullptr},
-  {  32400, "(UTC+09:00) Tokyo, Seoul",       nullptr},
-  {  34200, "(UTC+09:30) Adelaide",           "ACST-9:30ACDT,M10.1.0,M4.1.0/3"},
-  {  36000, "(UTC+10:00) Sydney",             "AEST-10AEDT,M10.1.0,M4.1.0/3"},
-  {  39600, "(UTC+11:00) Solomon Is.",        nullptr},
-  {  43200, "(UTC+12:00) Auckland",           "NZST-12NZDT,M9.5.0,M4.1.0/3"},
-};
-const uint8_t ZONE_COUNT = sizeof(TZONES) / sizeof(TZONES[0]);
-
-/* ======================================================================
    On-screen menu: model
    ====================================================================== */
 
@@ -1423,11 +1385,9 @@ const int8_t  BRIGHT_TRIM_MAX  = 8;
    its own takes its declarations along to its header.
    ---------------------------------------------------------------------- */
 // Daylight saving
-bool dstActiveAt(const char *rule, time_t utc);
 bool dstInEffect();
 void setDstMode(uint8_t mode);
 void updateAutoDst();
-void dstSelfTest();
 // setup() and loop()
 void setup(void);
 void loop(void);
@@ -1901,27 +1861,8 @@ void apiHa(Print &c, const String &body);
    Daylight saving
    ====================================================================== */
 
-// POSIX TZ rule of the timezone row with this base offset, or nullptr when the
-// zone has no daylight saving (or the offset matches no row).
-const char *tzRule(int32_t offset) {
-  for (unsigned int i = 0; i < sizeof(TZONES) / sizeof(TZONES[0]); i++) {
-    if (TZONES[i].off == offset) { return TZONES[i].rule; }
-  }
-  return nullptr;
-}
-
-// Whether daylight saving is in effect at this UTC instant under a POSIX TZ rule,
-// decided by the C library. TZ is set on every call because Arduino's configTime()
-// (SNTP start on the S3) resets it to UTC.
-bool dstActiveAt(const char *rule, time_t utc) {
-  if (!rule) { return false; }
-  setenv("TZ", rule, 1);
-  tzset();
-  struct tm local;
-  localtime_r(&utc, &local);
-  return local.tm_isdst > 0;
-}
-
+// The clock's daylight saving: the mode chosen and, in DST_AUTO, whether
+// summer time is in effect now. The zones and their rules: time_zones.h.
 bool dstInEffect() {
   if (settings.dst == DST_AUTO) { return dstAutoActive; }
   return settings.dst == DST_SUMMER;
@@ -1947,48 +1888,6 @@ void updateAutoDst() {
   Console.print(active ? "DST auto -> summer, clock " : "DST auto -> winter, clock ");
   Console.print(clockHour(local)); Console.print(':'); Console.println(clockMinute(local));
 }
-
-#if defined(CLOCK_DEBUG)
-// Debug build only: check dstActiveAt() against the 2026 changes from the IANA tz
-// database (tzdata 2026.4), one second before and at each change, and print the
-// result once, 10 s after boot.
-void dstSelfTest() {
-  struct Check { int32_t off; uint32_t utc; bool dst; };
-  static const Check checks[] = {
-    // Berlin, London, Azores and Athens all change at 01:00 UTC
-    {  3600, 1774745999UL, false }, {  3600, 1774746000UL, true  },
-    {  3600, 1792889999UL, true  }, {  3600, 1792890000UL, false },
-    {     0, 1774745999UL, false }, {     0, 1774746000UL, true  },
-    {     0, 1792889999UL, true  }, {     0, 1792890000UL, false },
-    { -3600, 1774745999UL, false }, { -3600, 1774746000UL, true  },
-    { -3600, 1792889999UL, true  }, { -3600, 1792890000UL, false },
-    {  7200, 1774745999UL, false }, {  7200, 1774746000UL, true  },
-    {  7200, 1792889999UL, true  }, {  7200, 1792890000UL, false },
-    // New York, Los Angeles: 02:00 local
-    {-18000, 1772953199UL, false }, {-18000, 1772953200UL, true  },
-    {-18000, 1793512799UL, true  }, {-18000, 1793512800UL, false },
-    {-28800, 1772963999UL, false }, {-28800, 1772964000UL, true  },
-    {-28800, 1793523599UL, true  }, {-28800, 1793523600UL, false },
-    // Sydney, Adelaide, Auckland: southern hemisphere, summer time over New Year
-    { 36000, 1775318399UL, true  }, { 36000, 1775318400UL, false },
-    { 36000, 1791043199UL, false }, { 36000, 1791043200UL, true  },
-    { 34200, 1775320199UL, true  }, { 34200, 1775320200UL, false },
-    { 34200, 1791044999UL, false }, { 34200, 1791045000UL, true  },
-    { 43200, 1775311199UL, true  }, { 43200, 1775311200UL, false },
-    { 43200, 1790431199UL, false }, { 43200, 1790431200UL, true  },
-    // Tokyo: no daylight saving
-    { 32400, 1774746000UL, false }, { 32400, 1792890000UL, false },
-  };
-  unsigned int ok = 0, total = 0;
-  for (const Check &c : checks) {
-    total++;
-    if (dstActiveAt(tzRule(c.off), (time_t)c.utc) == c.dst) { ok++; continue; }
-    Console.print("DST self-test FAIL offset "); Console.print(c.off);
-    Console.print(" utc "); Console.println(c.utc);
-  }
-  Console.print("DST self-test: "); Console.print(ok); Console.print('/'); Console.print(total); Console.println(" ok");
-}
-#endif
 
 // SETUP
 
