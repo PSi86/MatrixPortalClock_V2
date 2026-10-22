@@ -5184,7 +5184,7 @@ void fadeStep() {
 /* ======================================================================
    WLAN access point configuration mode
    ====================================================================== */
-// Bring the AP radio and its servers up (initial start and watchdog restart).
+// Bring the AP radio and its servers up (startAPMode()).
 void apRadioUp() {
   bool up = netApBegin(AP_SSID, AP_PASS);
   IPAddress ip = netApIP();
@@ -5192,7 +5192,8 @@ void apRadioUp() {
   // yet - the info screen and the DNS answers need a usable one either way.
   if ((uint32_t)ip != 0) { apIP = ip; }
   apServer.begin();
-  dnsUdp.begin(DNS_PORT); // captive portal DNS
+  // Captive portal DNS: without it a phone does not open the page by itself.
+  if (!dnsUdp.begin(DNS_PORT)) { Console.println("Captive portal DNS did NOT start"); }
   Console.print("AP "); Console.print(up ? "up" : "NOT up");
   Console.print(" at "); Console.println(apIP);
 }

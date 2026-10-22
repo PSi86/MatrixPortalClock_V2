@@ -1142,13 +1142,6 @@ inline bool boardResetWasNormal() {
 }
 
 /* ======================================================================
-   Reboot
-   ====================================================================== */
-inline void boardReset() {
-  ESP.restart();
-}
-
-/* ======================================================================
    WiFi / NTP
 
    lwIP runs on the ESP32-S3 itself: SNTP is started explicitly and a sync
