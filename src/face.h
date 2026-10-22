@@ -15,6 +15,7 @@
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include "clock_time.h"
+#include "settings_table.h"
 
 // What the clock plans itself - an extra, a GIF of its own accord, info
 // cards - ends this long before the time's next change starts (concept doc,
@@ -166,115 +167,46 @@ class Watchface {
 
 // ---- A face's settings --------------------------------------------------------
 // Each face keeps its settings in a blob of its own - NVS key, magic,
-// revision, then its fields - so no other blob ever changes for it. A table of
-// its settings - the web app's key, where it sits in the blob, what it may be -
-// lets one piece of code load, check, take from the web app and report them
-// all, where each face had its own copy of each. The keys, the blobs and the
-// values are the ones stored all along.
-enum FaceParamKind : uint8_t {
-  PARAM_RANGE,    // a number from lo to hi; a stored one outside is moved into it
-  PARAM_CHOICE,   // one of lo..hi, by value; a stored one outside is the default
-  PARAM_FLAG,     // 0 or 1; the web app's anything-but-0 is 1
-};
-const uint8_t PARAM_REDRAW = 0x01;   // a new value: the face redraws at once
-const uint8_t PARAM_PLAYS  = 0x02;   // a new value tried live: the face plays what it picks
-const uint8_t PARAM_KNOCK  = 0x04;   // the knock's sensitivity: to the sensor when it changes
-struct FaceParam {
-  const char *key;            // in the web app and in /api/state
-  uint8_t offset, size;       // where in the blob: 1 or 2 bytes, little-endian
-  FaceParamKind kind;
-  uint8_t flags;              // PARAM_REDRAW, PARAM_PLAYS, PARAM_KNOCK
-  uint16_t lo, hi;
-  const char *const *labels;  // a choice's and a flag's names, by value; nullptr for a range
-};
+// revision, then its fields - so no other blob ever changes for it. Their
+// table (settings_table.h) lets one piece of code load, check, take from the
+// web app and report them all, where each face had its own copy of each. The
+// keys, the blobs and the values are the ones stored all along; every face
+// setting is tried live, a range is moved into its range when loaded, a
+// choice out of its range takes its default, a flag is 0 or 1.
 struct FaceBlob {
   const char *key;            // the NVS key
   uint16_t magic;
   uint8_t rev;
   uint8_t face;               // the watchface these are the settings of
-  uint8_t *data;              // the face's settings struct: magic (2 bytes), rev, its fields
   uint8_t size;
-  const uint8_t *defaults;    // the same struct with the defaults; a choice out of range takes its value
-  const FaceParam *params;
-  uint8_t paramCount;
+  SettingsTable table;        // the face's settings struct (magic: 2 bytes, rev, its fields), its defaults and its table
   void (*migrate)(uint8_t *data, uint8_t storedRev);   // an older blob: fill in what came since
 };
-
-inline uint16_t faceParamGet(const uint8_t *data, const FaceParam &p) {
-  return p.size == 2 ? (uint16_t)(data[p.offset] | data[p.offset + 1] << 8) : data[p.offset];
-}
-inline void faceParamSet(uint8_t *data, const FaceParam &p, uint16_t v) {
-  data[p.offset] = (uint8_t)v;
-  if (p.size == 2) { data[p.offset + 1] = (uint8_t)(v >> 8); }
-}
 
 // Read a face's blob through `store` (the board's SettingsBlobStore). A blob
 // that is not this face's (no magic: none stored yet) gives the defaults,
 // written with the next save; an older revision is migrated in RAM, the same.
-// Then every value is checked, as each face did by hand.
+// Then every value is checked.
 template <typename Store>
 void faceBlobLoad(FaceBlob &b, Store &store) {
+  uint8_t *data = b.table.data;
   store.begin(b.key);
-  store.read(b.data, b.size);
-  if ((uint16_t)(b.data[0] | b.data[1] << 8) != b.magic) {
-    memcpy(b.data, b.defaults, b.size);
-  } else if (b.data[2] < b.rev && b.migrate) {
-    b.migrate(b.data, b.data[2]);
+  store.read(data, b.size);
+  if ((uint16_t)(data[0] | data[1] << 8) != b.magic) {
+    memcpy(data, b.table.defaults, b.size);
+  } else if (data[2] < b.rev && b.migrate) {
+    b.migrate(data, data[2]);
   }
-  for (uint8_t i = 0; i < b.paramCount; i++) {
-    const FaceParam &p = b.params[i];
-    uint16_t v = faceParamGet(b.data, p);
-    if (p.kind == PARAM_RANGE)       { v = v < p.lo ? p.lo : v > p.hi ? p.hi : v; }
-    else if (p.kind == PARAM_CHOICE) { if (v < p.lo || v > p.hi) { v = faceParamGet(b.defaults, p); } }
-    else if (v > 1)                  { v = 1; }
-    faceParamSet(b.data, p, v);
-  }
+  settingsCheck(b.table);
 }
 
 // Whether it is stored.
 template <typename Store>
 bool faceBlobSave(FaceBlob &b, Store &store) {
-  b.data[0] = (uint8_t)b.magic;
-  b.data[1] = (uint8_t)(b.magic >> 8);
-  b.data[2] = b.rev;
-  return store.write(b.data, b.size);
-}
-
-// The web app's values for a face's settings, live or to be saved: each key
-// that `get(key)` finds is taken, kept within its range. Returns what came:
-// PARAM_REDRAW or PARAM_PLAYS for such a setting whose value changed,
-// PARAM_KNOCK when the sensitivity changed (U2 of the face refactor: until
-// 2026-10-20 whenever the web app sent it, which it does with every live
-// change - the wall's QMI8658 was reset each time, blind to a knock meanwhile).
-template <typename Get>
-uint8_t faceBlobApply(FaceBlob &b, Get get) {
-  uint8_t came = 0;
-  for (uint8_t i = 0; i < b.paramCount; i++) {
-    const FaceParam &p = b.params[i];
-    String v = get(p.key);
-    if (!v.length()) { continue; }
-    long x = v.toInt();
-    uint16_t now = p.kind == PARAM_FLAG ? (x ? 1 : 0) : (uint16_t)constrain(x, (long)p.lo, (long)p.hi);
-    if (now != faceParamGet(b.data, p)) { came |= p.flags & (PARAM_REDRAW | PARAM_PLAYS | PARAM_KNOCK); }
-    faceParamSet(b.data, p, now);
-  }
-  return came;
-}
-
-// The settings into /api/state's settings object `o`, by key.
-template <typename Obj>
-void faceBlobJson(const FaceBlob &b, Obj o) {
-  for (uint8_t i = 0; i < b.paramCount; i++) { o[b.params[i].key] = faceParamGet(b.data, b.params[i]); }
-}
-
-// The names of a face's choices, for /api/state's lists: `add(key, labels,
-// count)` once per setting that has names.
-template <typename Add>
-void faceBlobLists(const FaceBlob &b, Add add) {
-  for (uint8_t i = 0; i < b.paramCount; i++) {
-    const FaceParam &p = b.params[i];
-    if (p.labels) { add(p.key, p.labels, (uint8_t)(p.hi - p.lo + 1)); }
-  }
+  b.table.data[0] = (uint8_t)b.magic;
+  b.table.data[1] = (uint8_t)(b.magic >> 8);
+  b.table.data[2] = b.rev;
+  return store.write(b.table.data, b.size);
 }
 
 // Random numbers for the faces. A release draws them from random(), which on

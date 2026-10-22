@@ -1766,9 +1766,13 @@ The Muncher and the Aliens share `face_planned.h`: they plan their change
 backwards from the minute, work its start out anew on every pass from the
 second's beginning, start it at its moment even when that has passed, and log
 when the new time stood (`... the new time stands at :00.0xx`). Each face also
-keeps a table of its own settings (`FaceParam`: the web app's key, where it sits
-in the face's blob, its range), through which one piece of code loads, checks,
-takes from the web app and reports them all.
+keeps a table of its own settings (`SettingParam` in `src/settings_table.h`: the
+web app's key, where it sits in the face's blob, its kind and range), through
+which one piece of code loads, checks, takes from the web app and reports them
+all. Since 2026-10-22 the clock's own settings go through such tables too
+(`CLOCK_PARAMS`, `UI_PARAMS`, `GIF_PARAMS`, `DECOR_PARAMS`, `FEED_PARAMS` in
+`src/main.cpp`), and `/api/state` tells the web app, under `lists.form`, how to
+send each one back (see "Settings: one table per blob" below).
 
 The same rules for every face: an animation asked for plays at once or not at
 all, and not when it would not end 3 s before the face's next change; after one,
