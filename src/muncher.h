@@ -1,6 +1,6 @@
 /* ----------------------------------------------------------------------
    The Muncher watchface's logic: where everything is and how it moves,
-   without any drawing (the sketch draws it, drawMuncherFace()).
+   without any drawing (MuncherFace in face_muncher.h draws it).
 
    The time is four digits of dots on a seven-segment grid, 5 x 9 dots 2 px
    apart, so a digit is 9 x 17 px. Below them runs a corridor between two
@@ -20,7 +20,7 @@
    eats a power pellet of the colon, the ghosts turn and flee, and the one
    it catches flashes white and is gone.
 
-   Everything here counts in steps of one pixel; the sketch says how long a
+   Everything here counts in steps of one pixel; the face says how long a
    step is and asks advanceTo() to catch up with the time.
    ---------------------------------------------------------------------- */
 #pragma once

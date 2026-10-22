@@ -148,7 +148,7 @@ bool saveDecorSettings();
 // ---- The info band's sources (NVS key "feeds") --------------------------------------
 // The place the clock fetches weather and warnings for, and which of its
 // sources are on. The sources and the items are in band_data.h, their
-// scheduling at the end of the sketch.
+// scheduling in feeds.h.
 #define FEED_SETTINGS_MAGIC 0xFEED
 #define FEED_SETTINGS_REV   3          // 1 = before frames, 2 = before the info round
 struct FeedSettings {

@@ -2,7 +2,7 @@
 // animations": the knock is an input event; what it does is the Inputs page's
 // business). The chip watches for it and raises a line; this module sets the
 // chip up at the sensitivity asked for and says when a knock came. Whether it
-// counts - a button held, a turn, the start - is the sketch's knockIsReal().
+// counts - a button held, a turn, the start - is knockIsReal() in main.cpp.
 //
 //   MatrixPortal S3: the onboard LIS3DH (also the rotation's sensor), INT1 on
 //     ACCEL_INT_PIN, its interrupt generator behind a high-pass filter.

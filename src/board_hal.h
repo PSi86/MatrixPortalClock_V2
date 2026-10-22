@@ -7,7 +7,7 @@
 
    Everything that genuinely differs between them lives here: matrix and button
    pins, the WiFi / NTP calls, the settings storage backend and the reset
-   instruction. The sketch itself stays board independent.
+   instruction. The rest of the code stays board independent.
    ------------------------------------------------------------------------- */
 #pragma once
 
@@ -841,7 +841,7 @@ class PanelCanvas : public GFXcanvas16 {
   }
   uint32_t refreshRate() const { return _rate; }
   // Whether the driver still sends the buffer to the panels, and a fresh start
-  // of that once it has stopped (wallOutputWatch() in the sketch).
+  // of that once it has stopped (wallOutputWatch(), console_cmds.cpp).
   bool outputRunning() const { return !_dma || _dma->outputRunning(); }
   void restartOutput() { if (_dma) { _dma->restartOutput(); } }
   // Test (console "prio"): the output's DMA channel priority, 0 to 5.
@@ -1274,7 +1274,7 @@ inline uint32_t netNtpEpoch() {
   if (!netStaConnected()) { return 0; }
   if (!netSntpRunning()) {
     sntp_set_time_sync_notification_cb(netNtpSyncCallback);
-    configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2); // TZ = UTC; the sketch adds the offset
+    configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2); // TZ = UTC; the clock adds the offset where it shows the time
     netSntpRunning() = true;
   }
   if (!netNtpFresh()) { return 0; }

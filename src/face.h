@@ -58,7 +58,7 @@ inline void faceDigits(time_t t, bool set, uint8_t d[4], uint8_t none) {
 
 // ---- What the core hands a face ---------------------------------------------
 // The moment a face is stepped or drawn at: the core's time as it stands then,
-// and the panel as it is turned (faceMoment() in the sketch). The ticks are
+// and the panel as it is turned (faceMoment() in main.cpp). The ticks are
 // true on the one pass that began a new second, minute or hour.
 struct FaceNow {
   unsigned long ms;         // millis() of the pass (a test build's own clock while it runs one)
@@ -138,7 +138,7 @@ enum FaceOutcome : uint8_t {
 // What every watchface does for the core. The core keeps the time, the
 // screens and the rules for who takes the panel; it steps the face on every
 // pass and has it drawn when its picture changed, then puts its marks over it
-// and shows it (faceShow() in the sketch).
+// and shows it (faceShow() in main.cpp).
 class Watchface {
  public:
   // It comes onto the panel (why): it shows the time as it stands, with what

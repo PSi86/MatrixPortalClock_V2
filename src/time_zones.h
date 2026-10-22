@@ -7,9 +7,10 @@
    the IANA tz database (tzdata 2026.4), with which the C library decides
    whether summer time is in effect (DST_AUTO). The clock's own state - the
    mode chosen, whether summer time is in effect now - stays with its
-   settings in the sketch (dstInEffect(), setDstMode(), updateAutoDst()).
-   The first part of the sketch to move into a module of its own (code
-   review of 2026-10-14, point 10; 2026-10-22).
+   settings, in time_sync.h (dstInEffect(), setDstMode(), updateAutoDst()).
+   The first part of the old sketch (src/MatrixPortalClock_V2.ino) to move
+   into a module of its own (code review of 2026-10-14, point 10;
+   2026-10-22).
    ------------------------------------------------------------------------- */
 #ifndef TIME_ZONES_H
 #define TIME_ZONES_H

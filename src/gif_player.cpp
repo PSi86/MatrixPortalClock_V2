@@ -680,8 +680,8 @@ void gifCardBegin() {
   cardRemountWanted = true;
 }
 
-// (Plain types in these signatures: the prototypes generated from this
-// sketch stand on every board, where the card's types do not exist.)
+// (Plain types in these signatures: from the .ino, whose generated
+// prototypes stood on every board, where the card's types do not exist.)
 void gifCardSend(uint8_t kind, int16_t index) {
   CardJob job = { (CardJobKind)kind, index, cardFreqKhz, index >= 0 ? &cardList.gifs[index] : nullptr };
   if (xQueueSend(cardJobs(), &job, 0) == pdTRUE) { cardJobBusy = true; }

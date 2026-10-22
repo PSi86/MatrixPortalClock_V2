@@ -1,8 +1,8 @@
 /* ----------------------------------------------------------------------
    One connection to the clock's web server: the request as it arrives, and
-   the answer built whole in RAM before any of it is sent. The sketch reads,
-   answers and sends over several passes of the loop (webUpdate()), so the
-   loop never waits for the network.
+   the answer built whole in RAM before any of it is sent. The web server
+   (web_server.cpp) reads, answers and sends over several passes of the loop
+   (webUpdate()), so the loop never waits for the network.
    ---------------------------------------------------------------------- */
 #ifndef WEB_REQUEST_H
 #define WEB_REQUEST_H

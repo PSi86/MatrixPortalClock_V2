@@ -2,11 +2,11 @@
 #
 # webui/index.html - one page with its CSS and script inline, no libraries and
 # system fonts only, since the hotspot has no internet - is gzipped and written
-# as the array WEBUI_GZ to webui_page.h in the build folder, which the sketch
-# serves as it is (Content-Encoding: gzip). The header also carries
+# as the array WEBUI_GZ to webui_page.h in the build folder, which the web app
+# (src/web_api.cpp) serves as it is (Content-Encoding: gzip). The header also carries
 # FW_VERSION: the commit the build comes from (git describe, "-dirty" with
-# changes not committed) and that commit's date. Only the sketch includes the
-# header, so a new version rebuilds the sketch and nothing else.
+# changes not committed) and that commit's date. Only src/web_api.cpp includes
+# the header, so a new version rebuilds that file and nothing else.
 
 import gzip
 import os

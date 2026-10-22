@@ -7,7 +7,7 @@
    it builds the same with newlib and picolibc.
 
    The clock holds UTC, exactly as NTP delivers it. Timezone and daylight
-   saving are added where the time is shown (the sketch's localTime), so
+   saving are added where the time is shown (localTime in main.cpp), so
    changing either never touches the clock. The hour/minute/second helpers
    break down whatever value they are given as gmtime_r() would; pass them the
    local time to get the local fields.
