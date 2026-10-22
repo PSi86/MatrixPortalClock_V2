@@ -71,6 +71,13 @@ in the wall's own 192x128 LEDs.
 - **Real-time clock:** the board's own PCF85063, with a coin cell in its socket
   J4 if wanted, and a DS3231 on the GPIO header before it (see
   [The wall clock's own real-time clock](#the-wall-clocks-own-real-time-clock-pcf85063)).
+- **Room temperature and humidity:** the board's Sensirion SHTC3 (0x70 on its
+  own bus), read every 5 s and filtered over 30 s; shown in the web app under
+  the panel's preview, in the info band, and sent to Home Assistant. It sits on
+  the board beside the ESP32-S3 and its regulators: on 2026-10-22 it read
+  34 °C and 31 % with the panels on, which looks well above the room's (not
+  compared yet). How far it is off, and whether a correction is worth it, is
+  being measured against a thermometer in Home Assistant.
 - **Panels dark before an upload:** `POST /api/black` (the web app's
   interface, in every build) switches the panels dark until the next start -
   before every upload, since the ROM bootloader leaves the last row pair lit at
@@ -161,7 +168,8 @@ dropped before the web server and WiFi work that followed.
 - **Sensors looked for at every start**, each up to 3 times, 50 ms apart: the
   LIS3DH (orientation, knock; MatrixPortals), BH1750 (light), DS3231
   (real-time clock), PAJ7620U2 (gestures), and on the wall clock its board's
-  PCF85063 (real-time clock) and QMI8658 (knock). The clock remembers which it
+  PCF85063 (real-time clock), QMI8658 (knock) and SHTC3 (room temperature and
+  humidity). The clock remembers which it
   had; one of those missing at a start makes the panel say `SENSOR` for 2 s
   and turns the status pixel red. The web app's System section lists every
   sensor - found, found on a later try, missing, or not fitted - with its
@@ -667,8 +675,17 @@ Setting it up:
    a stored home WiFi and **continuous network access** (Home WiFi section);
    the card says what is missing.
 3. The clock shows up in Home Assistant as the device *Matrix Clock xxxxxx*, by
-   MQTT discovery, with an entity **Message** (notify) and, with a BH1750, a
-   sensor **Light** (lux, once a minute).
+   MQTT discovery, with an entity **Message** (notify), with a BH1750 a sensor
+   **Light** (lux), and on the wall clock the sensors **Temperature** (°C) and
+   **Humidity** (%) from its board's SHTC3.
+4. **Values to Home Assistant** on the same card: a sensor's value goes out
+   when it changed - the light by 10 % (at least 1 lx), the temperature by
+   0.2 °C, the humidity by 1 % - but at most every *At most every* seconds
+   (60 unless set, 5 to 255), and unchanged still every *At least every*
+   minutes (15 unless set, 1 to 255), so Home Assistant sees the sensor
+   alive. Inside the clock the sensors are read as often as they need (the
+   light five times a second, the room every 5 s). Saving them does not start
+   the link anew.
 
 `xxxxxx` is the end of the clock's host name, the last three bytes of its MAC;
 the card shows its topics.
@@ -678,12 +695,13 @@ the card shows its topics.
 | `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required), and optionally `severity`, `intensity`, `chance`, `short`; an empty payload takes the item away |
 | `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600), and optionally `severity`, `intensity`, `chance` |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
-| `mpclock/<id>/light` | the clock to Home Assistant | lux, once a minute |
-| `homeassistant/notify/<id>/message/config`, `homeassistant/sensor/<id>/light/config` | the clock to Home Assistant, retained | MQTT discovery |
+| `mpclock/<id>/light` | the clock to Home Assistant | lux (the filtered light the brightness follows), as set under step 4 |
+| `mpclock/<id>/temperature`, `mpclock/<id>/humidity` | the clock to Home Assistant (wall clock) | °C with one decimal, % whole, as set under step 4 |
+| `homeassistant/notify/<id>/message/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back |
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
-`thunder`, `warning`, `wind`, `frost`, `heat`, `calendar`, `air`. The optional fields change how
+`thunder`, `warning`, `wind`, `frost`, `heat`, `calendar`, `air`, `indoor`. The optional fields change how
 the icon looks:
 
 - `severity`: a warning's level, as the DWD names them - `minor`, `moderate`,
@@ -1063,7 +1081,9 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
     after NOAA's solar calculator, within a minute of published tables;
   - **the moon**: its phase and how much of it is lit, and the next full or new
     moon, whichever comes first ("First quarter | 53% lit" / "Full moon Mon 26 Oct"),
-    from its longitude, within about half an hour (`src/sky.h`).
+    from its longitude, within about half an hour (`src/sky.h`);
+  - **the room**: "Indoor 22.4°C" / "humidity 48%" from the board's SHTC3,
+    with a thermometer in a house, once it gave a reading.
 - **Turns:** each stands 6 s, one that runs through as long as that takes.
 - **Lines** (one rule for every text in the band, Peter's of 2026-10-18): a
   text's parts are set apart by ` | ` - the clock's own, those it puts together
