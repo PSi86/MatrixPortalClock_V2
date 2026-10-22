@@ -3227,8 +3227,22 @@ void faceCatchUp() {
   classicFace.enter(faceMoment(), ENTER_SHOWN);
 }
 
+// The millis() the second now on the panel began at: the clock's own, which
+// knows it to the millisecond (clock_time.h), not the pass that noticed it -
+// after a long pass (a WiFi scan, an upload) that was a second or more late,
+// and the changes planned from it as late (code review of 2026-10-14). Never
+// after this pass's millisNow: the clock reads millis() a moment later. The
+// test's own clock keeps its passes' time.
+unsigned long secondBeganAt() {
+#if defined(FACE_FRAME_LOG)
+  if (testVirtualOn) { return millisNow; }
+#endif
+  unsigned long at = clockState().millisAt;
+  return (long)(at - millisNow) > 0 ? millisNow : at;
+}
+
 /* Updates millisNow, localTime and the ticks. Keeps track of the looptime using delay(). */
-void timekeeper(void) { 
+void timekeeper(void) {
   /*Call this always in the beginning of an iteration in loop()
     for scheduling of short actions use millisNow; for long-term schedules use hourNow, minuteNow, secondNow or plain localTime with the clock_time.h helpers eg: clockHour(localTime)
     Triggers are only active for one iteration: hourTrigger -> when the hour has changed
@@ -3265,7 +3279,7 @@ void timekeeper(void) {
   if (testBegins && testVirtualReset) { testFaceReset(); }   // the face afresh, at the scene's time
 #endif
 
-  if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; secondStartedAt=millisNow; }
+  if(secondNow != clockSecond(localTime)) { secondNow=clockSecond(localTime); secondTrigger=true; secondStartedAt=secondBeganAt(); }
   else { secondTrigger=false; }
  
   if(secondTrigger && minuteNow != clockMinute(localTime)) { minuteNow=clockMinute(localTime); minuteTrigger=true; }
