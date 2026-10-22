@@ -8655,6 +8655,7 @@ bool microDegreesOf(const String &v, int32_t limit, int32_t &out) {
 // The info band section of the config page (/save). Both fields empty clear
 // the place; a place that cannot be read keeps the one stored.
 void applyFeedParams(const String &q) {
+  uint8_t wasOn = feedSettings.on;
   uint8_t on = 0;
   if (getParam(q, "feedw") == "on") { on |= (uint8_t)(1 << FEED_WEATHER); }   // checkboxes: absent when unticked
   if (getParam(q, "feeda") == "on") { on |= (uint8_t)(1 << FEED_WARNINGS); }
@@ -8697,6 +8698,11 @@ void applyFeedParams(const String &q) {
   }
   for (uint8_t f = 0; f < FEED_COUNT; f++) {
     if (!feedOn(f)) { bandDropFeed(f); }   // a source switched off takes its items with it
+    // One switched on is due at once. Its due time was left as it was: after
+    // more than 24.8 days of uptime the signed comparison in feedDueWithin()
+    // read an old one as ahead, and the source waited up to that long again
+    // (code review of 2026-10-14).
+    else if (!(wasOn & (1 << f))) { feedRuns[f].dueAt = millisNow; }
   }
 }
 
