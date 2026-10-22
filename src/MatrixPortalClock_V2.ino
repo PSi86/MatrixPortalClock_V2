@@ -1136,6 +1136,11 @@ uint8_t       radioUsers   = RADIO_SYNC;      // the first sync is due at start-
 unsigned long joinAskedAt  = 0;               // millis() the join was last started, for the re-join pace
 unsigned long joinPolledAt = 0;               // millis() the station was last polled
 const unsigned long JOIN_RETRY_MS = 10000;    // between joins while the station does not connect
+// The home WiFi forgotten while joined: the station stays a moment for what
+// still has to go out over it (stationUpdate()).
+unsigned long wifiForgottenAt = 0;            // millis() it was forgotten; 0 = not since the start
+const unsigned long FORGET_ANSWER_MS = 2000;  // the web app's answer
+const unsigned long FORGET_LINK_MS   = 10000; // the Home Assistant link's goodbye, at most
 const unsigned long JOIN_POLL_MS  = 500;      // between looks at whether it has
 // A clock that has a time does not keep its radio on for a sync that does not
 // work out: after SYNC_ATTEMPT_MS it switches it off and tries again after
@@ -3741,8 +3746,18 @@ bool stationUp() { return stationState == STA_UP; }
 // Keeps the station joined while anyone needs it, and the radio off while
 // nobody does. Runs on every pass outside the hotspot and never waits.
 // Without a stored WiFi there is nothing to join, and whoever wants the
-// station simply goes on waiting.
+// station simply goes on waiting. Forgotten while joined, the station stays
+// for FORGET_ANSWER_MS, so the web app's answer gets out over it, and while
+// the Home Assistant link still holds it, so its goodbye does (up to
+// FORGET_LINK_MS). Until 2026-10-22 the radio went on the next pass: by the
+// code, before the answer went out on the home network, and before the
+// link's goodbye, so Home Assistant would have learned it from the broker's
+// last will only after the keepalive ran out (code review of 2026-10-14).
 void stationUpdate() {
+  if (!wifiStored() && stationState == STA_UP && wifiForgottenAt) {
+    unsigned long since = millisNow - wifiForgottenAt;
+    if (since < FORGET_ANSWER_MS || ((radioUsers & RADIO_HA) && since < FORGET_LINK_MS)) { return; }
+  }
   if (radioUsers == 0 || !wifiStored()) {
     if (stationState != STA_OFF) {
       if (stationState == STA_JOINING) { noteJoinFailed(); }   // read before the radio goes
@@ -4005,6 +4020,7 @@ bool forgetWifi() {
   wifiCreds.verified = 0;
   bool stored = saveWifiCreds();
   joinOutcome = JOIN_NOT_TRIED;
+  wifiForgottenAt = millisNow ? millisNow : 1;   // the station stays a moment (stationUpdate())
   Console.println("WiFi: forgotten");
   return stored;
 }
