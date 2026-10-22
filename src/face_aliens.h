@@ -212,10 +212,10 @@ class AliensFace : public PlannedFace {
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override {
     bool played;
     switch (why) {
-      case TRIGGER_ACTION:            played = scene(now, _s.animation, "a knock"); break;
-      case TRIGGER_NOW_AND_THEN:      played = scene(now, extraKind(), "now and then"); break;
-      case TRIGGER_PREVIEW_CHANGE:    played = scene(now, ALIENS_ANIM_REPLAY, "the web app's preview"); break;
-      case TRIGGER_PREVIEW_ANIMATION: played = scene(now, _s.animation, "the web app's choice"); break;
+      case TRIGGER_ACTION:            played = scene(now, _s.animation, "a knock", true); break;
+      case TRIGGER_NOW_AND_THEN:      played = scene(now, extraKind(), "now and then", false); break;
+      case TRIGGER_PREVIEW_CHANGE:    played = scene(now, ALIENS_ANIM_REPLAY, "the web app's preview", true); break;
+      case TRIGGER_PREVIEW_ANIMATION: played = scene(now, _s.animation, "the web app's choice", true); break;
       default:                        return OUTCOME_NONE;
     }
     return played ? OUTCOME_PLAYED : OUTCOME_REFUSED;
@@ -295,8 +295,12 @@ class AliensFace : public PlannedFace {
   // (the time on show stays right), a saucer, an alien shooting back, a block
   // waking - for the watchface animation, the web app, and now and then. Refused while a scene
   // runs, just after one, and when it could not end before the next change
-  // starts: then it is dropped, not kept.
-  bool scene(const FaceNow &now, uint8_t kind, const char *why) {
+  // starts: then it is dropped, not kept. One the user asked for must only
+  // have ended when the change starts; an extra the clock plays of itself
+  // FACE_GUARD_MS before (Peter, 2026-10-22: what the user asks for is
+  // granted unless there is a clear reason - and a scene still running when
+  // the change has to start would be cut off).
+  bool scene(const FaceNow &now, uint8_t kind, const char *why, bool asked) {
     if (_a.running || _a.shown[0] == aliens::NO_DIGIT) { return false; }
     if (now.ms - _sceneEndedAt < FACE_REST_MS) { return false; }
     if (_plannedFor == 0) { return false; }   // the next change is planned on the face's next pass
@@ -323,7 +327,7 @@ class AliensFace : public PlannedFace {
       what = "the minutes' ones again";
     }
     _plannedFor = 0;                          // the change is planned anew afterwards
-    if (len == 0 || !faceFits(plannedStart, now.ms, len)) { return false; }
+    if (len == 0 || !faceFits(plannedStart, now.ms, len, asked ? 0 : FACE_GUARD_MS)) { return false; }
     _startAt = now.ms;
     _logStand = false;
     _a.start();

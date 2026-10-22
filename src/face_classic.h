@@ -69,6 +69,7 @@ class ClassicFace : public Watchface {
       _timeY[i] = _animY[i] = _placeY[i];
       _flying[i] = false;
     }
+    _changeFlying = false;   // every digit stands: no change in the air
   }
 
   // One pass. On a second's tick the digits that flew in stand on their
@@ -94,6 +95,9 @@ class ClassicFace : public Watchface {
       starts[2] = starts[3] && (now.minute + 1) % 10 == 0;
       starts[1] = starts[2] && now.minute + 1 == 60;
       starts[0] = starts[1] && ((now.hour + 1) % 10 == 0 || now.hour + 1 == 24);
+      // The time's change: the minute's digits (and the hour's) fly in during
+      // second :59, as all the ones that change at the next second do.
+      _changeFlying = starts[3] && now.set;
       // The animation: every digit flies in as if it changed, through the same
       // steps as a real change - from the first tick after the second it was
       // asked in.
@@ -143,40 +147,38 @@ class ClassicFace : public Watchface {
     }
   }
 
-  // Whether its animation runs - all six digits asked to fly in at the next
-  // second, or flying (K1 of the face refactor: until 2026-10-20 a GIF or a
-  // card could start in the middle of it) - or the minute's first fly-in time,
-  // as the rules for the panel have always counted the change.
+  // Whether the time's change flies - the minute's digits, and the hour's,
+  // during second :59 until they have landed - or the animation the user
+  // asked for runs: all six digits asked to fly in at the next second, or
+  // flying (K1 of the face refactor: until 2026-10-20 a GIF or a card could
+  // start in the middle of it). Never the seconds, which fly every second.
+  // (Until 2026-10-22 the change was counted in the first fly-in time of
+  // second :00, which is the seconds' flight into :01, and not while the
+  // minute's digits flew.)
   bool busy(const FaceNow &now) const override {
     if (_anim != ANIM_IDLE) { return true; }
-    return now.second == 0 && now.ms - now.secondAt < (unsigned long)_s.flyInTime * 10UL;
+    return _changeFlying && now.ms - now.secondAt < _flightMs;
   }
 
-  // The minute's digits fly in during its second :59; the seconds' flight
-  // into :00 ends a fly-in time later.
+  // The minute's digits fly in during its second :59 and land a fly-in time
+  // after its tick (at most 850 ms), before the minute begins.
   FaceSpan changeSpan(const FaceNow &, time_t) const override {
-    FaceSpan s = { 1000UL, (unsigned long)_s.flyInTime * 10UL };
+    FaceSpan s = { 1000UL, 0 };
     return s;
   }
   bool offers(FaceTrigger why) const override { return why == TRIGGER_ACTION; }
 
   // The input's animation: all six digits fly in at the next second, unless
-  // one is still asked for or flying, landed less than FACE_REST_MS ago, or
-  // would not have landed FACE_GUARD_MS before the time's change starts - the
-  // minute's digits fly in during its second :59 (K2 of the face refactor:
-  // until 2026-10-20 the classic face did not look). The console gets one line
-  // per animation taken, with the requests refused since the one before, not
-  // one per request (a stress test of fast knocks wrote over 200 lines in
-  // 30 s).
+  // one is still asked for or flying, or landed less than FACE_REST_MS ago.
+  // Into the time's change too: it flies the same way, the minute's digits
+  // among the six (until 2026-10-22 it had to land FACE_GUARD_MS before
+  // second :59, which refused a knock from about :55 on; Peter: what the user
+  // asks for is granted). The console gets one line per animation taken,
+  // with the requests refused since the one before, not one per request (a
+  // stress test of fast knocks wrote over 200 lines in 30 s).
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override {
     if (why != TRIGGER_ACTION) { return OUTCOME_NONE; }
-    bool fits = true;
-    if (now.set) {
-      unsigned long changeAt = now.secondAt + (59UL - now.second) * 1000UL;
-      unsigned long len = now.secondAt + 1000UL - now.ms + (unsigned long)_s.flyInTime * 10UL;
-      fits = faceFits(changeAt, now.ms, len);
-    }
-    if (_anim != ANIM_IDLE || now.ms - _animEndedAt < FACE_REST_MS || !fits) {
+    if (_anim != ANIM_IDLE || now.ms - _animEndedAt < FACE_REST_MS) {
       if (_ignored < 0xFFFF) { _ignored++; }
       return OUTCOME_REFUSED;
     }
@@ -300,6 +302,7 @@ class ClassicFace : public Watchface {
   // and every second looks the same whether one digit flies or six.
   unsigned long _flightMs = 400;
   Anim _anim = ANIM_IDLE;
+  bool _changeFlying = false;      // the minute's or hour's digits started flying at this second's tick
   unsigned long _askedIn = 0;      // the second the animation was asked in (its secondAt)
   unsigned long _animEndedAt = 0;  // when the last one landed or was cut off
   uint16_t _ignored = 0;           // requests refused since the last one taken, for the console

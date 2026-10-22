@@ -199,9 +199,10 @@ class TetrisFace : public Watchface {
   }
 
   // Whether the digits are coming apart, a digit waits in the empty beat to be
-  // built, or blocks are still falling. (K7 of the face refactor: until
-  // 2026-10-20 the face counted as at rest in the beat, and something could
-  // start in it.)
+  // built, or blocks are still falling - for the time's change or for the
+  // animation a knock asked for: what the clock plans itself waits for both.
+  // (K7 of the face refactor: until 2026-10-20 the face counted as at rest in
+  // the beat, and something could start in it.)
   bool busy(const FaceNow &now) const override {
     if (breakingUp() || !_settled) { return true; }
     if (now.set) {
@@ -213,34 +214,22 @@ class TetrisFace : public Watchface {
   bool offers(FaceTrigger why) const override { return why == TRIGGER_ACTION || why == TRIGGER_PREVIEW_CHANGE; }
 
   // The input's animation: all four digits come apart and are built anew -
-  // unless they are coming apart already, the last effect ended less than
-  // FACE_REST_MS ago, or the break-up and the build after it (animationMs())
-  // would not end FACE_GUARD_MS before the next minute's change starts. A build under way,
-  // the minute change's too, may be smashed: only the time before the change
-  // is kept free, so the change starts from a clean picture (Peter,
-  // 2026-10-20; from 2026-10-12 every build refused it). The web app's
-  // preview of a setting tried there is the same run, now or not at all
-  // (until 2026-10-20 it waited for the run before it to finish).
+  // unless they are coming apart already, or the last effect ended less than
+  // FACE_REST_MS ago. Any build under way may be smashed, the minute
+  // change's too, and the animation may run into the change: the change
+  // takes it over as a knock takes over a knock's build (pushTime(): a digit
+  // still coming apart is built with the new time, one being built that
+  // changes comes apart again). Until 2026-10-22 it had to end FACE_GUARD_MS
+  // before the next minute, which refused a knock in up to the minute's last
+  // 15 s or so at a drop pace of 90 ms, by the build's length (Peter: what
+  // the user asks for is granted).
+  // The web app's preview of a setting tried there is the same run, now or
+  // not at all.
   FaceOutcome request(const FaceNow &now, FaceTrigger why) override {
     if (why != TRIGGER_ACTION && why != TRIGGER_PREVIEW_CHANGE) { return OUTCOME_NONE; }
     if (breakingUp() || now.ms - _breakUpEndedAt < FACE_REST_MS) { return OUTCOME_REFUSED; }
-    unsigned long changeAt = now.secondAt + (60UL - now.second) * 1000UL;   // the next minute's start
-    if (now.set && !faceFits(changeAt, now.ms, animationMs(now))) { return OUTCOME_REFUSED; }
     breakUpAll(now.ms);
     return OUTCOME_PLAYED;
-  }
-
-  // How long the watchface animation takes at most now: the break-up, the
-  // empty beat, and the rebuild of the time on show at the drop pace - the
-  // slowest of its four digits, each with the longest of its tilings, since
-  // the rebuild draws one at random; a piece takes a step for every cell it
-  // falls, and one to land. (K7 of the face refactor: until 2026-10-20 a flat
-  // 6 s, while it takes up to 10 s at the default drop pace and 33 s at the
-  // slowest.)
-  unsigned long animationMs(const FaceNow &now) const {
-    uint8_t d[4];
-    faceDigits(now.local, true, d, 0xFF);
-    return (unsigned long)BREAKUP_MAX_MS + HOLD_MS + (unsigned long)buildSteps(d, nullptr) * _s.dropMs;
   }
 
   // Its change starts at the minute: the digits that change break up, and are

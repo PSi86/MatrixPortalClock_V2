@@ -333,8 +333,11 @@ class MuncherFace : public PlannedFace {
     _dirty = true;
   }
 
-  // The watchface animation's scene: refused while a scene runs, just
-  // after one, and when it could not end before the next change starts.
+  // The watchface animation's scene, or the web app's: refused while a scene
+  // runs, just after one, and when it would still run when the next change
+  // has to start - the change would cut it off, or come late. Until
+  // 2026-10-22 it had to end FACE_GUARD_MS before (Peter: what the user asks
+  // for is granted unless there is a clear reason).
   bool playScene(const FaceNow &now, uint8_t kind) {
     if (_m.mode != muncher::MODE_IDLE || _m.shown[0] == muncher::NO_DIGIT) { return false; }
     if (now.ms - _sceneEndedAt < FACE_REST_MS) { return false; }
@@ -359,7 +362,7 @@ class MuncherFace : public PlannedFace {
       f.start(mode);
       while (f.mode != muncher::MODE_IDLE && steps < 3000) { f.advanceTo(++steps); }
     }
-    if (!faceFits(_startAt, now.ms, (unsigned long)steps * _s.paceMs)) { return false; }
+    if (!faceFits(_startAt, now.ms, (unsigned long)steps * _s.paceMs, 0)) { return false; }
     planScene(_m, kind, what);           // the same plan, now for the face
     startScene(mode, now.ms);
     Console.printf("Muncher: %s\n", what);
