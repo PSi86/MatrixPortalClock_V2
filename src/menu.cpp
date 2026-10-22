@@ -1,7 +1,6 @@
 // The on-screen menu, its editors, and the banners (menu.h).
 #include "menu.h"
 
-#include <Fonts/Picopixel.h>
 #include <Fonts/TomThumb.h>    // 3x5, for the menu
 #include "brightness.h"
 #include "clock_state.h"

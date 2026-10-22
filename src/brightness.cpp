@@ -9,6 +9,7 @@
 #include "web_server.h"
 #include "info_band.h"
 #include "face.h"        // FADE_GAMMA
+#include "gif_player.h"  // gifPlaying()
 #include "sensors.h"
 #include "settings.h"
 #if BOARD_WAVESHARE_WALL

@@ -48,7 +48,7 @@ static const int GIF_CANVAS_MAX = 64 * 32;      // pixels of the largest GIF tha
 // the time, the hotspot's time included, has better uses.
 struct GifPlayer { AnimatedGIF decoder; uint8_t canvas[GIF_CANVAS_MAX * 3]; };
 static GifPlayer *gifPlayer = nullptr;
-bool gifPlaying() { return gifPlayer != nullptr; }   // a GIF has the panel (clock_state.h)
+bool gifPlaying() { return gifPlayer != nullptr; }   // a GIF has the panel (gif_player.h)
 static uint8_t       gifGamma[256];
 static int16_t       gifW = 0, gifH = 0;
 static int16_t       gifIndex = -1;                 // the GIF on show

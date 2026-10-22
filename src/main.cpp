@@ -48,53 +48,17 @@ Todo Concept:
 #include "face.h"           // what the watchfaces share
 #include "face_classic.h"   // the classic watchface, on every board
 
-#include <Fonts/Picopixel.h>
-#include <Fonts/TomThumb.h>    // 3x5, for the menu
+#include <Fonts/Picopixel.h>  // the boot status and the banners' lines
+const GFXfont &fontPicopixel = Picopixel;   // for the modules (clock_state.h)
 
 #include "face_tetris.h"       // the Tetris watchface
 #include "knock.h"             // the knock on the clock, from its motion sensor
-#include "face_muncher.h"     // the Muncher watchface
-#include "face_aliens.h"      // the Aliens watchface
+#include "face_muncher.h"      // the Muncher watchface
+#include "face_aliens.h"       // the Aliens watchface
 
-#include <math.h>              // powf() for perceptual brightness fade
-
-#include <Wire.h>              // I2C for the onboard accelerometer + light sensor
-#include <Adafruit_Sensor.h>  // sensor base class
-#include <Adafruit_LIS3DH.h>  // the MatrixPortal S3's onboard LIS3DH accelerometer
-#include <BH1750FVI.h>         // external BH1750 ambient light sensor (auto-brightness)
-#include <RTClib.h>            // DS3231 real-time clock (optional)
-#include <RevEng_PAJ7620.h>    // PAJ7620U2 gesture sensor (optional)
-
-#include <AnimatedGIF.h>       // GIF decoder
-#include <new>                 // new (std::nothrow) for the decoder
-#include <esp_partition.h>     // the GIF pack in the ffat partition
-#include <esp_heap_caps.h>     // PSRAM for the pack's index and an inflated GIF
-#include <esp_rom_crc.h>       // CRC-32 in ROM, to check the pack
-#include <miniz.h>             // inflate in ROM (tinfl), for the pack's deflated GIFs
-
-#include "web_request.h"       // a web connection: its request and its answer
-#include <ESPmDNS.h>           // the clock's name on the home network
-#include <mbedtls/sha256.h>    // the home network password, kept as a salted hash
-#include <mbedtls/base64.h>    // and sent as HTTP Basic authorization
-
-#if BOARD_WAVESHARE_WALL
-#include <mbedtls/sha256.h>    // the console's "crypto" test of the panel output beside the crypto DMA
-#include <mbedtls/aes.h>
-#include <soc/gdma_struct.h>   // and its "gdma": the DMA channels' peripherals and priorities
-#include <esp_timer.h>
-#include "rtc_pcf85063.h"      // the board's own real-time clock
-#include "imu_qmi8658.h"       // its motion sensor, for the knock
-#include "shtc3.h"             // its temperature and humidity sensor
-#include "gif_card.h"          // its microSD card, the GIFs' source while one is in
-#endif
-
-#include "band_data.h"         // the info band's items and the sources the clock fetches
-#include "item_icons.h"        // their icons, for the band and the alert banners
-#if BAND_ON_PANEL
-#include "sky.h"               // sunrise, sunset and the moon's phase for the band
-#endif
-
-#include "ha_link.h"           // the link to Home Assistant over MQTT
+#include <Wire.h>              // I2C for the onboard accelerometer and the sensors
+#include <Adafruit_Sensor.h>   // sensor base class
+#include <Adafruit_LIS3DH.h>   // the MatrixPortal S3's onboard LIS3DH accelerometer
 
 /* ----------------------------------------------------------------------
 The RGB matrix must be wired to VERY SPECIFIC pins, different for each
@@ -104,32 +68,15 @@ being built for (MatrixPortal S3 or the wall clock's Waveshare board).
 
 PanelCanvas matrix(64, 32);   // the canvas the clock draws into; show() hands it to the DMA driver
 
-// The clock's stored settings: settings.h.
-
-
-
-
-// (GIFs on the panel, the GIF pack, the wall clock's card: gif_player.h.)
-
-// (Who takes the panel, and when, and the faces' extras: panel_rules.h.)
-
-// Info band data ------------------------------------------------------------------
-// (The place and the sources that are on: settings.h. The sources and the
-// fetch task: band_data.h; when they are fetched: feeds.h; the items, from
-// every source: band_items.h.)
-
-// (The items on the 64x32 clock, notices and info cards: notices.h.)
-
-// (The wall clock's info band: info_band.h.)
-
-
-// (The Home Assistant link: home_assistant.h.)
-
-// (The home WiFi and the station joined to it: wifi_station.h.)
-
-
-
-// (The inputs - buttons, gestures, face shortcuts - and their feedback: input.h.)
+// The clock's other parts are modules of their own, each with its state:
+// the settings (settings.h), the WiFi station (wifi_station.h), the time
+// (time_sync.h), the brightness (brightness.h), the info band's sources,
+// items, notices and band (feeds.h, band_items.h, notices.h, info_band.h),
+// who takes the panel (panel_rules.h), GIFs (gif_player.h), the inputs
+// (input.h), the menu and banners (menu.h), the hotspot (hotspot.h), the
+// web server and app (web_server.h, web_api.h, lan_access.h), Home
+// Assistant (home_assistant.h). What they share with this file:
+// clock_state.h.
 
 
 // Screens ------------------------------------------------------------------

@@ -2,7 +2,6 @@
 // screens (hotspot.h).
 #include "hotspot.h"
 
-#include <Fonts/Picopixel.h>
 #include "brightness.h"
 #include "clock_state.h"
 #include "web_server.h"
@@ -234,7 +233,7 @@ static uint8_t apInfoRotation() {
 void drawAPScreen() {
   setScreenRotation(apInfoRotation());
   matrix.fillScreen(0);
-  matrix.setFont(&Picopixel);
+  matrix.setFont(&fontPicopixel);
   // Full-saturation colors + a brightness floor so SSID/PW/IP never go black.
   matrix.setTextColor(scaledColorVisible(0, 0, 255));
   matrix.setCursor(0, 8);  matrix.print("SSID "); matrix.print(AP_SSID);

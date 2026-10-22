@@ -1,8 +1,9 @@
 /* -------------------------------------------------------------------------
-   clock_state.h - what the sketch (main.cpp) shares with the parts of the
-   clock that have moved into modules of their own: its state and the
-   functions they call, declared here and defined in main.cpp. It shrinks
-   as more parts become modules and take what is theirs along (code review
+   clock_state.h - what main.cpp shares with the clock's modules: its state
+   and the functions they call, declared here and defined there. main.cpp
+   is the clock's glue - setup() and loop(), the screen stack, the
+   orientation, the watchfaces, the timekeeper and the clock's settings -
+   and each module has a header of its own for what it offers (code review
    of 2026-10-14, point 10; 2026-10-22).
    ------------------------------------------------------------------------- */
 #ifndef CLOCK_STATE_H
@@ -17,7 +18,9 @@
 #include "face.h"        // FaceNow, Watchface
 #include "knock.h"       // Knock
 
-const char *fwVersion();   // the commit the build comes from and its date (FW_VERSION)
+// The commit the build comes from and its date (FW_VERSION). Defined in
+// web_api.cpp, the one file that includes the generated webui_page.h.
+const char *fwVersion();
 
 // millis() at the start of the loop's pass.
 extern unsigned long millisNow;
@@ -40,7 +43,6 @@ void apiTest(Print &c, const String &body);   // POST /api/test: what the scene 
 extern PanelCanvas matrix;
 extern bool panelDirty;
 uint16_t scaledColorVisible(uint8_t r, uint8_t g, uint8_t b);   // a colour at the panel's brightness, never black
-bool gifPlaying();   // a GIF has the panel, its decoder up
 
 // The watchface on show (main.cpp), and the moment it is drawn for.
 void faceUpdate();     // one pass of the face on the panel
@@ -98,8 +100,9 @@ void closeScreen();
 Screen screenBeneath();          // the screen a banner on top confirms
 void bootStatus(const char *msg);   // a status line while setup() runs
 void drawCenteredLines(const char *first, const char *second, uint16_t color);   // one or two lines of Picopixel, centred
+// The Picopixel font, kept in main.cpp alone: Adafruit's fonts are constants
+// of the file that includes them, and each file using one would carry a copy.
+extern const GFXfont &fontPicopixel;
 bool screenIsLandscape();        // the panel is drawn wider than tall
-
-
 
 #endif  // CLOCK_STATE_H

@@ -41,7 +41,7 @@ struct SensorKind {
   bool boardBus;      // on the wall clock board's own bus (Wire1), else on Wire
 };
 
-const SensorKind SENSOR_KINDS[SENSOR_COUNT] = {
+inline const SensorKind SENSOR_KINDS[SENSOR_COUNT] = {
   { "accel",    "LIS3DH",    "orientation, knock",  0x19, false },
   { "light",    "BH1750",    "auto-brightness",     0x23, false },
   { "rtc",      "DS3231",    "real-time clock",     0x68, false },

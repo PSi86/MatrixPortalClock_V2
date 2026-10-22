@@ -29,6 +29,7 @@ extern unsigned long gifShownAt;    // millis() the GIF on show began
 // GIF cannot hide the clock for minutes.
 const unsigned long GIF_PLAY_MAX_MS = GIF_SECONDS_MAX * 1000UL;
 
+bool    gifPlaying();        // a GIF has the panel, its decoder up
 void    gifGammaInit();      // at start-up: the gamma table
 void    gifScheduleNext();   // the next GIF of its own accord, at a random time between the settings
 void    gifUpdate();         // on every pass: a GIF of its own accord when one is due

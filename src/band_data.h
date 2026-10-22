@@ -109,7 +109,7 @@ inline uint32_t itemTag(const char *s, uint32_t tag = 2166136261u) {
 // a source that is fetched wakes the radio by itself and does not, one that
 // is pushed to the clock (Home Assistant over MQTT) will.
 struct FeedInfo { const char *name; uint32_t intervalMs; uint32_t staleS; bool needsAlways; };
-const FeedInfo FEEDS[FEED_COUNT] = {
+inline const FeedInfo FEEDS[FEED_COUNT] = {
   { "weather",  30UL * 60UL * 1000UL, 90UL * 60UL, false },
   { "warnings", 10UL * 60UL * 1000UL, 30UL * 60UL, false },
   { "air",      60UL * 60UL * 1000UL, 180UL * 60UL, false },   // the forecast's values are hourly
