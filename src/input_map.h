@@ -187,6 +187,25 @@ CHECK_PROFILE(PROFILE_DEFAULT);
 CHECK_PROFILE(PROFILE_CLASSIC_CLICKS);
 CHECK_GESTURES(GESTURES_DEFAULT);
 
+// The profiles the config page offers, stored as the position in this list.
+// So the order is part of the stored data: new profiles go on the end, none
+// is ever moved.
+struct InputProfile {
+  const char         *name;          // as the config page offers it
+  const InputMapping *rows;          // the buttons and the knock
+  uint8_t             count;
+  const InputMapping *gestures;      // the gesture sensor
+  uint8_t             gestureCount;
+  bool                blinkClicks;   // confirm 1x/2x/3x with blinks of the board LED
+};
+constexpr InputProfile INPUT_PROFILES[] = {
+  { "Default",        PROFILE_DEFAULT,        PROFILE_ROWS(PROFILE_DEFAULT),
+                      GESTURES_DEFAULT,       PROFILE_ROWS(GESTURES_DEFAULT),       false },
+  { "Classic clicks", PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS),
+                      GESTURES_DEFAULT,       PROFILE_ROWS(GESTURES_DEFAULT),       true  },
+};
+constexpr uint8_t INPUT_PROFILE_COUNT = sizeof(INPUT_PROFILES) / sizeof(INPUT_PROFILES[0]);
+
 // ----------------------------------------------------------------------------
 // Face shortcuts (concept doc: "Face shortcuts"). On the face every event of a
 // fitted source can be given one of FACE_ACTIONS on the config page's Inputs

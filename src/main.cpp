@@ -25,6 +25,7 @@ Todo Concept:
 #include "clock_time.h"     // software clock: seconds since 1970 (UTC), C library only
 #include "time_zones.h"     // the zones the clock offers and their daylight saving
 #include "clock_state.h"    // what this file shares with the modules below
+#include "settings.h"       // the clock's stored settings
 #include "lan_access.h"     // the web app on the home network
 #include "input_map.h"      // input events, functions and the profiles mapping them
 #include "face.h"           // what the watchfaces share
@@ -75,9 +76,6 @@ Todo Concept:
 
 #include "band_data.h"         // the info band's items and the sources the clock fetches
 #include "item_icons.h"        // their icons, for the band and the alert banners
-// The wall clock shows the items in its band below the face (bandUpdate());
-// the 64x32 clocks have no room for one and show them over the face.
-#define BAND_ON_PANEL BOARD_WAVESHARE_WALL
 struct BandTurn;                       // named by the declarations ahead of the code, on every board
 struct BandLocal;
 #if BAND_ON_PANEL
@@ -94,153 +92,8 @@ being built for (MatrixPortal S3 or the wall clock's Waveshare board).
 
 PanelCanvas matrix(64, 32);   // the canvas the clock draws into; show() hands it to the DMA driver
 
-// Persistent settings ------------------------------------------------------
-// Configurable at runtime via the WLAN AP config page and the on-screen menu.
-#define SETTINGS_MAGIC 0xC10E   // bump this to force a reset to defaults after a struct change
-// Layout revision inside a valid blob. Fields added later go into spare bytes and
-// are migrated in loadSettings() by revision, so the magic can stay the same and
-// an older firmware keeps reading (and round-tripping) the settings it knows.
-#define SETTINGS_REV   2        // 0 = before the watchface byte existed, 1 = flyInTime held ms per pixel
+// The clock's stored settings: settings.h.
 
-struct Settings {
-  uint16_t magic;        // validity marker
-  uint8_t  settingsRev;  // layout revision, see SETTINGS_REV (was padding in rev 0)
-  uint8_t  watchface;    // WATCHFACE_CLASSIC, WATCHFACE_TETRIS_ID, WATCHFACE_MUNCHER_ID or WATCHFACE_ALIENS_ID
-  int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
-  uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
-  uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
-  ClassicSettings classic;   // the classic face's fly-in time, colours and fly-in sides (face_classic.h)
-  uint8_t  syncHour;     // hour of daily NTP resync
-  uint8_t  syncMinute;   // minute of daily NTP resync
-  uint8_t  autoBright;   // 1 = BH1750 light sensor controls the master brightness
-  uint16_t luxDark;      // lux at/below which brightness = brightMin
-  uint16_t luxBright;    // lux at/above which brightness = brightMax
-  uint8_t  brightMin;    // master brightness in darkness
-  uint8_t  brightMax;    // master brightness in bright light
-};
-
-// settingsRev and watchface went into the two padding bytes that sat between
-// magic and tzOffset, so the struct keeps the size the stored blobs have. That
-// matters: SettingsStore::read() on the S3 accepts an NVS entry only at exactly
-// sizeof(Settings), and a mismatch would silently reset EVERY setting.
-static_assert(sizeof(Settings) == 32,
-              "Settings must stay 32 bytes - stored blobs are read back by exact size");
-static_assert(offsetof(Settings, classic) == 10 && offsetof(Settings, syncHour) == 23,
-              "The classic face's settings must stay where the stored blobs have them");
-
-// Watchfaces (Settings::watchface). A value a firmware does not know falls
-// back to the classic face (applySettings()).
-const uint8_t WATCHFACE_CLASSIC    = 0;  // six flying GFX-font digits, HH MM SS
-const uint8_t WATCHFACE_TETRIS_ID  = 1;  // HH:MM built from falling tetromino blocks
-const uint8_t WATCHFACE_MUNCHER_ID = 2;  // HH:MM in dots, eaten and laid anew by a muncher
-const uint8_t WATCHFACE_ALIENS_ID  = 3;  // HH:MM of aliens, shot and marching in anew
-const uint8_t WATCHFACE_COUNT      = 4;
-
-// Daylight saving modes (Settings::dst). 0 and 1 keep the meaning the byte had
-// before the automatic mode existed, so stored settings stay valid.
-const uint8_t DST_WINTER = 0;  // standard time, fixed
-const uint8_t DST_SUMMER = 1;  // daylight saving time (+1 h), fixed
-const uint8_t DST_AUTO   = 2;  // follow the daylight-saving rule of the selected timezone
-
-// Factory defaults reproduce the original hard-coded behaviour.
-const Settings DEFAULTS = {
-  SETTINGS_MAGIC,
-  SETTINGS_REV,
-  WATCHFACE_CLASSIC,
-  3600,            // CET base (UTC+1)
-  DST_AUTO,        // CET/CEST switched automatically (the original was a fixed UTC+2)
-  128,             // neutral: absolute half in manual mode, sensor-as-is trim in auto mode
-  { 40,            // the classic face: fly-in time 400 ms
-    0, 0, 255,     // blue digits
-    255, 255, 255, // fly-in trail (full color; dimmed relative to brightness at render time)
-    {3, 1, 3, 1, 1, 1} },
-  5, 11,           // original sync time 05:11
-  1,               // auto-brightness on (BH1750)
-  1, 400,          // lux mapping range: 1 lux (dark) .. 400 lux (bright)
-  8, 255           // brightness 8 (dark) .. 255 (bright)
-};
-
-Settings settings;
-
-// The settings are stored OUTSIDE the program image so they survive a firmware
-// upload, not just a restart: in NVS (board_hal.h).
-SettingsStore<Settings> clockStore;
-
-// The web app's keys for them (settings_table.h). A stored value is checked
-// in applySettings(): the daylight saving mode and the fly-in time are moved
-// into their ranges, a watchface the firmware does not know becomes the
-// classic one, the colours are made full ones; nothing else ever was.
-const SettingParam CLOCK_PARAMS[] = {
-  { "wf",     SETTING_FIELD(Settings, watchface),         PARAM_RANGE,    PARAM_LIVE,                0,                  WATCHFACE_COUNT - 1, LOAD_DEFAULT, nullptr },
-  { "tz",     0, 0,                                       PARAM_SPECIAL,  0,                         0,                  0,                   LOAD_KEEP,    nullptr },   // seconds, as the zone list offers them (applyParams())
-  { "dst",    SETTING_FIELD(Settings, dst),               PARAM_RANGE,    0,                         DST_WINTER,         DST_AUTO,            LOAD_CLAMP,   nullptr },
-  { "bright", SETTING_FIELD(Settings, brightness),        PARAM_RANGE,    PARAM_LIVE,                0,                  255,                 LOAD_KEEP,    nullptr },
-  { "speed",  SETTING_FIELD(Settings, classic.flyInTime), PARAM_SCALED,   PARAM_LIVE,                FLY_IN_MIN_MS / 10, FLY_IN_MAX_MS / 10,  LOAD_CLAMP,   nullptr },
-  { "digit",  (uint8_t)offsetof(Settings, classic.digitR), 3, PARAM_COLOUR, PARAM_LIVE | PARAM_REDRAW, 0,                  0,                   LOAD_KEEP,    nullptr },
-  { "trail",  (uint8_t)offsetof(Settings, classic.trailR), 3, PARAM_COLOUR, PARAM_LIVE | PARAM_REDRAW, 0,                  0,                   LOAD_KEEP,    nullptr },
-  { "dirs",   0, 0,                                       PARAM_SPECIAL,  0,                         0,                  0,                   LOAD_KEEP,    nullptr },   // sent as dir0 .. dir5 (applyParams())
-  { "synch",  SETTING_FIELD(Settings, syncHour),          PARAM_RANGE,    0,                         0,                  23,                  LOAD_KEEP,    nullptr },
-  { "syncm",  SETTING_FIELD(Settings, syncMinute),        PARAM_RANGE,    0,                         0,                  59,                  LOAD_KEEP,    nullptr },
-  { "autob",  SETTING_FIELD(Settings, autoBright),        PARAM_CHECKBOX, PARAM_LIVE,                0,                  1,                   LOAD_KEEP,    nullptr },
-  { "luxd",   SETTING_FIELD(Settings, luxDark),           PARAM_RANGE,    PARAM_LIVE,                0,                  65535,               LOAD_KEEP,    nullptr },
-  { "luxb",   SETTING_FIELD(Settings, luxBright),         PARAM_RANGE,    PARAM_LIVE,                1,                  65535,               LOAD_KEEP,    nullptr },
-  { "brmin",  SETTING_FIELD(Settings, brightMin),         PARAM_RANGE,    PARAM_LIVE,                0,                  255,                 LOAD_KEEP,    nullptr },
-  { "brmax",  SETTING_FIELD(Settings, brightMax),         PARAM_RANGE,    PARAM_LIVE,                0,                  255,                 LOAD_KEEP,    nullptr },
-};
-SettingsTable clockTable = SETTING_TABLE(settings, DEFAULTS, CLOCK_PARAMS);
-
-// Input profiles -------------------------------------------------------------
-// The tables and the rules they are checked against are in input_map.h; the
-// config page picks one, stored as its position in this list. So the order is
-// part of the stored data: new profiles go on the end, none is ever moved.
-struct InputProfile {
-  const char         *name;          // as the config page offers it
-  const InputMapping *rows;          // the buttons and the knock
-  uint8_t             count;
-  const InputMapping *gestures;      // the gesture sensor
-  uint8_t             gestureCount;
-  bool                blinkClicks;   // confirm 1x/2x/3x with blinks of the board LED
-};
-const InputProfile INPUT_PROFILES[] = {
-  { "Default",        PROFILE_DEFAULT,        PROFILE_ROWS(PROFILE_DEFAULT),
-                      GESTURES_DEFAULT,       PROFILE_ROWS(GESTURES_DEFAULT),       false },
-  { "Classic clicks", PROFILE_CLASSIC_CLICKS, PROFILE_ROWS(PROFILE_CLASSIC_CLICKS),
-                      GESTURES_DEFAULT,       PROFILE_ROWS(GESTURES_DEFAULT),       true  },
-};
-const uint8_t INPUT_PROFILE_COUNT = sizeof(INPUT_PROFILES) / sizeof(INPUT_PROFILES[0]);
-
-// UI settings ------------------------------------------------------------------
-// Settings of the operating concept, in a blob of their own (NVS key "ui"), so
-// the 32-byte main blob never grows.
-// Fields added later go on the end and are filled in by revision, as with the
-// other blobs; an older firmware does not read this one at all.
-#define UI_SETTINGS_MAGIC 0x5E71
-#define UI_SETTINGS_REV   3        // 1 = before syncDays, 2 = before gestureMount
-struct UiSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  inputProfile;   // position in INPUT_PROFILES
-  uint16_t syncDays;       // with a real-time clock: days between NTP syncs, 0 = no sync (rev 2)
-  uint8_t  gestureMount;   // quarter turns clockwise the gesture sensor sits at against the panel (rev 3)
-  uint8_t  reserved;
-};
-const uint16_t SYNC_DAYS_MAX = 366;
-const UiSettings UI_DEFAULTS = { UI_SETTINGS_MAGIC, UI_SETTINGS_REV, 0, 7, 0, 0 };
-UiSettings uiSettings;
-SettingsStore<UiSettings> uiStore;
-// The web app's keys for them (settings_table.h), with the Inputs page's two
-// lists, whose blobs of their own are taken by their own code
-// (applyKeysForm(), applyNoticeKeysForm()). The input profile and the
-// sensor's mount count only once the Inputs page passed its check: a save
-// it fails stores nothing at all (apiSave()).
-const SettingParam UI_PARAMS[] = {
-  { "prof",   SETTING_FIELD(UiSettings, inputProfile), PARAM_RANGE,   0, 0, INPUT_PROFILE_COUNT - 1, LOAD_DEFAULT, nullptr },
-  { "syncd",  SETTING_FIELD(UiSettings, syncDays),     PARAM_RANGE,   0, 0, SYNC_DAYS_MAX,           LOAD_DEFAULT, nullptr },
-  { "gmount", SETTING_FIELD(UiSettings, gestureMount), PARAM_RANGE,   0, 0, 3,                       LOAD_MASK,    nullptr },
-  { "keys",   0, 0,                                    PARAM_SPECIAL, 0, 0, 0,                       LOAD_KEEP,    nullptr },   // sent as k0, k1 ...
-  { "closes", 0, 0,                                    PARAM_SPECIAL, 0, 0, 0,                       LOAD_KEEP,    nullptr },   // sent as cset, c0, c1 ...
-};
-SettingsTable uiTable = SETTING_TABLE(uiSettings, UI_DEFAULTS, UI_PARAMS);
 
 // Face shortcuts: what each face event does (input_map.h: FACE_EVENTS), as
 // FACE_ACTIONS codes. A blob of its own (NVS key "keys"); nothing stored means
@@ -259,43 +112,6 @@ uint8_t faceKeys[FACE_EVENT_COUNT];        // what applies now
 bool    faceKeysOwn = false;               // false: the profile's own face rows apply
 SettingsStore<FaceKeys> keysStore;
 
-// GIF settings: a blob of its own (NVS key "gif"), so no other blob changes.
-#define GIF_SETTINGS_MAGIC 0x61F5
-#define GIF_SETTINGS_REV   3
-struct GifSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  randomOn;      // 1 = GIFs come up by themselves
-  uint16_t minMinutes;    // shortest time from one GIF to the next
-  uint16_t maxMinutes;    // longest
-  uint8_t  seconds;       // how long one plays
-  uint8_t  minBright;     // rev 2: the panel's brightness at least while a GIF plays
-  uint8_t  brightTimes;   // rev 3: and at least this many tenths of the clock's (20 = twice)
-  uint8_t  reserved[1];
-};
-const uint16_t GIF_MINUTES_MAX = 1440;
-const uint8_t  GIF_SECONDS_MIN = 2, GIF_SECONDS_MAX = 60;
-// The GIF brightness, found on the MatrixPortal S3 (2026-10-07) with the GIFs
-// that are hardest to make out (a log fire's dark logs and glow, a city of
-// many like colours): 54 in a dark room, twice the clock's with a lamp on.
-// Below about 48 the panel's colours step too coarsely for such GIFs anyway.
-const uint8_t  GIF_BRIGHT_MIN_DEFAULT = 54, GIF_BRIGHT_TIMES_DEFAULT = 20;
-const uint8_t  GIF_BRIGHT_TIMES_MIN = 10, GIF_BRIGHT_TIMES_MAX = 50;
-const GifSettings GIF_DEFAULTS = { GIF_SETTINGS_MAGIC, GIF_SETTINGS_REV, 1, 2, 30, 7,
-                                   GIF_BRIGHT_MIN_DEFAULT, GIF_BRIGHT_TIMES_DEFAULT, { 0 } };
-GifSettings gifSettings;
-SettingsStore<GifSettings> gifStore;
-// The web app's keys for them (settings_table.h); the longest time between
-// two GIFs is at least the shortest (gifSettingsCheck()).
-const SettingParam GIF_PARAMS[] = {
-  { "gifr",   SETTING_FIELD(GifSettings, randomOn),    PARAM_CHECKBOX, 0, 0,                    1,                    LOAD_BOOL,  nullptr },
-  { "gifmin", SETTING_FIELD(GifSettings, minMinutes),  PARAM_RANGE,    0, 1,                    GIF_MINUTES_MAX,      LOAD_CLAMP, nullptr },
-  { "gifmax", SETTING_FIELD(GifSettings, maxMinutes),  PARAM_RANGE,    0, 1,                    GIF_MINUTES_MAX,      LOAD_CLAMP, nullptr },
-  { "gifsec", SETTING_FIELD(GifSettings, seconds),     PARAM_RANGE,    0, GIF_SECONDS_MIN,      GIF_SECONDS_MAX,      LOAD_CLAMP, nullptr },
-  { "gifbr",  SETTING_FIELD(GifSettings, minBright),   PARAM_RANGE,    0, 0,                    255,                  LOAD_KEEP,  nullptr },
-  { "gifbx",  SETTING_FIELD(GifSettings, brightTimes), PARAM_TENTHS,   0, GIF_BRIGHT_TIMES_MIN, GIF_BRIGHT_TIMES_MAX, LOAD_CLAMP, nullptr },
-};
-SettingsTable gifTable = SETTING_TABLE(gifSettings, GIF_DEFAULTS, GIF_PARAMS);
 
 // GIF playback state (the section "GIF playback" at the end of the sketch).
 #if BOARD_WAVESHARE_WALL
@@ -434,77 +250,13 @@ const uint8_t       PANEL_INFO_HALF_S     = 30;     // messages and cards start 
 unsigned long faceChangeEndedAt = 0;   // the face's last change or scene ended
 unsigned long panelFaceSince    = 0;   // the face came back on top
 
-// Decoration - GIFs of their own accord and the faces' extras - and when it
-// rests: quiet hours, and a dark room by the light sensor. A blob of its
-// own (NVS key "deco").
-#define DECOR_SETTINGS_MAGIC 0xDEC0
-#define DECOR_SETTINGS_REV   1
-struct DecorSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  extras;      // how often the faces' extras come: 0 never, 1 rare ... DECOR_EXTRAS_MAX often
-  uint8_t  quietFrom;   // quiet hours from this hour ...
-  uint8_t  quietTo;     // ... to this one; the same hour twice: none
-  uint16_t darkLux;     // below this light no decoration; 0 = off
-};
-static_assert(sizeof(DecorSettings) == 8, "the stored blob keeps its size");
-const uint8_t DECOR_EXTRAS_MAX = 6;
-// The mean minutes between two extras for each step of the slider (0 = never).
-const uint8_t DECOR_EXTRAS_MINUTES[DECOR_EXTRAS_MAX + 1] = { 0, 60, 30, 15, 10, 5, 2 };
-// About every 5 min, as the Aliens' extras and the Muncher's fruit came before; no quiet.
-const DecorSettings DECOR_DEFAULTS = { DECOR_SETTINGS_MAGIC, DECOR_SETTINGS_REV, 5, 0, 0, 0 };
-DecorSettings decorSettings;
-SettingsStore<DecorSettings> decorStore;
-// The web app's keys for them (settings_table.h); a new pace of the extras
-// draws the next one anew (applyDecorParams()).
-const SettingParam DECOR_PARAMS[] = {
-  { "dxr", SETTING_FIELD(DecorSettings, extras),    PARAM_RANGE, 0, 0, DECOR_EXTRAS_MAX, LOAD_DEFAULT, nullptr },
-  { "dqf", SETTING_FIELD(DecorSettings, quietFrom), PARAM_RANGE, 0, 0, 23,               LOAD_DEFAULT, nullptr },
-  { "dqt", SETTING_FIELD(DecorSettings, quietTo),   PARAM_RANGE, 0, 0, 23,               LOAD_DEFAULT, nullptr },
-  { "ddk", SETTING_FIELD(DecorSettings, darkLux),   PARAM_RANGE, 0, 0, 60000,            LOAD_KEEP,    nullptr },
-};
-SettingsTable decorTable = SETTING_TABLE(decorSettings, DECOR_DEFAULTS, DECOR_PARAMS);
+// Decoration: its settings in settings.h.
 unsigned long extrasDueAt = 0;          // the next extra of a face; 0 = not drawn yet
 unsigned long infoCardsEndedAt = 0;     // a GIF keeps ROUND_GIF_GAP_MS after info cards
 
-// Info band data ---------------------------------------------------------------
-// The place the clock fetches weather and warnings for, and which of its
-// sources are on: a blob of its own (NVS key "feeds"). The sources and the
-// items are in src/band_data.h, their scheduling at the end of the sketch.
-#define FEED_SETTINGS_MAGIC 0xFEED
-#define FEED_SETTINGS_REV   3          // 1 = before frames, 2 = before the info round
-struct FeedSettings {
-  uint16_t magic;
-  uint8_t  rev;
-  uint8_t  on;          // one bit per FeedId: the sources fetched
-  int32_t  lat, lon;    // the place, in millionths of a degree
-  uint8_t  located;     // 1 once a place is set; nothing is fetched before
-  uint8_t  frames;      // 1: an alert's banner has a frame in its level's colour (rev 2)
-  uint8_t  roundMinutes;   // minutes between info rounds on a clock without a band; 0 = none (rev 3)
-  uint8_t  reserved;
-};
-static_assert(sizeof(FeedSettings) == 16, "FeedSettings keeps the size stored blobs have");
-const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
-                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS) | (1 << FEED_AIR)), 0, 0, 0, 1, 15, 0 };
-// The info round's choices, in minutes (0 = never): each divides the hour.
-const uint8_t ROUND_CHOICES[] = { 0, 5, 10, 15, 20, 30, 60 };
-FeedSettings feedSettings;
-SettingsStore<FeedSettings> feedStore;
-// The web app's keys for them (settings_table.h). The place and the info
-// round have their own code (applyFeedParams()), and the round is the 64x32
-// clock's alone: the wall clock shows the items in its band.
-const SettingParam FEED_PARAMS[] = {
-  { "feedw",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_WEATHER,  0, LOAD_KEEP, nullptr },
-  { "feeda",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_WARNINGS, 0, LOAD_KEEP, nullptr },
-  { "feedq",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_AIR,      0, LOAD_KEEP, nullptr },
-  { "afr",    SETTING_FIELD(FeedSettings, frames), PARAM_CHECKBOX, 0, 0,             1, LOAD_KEEP, nullptr },
-  { "lat",    0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },   // degrees, "" for none
-  { "lon",    0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },
-#if !BAND_ON_PANEL
-  { "iround", 0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },   // minutes, one of ROUND_CHOICES
-#endif
-};
-SettingsTable feedTable = SETTING_TABLE(feedSettings, FEED_DEFAULTS, FEED_PARAMS);
+// Info band data ------------------------------------------------------------------
+// (The place and the sources that are on: settings.h. The sources and the
+// items are in src/band_data.h, their scheduling at the end of the sketch.)
 
 // Per source: when it is due, and how its last fetch went.
 struct FeedRun {
@@ -1513,12 +1265,9 @@ void printWifiStatus();
 // Settings persistence
 long tzTotalOffset();
 void loadSettings();
-void loadUiSettings();
-bool saveUiSettings();
 void loadWifiCreds();
 bool saveWifiCreds();
 bool forgetWifi();
-bool saveSettings();
 void applySettings();
 uint16_t scaledColorB(uint8_t r, uint8_t g, uint8_t b, uint8_t bright);
 uint16_t scaledColor(uint8_t r, uint8_t g, uint8_t b);
@@ -1632,9 +1381,6 @@ void printAgo(Print &c, unsigned long at);
 FaceOutcome applyLiveParams(const String &q);
 String applyKeysForm(const String &q);
 // GIF playback
-void gifSettingsCheck();
-void loadGifSettings();
-bool saveGifSettings();
 void applyGifParams(const String &q);
 void gifGammaInit();
 void gifScheduleNext();
@@ -1672,7 +1418,6 @@ void gifCardUpdate();
 void gifCardCommand(const char *line);
 // Info band data
 void loadFeedSettings();
-bool saveFeedSettings();
 bool feedOn(uint8_t f);
 bool feedsReady();
 bool feedDueWithin(uint8_t f, unsigned long early);
@@ -1728,8 +1473,6 @@ unsigned long panelRandomAt(unsigned long lo, unsigned long hi, unsigned long ms
 void extrasScheduleNext();
 bool extrasDue();
 void extrasUpdate();
-void loadDecorSettings();
-bool saveDecorSettings();
 void applyDecorParams(const String &q);
 bool noticeClosedBy(InputEvent ev);
 void loadNoticeKeys();
@@ -4386,25 +4129,6 @@ void loadSettings() {
   applySettings();
 }
 
-// UI settings from flash; the defaults on a clock that never had them, which
-// are only written once something is changed. Fields an older revision did
-// not have get their default, here in RAM; the next save stores them.
-void loadUiSettings() {
-  uiStore.begin("ui");
-  uiStore.read(uiSettings);
-  if (uiSettings.magic != UI_SETTINGS_MAGIC) { uiSettings = UI_DEFAULTS; }
-  if (uiSettings.rev < 2) { uiSettings.syncDays = UI_DEFAULTS.syncDays; }
-  if (uiSettings.rev < 3) { uiSettings.gestureMount = UI_DEFAULTS.gestureMount; uiSettings.reserved = 0; }
-  settingsCheck(uiTable);   // the profile, the sync days, the sensor's mount (UI_PARAMS)
-  Console.print("Input profile: "); Console.println(INPUT_PROFILES[uiSettings.inputProfile].name);
-}
-
-bool saveUiSettings() {
-  uiSettings.magic = UI_SETTINGS_MAGIC;
-  uiSettings.rev   = UI_SETTINGS_REV;
-  return uiStore.write(uiSettings);
-}
-
 // The home WiFi from flash. A clock that has never stored one takes the
 // credentials the build brings (arduino_secrets.h), and stores them - once:
 // from then on the stored ones count, also when they have been forgotten.
@@ -4444,13 +4168,6 @@ bool forgetWifi() {
   wifiForgottenAt = millisNow ? millisNow : 1;   // the station stays a moment (stationUpdate())
   Console.println("WiFi: forgotten");
   return stored;
-}
-
-// Write current settings to flash.
-bool saveSettings() {
-  settings.magic       = SETTINGS_MAGIC;
-  settings.settingsRev = SETTINGS_REV;
-  return clockStore.write(settings);
 }
 
 // Push settings into the runtime globals that drive the clock.
@@ -6433,37 +6150,6 @@ String applyKeysForm(const String &q) {
    brightness (PanelCanvas::panelValue) dim a GIF as they dim the face.
    ====================================================================== */
 
-// Keeps the settings in range: whole minutes, the maximum not below the minimum.
-void gifSettingsCheck() {
-  settingsCheck(gifTable);   // each within its range (GIF_PARAMS)
-  if (gifSettings.maxMinutes < gifSettings.minMinutes) { gifSettings.maxMinutes = gifSettings.minMinutes; }
-}
-
-void loadGifSettings() {
-  gifStore.begin("gif");
-  gifStore.read(gifSettings);
-  if (gifSettings.magic != GIF_SETTINGS_MAGIC) { gifSettings = GIF_DEFAULTS; }
-  if (gifSettings.rev < 3) {
-    // Rev 3 brings the GIF brightness rule; its start values replace what rev 2
-    // (a test build only) had and the 0 rev 1 held in those reserved bytes.
-    gifSettings.minBright = GIF_BRIGHT_MIN_DEFAULT;
-    gifSettings.brightTimes = GIF_BRIGHT_TIMES_DEFAULT;
-    gifSettings.rev = GIF_SETTINGS_REV;
-    gifStore.write(gifSettings);
-  }
-  gifSettingsCheck();
-  Console.printf("GIFs: %s, every %u to %u min for %u s\n", gifSettings.randomOn ? "random on" : "random off",
-                gifSettings.minMinutes, gifSettings.maxMinutes, gifSettings.seconds);
-  Console.printf("GIFs: at least %u bright and %u.%u times the clock's\n", gifSettings.minBright,
-                gifSettings.brightTimes / 10, gifSettings.brightTimes % 10);
-}
-
-bool saveGifSettings() {
-  gifSettings.magic = GIF_SETTINGS_MAGIC;
-  gifSettings.rev   = GIF_SETTINGS_REV;
-  return gifStore.write(gifSettings);
-}
-
 // The GIF section of the config page (/save).
 void applyGifParams(const String &q) {
   settingsApply(gifTable, [&q](const char *key) { return getParam(q, key); }, false);   // GIF_PARAMS
@@ -7234,12 +6920,6 @@ void loadFeedSettings() {
     Console.printf("Info band: weather %s, warnings %s, air quality %s, for %s, %s\n", feedOn(FEED_WEATHER) ? "on" : "off",
                   feedOn(FEED_WARNINGS) ? "on" : "off", feedOn(FEED_AIR) ? "on" : "off", lat, lon);
   }
-}
-
-bool saveFeedSettings() {
-  feedSettings.magic = FEED_SETTINGS_MAGIC;
-  feedSettings.rev   = FEED_SETTINGS_REV;
-  return feedStore.write(feedSettings);
 }
 
 bool feedOn(uint8_t f) {
@@ -8038,19 +7718,6 @@ void extrasUpdate() {
   if (face.request(faceMoment(), TRIGGER_NOW_AND_THEN) != OUTCOME_PLAYED) {
     Console.println("Extra: due, the face has no room for it - dropped");
   }
-}
-
-void loadDecorSettings() {
-  decorStore.begin("deco");
-  decorStore.read(decorSettings);
-  if (decorSettings.magic != DECOR_SETTINGS_MAGIC) { decorSettings = DECOR_DEFAULTS; }   // written with the next save
-  settingsCheck(decorTable);   // the extras' pace and the quiet hours (DECOR_PARAMS)
-}
-
-bool saveDecorSettings() {
-  decorSettings.magic = DECOR_SETTINGS_MAGIC;
-  decorSettings.rev   = DECOR_SETTINGS_REV;
-  return decorStore.write(decorSettings);
 }
 
 // The web app's extras and quiet; a new pace of the extras draws the next anew.
