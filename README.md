@@ -74,10 +74,16 @@ in the wall's own 192x128 LEDs.
 - **Room temperature and humidity:** the board's Sensirion SHTC3 (0x70 on its
   own bus), read every 5 s and filtered over 30 s; shown in the web app under
   the panel's preview, in the info band, and sent to Home Assistant. It sits on
-  the board beside the ESP32-S3 and its regulators: on 2026-10-22 it read
-  34 °C and 31 % with the panels on, which looks well above the room's (not
-  compared yet). How far it is off, and whether a correction is worth it, is
-  being measured against a thermometer in Home Assistant.
+  the board beside the ESP32-S3 and its regulators, which warm it: on
+  2026-10-22 it read 34.5 °C and 27 % in a room of about 24 °C and 50 %.
+  **Board warmth** (System section, under the sensors; 0 to 20.0 °C, 10.5 on
+  the wall since then) is taken off its temperature, and the humidity is worked
+  out for the room's temperature through the saturation vapour pressure
+  (Magnus) - the air at the sensor holds as much water as the room's, only
+  warmer: 34.5 °C / 27 % became 24.0 °C / 49 %. The conversion also scales the
+  sensor's own error, about x1.8 from 34 to 24 °C, so the humidity is a guide
+  within a few percent. Whether the warmth stays the same with the panels'
+  brightness and the time of day is to be seen in Home Assistant.
 - **Panels dark before an upload:** `POST /api/black` (the web app's
   interface, in every build) switches the panels dark until the next start -
   before every upload, since the ROM bootloader leaves the last row pair lit at
@@ -669,16 +675,16 @@ Setting it up:
 1. In Home Assistant, install the **Mosquitto broker** add-on, add a Home
    Assistant user for the clock, and set up the MQTT integration if Home
    Assistant does not offer it by itself.
-2. On the clock's page, section **Info**, card **Home Assistant**:
+2. On the clock's page, section **Home Assistant**:
    the broker's address (`homeassistant.local` or its IP), port 1883, that user
    and its password, the switch on, **Save Home Assistant link**. The link needs
-   a stored home WiFi and **continuous network access** (Home WiFi section);
+   a stored home WiFi and **continuous network access** (Network section);
    the card says what is missing.
 3. The clock shows up in Home Assistant as the device *Matrix Clock xxxxxx*, by
    MQTT discovery, with an entity **Message** (notify), with a BH1750 a sensor
    **Light** (lux), and on the wall clock the sensors **Temperature** (°C) and
    **Humidity** (%) from its board's SHTC3.
-4. **Values to Home Assistant** on the same card: a sensor's value goes out
+4. **Values to Home Assistant** in the same section: a sensor's value goes out
    when it changed - the light by 10 % (at least 1 lx), the temperature by
    0.2 °C, the humidity by 1 % - but at most every *At most every* seconds
    (60 unless set, 5 to 255), and unchanged still every *At least every*
