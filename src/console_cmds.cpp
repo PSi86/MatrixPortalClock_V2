@@ -2,18 +2,18 @@
 // (console_cmds.h).
 #include "console_cmds.h"
 
+#include <esp_heap_caps.h>
 #include "clock_state.h"
 #include "console.h"
 #include "feeds.h"
+#include "gif_player.h"
 #include "lan_access.h"
 #if BOARD_WAVESHARE_WALL
 #include <mbedtls/sha256.h>    // the "crypto" test of the panel output beside the crypto DMA
 #include <mbedtls/aes.h>
 #include <soc/gdma_struct.h>   // and "gdma": the DMA channels' peripherals and priorities
-#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include "brightness.h"
-#include "gif_player.h"
 #include "info_band.h"
 #include "time_sync.h"
 
@@ -33,9 +33,13 @@ static void wallCryptoTest(bool external);
 //   over HTTPS), to watch the panel output while they are fetched.
 // - "lan on" / "lan off" switch the web app on the home network, as its
 //   switch on the hotspot's page does (with the password set there).
+// - "gif <name or keyword>" asks for a GIF as the web app does (gifRequest();
+//   "gif! ..." with replace), "gifs <name or keyword>" lists what it finds.
 // On the wall clock also its own (wallCommand()).
+static void gifCommand(const char *line);
+
 void consoleCommands() {
-  static char line[32];
+  static char line[96];   // a card GIF's name has up to 63 characters
   static uint8_t len = 0;
   while (Console.available() > 0) {
     char c = (char)Console.read();
@@ -59,10 +63,44 @@ void consoleCommands() {
       lanSwitch(lanOn);
       Console.printf("Web app on the home network: %s\n", lanOn ? "on" : "off");
     }
+    gifCommand(line);
 #if BOARD_WAVESHARE_WALL
     wallCommand(line);
 #endif
   }
+}
+
+// "gif ...", "gif! ..." and "gifs ..." (consoleCommands()).
+static void gifCommand(const char *line) {
+  if (strncmp(line, "gifs ", 5) == 0 || strcmp(line, "gifs") == 0) {
+    uint16_t count = (uint16_t)gifCount();
+    uint8_t *hit = count ? (uint8_t *)heap_caps_malloc(count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+    if (count && !hit) { Console.println("GIFs: no RAM to search"); return; }
+    bool byName = false;
+    uint32_t t0 = micros();
+    uint16_t found = count ? gifFind(line[4] ? line + 5 : "", hit, byName) : 0;
+    uint32_t us = micros() - t0;
+    Console.printf("GIFs: %u of %u found%s in %lu us, %u in the meta index:\n", found, count, byName ? " by name" : "",
+                  (unsigned long)us, gifMetaKnown());
+    uint16_t shown = 0;
+    for (uint16_t i = 0; i < count && shown < 40; i++) {
+      if (!hit[i]) { continue; }
+      uint16_t w = 0, h = 0;
+      gifSizeOf((int16_t)i, w, h);
+      Console.printf("  %s (%ux%u%s) %s\n", gifMetaOf((int16_t)i).field[GIF_META_NAME], w, h,
+                    gifFitsNow((int16_t)i) ? "" : ", does not fit now", gifTitleOf((int16_t)i));
+      shown++;
+    }
+    heap_caps_free(hit);
+    return;
+  }
+  bool replace = strncmp(line, "gif! ", 5) == 0 || strcmp(line, "gif!") == 0;
+  if (!replace && strncmp(line, "gif ", 4) != 0 && strcmp(line, "gif") != 0) { return; }
+  const char *what = line + (replace ? 4 : 3);
+  while (*what == ' ') { what++; }
+  GifAnswer a = gifRequest(what, replace);
+  Console.printf("GIF asked for: %s (%u found, %u fit)%s%s\n", gifAskedWords(a.how), a.matches, a.fit, a.index >= 0 ? " - " : "",
+                a.index >= 0 ? gifMetaOf(a.index).field[GIF_META_NAME] : "");
 }
 #endif
 

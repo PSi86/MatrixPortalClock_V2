@@ -41,14 +41,27 @@
 # the clock inflates a deflated one into PSRAM with the inflate in the chip's
 # ROM before it plays.
 #
+# A folder may hold a meta index, gif_meta.txt (the README's "GIF meta
+# index"; the GIF library writes one with every choice): a line per GIF -
+# its file name, title, franchise, category, era, style and motif, apart by
+# tabs - between "MATRIXCLOCK GIF META 1" and "END <count>". The clock
+# searches it for GIFs on request. When any folder has one, the pack carries
+# a line for each of its GIFs, in the order of the index (a GIF without a
+# line gets one with its name alone).
+#
 # Layout (little-endian), the one the firmware reads:
 #   header, 32 bytes: magic "CLKGPACK", version (u16) = 1, count (u16),
-#     CRC-32 of the index (u32), pack size in bytes (u32), 12 bytes zero
+#     CRC-32 of the index (u32), pack size in bytes (u32), and where the
+#     meta index lies: its offset from the start of the pack (u32), its bytes
+#     (u32) and their CRC-32 (u32) - all three 0 in a pack without one (they
+#     were 12 bytes zero before the meta index, which a clock from before it
+#     still takes them for)
 #   index, count x 56 bytes: name (32 bytes, NUL-terminated), width (u16),
 #     height (u16), codec (u8: 0 stored, 1 deflated), 3 bytes zero, offset
 #     from the start of the pack (u32), bytes stored (u32), bytes of the GIF
 #     itself (u32), CRC-32 of the bytes stored (u32)
-#   then the GIFs' bytes, one after the other.
+#   then the GIFs' bytes, one after the other, and last the meta index, as
+#   text in UTF-8: its first line, a line per GIF of the index, "END <count>".
 #
 # Without PlatformIO, for a test or an image of one's own:
 #   python scripts/gif_pack.py OUT.bin FOLDER... [--panel 64x32]
@@ -64,9 +77,12 @@ import zlib
 
 MAGIC = b"CLKGPACK"
 VERSION = 1
-HEADER = struct.Struct("<8sHHII12x")
+HEADER = struct.Struct("<8sHHIIIII")
 ENTRY = struct.Struct("<32sHHB3xIIII")
 STORED, DEFLATED = 0, 1
+META_FILE = "gif_meta.txt"
+META_HEAD = "MATRIXCLOCK GIF META 1"
+META_FIELDS = 7             # name, title, franchise, category, era, style, motif
 COUNT_MAX = 4000            # the firmware refuses a pack with more
 GIF_MAX = 614400            # nor a GIF larger than this once inflated
 ROM_USB = (0x303A, 0x1001)  # an ESP32-S3's USB-Serial/JTAG, as its ROM bootloader shows up
@@ -84,40 +100,98 @@ def entry_name(path):
     return stem.encode("ascii", "replace")[:31]
 
 
+def read_meta(folder):
+    """The lines of the folder's meta index by file name, {} without one. A
+    file that does not end with its "END <count>" is taken as cut off and
+    left out."""
+    path = os.path.join(folder, META_FILE)
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    if not lines or lines[0].rstrip("\r") != META_HEAD:
+        sys.stderr.write("GIF pack: %s does not start with \"%s\" - left out\n" % (path, META_HEAD))
+        return {}
+    found = {}
+    for line in lines[1:]:
+        line = line.rstrip("\r")
+        if line.startswith("END "):
+            if line[4:].strip() == str(len(found)):
+                return found
+            break
+        if line:
+            fields = line.split("\t")[:META_FIELDS]
+            fields += [""] * (META_FIELDS - len(fields))
+            found[fields[0]] = "\t".join(fields)
+    sys.stderr.write("GIF pack: %s has no END line for its %d lines - left out\n" % (path, len(found)))
+    return {}
+
+
+def meta_end(count):
+    return ("END %d\n" % count).encode()
+
+
+def meta_summary(gifs, taken):
+    """In words: whether the pack has a meta index, and for how many of its GIFs."""
+    lines = {g[0]: g[4] for g in gifs if len(g) > 4}
+    known = sum(1 for name in taken if lines.get(name))
+    if not known:
+        return "no meta index (no %s in the folders): GIFs on request find them by name only" % META_FILE
+    return "meta index for %d of the %d GIFs (%s)" % (known, len(taken), META_FILE)
+
+
 def layout(gifs, capacity):
-    """gifs: [(name bytes, width, height, data)] in the order to take them.
-    Takes each that still fits into capacity bytes (header and index
-    included) and returns (pack bytes, taken, left out), the last two as lists
-    of names."""
-    chosen, left_out, used = [], [], HEADER.size
-    for name, w, h, data in gifs:
+    """gifs: [(name bytes, width, height, data[, meta line, file name])] in
+    the order to take them, as collect() gives them; the meta line is the
+    GIF's line of its folder's meta index, None without one. Takes each that
+    still fits into capacity bytes (header, index and meta index included)
+    and returns (pack bytes, taken, left out), the last two as lists of names.
+    The pack carries a meta index when any GIF has a line; a GIF without one
+    gets a line with its file name alone."""
+    with_meta = any(len(g) > 4 and g[4] for g in gifs)
+    chosen, left_out = [], []
+    used = HEADER.size + (len(META_HEAD) + 1 if with_meta else 0)   # the END line is counted with each GIF
+    for g in gifs:
+        name, w, h, data = g[:4]
+        line = None
+        if with_meta:
+            file_name = g[5] if len(g) > 5 else name.decode("ascii", "replace") + ".gif"
+            line = g[4] if g[4] else "\t".join([file_name] + [""] * (META_FIELDS - 1))
         codec, stored = payload(data)
-        cost = ENTRY.size + len(stored)
-        if len(chosen) >= COUNT_MAX or len(data) > GIF_MAX or used + cost > capacity:
+        cost = ENTRY.size + len(stored) + (len(line.encode("utf-8")) + 1 if line is not None else 0)
+        end = len(meta_end(len(chosen) + 1)) if with_meta else 0
+        if len(chosen) >= COUNT_MAX or len(data) > GIF_MAX or used + cost + end > capacity:
             left_out.append(name)
             continue
-        chosen.append((name, w, h, codec, stored, len(data)))
+        chosen.append((name, w, h, codec, stored, len(data), line))
         used += cost
     offset = HEADER.size + ENTRY.size * len(chosen)
     index, blobs = b"", []
-    for name, w, h, codec, stored, gif_bytes in chosen:
+    for name, w, h, codec, stored, gif_bytes, _line in chosen:
         index += ENTRY.pack(name, w, h, codec, offset, len(stored), gif_bytes, zlib.crc32(stored))
         blobs.append(stored)
         offset += len(stored)
-    pack = HEADER.pack(MAGIC, VERSION, len(chosen), zlib.crc32(index), offset) + index + b"".join(blobs)
-    assert len(pack) == used
+    meta = b""
+    if with_meta:
+        meta = (META_HEAD + "\n" + "".join(c[6] + "\n" for c in chosen)).encode("utf-8") + meta_end(len(chosen))
+    meta_at = offset if meta else 0
+    pack = HEADER.pack(MAGIC, VERSION, len(chosen), zlib.crc32(index), offset + len(meta), meta_at, len(meta),
+                       zlib.crc32(meta) if meta else 0) + index + b"".join(blobs) + meta
+    assert len(pack) == used + (len(meta_end(len(chosen))) if with_meta else 0)
     return pack, [c[0] for c in chosen], left_out
 
 
 def collect(folders, panel, orientation, skip_sha1=()):
     """The GIFs of the folders that fit, smallest stored size first, without
     copies and without those in skip_sha1 (the GIF library passes what a clock
-    has elsewhere). Returns (gifs for layout(), number that do not fit, number
-    left out as copies)."""
+    has elsewhere), each with its line of its folder's meta index (or None).
+    Returns (gifs for layout(), number that do not fit, number left out as
+    copies)."""
     import gif_common
     seen, found, too_big, copies = set(skip_sha1), [], 0, 0
     for folder in folders:
         skip = gif_common.exclusions(folder)
+        meta = read_meta(folder)
         for path in gif_common.gifs_in(folder):
             if gif_common.excluded(path, skip):
                 continue
@@ -133,9 +207,9 @@ def collect(folders, panel, orientation, skip_sha1=()):
                 copies += 1
                 continue
             seen.add(digest)
-            found.append((len(payload(data)[1]), path, size, data))
+            found.append((len(payload(data)[1]), path, size, data, meta.get(os.path.basename(path))))
     found.sort(key=lambda f: (f[0], f[1]))
-    return [(entry_name(p), s[0], s[1], d) for _n, p, s, d in found], too_big, copies
+    return [(entry_name(p), s[0], s[1], d, m, os.path.basename(p)) for _n, p, s, d, m in found], too_big, copies
 
 
 def rom_ports(ports):
@@ -272,6 +346,7 @@ def _pio(env):
         print("GIF pack: %d GIFs, %d of %d bytes (ffat at 0x%x); %d did not fit the room left, %d do not fit "
               "the panel, %d left out as copies" % (len(taken), len(pack), capacity, offset,
                                                                 len(left_out), too_big, copies))
+        print("GIF pack: %s" % meta_summary(gifs, taken))
         print("GIF pack: from %s - %s" % (", ".join(folders), out))
         return 0
 
@@ -355,6 +430,7 @@ if __name__ == "__main__" and "Import" not in globals():
         f.write(pack)
     print("%d GIFs, %d bytes; %d did not fit the room left, %d do not fit the panel, %d copies"
           % (len(taken), len(pack), len(left_out), too_big, copies))
+    print(meta_summary(gifs, taken))
 elif "Import" in globals():   # run by PlatformIO (SCons) as an extra script
     Import("env")  # noqa: F821 - provided by PlatformIO/SCons
     _pio(env)  # noqa: F821

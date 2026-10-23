@@ -6,6 +6,7 @@
 #include "board_hal.h"
 #include "brightness.h"
 #include "clock_state.h"
+#include "gif_player.h"
 #include "web_server.h"
 #include "hotspot.h"
 #include "clock_time.h"
@@ -30,6 +31,7 @@ static bool haNameOk(const char *name);
 static void haIconLook(JsonDocument &doc, BandItem &it);
 static void haItem(const char *name, const char *payload, uint16_t len);
 static void haMessage(const char *payload, uint16_t len);
+static void haGif(const char *payload, uint16_t len);
 static const char *haBlocked();
 
 // The Home Assistant link ------------------------------------------------------------
@@ -144,8 +146,10 @@ const char *haBlocked() {
 }
 
 // The discovery configs: an entity to send the clock a message (notify,
-// Home Assistant 2024.5 on), and the light sensor's lux when there is one.
-// Without a sensor its config is taken back, in case it was there before.
+// Home Assistant 2024.5 on), the light sensor's lux when there is one, and
+// for GIFs on request a text entity (a name or a keyword; text.set_value in
+// an automation) and a button for any GIF. Without a sensor its config is
+// taken back, in case it was there before.
 void haBuildAnnounce() {
   HaLink &l = haLink();
   const char *id = haId();
@@ -183,6 +187,36 @@ void haBuildAnnounce() {
     haSensorConfig(l.announce[3], dev, "Humidity", "humidity", "humidity", "%", 0);
   }
 #endif
+
+  // GIFs on request (haGif()): the text entity sends what is typed, the
+  // button any GIF; neither takes the place of a GIF on show - an
+  // automation that wants that publishes {"gif": ..., "replace": true}.
+  JsonDocument gif;
+  gif["name"] = "GIF";
+  gif["unique_id"] = String(netHostname()) + "-gif";
+  gif["command_topic"] = l.gif;
+  gif["command_template"] = "{\"gif\": {{ value | tojson }}}";
+  gif["max"] = 100;
+  gif["icon"] = "mdi:file-gif-box";
+  gif["availability_topic"] = l.status;
+  gif["qos"] = 1;
+  gif["device"] = dev;
+  snprintf(l.announceTopic[4], sizeof(l.announceTopic[4]), "homeassistant/text/%s/gif/config", id);
+  l.announce[4] = "";
+  serializeJson(gif, l.announce[4]);
+
+  JsonDocument play;
+  play["name"] = "Play GIF";
+  play["unique_id"] = String(netHostname()) + "-play-gif";
+  play["command_topic"] = l.gif;
+  play["payload_press"] = "{}";
+  play["icon"] = "mdi:play-box-outline";
+  play["availability_topic"] = l.status;
+  play["qos"] = 1;
+  play["device"] = dev;
+  snprintf(l.announceTopic[5], sizeof(l.announceTopic[5]), "homeassistant/button/%s/gif/config", id);
+  l.announce[5] = "";
+  serializeJson(play, l.announce[5]);
 }
 
 // A sensor's discovery config: its name, its topic past the clock's prefix
@@ -393,6 +427,10 @@ void haApply(const HaIn &m) {
         // An empty one is how a kept message is taken off the broker.
         if (m.retained)    { Console.println("Home Assistant: a message kept by the broker is not shown again"); }
         else if (m.len)    { haMessage(m.payload, m.len); }
+      } else if (strcmp(m.topic, "gif") == 0) {
+        // The same for a GIF asked for: it was played, or not, when it came.
+        if (m.retained) { Console.println("Home Assistant: a GIF request kept by the broker is not played again"); }
+        else            { haGif(m.payload, m.len); }
       }
       break;
     default:
@@ -536,6 +574,32 @@ void haMessage(const char *payload, uint16_t len) {
   it.until = clockNow() + seconds;
   it.tag   = ++messages;
   bandPut(it);
+}
+
+// mpclock/<id>/gif: a GIF by its name or a keyword (gifRequest()), as JSON -
+// gif, and replace (true) to take the place of a GIF on show - or as the
+// text alone; empty, or JSON without gif, asks for any GIF.
+void haGif(const char *payload, uint16_t len) {
+  char what[HA_PAYLOAD_MAX + 1];
+  bool replace = false;
+  const char *p = payload;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') { p++; }
+  if (*p == '{') {
+    JsonDocument doc;
+    DeserializationError e = deserializeJson(doc, payload, len);
+    if (e || !doc.is<JsonObject>()) {
+      Console.printf("Home Assistant: the GIF request is no JSON object (%s)\n", e ? e.c_str() : "another JSON value");
+      return;
+    }
+    strlcpy(what, doc["gif"] | "", sizeof(what));
+    JsonVariant r = doc["replace"];
+    replace = r.is<bool>() ? r.as<bool>() : r.is<long>() ? r.as<long>() != 0
+            : r.is<const char *>() && (strcmp(r.as<const char *>(), "true") == 0 || strcmp(r.as<const char *>(), "1") == 0);
+  } else {
+    strlcpy(what, p, sizeof(what));
+  }
+  GifAnswer a = gifRequest(what, replace);
+  Console.printf("Home Assistant: GIF \"%s\"%s - %s\n", what, replace ? ", replace" : "", gifAskedWords(a.how));
 }
 
 // The settings for the page; never the password, only whether there is one.

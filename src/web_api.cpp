@@ -44,6 +44,8 @@ static void apiStatusInto(JsonDocument &d);
 static void apiState(Print &c);
 static void apiGestures(Print &c);
 static void apiPanel(Print &c);
+static const char *gifAskedCode(GifAsked how);
+static void apiGifs(Print &c, const String &body);
 static size_t packRead(WiFiClient &client, uint8_t *buf, size_t want);
 static void packDrain(WiFiClient &client, long left);
 static void drawPackProgress(uint32_t done, uint32_t total);
@@ -481,6 +483,7 @@ static void apiState(Print &c) {
   gifs["pack"] = (gifPackState == GIF_PACK_OK) ? gifPackCount : 0;
   gifs["packState"] = gifPackState == GIF_PACK_OK ? "ok" : gifPackState == GIF_PACK_BAD ? "damaged" : "none";
   gifs["packMaxKb"] = gifPackPart ? gifPackPart->size / 1024 : 0;   // what POST /api/pack takes
+  gifs["meta"] = gifMetaKnown();   // GIFs of the source playing that the meta index has a line for
 #if BOARD_WAVESHARE_WALL
   gifs["source"] = gifFromCard ? "card" : "pack";
   JsonObject sd = gifs["card"].to<JsonObject>();
@@ -569,6 +572,78 @@ static void apiPanel(Print &c) {
   c.write((const uint8_t *)matrix.getBuffer(), bytes);
 }
 
+// What a request for a GIF came to (gifRequest()), as the web app reads it.
+static const char *gifAskedCode(GifAsked how) {
+  switch (how) {
+    case GIF_ASKED_PLAYS:       return "plays";
+    case GIF_ASKED_READING:     return "reading";
+    case GIF_ASKED_NOT_ON_FACE: return "notOnFace";
+    case GIF_ASKED_GIF_ON_SHOW: return "gifOnShow";
+    case GIF_ASKED_NO_MATCH:    return "noMatch";
+    case GIF_ASKED_NONE_FITS:   return "noneFits";
+    default:                    return "notOpened";
+  }
+}
+
+// POST /api/gifs, find=<a name or a keyword>: the GIFs a request for it draws
+// from (gifFind()), for the web app's search - how many there are, how many
+// of them fit the panel as it is held, and the first GIF_LIST_MAX by title
+// with what the meta index says of them. An empty find lists them all.
+static const uint16_t GIF_LIST_MAX = 50;
+
+static void apiGifs(Print &c, const String &body) {
+  String find = getParam(body, "find");
+  uint16_t count = (uint16_t)gifCount();
+  uint8_t *hit = count ? (uint8_t *)heap_caps_malloc(count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+  int16_t *order = count ? (int16_t *)heap_caps_malloc(count * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+  if (count && (!hit || !order)) {
+    heap_caps_free(hit);
+    heap_caps_free(order);
+    sendJsonError(c, 500, "The clock has no RAM to search now.");
+    return;
+  }
+  bool byName = false;
+  uint32_t t0 = micros();
+  uint16_t found = count ? gifFind(find.c_str(), hit, byName) : 0, n = 0, fit = 0;
+  for (uint16_t i = 0; i < count; i++) {
+    if (!hit[i]) { continue; }
+    order[n++] = (int16_t)i;
+    fit += gifFitsNow((int16_t)i);
+  }
+  qsort(order, n, sizeof(int16_t), [](const void *a, const void *b) {
+    int16_t x = *(const int16_t *)a, y = *(const int16_t *)b;
+    int r = strcasecmp(gifTitleOf(x), gifTitleOf(y));
+    return r ? r : strcmp(gifMetaOf(x).field[GIF_META_NAME], gifMetaOf(y).field[GIF_META_NAME]);
+  });
+  uint32_t us = micros() - t0;
+  JsonDocument d;
+  d["count"] = found;
+  d["fit"] = fit;
+  d["byName"] = byName;
+  d["total"] = count;
+  d["meta"] = gifMetaKnown();   // GIFs the meta index has a line for; the rest are found by name
+  d["us"] = us;
+  JsonArray list = d["gifs"].to<JsonArray>();
+  for (uint16_t k = 0; k < n && k < GIF_LIST_MAX; k++) {
+    int16_t i = order[k];
+    const GifMeta &m = gifMetaOf(i);
+    JsonObject o = list.add<JsonObject>();
+    o["name"] = m.field[GIF_META_NAME];
+    o["title"] = gifTitleOf(i);
+    if (m.field[GIF_META_FRANCHISE][0]) { o["franchise"] = m.field[GIF_META_FRANCHISE]; }
+    if (m.field[GIF_META_CATEGORY][0])  { o["category"] = m.field[GIF_META_CATEGORY]; }
+    if (m.field[GIF_META_ERA][0])       { o["era"] = m.field[GIF_META_ERA]; }
+    uint16_t w = 0, h = 0;
+    gifSizeOf(i, w, h);
+    o["w"] = w;
+    o["h"] = h;
+    o["fits"] = gifFitsNow(i);
+  }
+  heap_caps_free(hit);
+  heap_caps_free(order);
+  sendJson(c, d);
+}
+
 // POST /api/pack: a GIF pack (the layout scripts/gif_pack.py writes), sent
 // whole as the request body, into the ffat partition. Its header is checked
 // before anything is erased, so a file that is no pack leaves the old one as
@@ -610,10 +685,7 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
 
   // Nothing plays from the old pack while it is overwritten.
   if (screen == SCREEN_GIF) { closeScreen(); }
-  gifPackState = GIF_PACK_NONE;
-  free(gifPack);
-  gifPack = nullptr;
-  gifPackCount = 0;
+  gifPackForget();
 #if BOARD_WAVESHARE_WALL
   if (!gifFromCard)   // the card's GIFs stay as they are
 #endif
@@ -856,17 +928,28 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     d["line"] = homeWifiStatusText();
     sendJson(c, d);
   } else if (path == "/api/gif") {
-    bool onFace = (screen == SCREEN_FACE);
-    // Over the face, now or not at all, also during or into the time's change
-    // (gifPlayNow()). Whether it played says why not: on the face, with GIFs
-    // to play, it could not be opened this moment (the card's next one not
-    // read yet, no RAM for the decoder).
-    if (onFace) { gifPlayNow(); }
-    bool playing = onFace && screen == SCREEN_GIF;
+    // A GIF over the face, now or not at all, also during or into the time's
+    // change (gifRequest()): gif=<its name or a keyword>, without it any GIF
+    // (the button "Play a GIF now"); replace=1 takes the place of a GIF on
+    // show. The answer says what came of it (result: gifAskedCode()), how
+    // many GIFs the request finds and how many of them fit, and the one
+    // chosen.
+    GifAnswer a = gifRequest(getParam(body, "gif").c_str(), getParam(body, "replace") == "1");
     JsonDocument d;
-    d["playing"] = playing;
-    d["busy"] = onFace && !playing && gifCount() > 0;
+    d["result"] = gifAskedCode(a.how);
+    d["playing"] = a.how == GIF_ASKED_PLAYS;
+    d["reading"] = a.how == GIF_ASKED_READING;   // the wall: read from the card first, plays in a moment
+    d["busy"] = a.how == GIF_ASKED_NOT_OPENED;   // could not be opened this moment (no RAM, the card's next not read yet)
+    d["matches"] = a.matches;
+    d["fit"] = a.fit;
+    d["byName"] = a.byName;
+    if (a.index >= 0) {
+      d["name"] = gifMetaOf(a.index).field[GIF_META_NAME];
+      d["title"] = gifTitleOf(a.index);
+    }
     sendJson(c, d);
+  } else if (path == "/api/gifs") {
+    apiGifs(c, body);
 #if BOARD_WAVESHARE_WALL
   } else if (path == "/api/card") {
     // The card read anew - a card put in, or GIFs changed on it - as soon

@@ -14,7 +14,10 @@
      height, one loop in ms, frames, SHA-1 and name per GIF), and one pass over
      the folder with FatFs's own readdir, which gives every file's size without
      opening it. A GIF the index does not name (put there by hand) is taken as
-     well; its size and loop are found when it is first read.
+     well; its size and loop are found when it is first read. Then the meta
+     index /gifs/.meta (card.py writes it too; README "GIF meta index"):
+     each GIF's title, franchise and the rest, and its search text for GIFs
+     on request (gif_find.h); a GIF it does not name is found by its name.
    - fetch: one GIF into PSRAM, through a 32 KB buffer in internal RAM. The
      card's DMA so never touches PSRAM - DMA into PSRAM by the crypto engine
      made the panel output stop on 2026-10-18 - and the copy into PSRAM is the
@@ -34,6 +37,7 @@
 #include <mbedtls/sha1.h>
 #include <freertos/queue.h>
 #include <esp_heap_caps.h>
+#include "gif_find.h"
 
 const uint32_t CARD_GIF_MAX     = 4UL << 20;   // bytes; the largest GIF of the library that fits the wall has 1.8 MB
 const uint16_t CARD_COUNT_MAX   = 8000;
@@ -63,6 +67,9 @@ struct CardList {
   uint16_t count = 0;
   char    *names = nullptr;   // the name pool
   size_t   namesUsed = 0, namesSize = 0;
+  GifMeta *meta = nullptr;    // per GIF: its name and meta fields, its search text
+  char    *metaFile = nullptr, *metaTexts = nullptr;   // what they point into
+  uint16_t metaKnown = 0;     // GIFs the meta index has a line for
 };
 
 enum CardJobKind : uint8_t { CARD_MOUNT_JOB, CARD_FETCH_JOB, CARD_SPEED_JOB };
@@ -104,6 +111,9 @@ inline void cardDrive(char *out) {   // "0:" - FatFs's name of the mounted card
 inline void cardListFree(CardList &l) {
   heap_caps_free(l.gifs);
   heap_caps_free(l.names);
+  heap_caps_free(l.meta);
+  heap_caps_free(l.metaFile);
+  heap_caps_free(l.metaTexts);
   l = CardList();
 }
 
@@ -161,6 +171,61 @@ inline char *cardReadAll(const char *file, uint32_t limit) {
   }
   heap_caps_free(f);
   return out;
+}
+
+// The list's meta index: the lines of /gifs/.meta matched to its GIFs by
+// name (a GIF without one keeps its name alone), and every GIF's search
+// text. Without RAM for it the list has no meta, and GIFs on request find
+// nothing on the card.
+inline void cardMeta(CardList &list) {
+  if (!list.count) { return; }
+  list.meta = (GifMeta *)heap_caps_calloc(list.count, sizeof(GifMeta), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!list.meta) { return; }
+  for (uint16_t i = 0; i < list.count; i++) {
+    for (uint8_t k = 0; k < GIF_META_FIELDS; k++) { list.meta[i].field[k] = ""; }
+    list.meta[i].field[GIF_META_NAME] = list.gifs[i].name;
+  }
+  char *text = cardReadAll("gifs/.meta", 4UL << 20);
+  if (text) {
+    // Its lines' fields, sorted by name, for a binary search per GIF.
+    struct Line { const char *field[GIF_META_FIELDS]; };
+    size_t len = strlen(text), most = 0;
+    for (const char *p = text; *p; p++) { most += *p == '\n'; }
+    Line *lines = most ? (Line *)heap_caps_malloc(most * sizeof(Line), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+    size_t n = 0;
+    long got = lines ? gifMetaLines(text, len, [&](const char *const *f) {
+      if (n < most) { memcpy(lines[n].field, f, sizeof(lines[n].field)); n++; }
+    }) : -1;
+    if (got >= 0) {
+      qsort(lines, n, sizeof(Line), [](const void *a, const void *b) {
+        return strcmp(((const Line *)a)->field[GIF_META_NAME], ((const Line *)b)->field[GIF_META_NAME]);
+      });
+      for (uint16_t i = 0; i < list.count; i++) {
+        Line key;
+        key.field[GIF_META_NAME] = list.gifs[i].name;
+        const Line *l = (const Line *)bsearch(&key, lines, n, sizeof(Line), [](const void *a, const void *b) {
+          return strcmp(((const Line *)a)->field[GIF_META_NAME], ((const Line *)b)->field[GIF_META_NAME]);
+        });
+        if (l) {
+          memcpy(list.meta[i].field, l->field, sizeof(l->field));
+          list.metaKnown++;
+        }
+      }
+      list.metaFile = text;   // the fields point into it
+      text = nullptr;
+    }
+    heap_caps_free(lines);
+    heap_caps_free(text);
+  }
+  list.metaTexts = gifMetaTexts(list.meta, list.count,
+                                [](size_t n) { return (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); });
+  if (!list.metaTexts) {
+    heap_caps_free(list.meta);
+    heap_caps_free(list.metaFile);
+    list.meta = nullptr;
+    list.metaFile = nullptr;
+    list.metaKnown = 0;
+  }
 }
 
 // Mounts the card and makes its list: the index's lines for the files that
@@ -267,9 +332,10 @@ inline void cardMount(uint32_t freqKhz, CardResult &r) {
   heap_caps_free(dir);
   heap_caps_free(fi);
   heap_caps_free(lines);
+  cardMeta(list);
   r.ok = list.count > 0;
-  snprintf(r.text, sizeof(r.text), "%u GIFs (%u from the index, %u not in it, %u left out)", list.count,
-           r.fromIndex, r.byHand, r.skipped);
+  snprintf(r.text, sizeof(r.text), "%u GIFs (%u from the index, %u not in it, %u left out), %u in the meta index",
+           list.count, r.fromIndex, r.byHand, r.skipped, list.metaKnown);
 }
 
 // Reads one file through the internal buffer: into `into` (PSRAM) when given,

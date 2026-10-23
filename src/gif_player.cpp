@@ -28,7 +28,12 @@ static uint32_t gifLoopMs(const uint8_t *d, uint32_t n, uint16_t &frames);
 static bool gifPackMappable(const GifPackEntry &e);
 static bool gifPackOpen(const GifPackEntry &e, const uint8_t *&data, uint32_t &size);
 static void gifPackClose();
+static void gifPackMetaFree();
+static void gifPackMetaLoad(const GifPackHeader &h, uint32_t dataFrom);
+static uint16_t gifFindQuery(const GifQuery &q, uint8_t *hit, bool &byName);
 #if BOARD_WAVESHARE_WALL
+static GifAsked gifCardWant(int16_t i);
+static void gifCardWantUpdate();
 static void gifCardSend(uint8_t kind, int16_t index);
 static void gifCardFreeSlot(uint8_t s);
 static int16_t gifCardNext();
@@ -70,6 +75,13 @@ GifPackState  gifPackState = GIF_PACK_NONE;
 const esp_partition_t *gifPackPart = nullptr;
 GifPackEntry *gifPack = nullptr;             // the index, in PSRAM when there is some
 uint16_t      gifPackCount = 0;
+// Its meta index: per GIF its name and fields and its search text (GIFs on
+// request), in PSRAM; without one, or one that does not check out, every GIF
+// has its name alone.
+static const uint32_t GIF_PACK_META_MAX = 1UL << 20;   // the most a meta index may take
+static GifMeta *gifPackMeta = nullptr;
+static char    *gifPackMetaFile = nullptr, *gifPackMetaTexts = nullptr;   // what it points into
+static uint16_t gifPackMetaKnown = 0;                  // GIFs it has a line for
 // The pack GIF on show: its bytes mapped from flash, or read or inflated into PSRAM.
 static esp_partition_mmap_handle_t gifPackMap;
 static bool          gifPackMapped = false;
@@ -114,6 +126,12 @@ static uint8_t  cardStressCount = 0, cardStressAt = 0;
 // A card GIF's one loop must leave room in a minute: the faces' changes take
 // up to about 30 s of it (the Muncher's and the Aliens' from about :30).
 static const uint32_t CARD_LOOP_MAX_MS = 25000;
+// A card GIF asked for (gifRequest()) that is being read for it: it plays
+// once it is read, if the face is free then; a later request takes its
+// place, and after CARD_WANT_MS it goes.
+static int16_t       cardWant = -1;
+static unsigned long cardWantAt = 0;
+static const unsigned long CARD_WANT_MS = 3000;
 #endif
 
 /* ======================================================================
@@ -289,10 +307,10 @@ int16_t gifNext() {
 // A GIF now (FN_PLAY_GIF): on the face only, now or not at all (Peter,
 // 2026-10-12) - also during the face's change or a scene of it, and into the
 // next change (Peter, 2026-10-22: what the user asks for is granted; the face
-// catches up behind it). Until then it was dropped there.
+// catches up behind it). Until then it was dropped there. Any GIF, as a
+// request for none in particular (gifRequest()).
 void gifPlayNow() {
-  if (screen != SCREEN_FACE) { return; }
-  if (!gifStart(gifNext(), false)) { gifScheduleNext(); }
+  gifRequest("", false);
 }
 
 // The last GIF shown once more (FN_GIF_AGAIN): on the face only, as
@@ -302,6 +320,153 @@ void gifPlayAgain() {
   if (screen != SCREEN_FACE) { return; }
   int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifNext();
   if (!gifStart(i, false)) { gifScheduleNext(); }
+}
+
+/* ----------------------------------------------------------------------
+   GIFs on request (plan of 2026-10-23): a GIF by its name, or one of those
+   a keyword finds in the meta index (gif_find.h has the rule), from the web
+   app, Home Assistant or the console. The same search gives the web app its
+   list, so what the list shows is what a request draws from.
+   ---------------------------------------------------------------------- */
+
+const char *gifAskedWords(GifAsked how) {
+  static const char *const WORDS[] = { "plays", "being read from the card", "not over the face", "a GIF on show",
+                                       "no GIF found", "none fits the panel as it is held", "could not be opened now" };
+  return how < sizeof(WORDS) / sizeof(WORDS[0]) ? WORDS[how] : "?";
+}
+
+const GifMeta &gifMetaOf(int16_t i) {
+  static GifMeta bare;   // a GIF of a list without meta (no RAM for it): its name, no search text
+  const GifMeta *m = nullptr;
+  const char *name = "";
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard) {
+    m = cardList.meta ? &cardList.meta[i] : nullptr;
+    name = cardList.gifs[i].name;
+  } else
+#endif
+  {
+    m = gifPackMeta ? &gifPackMeta[i] : nullptr;
+    name = gifPack[i].name;
+  }
+  if (m) { return *m; }
+  for (uint8_t k = 0; k < GIF_META_FIELDS; k++) { bare.field[k] = ""; }
+  bare.field[GIF_META_NAME] = name;
+  bare.text = "";
+  bare.cut = false;
+  return bare;
+}
+
+const char *gifTitleOf(int16_t i) {
+  const GifMeta &m = gifMetaOf(i);
+  return m.field[GIF_META_TITLE][0] ? m.field[GIF_META_TITLE] : m.field[GIF_META_NAME];
+}
+
+bool gifFitsNow(int16_t i) { return gifFits(i); }
+
+void gifSizeOf(int16_t i, uint16_t &w, uint16_t &h) {
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard) { w = cardList.gifs[i].width; h = cardList.gifs[i].height; return; }
+#endif
+  w = gifPack[i].width;
+  h = gifPack[i].height;
+}
+
+uint16_t gifMetaKnown() {
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard) { return cardList.metaKnown; }
+#endif
+  return gifPackMetaKnown;
+}
+
+// The GIFs a request taken apart finds (hit as in gifFind()); one for none in
+// particular finds them all.
+uint16_t gifFindQuery(const GifQuery &q, uint8_t *hit, bool &byName) {
+  uint16_t count = (uint16_t)gifCount();
+  byName = false;
+  if (!q.name[0] && !q.keys) {
+    memset(hit, 1, count);
+    return count;
+  }
+  return gifFindAll(q, count, [](uint16_t i) {
+    const GifMeta &m = gifMetaOf((int16_t)i);
+    return GifFindItem{ m.text, m.cut };
+  }, hit, byName);
+}
+
+uint16_t gifFind(const char *request, uint8_t *hit, bool &byName) {
+  GifQuery q;
+  gifQueryParse(request, q);
+  return gifFindQuery(q, hit, byName);
+}
+
+// A request: which GIFs it finds and which of them fit, one of those drawn at
+// random (not the last one shown while another fits), and that one started -
+// or, for none in particular, the one gifNext() has (on the wall the card's
+// GIF read ahead, so it starts at once).
+GifAnswer gifRequest(const char *request, bool replace) {
+  GifAnswer a = { GIF_ASKED_NO_MATCH, 0, 0, -1, false };
+  bool onShow = screen == SCREEN_GIF;
+  if (screen != SCREEN_FACE && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (onShow && !replace) {
+    Console.printf("GIF request \"%s\": a GIF is on show, and no replace - dropped\n", request);
+    a.how = GIF_ASKED_GIF_ON_SHOW;
+    return a;
+  }
+  GifQuery q;
+  gifQueryParse(request, q);
+  bool any = !q.name[0] && !q.keys;
+  uint16_t count = (uint16_t)gifCount();
+  uint8_t *hit = nullptr;
+  if (count) {
+    hit = (uint8_t *)heap_caps_malloc(count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!hit) { hit = (uint8_t *)malloc(count); }
+    if (!hit) { Console.println("GIF request: no RAM to search"); a.how = GIF_ASKED_NOT_OPENED; return a; }
+  }
+  uint32_t t0 = micros();
+  a.matches = count ? gifFindQuery(q, hit, a.byName) : 0;
+  uint16_t others = 0;   // fitting finds but the last one shown
+  for (uint16_t i = 0; i < count; i++) {
+    if (hit[i] && gifFits((int16_t)i)) { a.fit++; others += (int16_t)i != gifLast; }
+  }
+  int16_t pick = -1;
+  if (a.fit && !any) {
+    pick = gifLast;   // the only one that fits, when no other does
+    if (others) {
+      uint16_t n = esp_random() % others;
+      for (uint16_t i = 0; i < count; i++) {
+        if (hit[i] && gifFits((int16_t)i) && (int16_t)i != gifLast) {
+          if (n == 0) { pick = (int16_t)i; break; }
+          n--;
+        }
+      }
+    }
+  }
+  free(hit);
+  if (!any) {
+    Console.printf("GIF request \"%s\"%s: %u found%s, %u fit, %lu us\n", request, replace ? " (replace)" : "",
+                  a.matches, a.byName ? " by name" : "", a.fit, (unsigned long)(micros() - t0));
+  }
+  if (!a.matches) { a.how = GIF_ASKED_NO_MATCH; return a; }
+  if (!a.fit) { a.how = GIF_ASKED_NONE_FITS; return a; }
+  if (onShow) { closeScreen(); }                      // replace: the GIF on show goes
+  if (screen != SCREEN_FACE) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (any) { pick = gifNext(); }
+  a.index = pick;
+#if BOARD_WAVESHARE_WALL
+  if (gifFromCard && !any) {
+    a.how = gifCardWant(pick);
+    if (a.how == GIF_ASKED_NOT_OPENED) { gifScheduleNext(); }
+    return a;
+  }
+#endif
+  if (gifStart(pick, false)) {
+    a.how = GIF_ASKED_PLAYS;
+  } else {
+    a.how = GIF_ASKED_NOT_OPENED;
+    gifScheduleNext();
+  }
+  return a;
 }
 
 // A GIF of its own accord once it is due: now, or not at all when the panel
@@ -514,6 +679,7 @@ uint32_t gifLoopMs(const uint8_t *d, uint32_t n, uint16_t &frames) {
    ---------------------------------------------------------------------- */
 
 void gifPackLoad() {
+  gifPackMetaFree();   // an old pack's, should there be one
   gifPackPart = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "ffat");
   GifPackHeader h;
   if (!gifPackPart || esp_partition_read(gifPackPart, 0, &h, sizeof(h)) != ESP_OK
@@ -554,8 +720,83 @@ void gifPackLoad() {
   gifPack = index;
   gifPackCount = h.count;
   gifPackState = GIF_PACK_OK;
-  Console.printf("GIF pack: %u GIFs, %u KB; %u KB PSRAM free\n", gifPackCount, (unsigned)(h.size / 1024),
-                (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+  gifPackMetaLoad(h, dataFrom);
+  Console.printf("GIF pack: %u GIFs, %u KB, %u in the meta index; %u KB PSRAM free\n", gifPackCount,
+                (unsigned)(h.size / 1024), gifPackMetaKnown, (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+}
+
+void gifPackForget() {
+  gifPackState = GIF_PACK_NONE;
+  free(gifPack);
+  gifPack = nullptr;
+  gifPackCount = 0;
+  gifPackMetaFree();
+}
+
+void gifPackMetaFree() {
+  heap_caps_free(gifPackMeta);
+  heap_caps_free(gifPackMetaFile);
+  heap_caps_free(gifPackMetaTexts);
+  gifPackMeta = nullptr;
+  gifPackMetaFile = gifPackMetaTexts = nullptr;
+  gifPackMetaKnown = 0;
+}
+
+// The pack's meta index (h.metaOffset, scripts/gif_pack.py): read, checked
+// and taken apart, a line per GIF in the order of the index, and every GIF's
+// search text. One out of place, damaged or with another count of lines is
+// left out: the GIFs keep their names.
+void gifPackMetaLoad(const GifPackHeader &h, uint32_t dataFrom) {
+  gifPackMeta = (GifMeta *)heap_caps_calloc(gifPackCount, sizeof(GifMeta), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!gifPackMeta) { Console.println("GIF pack: no RAM for the meta index - GIFs on request find nothing"); return; }
+  auto byName = []() {
+    for (uint16_t i = 0; i < gifPackCount; i++) {
+      GifMeta &m = gifPackMeta[i];
+      for (uint8_t k = 0; k < GIF_META_FIELDS; k++) { m.field[k] = ""; }
+      m.field[GIF_META_NAME] = gifPack[i].name;
+      m.cut = strlen(gifPack[i].name) == sizeof(gifPack[i].name) - 1;   // as gif_pack.py cuts it
+    }
+  };
+  byName();
+  if (h.metaSize) {
+    const char *why = nullptr;
+    if (h.metaOffset < dataFrom || h.metaOffset > h.size || h.metaSize > h.size - h.metaOffset || h.metaSize > GIF_PACK_META_MAX) {
+      why = "lies out of place";
+    } else if (!(gifPackMetaFile = (char *)heap_caps_malloc(h.metaSize + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))) {
+      why = "has no RAM";
+    } else if (esp_partition_read(gifPackPart, h.metaOffset, gifPackMetaFile, h.metaSize) != ESP_OK) {
+      why = "cannot be read";
+    } else if (esp_rom_crc32_le(0, (const uint8_t *)gifPackMetaFile, h.metaSize) != h.metaCrc) {
+      why = "is damaged";
+    } else {
+      gifPackMetaFile[h.metaSize] = '\0';
+      uint16_t n = 0;
+      long lines = gifMetaLines(gifPackMetaFile, h.metaSize, [&n](const char *const *f) {
+        if (n < gifPackCount) {
+          memcpy(gifPackMeta[n].field, f, sizeof(gifPackMeta[n].field));
+          gifPackMeta[n].cut = false;
+        }
+        n++;
+      });
+      if (lines == gifPackCount) {
+        gifPackMetaKnown = gifPackCount;
+      } else {
+        why = lines < 0 ? "is cut off or of another kind" : "has another count of lines";
+        byName();
+      }
+    }
+    if (why) {
+      Console.printf("GIF pack: its meta index %s - GIFs on request find them by name\n", why);
+      heap_caps_free(gifPackMetaFile);
+      gifPackMetaFile = nullptr;
+    }
+  }
+  gifPackMetaTexts = gifMetaTexts(gifPackMeta, gifPackCount,
+                                  [](size_t n) { return (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); });
+  if (!gifPackMetaTexts) {
+    Console.println("GIF pack: no RAM for the search texts - GIFs on request find nothing");
+    gifPackMetaFree();
+  }
 }
 
 // Whether pack GIF e lies where the cache can map it (GIF_PACK_MAP_LIMIT).
@@ -702,6 +943,53 @@ int16_t gifCardNext() {
   return -1;
 }
 
+// Card GIF i asked for (gifRequest()): at once when it is read ahead or was
+// the last one shown; else it is read for it, in place of the GIF read
+// ahead, and plays once it is read (gifCardWantUpdate()).
+GifAsked gifCardWant(int16_t i) {
+  for (uint8_t s = 0; s < 2; s++) {
+    if (cardSlot[s].state == CARD_SLOT_READY && cardSlot[s].index == i) {
+      cardWant = -1;
+      return gifStart(i, false) ? GIF_ASKED_PLAYS : GIF_ASKED_NOT_OPENED;
+    }
+  }
+  // The GIF read ahead makes room, so no GIF of its own accord takes it meanwhile.
+  for (uint8_t s = 0; s < 2; s++) {
+    if (cardSlot[s].state == CARD_SLOT_READY && s != cardLastSlot) { gifCardFreeSlot(s); }
+  }
+  cardWant = i;
+  cardWantAt = millisNow;
+  Console.printf("Card: %s asked for - reading it\n", cardList.gifs[i].name);
+  return GIF_ASKED_READING;
+}
+
+// On every pass: the GIF asked for, once it is read - over the face, else it
+// goes - or it goes when it cannot be played or is not read in CARD_WANT_MS.
+void gifCardWantUpdate() {
+  if (cardWant < 0) { return; }
+  if (!gifFromCard || cardWant >= (int16_t)cardList.count) { cardWant = -1; return; }
+  const CardGif &g = cardList.gifs[cardWant];
+  for (uint8_t s = 0; s < 2; s++) {
+    if (cardSlot[s].state == CARD_SLOT_READY && cardSlot[s].index == cardWant) {
+      int16_t i = cardWant;
+      cardWant = -1;
+      if (screen != SCREEN_FACE) {
+        Console.printf("Card: %s read, the face is not free now - dropped\n", g.name);
+      } else if (!gifStart(i, false)) {
+        gifScheduleNext();
+      }
+      return;
+    }
+  }
+  if (g.bad) {
+    Console.printf("Card: %s asked for does not play - dropped\n", g.name);
+    cardWant = -1;
+  } else if ((long)(millisNow - cardWantAt) > (long)CARD_WANT_MS) {
+    Console.printf("Card: %s not read in %lu ms - dropped\n", g.name, CARD_WANT_MS);
+    cardWant = -1;
+  }
+}
+
 // Card GIF i's bytes, from the slot holding it; false when none does.
 bool gifCardOpen(int16_t i, const uint8_t *&data, uint32_t &size) {
   for (uint8_t s = 0; s < 2; s++) {
@@ -798,9 +1086,24 @@ void gifCardResult() {
 void gifCardUpdate() {
   if (!cardResults()) { return; }
   if (cardJobBusy && xQueueReceive(cardResults(), &cardResult, 0) == pdTRUE) { gifCardResult(); }
+  gifCardWantUpdate();
   if (cardJobBusy || screen == SCREEN_GIF) { return; }
-  if (cardRemountWanted) { gifCardRemount(); return; }
+  if (cardRemountWanted) { cardWant = -1; gifCardRemount(); return; }
   if (!gifFromCard) { return; }
+  if (cardWant >= 0) {
+    // The GIF asked for, in place of one read ahead meanwhile.
+    for (uint8_t s = 0; s < 2; s++) {
+      if (cardSlot[s].state == CARD_SLOT_READY && s != cardLastSlot && cardSlot[s].index != cardWant) { gifCardFreeSlot(s); }
+    }
+    for (uint8_t s = 0; s < 2; s++) {
+      if (cardSlot[s].state == CARD_SLOT_EMPTY) {
+        cardSlot[s] = { nullptr, 0, cardWant, CARD_SLOT_FILLING };
+        gifCardSend(CARD_FETCH_JOB, cardWant);
+        break;
+      }
+    }
+    return;
+  }
   bool ready = false;
   int8_t empty = -1;
   for (uint8_t s = 0; s < 2; s++) {

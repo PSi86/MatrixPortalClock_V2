@@ -13,13 +13,13 @@ sys.path.insert(0, HERE)
 import gif_common  # noqa: E402
 import gif_pack  # noqa: E402
 
-REPO_GIFS = os.path.join(os.path.dirname(HERE), "gifs")
 PANEL = (64, 32)
 
 
 def read_pack(pack):
-    magic, version, count, index_crc, size = struct.unpack_from("<8sHHII", pack, 0)
-    assert pack[20:32] == bytes(12), "header tail not zero"
+    magic, version, count, index_crc, size, meta_at, meta_size, meta_crc = struct.unpack_from("<8sHHIIIII", pack, 0)
+    if meta_size == 0:
+        assert pack[20:32] == bytes(12), "header tail not zero in a pack without a meta index"
     index = pack[32:32 + 56 * count]
     entries = []
     for i in range(count):
@@ -27,18 +27,34 @@ def read_pack(pack):
         assert pad == bytes(3)
         entries.append({"name": name.rstrip(b"\0"), "w": w, "h": h, "codec": codec, "offset": offset,
                         "stored": stored, "gif": gif_bytes, "crc": crc})
+    meta = pack[meta_at:meta_at + meta_size] if meta_size else b""
     return {"magic": magic, "version": version, "count": count, "index_ok": zlib.crc32(index) == index_crc,
-            "size": size}, entries
+            "size": size, "meta_at": meta_at, "meta": meta, "meta_ok": zlib.crc32(meta) == meta_crc}, entries
 
 
-def repo_gifs():
-    gifs, _too_big, _copies = gif_pack.collect([REPO_GIFS], PANEL, "landscape")
+def sample_folder(d):
+    """Some GIFs of the test's own (the repository brings none since
+    2026-10-10): some that deflate, some that do not, several sizes."""
+    import random
+    rng = random.Random(7)
+    for i, (w, h) in enumerate(((64, 32), (32, 32), (32, 64), (64, 32), (16, 16), (64, 32))):
+        body = bytes(300 * (i + 1)) if i % 2 else bytes(rng.getrandbits(8) for _ in range(250 * (i + 1)))
+        with open(os.path.join(d, "sample-%d.gif" % i), "wb") as f:
+            f.write(b"GIF89a" + struct.pack("<HH", w, h) + body)
+    return d
+
+
+def sample_gifs(d):
+    gifs, _too_big, _copies = gif_pack.collect([sample_folder(d)], PANEL, "landscape")
     return gifs
 
 
 def test_pack_reads_back_byte_for_byte():
-    originals = {gif_pack.entry_name(p): open(p, "rb").read() for p in glob.glob(os.path.join(REPO_GIFS, "*.gif"))}
-    pack, taken, left_out = gif_pack.layout(repo_gifs(), 10 ** 7)
+    with tempfile.TemporaryDirectory() as d:
+        gifs = sample_gifs(d)
+        originals = {gif_pack.entry_name(p): open(p, "rb").read() for p in glob.glob(os.path.join(d, "*.gif"))
+                     if gif_common.fits(gif_common.gif_size(p), PANEL, "landscape")}
+    pack, taken, left_out = gif_pack.layout(gifs, 10 ** 7)
     head, entries = read_pack(pack)
     assert head["magic"] == b"CLKGPACK" and head["version"] == 1 and head["index_ok"], head
     assert head["size"] == len(pack) and head["count"] == len(taken) == len(originals) and not left_out
@@ -65,7 +81,9 @@ def test_each_gif_is_stored_the_smaller_way():
 
 
 def test_room_counts_header_and_index():
-    gifs = repo_gifs()
+    with tempfile.TemporaryDirectory() as d:
+        gifs = sample_gifs(d)
+    assert len(gifs) == 5, len(gifs)
     whole, taken, _ = gif_pack.layout(gifs, 10 ** 7)
     exact, taken_exact, out_exact = gif_pack.layout(gifs, len(whole))
     assert taken_exact == taken and not out_exact
@@ -103,6 +121,112 @@ def test_copies_and_gifs_to_skip_are_left_out():
         skip = [hashlib.sha1(open(a, "rb").read()).hexdigest()]
         gifs, _too_big, copies = gif_pack.collect([d], PANEL, "landscape", skip)
         assert [g[0] for g in gifs] == [b"b"] and copies == 2, ([g[0] for g in gifs], copies)
+
+
+# --- the meta index (GIFs on request) ------------------------------------------
+
+def write_meta(folder, lines, end=True):
+    with open(os.path.join(folder, gif_pack.META_FILE), "w", encoding="utf-8", newline="\n") as f:
+        f.write(gif_pack.META_HEAD + "\n" + "".join(l + "\n" for l in lines) + ("END %d\n" % len(lines) if end else ""))
+
+
+META_LINES = ["sample-1.gif\tA sample\tSuper Mario\tgame\t1980s 80s\tpixel-art\tMario jumps",
+              "sample-3.gif\tPokémon sample\tPokemon\tcartoon-anime\t\t\ta short one",
+              "not-in-the-folder.gif\tGone\t\t\t\t\t"]
+
+
+def test_a_folder_without_a_meta_index_gives_the_pack_as_before():
+    with tempfile.TemporaryDirectory() as d:
+        pack, taken, _ = gif_pack.layout(sample_gifs(d), 10 ** 7)
+    head, entries = read_pack(pack)
+    assert head["meta"] == b"" and head["meta_at"] == 0 and pack[20:32] == bytes(12)
+    assert head["size"] == len(pack) == entries[-1]["offset"] + entries[-1]["stored"]
+
+
+def test_the_meta_index_follows_the_gifs_a_line_per_gif_in_index_order():
+    with tempfile.TemporaryDirectory() as d:
+        sample_folder(d)
+        write_meta(d, META_LINES)
+        gifs, _too_big, _copies = gif_pack.collect([d], PANEL, "landscape")
+    pack, taken, _ = gif_pack.layout(gifs, 10 ** 7)
+    head, entries = read_pack(pack)
+    assert head["meta_ok"] and head["meta_at"] == entries[-1]["offset"] + entries[-1]["stored"], head
+    assert head["size"] == len(pack) == head["meta_at"] + len(head["meta"])
+    text = head["meta"].decode("utf-8").split("\n")
+    assert text[0] == gif_pack.META_HEAD and text[-2] == "END %d" % len(entries) and text[-1] == "", text
+    lines = text[1:-2]
+    assert len(lines) == len(entries)
+    for e, line in zip(entries, lines):
+        name = line.split("\t")[0]
+        assert name == e["name"].decode() + ".gif", (name, e["name"])
+        assert len(line.split("\t")) == gif_pack.META_FIELDS, line
+        if name == "sample-1.gif":
+            assert line == META_LINES[0], line
+        elif name == "sample-3.gif":
+            assert line == META_LINES[1], line
+        else:
+            assert line == name + "\t" * 6, "a GIF without a line gets its name alone: %r" % line
+    assert "not-in-the-folder" not in head["meta"].decode()
+
+
+def test_room_counts_the_meta_index():
+    with tempfile.TemporaryDirectory() as d:
+        sample_folder(d)
+        write_meta(d, META_LINES)
+        gifs, _too_big, _copies = gif_pack.collect([d], PANEL, "landscape")
+    whole, taken, _ = gif_pack.layout(gifs, 10 ** 7)
+    exact, taken_exact, out_exact = gif_pack.layout(gifs, len(whole))
+    assert exact == whole and taken_exact == taken and not out_exact
+    short, taken_short, out_short = gif_pack.layout(gifs, len(whole) - 1)
+    assert len(taken_short) == len(taken) - 1 and len(out_short) == 1, (taken_short, out_short)
+    assert read_pack(short)[0]["meta_ok"] and len(short) <= len(whole) - 1
+
+
+def test_a_meta_index_cut_off_or_of_another_kind_is_left_out():
+    with tempfile.TemporaryDirectory() as d:
+        write_meta(d, META_LINES[:2], end=False)
+        assert gif_pack.read_meta(d) == {}
+        with open(os.path.join(d, gif_pack.META_FILE), "w") as f:
+            f.write("SOMETHING ELSE\nEND 0\n")
+        assert gif_pack.read_meta(d) == {}
+        write_meta(d, META_LINES[:2])
+        assert sorted(gif_pack.read_meta(d)) == ["sample-1.gif", "sample-3.gif"]
+        write_meta(d, ["short.gif\tonly a title"])
+        assert gif_pack.read_meta(d)["short.gif"] == "short.gif\tonly a title" + "\t" * 5, "missing fields filled"
+
+
+def old_clock_takes(pack, partition=4544 * 1024):
+    """What a clock from before the meta index (main 760dece) checks: POST
+    /api/pack in web_api.cpp, then gifPackLoad() in gif_player.cpp."""
+    magic, version, count, index_crc, size = struct.unpack_from("<8sHHII", pack, 0)
+    index_bytes = count * 56
+    if not (32 <= len(pack) <= partition and magic == b"CLKGPACK" and version == 1 and 0 < count <= 4000
+            and size == len(pack) and 32 + index_bytes <= size):
+        return False
+    data_from = 32 + index_bytes
+    if size > partition or data_from > size or zlib.crc32(pack[32:data_from]) != index_crc:
+        return False
+    for i in range(count):
+        _name, _w, _h, codec, offset, stored, gif_bytes, crc = struct.unpack_from("<32sHHB3xIIII", pack, 32 + 56 * i)
+        codec_ok = codec == 1 or (codec == 0 and gif_bytes == stored)
+        if not codec_ok or stored == 0 or offset < data_from or offset > size or stored > size - offset or gif_bytes > 614400:
+            return False
+        if zlib.crc32(pack[offset:offset + stored]) != crc:
+            return False
+    return True
+
+
+def test_a_clock_from_before_the_meta_index_takes_a_pack_with_one():
+    with tempfile.TemporaryDirectory() as d:
+        sample_folder(d)
+        write_meta(d, META_LINES)
+        gifs, _too_big, _copies = gif_pack.collect([d], PANEL, "landscape")
+    pack, _taken, _ = gif_pack.layout(gifs, 10 ** 7)
+    assert read_pack(pack)[0]["meta"], "no meta index to try"
+    assert old_clock_takes(pack)
+    bad = bytearray(pack)
+    bad[32 + 44] ^= 1                    # the first entry's offset: the old checks see that
+    assert not old_clock_takes(bytes(bad)), "the stand-in for the old clock checks nothing"
 
 
 def table_entry(label, kind, sub, offset, size):
