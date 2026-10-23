@@ -34,8 +34,11 @@ static void haMessage(const char *payload, uint16_t len);
 static void haGif(const char *payload, uint16_t len);
 static void haGifSearchSet(const char *payload, uint16_t len);
 static void haGifSend();
-static bool haGifSendText(const char *suffix, char *text, bool retain);
-static char *haGifMatches();
+static bool haGifSendText(const char *topic, char *text, bool retain, bool whole);
+static bool haGifMatches(char *&config);
+static void haGifPick(const char *option);
+static void haUtf8Cut(char *s, size_t n);
+static void haDeviceInto(JsonObject dev);
 static const char *haBlocked();
 
 // The Home Assistant link ------------------------------------------------------------
@@ -66,11 +69,12 @@ const uint8_t  HA_MIN_S_LOW = 5;   // the shortest the web app takes
 // field shows it still and Play GIF plays from it; and what is still to be
 // sent to Home Assistant about it.
 const uint8_t  HA_GIF_SEARCH_MAX = 100;   // characters of the field
-const uint8_t  HA_GIF_MATCHES_MAX = 30;   // GIFs the sensor GIF matches lists (about 4 KB)
+const uint8_t  HA_GIF_MATCHES_MAX = 50;   // GIFs the select GIF matches lists (its config up to about 7 KB)
 struct HaGifSearch { char text[HA_GIF_SEARCH_MAX * 2 + 4]; };   // UTF-8: room for 100 characters of two bytes
 static HaGifSearch haGifSearch;
 static SettingsStore<HaGifSearch> haGifStore;
-static bool     haGifSearchDue = false, haGifMatchesDue = false;   // to Home Assistant at the next chance
+static bool     haGifSearchDue = false, haGifMatchesDue = false, haGifSummaryDue = false;   // to Home Assistant at the next chance
+static char     haGifSummary[256] = "";   // GIF matches' first option and state (haGifMatches())
 static uint32_t haGifListSeen = 0;      // gifListGeneration() as the matches last went out
 static uint8_t  haGifTurnSeen = 0xFF;   // and the panel's rotation
 
@@ -170,15 +174,20 @@ const char *haBlocked() {
 // for GIFs on request a text entity (a name or a keyword; text.set_value in
 // an automation) and a button for any GIF. Without a sensor its config is
 // taken back, in case it was there before.
+// The device every entity of the clock belongs to, for the discovery configs.
+void haDeviceInto(JsonObject dev) {
+  dev["identifiers"][0] = netHostname();
+  dev["name"] = String("Matrix Clock ") + haId();
+  dev["model"] = BOARD_NAME;
+  dev["sw_version"] = fwVersion();
+  dev["configuration_url"] = String("http://") + netHostname() + ".local/";
+}
+
 void haBuildAnnounce() {
   HaLink &l = haLink();
   const char *id = haId();
   JsonDocument dev;
-  dev["identifiers"][0] = netHostname();
-  dev["name"] = String("Matrix Clock ") + id;
-  dev["model"] = BOARD_NAME;
-  dev["sw_version"] = fwVersion();
-  dev["configuration_url"] = String("http://") + netHostname() + ".local/";
+  haDeviceInto(dev.to<JsonObject>());
 
   JsonDocument msg;
   msg["name"] = "Message";
@@ -211,10 +220,9 @@ void haBuildAnnounce() {
   // GIFs on request (Peter, 2026-10-23): a search field that keeps its text,
   // which the clock keeps too (haGifSearchSet()); the button Play GIF plays
   // one of the GIFs it finds, any GIF when it is empty, and GIF again the last
-  // GIF shown; the sensor GIF matches counts what the field finds and lists
-  // the first of them (haGifMatches()). Its unit keeps it out of Home
-  // Assistant's logbook, which leaves out sensors with one. (An automation can
-  // still ask for a GIF on mpclock/<id>/gif.)
+  // GIF shown; the select GIF matches lists what the field finds
+  // (haGifMatches(), sent by the loop). (An automation can still ask for a
+  // GIF on mpclock/<id>/gif.)
   JsonDocument search;
   search["name"] = "GIF search";
   search["unique_id"] = String(netHostname()) + "-gif";   // the entity GIF of before, so it keeps its id
@@ -245,19 +253,11 @@ void haBuildAnnounce() {
   button(5, "Play GIF", "-play-gif", l.gifPlay, "mdi:play-box-outline", "gif");
   button(6, "GIF again", "-gif-again", l.gifAgain, "mdi:replay", "gif_again");
 
-  JsonDocument matches;
-  matches["name"] = "GIF matches";
-  matches["unique_id"] = String(netHostname()) + "-gif-matches";
-  matches["state_topic"] = String(l.prefix) + "gif/matches";
-  matches["value_template"] = "{{ value_json.count }}";
-  matches["json_attributes_topic"] = String(l.prefix) + "gif/matches";
-  matches["unit_of_measurement"] = "GIFs";
-  matches["icon"] = "mdi:magnify";
-  matches["availability_topic"] = l.status;
-  matches["device"] = dev;
+  // The matches are a select entity (haGifMatches()), whose config changes
+  // with each search: the loop sends it, not this list. A sensor GIF
+  // matches of a test build of 2026-10-23 is taken back here.
   snprintf(l.announceTopic[7], sizeof(l.announceTopic[7]), "homeassistant/sensor/%s/gif_matches/config", id);
   l.announce[7] = "";
-  serializeJson(matches, l.announce[7]);
 }
 
 // A sensor's discovery config: its name, its topic past the clock's prefix
@@ -486,6 +486,8 @@ void haApply(const HaIn &m) {
         const char *name = a.index >= 0 ? gifMetaOf(a.index).field[GIF_META_NAME] : "-";
         if (again) { Console.printf("Home Assistant: GIF again - %s, %s\n", gifAskedWords(a.how), name); }
         else       { Console.printf("Home Assistant: Play GIF for \"%s\" - %s, %s\n", haGifSearch.text, gifAskedWords(a.how), name); }
+      } else if (strcmp(m.topic, "gif/pick") == 0) {
+        if (!m.retained) { haGifPick(m.payload); }
       }
       break;
     default:
@@ -676,73 +678,144 @@ void haGifSearchSet(const char *payload, uint16_t len) {
   Console.printf("Home Assistant: GIF search \"%s\"%s\n", haGifSearch.text, stored ? "" : " (not stored: the flash could not be written)");
 }
 
-// The GIFs the search field finds, for the sensor GIF matches: how many, how
-// many of them fit the panel as it is held, and the first HA_GIF_MATCHES_MAX
-// by title with their file names, as JSON in a block from the heap (nullptr
-// without RAM). An empty field finds every GIF, and lists none.
-char *haGifMatches() {
+// s cut to at most n bytes, not in the middle of a UTF-8 character.
+void haUtf8Cut(char *s, size_t n) {
+  if (strlen(s) <= n) { return; }
+  while (n > 0 && ((uint8_t)s[n] & 0xC0) == 0x80) { n--; }   // s[n] continues a character begun before it
+  s[n] = '\0';
+}
+
+// The select entity GIF matches, for what the search field finds: a first
+// option that says it ("15 matches for "mario"", "no GIF found for ...",
+// "all 241 GIFs - type a search"), which is the entity's state, then the GIFs
+// found, "<title> (<file name>)" by title, the first HA_GIF_MATCHES_MAX, one
+// that does not fit the panel as it is held marked so. Home Assistant keeps a
+// select's options out of its recorder by itself (SelectEntity's unrecorded
+// attributes), so the names show without being stored or logged (Peter,
+// 2026-10-23: the names, not a number; nothing kept in Home Assistant's
+// database). A select's options come with its discovery config, so the
+// config goes out anew with each search. config gets the config (a block
+// from the heap), haGifSummary the first option; false without RAM.
+bool haGifMatches(char *&config) {
   uint16_t count = (uint16_t)gifCount(), fit = 0;
   int16_t *order = count ? (int16_t *)heap_caps_malloc(count * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
-  if (count && !order) { return nullptr; }
+  if (count && !order) { return false; }
   bool byName = false;
   int32_t n = gifFindByTitle(haGifSearch.text, order, fit, byName);
-  if (n < 0) { heap_caps_free(order); return nullptr; }
+  if (n < 0) { heap_caps_free(order); return false; }
+  char asked[160];
+  strlcpy(asked, haGifSearch.text, sizeof(asked));
+  haUtf8Cut(asked, 120);
+  if (!haGifSearch.text[0])  { snprintf(haGifSummary, sizeof(haGifSummary), "all %u GIFs - type a search", count); }
+  else if (n == 0)           { snprintf(haGifSummary, sizeof(haGifSummary), "no GIF found for \"%s\"", asked); }
+  else if (n == 1)           { snprintf(haGifSummary, sizeof(haGifSummary), "1 match for \"%s\"", asked); }
+  else if (n <= HA_GIF_MATCHES_MAX) { snprintf(haGifSummary, sizeof(haGifSummary), "%ld matches for \"%s\"", (long)n, asked); }
+  else { snprintf(haGifSummary, sizeof(haGifSummary), "%ld matches for \"%s\", the first %u listed", (long)n, asked, HA_GIF_MATCHES_MAX); }
+
   JsonDocument d;
-  d["count"] = n;
-  d["fit"] = fit;
-  d["search"] = haGifSearch.text;
-  d["by_name"] = byName;
-  JsonArray list = d["gifs"].to<JsonArray>();
+  d["name"] = "GIF matches";
+  d["unique_id"] = String(netHostname()) + "-gif-list";
+  d["command_topic"] = haLink().gifPick;
+  d["state_topic"] = String(haLink().prefix) + "gif/matches";
+  d["icon"] = "mdi:format-list-bulleted";
+  d["availability_topic"] = haLink().status;
+  d["qos"] = 1;
+  haDeviceInto(d["device"].to<JsonObject>());
+  JsonArray options = d["options"].to<JsonArray>();
+  options.add(haGifSummary);
   if (haGifSearch.text[0]) {
+    static char option[200];
     for (int32_t k = 0; k < n && k < HA_GIF_MATCHES_MAX; k++) {
-      JsonObject o = list.add<JsonObject>();
-      o["title"] = gifTitleOf(order[k]);
-      o["name"] = gifMetaOf(order[k]).field[GIF_META_NAME];
-      o["fits"] = gifFitsNow(order[k]);
+      const char *name = gifMetaOf(order[k]).field[GIF_META_NAME];
+      char title[120];
+      strlcpy(title, gifTitleOf(order[k]), sizeof(title));
+      haUtf8Cut(title, sizeof(title) - 1 - min<size_t>(strlen(name), 60));
+      snprintf(option, sizeof(option), "%s (%s)%s", title, name, gifFitsNow(order[k]) ? "" : " - does not fit now");
+      bool twice = false;   // an option twice would refuse the whole config
+      for (JsonVariant o : options) { if (strcmp(o.as<const char *>(), option) == 0) { twice = true; break; } }
+      if (!twice) { options.add(option); }
     }
-    if (n > HA_GIF_MATCHES_MAX) { d["more"] = n - HA_GIF_MATCHES_MAX; }
   }
   heap_caps_free(order);
   size_t bytes = measureJson(d) + 1;
-  char *out = (char *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (out) { serializeJson(d, out, bytes); }
-  return out;
+  config = (char *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!config) { return false; }
+  serializeJson(d, config, bytes);
+  return true;
 }
 
-// A payload of any length to mpclock/<id>/<suffix>, through the worker, which
-// frees it; false when its queue is full (text is freed here then).
-bool haGifSendText(const char *suffix, char *text, bool retain) {
+// mpclock/<id>/gif/pick: an option of GIF matches picked in Home Assistant:
+// the GIF of the file name in its last brackets plays, in place of one on
+// show; the first option (what the search finds) plays nothing. The state
+// goes back to the first option, so the same GIF can be picked again.
+void haGifPick(const char *option) {
+  haGifSummaryDue = true;
+  if (strcmp(option, haGifSummary) == 0) { return; }
+  const char *open = nullptr;
+  for (const char *p = strstr(option, " ("); p; p = strstr(p + 1, " (")) { open = p; }
+  const char *close = open ? strchr(open, ')') : nullptr;
+  if (!close || close == open + 2) {
+    Console.printf("Home Assistant: GIF picked, but \"%s\" names none\n", option);
+    return;
+  }
+  char name[96];
+  size_t n = min<size_t>((size_t)(close - open - 2), sizeof(name) - 1);
+  memcpy(name, open + 2, n);
+  name[n] = '\0';
+  GifAnswer a = gifRequest(name, true);
+  Console.printf("Home Assistant: GIF picked, %s - %s\n", name, gifAskedWords(a.how));
+}
+
+// A payload of any length to mpclock/<id>/<topic>, or to the whole topic,
+// through the worker, which frees it; false when its queue is full (text is
+// freed here then).
+bool haGifSendText(const char *topic, char *text, bool retain, bool whole) {
   HaCmd c = {};
   c.kind = HA_CMD_SEND;
   c.qos = 1;
   c.retain = retain ? 1 : 0;
+  c.whole = whole ? 1 : 0;
   c.text = text;
-  strlcpy(c.suffix, suffix, sizeof(c.suffix));
+  strlcpy(c.suffix, topic, sizeof(c.suffix));
   if (haCommand(c)) { return true; }
   heap_caps_free(text);
   return false;
 }
 
-// While connected, on every pass: the search field's text and the matches
-// when they are due - after a connect, a new text, a new set of GIFs, the
-// panel turned. Both retained, so Home Assistant has them as soon as it
-// subscribes, also after its own start.
+// A copy of s in a block from the heap, for haGifSendText(); nullptr without RAM.
+static char *haCopy(const char *s) {
+  size_t n = strlen(s) + 1;
+  char *out = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (out) { memcpy(out, s, n); }
+  return out;
+}
+
+// While connected, on every pass: the search field's text, and GIF matches'
+// config and state, when they are due - after a connect, a new text, a new
+// set of GIFs, the panel turned, a GIF picked. All retained, so Home
+// Assistant has them as soon as it subscribes, also after its own start.
 void haGifSend() {
   uint8_t turn = matrix.getRotation();
   if (gifListGeneration() != haGifListSeen || turn != haGifTurnSeen) { haGifMatchesDue = true; }
   if (haGifSearchDue) {
-    char *text = (char *)heap_caps_malloc(sizeof(haGifSearch.text), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!text) { return; }
-    strlcpy(text, haGifSearch.text, sizeof(haGifSearch.text));
-    if (!haGifSendText("gif/search/state", text, true)) { return; }   // on a later pass
+    char *text = haCopy(haGifSearch.text);
+    if (!text || !haGifSendText("gif/search/state", text, true, false)) { return; }   // on a later pass
     haGifSearchDue = false;
   }
   if (haGifMatchesDue) {
-    char *json = haGifMatches();
-    if (!json || !haGifSendText("gif/matches", json, true)) { return; }
+    char *config = nullptr, topic[64];
+    if (!haGifMatches(config)) { return; }
+    snprintf(topic, sizeof(topic), "homeassistant/select/%s/gif_matches/config", haId());
+    if (!haGifSendText(topic, config, true, true)) { return; }
     haGifMatchesDue = false;
+    haGifSummaryDue = true;
     haGifListSeen = gifListGeneration();
     haGifTurnSeen = turn;
+  }
+  if (haGifSummaryDue) {
+    char *text = haCopy(haGifSummary);
+    if (!text || !haGifSendText("gif/matches", text, true, false)) { return; }
+    haGifSummaryDue = false;
   }
 }
 

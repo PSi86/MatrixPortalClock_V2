@@ -25,8 +25,12 @@
                                search field finds (any GIF when it is empty)
      mpclock/<id>/gif/again    Home Assistant to the clock: GIF again
      mpclock/<id>/gif/matches  the clock to Home Assistant, retained: the
-                               GIFs the search field finds, JSON count and
-                               the first of them
+                               select entity GIF matches' state, a line on
+                               what the search field finds; the GIFs it
+                               finds are the entity's options, in its
+                               discovery config, sent anew with each search
+     mpclock/<id>/gif/pick     Home Assistant to the clock: a GIF picked from
+                               the matches (an option of GIF matches)
      mpclock/<id>/status       the clock to Home Assistant, retained: online,
                                or offline as the last will
      mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux
@@ -88,7 +92,8 @@ struct HaCmd {
   uint8_t qos;            // HA_CMD_SEND
   uint8_t retain;         // HA_CMD_SEND
   uint8_t connected;      // HA_CMD_STOP: connected, so it says goodbye first
-  char    suffix[20];     // HA_CMD_SEND: the topic past the clock's prefix
+  char    suffix[64];     // HA_CMD_SEND: the topic past the clock's prefix, or a whole topic (whole)
+  uint8_t whole;          // HA_CMD_SEND: suffix is the whole topic (a discovery config)
   char    payload[32];    // HA_CMD_SEND: a value
   char   *text;           // HA_CMD_SEND: a longer payload instead, from heap_caps_malloc(); the worker frees it
 };
@@ -115,6 +120,7 @@ struct HaLink {
   char     gifSearch[48] = "";        // the search field's text, to the clock
   char     gifPlay[48] = "";          // the button Play GIF
   char     gifAgain[48] = "";         // the button GIF again
+  char     gifPick[48] = "";          // a GIF picked from the matches
   char     announceTopic[HA_ANNOUNCE_MAX][64] = {};
   String   announce[HA_ANNOUNCE_MAX];  // empty takes a config back (a sensor no longer found)
   std::atomic<uint32_t> lost{0};       // what the loop did not take in time
@@ -132,6 +138,7 @@ inline void haTopics(const char *id) {
   snprintf(l.gifSearch, sizeof(l.gifSearch), "%sgif/search", l.prefix);
   snprintf(l.gifPlay, sizeof(l.gifPlay), "%sgif/play", l.prefix);
   snprintf(l.gifAgain, sizeof(l.gifAgain), "%sgif/again", l.prefix);
+  snprintf(l.gifPick, sizeof(l.gifPick), "%sgif/pick", l.prefix);
 }
 
 // Waits up to a second for the loop, which empties the queue on every pass;
@@ -172,6 +179,7 @@ inline void haEvent(void *, esp_event_base_t, int32_t id, void *data) {
       esp_mqtt_client_subscribe(e->client, l.gifSearch, 1);
       esp_mqtt_client_subscribe(e->client, l.gifPlay, 1);
       esp_mqtt_client_subscribe(e->client, l.gifAgain, 1);
+      esp_mqtt_client_subscribe(e->client, l.gifPick, 1);
       esp_mqtt_client_subscribe(e->client, "homeassistant/status", 1);
       haAnnounce();
       break;
@@ -289,8 +297,8 @@ inline void haWorker(void *) {
         break;
       case HA_CMD_SEND:
         if (l.client) {
-          char topic[64];
-          snprintf(topic, sizeof(topic), "%s%s", l.prefix, c.suffix);
+          char topic[96];
+          snprintf(topic, sizeof(topic), "%s%s", c.whole ? "" : l.prefix, c.suffix);
           esp_mqtt_client_enqueue(l.client, topic, c.text ? c.text : c.payload, 0, c.qos, c.retain, true);
         }
         heap_caps_free(c.text);   // the outbox has its own copy
