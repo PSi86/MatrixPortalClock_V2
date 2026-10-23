@@ -17,7 +17,9 @@
                                or a keyword, JSON gif and replace, or the
                                text alone; empty or {} any GIF
      mpclock/<id>/gif/state    the clock to Home Assistant: the text entity
-                               GIF's state, empty after every request
+                               GIF's state - what came of the last request
+                               ("spongebob → SpongeBob dance"), empty at the
+                               connect
      mpclock/<id>/status       the clock to Home Assistant, retained: online,
                                or offline as the last will
      mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux
@@ -80,7 +82,7 @@ struct HaCmd {
   uint8_t retain;         // HA_CMD_SEND
   uint8_t connected;      // HA_CMD_STOP: connected, so it says goodbye first
   char    suffix[16];     // HA_CMD_SEND: the topic past the clock's prefix
-  char    payload[32];    // HA_CMD_SEND
+  char    payload[256];   // HA_CMD_SEND: a value, or the GIF entity's state (Home Assistant takes 255 characters)
 };
 
 // ---- The link ----------------------------------------------------------------------

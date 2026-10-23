@@ -32,6 +32,8 @@ static void haIconLook(JsonDocument &doc, BandItem &it);
 static void haItem(const char *name, const char *payload, uint16_t len);
 static void haMessage(const char *payload, uint16_t len);
 static void haGif(const char *payload, uint16_t len);
+static void haUtf8Cut(char *s, size_t n);
+static void haGifState(const char *what, const GifAnswer &a);
 static const char *haBlocked();
 
 // The Home Assistant link ------------------------------------------------------------
@@ -100,6 +102,7 @@ static HaValue haValues[HA_VALUE_COUNT] = {
 const unsigned long HA_RETRY_MS = 60UL * 1000UL;   // after the client failed to start
 const unsigned long HA_STOP_WAIT_MS = 2000;        // the hotspot waits this long for the goodbye
 const uint8_t  HA_MESSAGES_MAX = 4;      // messages kept at a time, as items "*msg1" ... (no item name has a '*')
+static char    haGifShown[256] = "";     // the GIF entity's state as last sent (haGifState())
 const uint16_t HA_MESSAGE_S = 3600;      // how long a message counts when it does not say
 
 /* ----------------------------------------------------------------------
@@ -191,17 +194,19 @@ void haBuildAnnounce() {
   // GIFs on request (haGif()): the text entity sends what is typed, the
   // button any GIF; neither takes the place of a GIF on show - an
   // automation that wants that publishes {"gif": ..., "replace": true}.
-  // The text entity has a state the clock empties after every request:
-  // without one Home Assistant keeps what was typed as its state, and its
-  // entity row sends nothing for a value equal to the state - the same
-  // keyword twice in a row came once (Peter, 2026-10-23).
+  // The text entity's state is set by the clock, to what came of each
+  // request (haGifState()): without a state topic Home Assistant keeps what
+  // was typed as the state, and its entity row sends nothing for a value
+  // equal to the state - the same keyword twice in a row came once (Peter,
+  // 2026-10-23). max is Home Assistant's longest state: it refuses a state
+  // longer than the entity's max.
   JsonDocument gif;
   gif["name"] = "GIF";
   gif["unique_id"] = String(netHostname()) + "-gif";
   gif["command_topic"] = l.gif;
   gif["command_template"] = "{\"gif\": {{ value | tojson }}}";
   gif["state_topic"] = l.gifState;
-  gif["max"] = 100;
+  gif["max"] = 255;
   gif["icon"] = "mdi:file-gif-box";
   gif["availability_topic"] = l.status;
   gif["qos"] = 1;
@@ -394,6 +399,7 @@ void haApply(const HaIn &m) {
   if ((haPhase != HA_PHASE_STARTING && haPhase != HA_PHASE_RUNNING) || haChanged) { return; }
   switch (m.kind) {
     case HA_IN_CONNECTED:
+      haGifShown[0] = '\0';   // haAnnounce() empties the GIF entity at the connect
       haState   = HA_UP;
       haUpSince = clockIsSet() ? clockNow() : 0;
       haError[0] = '\0';
@@ -605,11 +611,40 @@ void haGif(const char *payload, uint16_t len) {
   }
   GifAnswer a = gifRequest(what, replace);
   Console.printf("Home Assistant: GIF \"%s\"%s - %s\n", what, replace ? ", replace" : "", gifAskedWords(a.how));
-  HaCmd c = {};   // the text entity GIF empty again, so the same keyword can come once more
+  haGifState(what, a);
+}
+
+// s cut to at most n bytes, not in the middle of a UTF-8 character.
+void haUtf8Cut(char *s, size_t n) {
+  if (strlen(s) <= n) { return; }
+  while (n > 0 && ((uint8_t)s[n] & 0xC0) == 0x80) { n--; }   // s[n] continues a character begun before it
+  s[n] = '\0';
+}
+
+// The text entity GIF's state after a request: what came of it - what was
+// asked and the title of the GIF that plays, or why none does ("spongebob ->
+// SpongeBob dance", "xyz -> no GIF found", with an arrow). Home Assistant's
+// logbook shows each, and the field never holds the keyword alone, so the
+// same keyword can come again: its entity row sends nothing for a value
+// equal to the state (Peter, 2026-10-23). The same text twice in a row would
+// be no change for Home Assistant and its logbook: the state goes empty
+// in between then. Home Assistant takes 255 characters.
+void haGifState(const char *what, const GifAnswer &a) {
+  static char text[512];
+  static HaCmd c;
+  char asked[96];
+  strlcpy(asked, what[0] ? what : "any GIF", sizeof(asked));
+  haUtf8Cut(asked, 80);
+  bool plays = (a.how == GIF_ASKED_PLAYS || a.how == GIF_ASKED_READING) && a.index >= 0;
+  snprintf(text, sizeof(text), "%s \xE2\x86\x92 %s", asked, plays ? gifTitleOf(a.index) : gifAskedWords(a.how));
+  haUtf8Cut(text, 255);
+  c = {};
   c.kind = HA_CMD_SEND;
   c.qos = 1;
   strlcpy(c.suffix, "gif/state", sizeof(c.suffix));
-  haCommand(c);
+  if (strcmp(text, haGifShown) == 0) { haCommand(c); }   // empty first
+  strlcpy(c.payload, text, sizeof(c.payload));
+  if (haCommand(c)) { strlcpy(haGifShown, text, sizeof(haGifShown)); }
 }
 
 // The settings for the page; never the password, only whether there is one.
