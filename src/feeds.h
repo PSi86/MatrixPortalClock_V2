@@ -35,6 +35,7 @@ extern char          feedPlace[32];     // the warnings' place, as the DWD names
 void loadFeedSettings();   // at start-up: the settings and the fetch task
 bool feedOn(uint8_t f);    // source f is switched on
 void feedsUpdate();        // on every pass outside the hotspot
+bool feedsSettle(unsigned long maxMs);   // a fetch under way ended and taken, waiting up to maxMs; false if it still runs
 #if defined(CLOCK_DEBUG)
 void feedRetrySelfTest();
 #endif
