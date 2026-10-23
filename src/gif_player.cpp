@@ -425,17 +425,21 @@ GifAnswer gifRequest(const char *request, bool replace) {
   }
   uint32_t t0 = micros();
   a.matches = count ? gifFindQuery(q, hit, a.byName) : 0;
+  // The one shown last: with replace the one on show, which becomes the last
+  // only when it closes (2026-10-23 on the S3: before, 20 requests in a row
+  // brought the same GIF twice in a row twice).
+  int16_t last = onShow ? gifIndex : gifLast;
   uint16_t others = 0;   // fitting finds but the last one shown
   for (uint16_t i = 0; i < count; i++) {
-    if (hit[i] && gifFits((int16_t)i)) { a.fit++; others += (int16_t)i != gifLast; }
+    if (hit[i] && gifFits((int16_t)i)) { a.fit++; others += (int16_t)i != last; }
   }
   int16_t pick = -1;
   if (a.fit && !any) {
-    pick = gifLast;   // the only one that fits, when no other does
+    pick = last;   // the only one that fits, when no other does
     if (others) {
       uint16_t n = esp_random() % others;
       for (uint16_t i = 0; i < count; i++) {
-        if (hit[i] && gifFits((int16_t)i) && (int16_t)i != gifLast) {
+        if (hit[i] && gifFits((int16_t)i) && (int16_t)i != last) {
           if (n == 0) { pick = (int16_t)i; break; }
           n--;
         }

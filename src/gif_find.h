@@ -154,7 +154,17 @@ inline size_t gifNormalise(const char *in, size_t len, char *out, size_t size, b
   return n;
 }
 
-// The search text of a GIF out of its fields (UTF-8, nullptr as ""), into
+// The length of a name without a ".gif" at its end, of any case.
+inline size_t gifStemLength(const char *name, size_t len) {
+  if (len >= 4) {
+    const char *x = name + len - 4;
+    if (x[0] == '.' && (x[1] | 0x20) == 'g' && (x[2] | 0x20) == 'i' && (x[3] | 0x20) == 'f') { return len - 4; }
+  }
+  return len;
+}
+
+// The search text of a GIF out of its fields (UTF-8, nullptr as ""), the
+// first its name, without its ".gif" (a request names it either way), into
 // out (size bytes); the length it takes, so out == nullptr measures.
 inline size_t gifSearchText(const char *const *fields, uint8_t count, char *out, size_t size) {
   size_t n = 0;
@@ -164,8 +174,10 @@ inline size_t gifSearchText(const char *const *fields, uint8_t count, char *out,
       n++;
     }
     const char *f = fields[i] ? fields[i] : "";
+    size_t len = strlen(f);
+    if (i == 0) { len = gifStemLength(f, len); }
     size_t room = (out && n < size) ? size - n : 0;
-    n += gifNormalise(f, strlen(f), room ? out + n : nullptr, room, true);
+    n += gifNormalise(f, len, room ? out + n : nullptr, room, true);
   }
   if (out && size) { out[n < size ? n : size - 1] = '\0'; }
   return n;
@@ -177,12 +189,7 @@ inline size_t gifSearchText(const char *const *fields, uint8_t count, char *out,
 inline void gifQueryParse(const char *request, GifQuery &q) {
   size_t len = strlen(request);
   while (len > 0 && (request[len - 1] == ' ' || request[len - 1] == '\t')) { len--; }
-  size_t nameLen = len;
-  if (nameLen >= 4) {
-    const char *x = request + nameLen - 4;
-    if (x[0] == '.' && (x[1] | 0x20) == 'g' && (x[2] | 0x20) == 'i' && (x[3] | 0x20) == 'f') { nameLen -= 4; }
-  }
-  gifNormalise(request, nameLen, q.name, sizeof(q.name), false);
+  gifNormalise(request, gifStemLength(request, len), q.name, sizeof(q.name), false);
   q.keys = 0;
   const char *s = request, *end = request + len;
   while (s <= end) {
@@ -199,25 +206,33 @@ inline void gifQueryParse(const char *request, GifQuery &q) {
 
 // How key (letters and digits only) stands in a search text: 2 as whole
 // words, 1 at the start of a word only, 0 not at all. The spaces of the
-// text count for nothing within it, the fields' '|' end it.
+// text count for nothing within it, the fields' '|' end it. It goes from
+// word start to word start, and tries one only where its first letter is
+// the key's.
 inline uint8_t gifMatchLevel(const char *text, const char *key) {
   if (!*key) { return 0; }
   uint8_t best = 0;
-  for (const char *s = text; *s; s++) {
-    if (*s == ' ' || *s == '|' || (s > text && s[-1] != ' ' && s[-1] != '|')) { continue; }   // not a word's start
-    const char *p = s, *k = key;
-    while (*k && *p && *p != '|') {
-      if (*p == ' ') { p++; continue; }
-      if (*p != *k) { break; }
-      p++;
-      k++;
+  const char *s = text;
+  while (*s == ' ' || *s == '|') { s++; }
+  while (*s) {
+    if (*s == *key) {   // a word's start
+      const char *p = s, *k = key;
+      while (*k && *p && *p != '|') {
+        if (*p == ' ') { p++; continue; }
+        if (*p != *k) { break; }
+        p++;
+        k++;
+      }
+      if (!*k) {
+        const char *r = p;   // what is left of the word the key ends in
+        while (*r && *r != ' ' && *r != '|') { r++; }
+        size_t rest = (size_t)(r - p);
+        if (rest == 0 || (rest == 1 && p[0] == 's') || (rest == 2 && p[0] == 'e' && p[1] == 's')) { return 2; }
+        best = 1;
+      }
     }
-    if (*k) { continue; }
-    const char *r = p;   // what is left of the word the key ends in
-    while (*r && *r != ' ' && *r != '|') { r++; }
-    size_t rest = (size_t)(r - p);
-    if (rest == 0 || (rest == 1 && p[0] == 's') || (rest == 2 && p[0] == 'e' && p[1] == 's')) { return 2; }
-    best = 1;
+    while (*s && *s != ' ' && *s != '|') { s++; }   // on to the next word
+    while (*s == ' ' || *s == '|') { s++; }
   }
   return best;
 }
