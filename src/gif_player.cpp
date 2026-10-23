@@ -314,12 +314,34 @@ void gifPlayNow() {
 }
 
 // The last GIF shown once more (FN_GIF_AGAIN): on the face only, as
-// gifPlayNow(); a random one when none has played yet or the last no longer
-// fits the panel as it is held.
+// gifPlayNow().
 void gifPlayAgain() {
-  if (screen != SCREEN_FACE) { return; }
-  int16_t i = (gifLast >= 0 && gifFits(gifLast)) ? gifLast : gifNext();
-  if (!gifStart(i, false)) { gifScheduleNext(); }
+  gifAgain(false);
+}
+
+// The last GIF shown once more - with replace the one on show, from its
+// start - or a random one when none has played yet or the last no longer
+// fits the panel as it is held. Over the face, now or not at all, as
+// gifRequest().
+GifAnswer gifAgain(bool replace) {
+  GifAnswer a = { GIF_ASKED_NO_MATCH, 0, 0, -1, false };
+  bool onShow = screen == SCREEN_GIF;
+  if (screen != SCREEN_FACE && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (onShow && !replace) { a.how = GIF_ASKED_GIF_ON_SHOW; return a; }
+  if (gifCount() == 0) { return a; }
+  if (onShow) { closeScreen(); }   // the GIF on show becomes the last one
+  if (screen != SCREEN_FACE) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  bool last = gifLast >= 0 && gifFits(gifLast);
+  a.index = last ? gifLast : gifNext();
+  a.matches = a.fit = 1;
+  a.byName = last;
+  if (gifStart(a.index, false)) {
+    a.how = GIF_ASKED_PLAYS;
+  } else {
+    a.how = GIF_ASKED_NOT_OPENED;
+    gifScheduleNext();
+  }
+  return a;
 }
 
 /* ----------------------------------------------------------------------
@@ -400,6 +422,33 @@ uint16_t gifFind(const char *request, uint8_t *hit, bool &byName) {
   gifQueryParse(request, q);
   return gifFindQuery(q, hit, byName);
 }
+
+int32_t gifFindByTitle(const char *request, int16_t *order, uint16_t &fit, bool &byName) {
+  uint16_t count = (uint16_t)gifCount(), n = 0;
+  fit = 0;
+  byName = false;
+  if (!count) { return 0; }
+  uint8_t *hit = (uint8_t *)heap_caps_malloc(count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!hit) { return -1; }
+  gifFind(request, hit, byName);
+  for (uint16_t i = 0; i < count; i++) {
+    if (!hit[i]) { continue; }
+    order[n++] = (int16_t)i;
+    fit += gifFits((int16_t)i);
+  }
+  heap_caps_free(hit);
+  qsort(order, n, sizeof(int16_t), [](const void *a, const void *b) {
+    int16_t x = *(const int16_t *)a, y = *(const int16_t *)b;
+    int r = strcasecmp(gifTitleOf(x), gifTitleOf(y));
+    return r ? r : strcmp(gifMetaOf(x).field[GIF_META_NAME], gifMetaOf(y).field[GIF_META_NAME]);
+  });
+  return n;
+}
+
+// Counts up whenever the GIFs to play change: Home Assistant's matches are
+// sent anew then.
+static uint32_t gifGeneration = 0;
+uint32_t gifListGeneration() { return gifGeneration; }
 
 // A request: which GIFs it finds and which of them fit, one of those drawn at
 // random (not the last one shown while another fits), and that one started -
@@ -685,6 +734,7 @@ uint32_t gifLoopMs(const uint8_t *d, uint32_t n, uint16_t &frames) {
 
 void gifPackLoad() {
   gifPackMetaFree();   // an old pack's, should there be one
+  gifGeneration++;
   gifPackPart = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "ffat");
   GifPackHeader h;
   if (!gifPackPart || esp_partition_read(gifPackPart, 0, &h, sizeof(h)) != ESP_OK
@@ -731,6 +781,7 @@ void gifPackLoad() {
 }
 
 void gifPackForget() {
+  gifGeneration++;
   gifPackState = GIF_PACK_NONE;
   free(gifPack);
   gifPack = nullptr;
@@ -1026,6 +1077,7 @@ void gifCardClose(uint8_t how) {
 // The card is read anew (at start-up, POST /api/card, the console, or when
 // reads keep failing): the pack is the source until it is done.
 void gifCardRemount() {
+  gifGeneration++;
   for (uint8_t s = 0; s < 2; s++) { gifCardFreeSlot(s); }
   if (gifFromCard) { gifLast = -1; }
   gifFromCard = false;
@@ -1040,6 +1092,7 @@ void gifCardResult() {
   CardResult &r = cardResult;
   cardJobBusy = false;
   if (r.kind == CARD_MOUNT_JOB) {
+    gifGeneration++;
     cardMounted = cardHandle() != nullptr;
     cardList = r.list;
     cardMb = r.cardMb;

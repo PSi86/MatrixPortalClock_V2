@@ -702,8 +702,9 @@ newer request takes the place of one being read, and after 3 s one goes.
   the list the web app shows: `count`, `fit`, `byName`, `total`, `meta` (GIFs
   the meta index knows), and `gifs` (up to 50: `name`, `title`, `franchise`,
   `category`, `era`, `w`, `h`, `fits`).
-- **Home Assistant:** the topic `mpclock/<id>/gif`, and the entities **GIF** and
-  **Play GIF** (see [Home Assistant link](#home-assistant-link)).
+- **Home Assistant:** the search field **GIF search** with the buttons **Play
+  GIF** and **GIF again** and the select **GIF matches**, and the topic
+  `mpclock/<id>/gif` for automations (see [Home Assistant link](#home-assistant-link)).
 - **Console** (debug build): `gif <name or keyword>`, `gif! ...` with replace,
   `gifs <name or keyword>` lists what it finds.
 
@@ -778,12 +779,29 @@ Setting it up:
    a stored home WiFi and **continuous network access** (Network section);
    the card says what is missing.
 3. The clock shows up in Home Assistant as the device *Matrix Clock xxxxxx*, by
-   MQTT discovery, with an entity **Message** (notify), the text entity **GIF**
-   and the button **Play GIF** ([GIFs on request](#gifs-on-request): a name or a
-   keyword typed into **GIF** plays that GIF or one it finds, the button any
-   GIF; neither replaces a GIF on show), with a BH1750 a sensor **Light** (lux),
-   and on the wall clock the sensors **Temperature** (°C) and **Humidity** (%)
-   from its board's SHTC3.
+   MQTT discovery, with an entity **Message** (notify), the GIF entities below,
+   with a BH1750 a sensor **Light** (lux), and on the wall clock the sensors
+   **Temperature** (°C) and **Humidity** (%) from its board's SHTC3.
+   [GIFs on request](#gifs-on-request):
+   - **GIF search**, a text field that keeps what was typed into it - a GIF's
+     name, a keyword, several keywords apart by commas, or nothing. The clock
+     keeps it too, in its flash, so after a restart the field still shows it.
+     Typing plays nothing.
+   - **Play GIF**: a GIF the search finds, drawn at random and not the one
+     shown last while another fits; with a single match always that one; with
+     the field empty any GIF.
+   - **GIF again**: the last GIF shown, whatever brought it (a random one when
+     none has played yet).
+   - Both buttons take the place of a GIF on show.
+   - **GIF matches**, a select: its list holds what the search finds - first
+     a line that says it (`15 matches for "mario"`, `no GIF found for "xyz"`,
+     `all 241 GIFs - type a search`), then the GIFs found as `title (file
+     name)`, by title, the first 50, marked when one does not fit the panel as
+     it stands. Picking one plays it, in place of a GIF on show; the select
+     then shows the first line again. Home Assistant keeps a select's list out
+     of its database by itself, so the names are never stored; only the first
+     line, the select's state, is, once per search. The clock sends the list
+     with the select's discovery config, anew with each search.
 4. **Values to Home Assistant** in the same section: a sensor's value goes out
    when it changed - the light by 10 % (at least 1 lx), the temperature by
    0.2 °C, the humidity by 1 % - but at most every *At most every* seconds
@@ -801,10 +819,16 @@ the card shows its topics.
 | `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required), and optionally `severity`, `intensity`, `chance`, `short`; an empty payload takes the item away |
 | `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600), and optionally `severity`, `intensity`, `chance` |
 | `mpclock/<id>/gif` | Home Assistant to the clock, not retained (a retained one is not played) | JSON `gif` (a GIF's name or a keyword) and `replace` (`true`: in place of a GIF on show), or the name or keyword alone; empty or `{}`: any GIF ([GIFs on request](#gifs-on-request)) |
+| `mpclock/<id>/gif/search` | Home Assistant to the clock | the search field's text (up to 100 characters); the clock keeps it in its flash |
+| `mpclock/<id>/gif/search/state` | the clock to Home Assistant, retained | the search field's text as the clock keeps it |
+| `mpclock/<id>/gif/play`, `mpclock/<id>/gif/again` | Home Assistant to the clock | the buttons **Play GIF** and **GIF again** (any payload) |
+| `mpclock/<id>/gif/matches` | the clock to Home Assistant, retained | the select **GIF matches**' state: the first line of its list, what the search finds |
+| `mpclock/<id>/gif/pick` | Home Assistant to the clock | a line of **GIF matches** picked: the GIF of the file name in its last brackets plays |
+| `homeassistant/select/<id>/gif_matches/config` | the clock to Home Assistant, retained | **GIF matches**' discovery config with its list (`options`), sent anew after a new search text, a connect, a new pack or card, the panel turned |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux (the filtered light the brightness follows), as set under step 4 |
 | `mpclock/<id>/temperature`, `mpclock/<id>/humidity` | the clock to Home Assistant (wall clock) | °C with one decimal, % whole, as set under step 4 |
-| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back |
+| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/button/<id>/gif_again/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back (as does `homeassistant/sensor/<id>/gif_matches/config`, a sensor of a test build) |
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
@@ -852,15 +876,32 @@ data:
   payload: '{"gif": "doorbell", "replace": true}'
 ```
 
-Through the entity **GIF**, here one of the Christmas GIFs (the entity's id is
-the one Home Assistant gave it, shown on the device's page):
+Through the search field and the button, here one of the Christmas GIFs (the
+entities' ids are the ones Home Assistant gave them, shown on the device's
+page):
 
 ```yaml
-action: text.set_value
-target:
-  entity_id: text.matrix_clock_06c16c_gif
-data:
-  value: christmas, santa, snow
+- action: text.set_value
+  target:
+    entity_id: text.matrix_clock_06c16c_gif
+  data:
+    value: christmas, santa, snow
+- action: button.press
+  target:
+    entity_id: button.matrix_clock_06c16c_play_gif
+```
+
+The matches as a list in a Markdown card, besides the select's own dropdown
+(the options are there at run time, only not stored):
+
+```yaml
+type: markdown
+content: |
+  {% set options = state_attr('select.matrix_clock_06c16c_gif_matches', 'options') or [] %}
+  **{{ options[0] if options else 'no matches yet' }}**
+  {% for o in options[1:] %}
+  - {{ o }}
+  {% endfor %}
 ```
 
 ### Example: public holidays
