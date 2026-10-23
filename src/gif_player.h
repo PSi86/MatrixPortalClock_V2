@@ -124,6 +124,7 @@ extern uint32_t cardMb, cardFreeMb;
 void gifCardBegin();                 // at start-up: the card's task
 void gifCardUpdate();                // on every pass: its results, and the next GIF read ahead
 void gifCardCommand(const char *line);   // the console's "sd ..."
+bool gifCardSettle(unsigned long maxMs); // a card job under way ended and taken, waiting up to maxMs; false if it still runs
 #endif
 
 #endif  // GIF_PLAYER_H

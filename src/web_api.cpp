@@ -653,6 +653,7 @@ static void apiGifs(Print &c, const String &body) {
 // shows how far it is.
 const uint32_t PACK_ERASE_BLOCK = 65536;            // erased ahead of the data, a flash block at a time
 const unsigned long PACK_READ_TIMEOUT_MS = 5000;    // the longest gap in the upload before it counts as broken off
+const unsigned long PACK_SETTLE_MS = 20000;         // the longest wait for a fetch under way before the writes begin
 
 void apiPackUpload(WiFiClient &client, Print &out, long length) {
   if (!gifPackPart) {
@@ -686,6 +687,20 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   // Nothing plays from the old pack while it is overwritten.
   if (screen == SCREEN_GIF) { closeScreen(); }
   gifPackForget();
+  // And nothing computes on core 0 beside the flash writes: each of them holds
+  // core 0 as well, and with a fetch's TLS handshake there too the idle task
+  // of core 0 did not run for 5 s - the task watchdog reset the clock in the
+  // middle of the pack (2026-10-23). A fetch or a card job under way ends
+  // first; none starts while the loop is in here.
+  unsigned long settleFrom = millis();
+  bool settled = feedsSettle(PACK_SETTLE_MS);
+#if BOARD_WAVESHARE_WALL
+  settled = gifCardSettle(PACK_SETTLE_MS) && settled;
+#endif
+  if (!settled || millis() - settleFrom >= 50) {
+    Console.printf("GIF pack: waited %lu ms for a fetch under way%s\n", millis() - settleFrom,
+                  settled ? "" : " - it still runs, the pack is written anyway");
+  }
 #if BOARD_WAVESHARE_WALL
   if (!gifFromCard)   // the card's GIFs stay as they are
 #endif

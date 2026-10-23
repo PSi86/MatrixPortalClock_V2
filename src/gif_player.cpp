@@ -1086,6 +1086,18 @@ void gifCardResult() {
   }
 }
 
+// Waits up to maxMs for the card's task to end a job under way, and takes its
+// result, as feedsSettle() does for a fetch: before a long run of flash
+// writes (POST /api/pack), which hold core 0 too. No new job starts until
+// the loop runs gifCardUpdate() again.
+bool gifCardSettle(unsigned long maxMs) {
+  unsigned long t0 = millis();
+  while (cardJobBusy && cardResults() && millis() - t0 < maxMs) {
+    if (xQueueReceive(cardResults(), &cardResult, pdMS_TO_TICKS(50)) == pdTRUE) { gifCardResult(); }
+  }
+  return !cardJobBusy;
+}
+
 // Every pass: the task's result, and the next job - only while no GIF plays,
 // so the card's reads do not come on top of a GIF's frames.
 void gifCardUpdate() {

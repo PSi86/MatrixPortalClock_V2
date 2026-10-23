@@ -19,6 +19,7 @@ static bool feedDueWithin(uint8_t f, unsigned long early);
 static int8_t feedDue(unsigned long early);
 static void feedFailed(uint8_t f, const char *why);
 static void feedApply(const FeedResult &res);
+static void feedTake(TickType_t wait);
 static bool microDegreesOf(const String &v, int32_t limit, int32_t &out);
 
 // Per source: when it is due, and how its last fetch went (FeedRun: feeds.h).
@@ -173,14 +174,32 @@ static void feedApply(const FeedResult &res) {
   for (uint8_t k = 0; k < res.count; k++) { bandPut(res.item[k]); }
 }
 
-// On every pass outside the hotspot: takes a result back, hands out the next
-// fetch, and wants the station only while a source is due.
-void feedsUpdate() {
+// The fetch task's result, when there is one within `wait`.
+static void feedTake(TickType_t wait) {
   static FeedResult res;   // 0.6 KB, off the loop's stack
-  if (feedBusy && xQueueReceive(feedResults(), &res, 0) == pdTRUE) {
+  if (feedBusy && xQueueReceive(feedResults(), &res, wait) == pdTRUE) {
     feedBusy = false;
     feedApply(res);
   }
+}
+
+// Waits up to maxMs for a fetch under way to end, and takes its result; no
+// new one starts until the loop runs feedsUpdate() again. For a long run of
+// flash writes (POST /api/pack): each write holds core 0 as well, and a TLS
+// handshake on core 0 beside them kept its idle task from running for 5 s -
+// the task watchdog reset the S3 and the pack was gone (2026-10-23, in 3 of
+// 3 sends with a fetch started with them, 2 of 2 sends at the start, when
+// the first fetches run; 0 of 2 without one).
+bool feedsSettle(unsigned long maxMs) {
+  unsigned long t0 = millis();
+  while (feedBusy && millis() - t0 < maxMs) { feedTake(pdMS_TO_TICKS(50)); }
+  return !feedBusy;
+}
+
+// On every pass outside the hotspot: takes a result back, hands out the next
+// fetch, and wants the station only while a source is due.
+void feedsUpdate() {
+  feedTake(0);
   // An item goes when its until has come. Once a minute every item is looked
   // at as well, whatever bandNextUntil says, so none can outstay its until
   // by more than that.
