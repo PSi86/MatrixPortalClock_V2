@@ -353,6 +353,7 @@ const GifMeta &gifMetaOf(int16_t i) {
   for (uint8_t k = 0; k < GIF_META_FIELDS; k++) { bare.field[k] = ""; }
   bare.field[GIF_META_NAME] = name;
   bare.text = "";
+  bare.starts = 0;
   bare.cut = false;
   return bare;
 }
@@ -390,7 +391,7 @@ uint16_t gifFindQuery(const GifQuery &q, uint8_t *hit, bool &byName) {
   }
   return gifFindAll(q, count, [](uint16_t i) {
     const GifMeta &m = gifMetaOf((int16_t)i);
-    return GifFindItem{ m.text, m.cut };
+    return GifFindItem{ m.text, m.cut, m.starts };
   }, hit, byName);
 }
 

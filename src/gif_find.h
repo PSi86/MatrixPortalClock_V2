@@ -30,10 +30,25 @@ struct GifQuery {
   uint8_t keys;
 };
 
-// A GIF as gifFindAll() sees it: its search text, and whether its name was
-// cut short (the GIF pack keeps 31 characters), so a longer one asked for
-// still names it.
-struct GifFindItem { const char *text; bool cut; };
+// A GIF as gifFindAll() sees it: its search text, whether its name was cut
+// short (the GIF pack keeps 31 characters), so a longer one asked for still
+// names it, and the letters its words begin with (gifStartsOf(); all bits:
+// not known), so a keyword passes over a GIF without a word that starts
+// with its first letter.
+struct GifFindItem { const char *text; bool cut; uint32_t starts; };
+
+// The bit of a word's first letter or digit in GifFindItem.starts: a to z
+// their own, the ten digits six bits among them.
+inline uint32_t gifStartBit(char c) { return 1u << (c >= 'a' ? c - 'a' : 26 + (c - '0') % 6); }
+
+// The first letters of a search text's words, as bits.
+inline uint32_t gifStartsOf(const char *text) {
+  uint32_t bits = 0;
+  for (const char *s = text; *s; s++) {
+    if (*s != ' ' && *s != '|' && (s == text || s[-1] == ' ' || s[-1] == '|')) { bits |= gifStartBit(*s); }
+  }
+  return bits;
+}
 
 // ---- The meta index -----------------------------------------------------------
 // The GIF library's line per GIF (README, "GIF meta index"), between its
@@ -48,6 +63,7 @@ enum GifMetaField : uint8_t {
 struct GifMeta {
   const char *field[GIF_META_FIELDS];
   const char *text;
+  uint32_t    starts;   // gifStartsOf(text)
   bool        cut;      // the name is the pack's, cut to 31 characters
 };
 
@@ -268,11 +284,14 @@ inline uint16_t gifFindAll(const GifQuery &q, uint16_t count, Item item, uint8_t
   // of the high half the start of one; then each keyword counts with the
   // GIFs that have it whole, or, when none has, with those it starts in.
   uint8_t whole = 0;
+  uint32_t first[GIF_FIND_KEYS];
+  for (uint8_t k = 0; k < q.keys; k++) { first[k] = gifStartBit(q.key[k][0]); }
   for (uint16_t i = 0; i < count; i++) {
-    const char *text = item(i).text;
+    GifFindItem g = item(i);
     uint8_t m = 0;
     for (uint8_t k = 0; k < q.keys; k++) {
-      uint8_t level = gifMatchLevel(text, q.key[k]);
+      if (!(g.starts & first[k])) { continue; }   // no word of it starts as the key does
+      uint8_t level = gifMatchLevel(g.text, q.key[k]);
       if (level == 2) { m |= (uint8_t)(1 << k); } else if (level == 1) { m |= (uint8_t)(0x10 << k); }
     }
     hit[i] = m;
@@ -295,6 +314,7 @@ inline char *gifMetaTexts(GifMeta *meta, uint16_t count, Alloc alloc) {
   for (uint16_t i = 0; i < count; i++) {
     meta[i].text = block + at;
     at += gifSearchText(meta[i].field, GIF_META_FIELDS, block + at, total - at) + 1;
+    meta[i].starts = gifStartsOf(meta[i].text);
   }
   return block;
 }
