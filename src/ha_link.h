@@ -16,6 +16,8 @@
      mpclock/<id>/gif          Home Assistant to the clock: a GIF by its name
                                or a keyword, JSON gif and replace, or the
                                text alone; empty or {} any GIF
+     mpclock/<id>/gif/state    the clock to Home Assistant: the text entity
+                               GIF's state, empty after every request
      mpclock/<id>/status       the clock to Home Assistant, retained: online,
                                or offline as the last will
      mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux
@@ -99,6 +101,7 @@ struct HaLink {
   char     items[40] = "";            // the items' filter, "mpclock/06c16c/item/+"
   char     message[40] = "";          // the message topic
   char     gif[40] = "";              // the topic for GIFs on request
+  char     gifState[48] = "";         // the text entity GIF's state
   char     announceTopic[HA_ANNOUNCE_MAX][64] = {};
   String   announce[HA_ANNOUNCE_MAX];  // empty takes a config back (a sensor no longer found)
   std::atomic<uint32_t> lost{0};       // what the loop did not take in time
@@ -113,6 +116,7 @@ inline void haTopics(const char *id) {
   snprintf(l.items, sizeof(l.items), "%sitem/+", l.prefix);
   snprintf(l.message, sizeof(l.message), "%smessage", l.prefix);
   snprintf(l.gif, sizeof(l.gif), "%sgif", l.prefix);
+  snprintf(l.gifState, sizeof(l.gifState), "%sgif/state", l.prefix);
 }
 
 // Waits up to a second for the loop, which empties the queue on every pass;
@@ -134,6 +138,7 @@ inline void haAnnounce() {
     if (!l.announceTopic[i][0]) { continue; }
     esp_mqtt_client_enqueue(l.client, l.announceTopic[i], l.announce[i].c_str(), (int)l.announce[i].length(), 1, 1, true);
   }
+  esp_mqtt_client_enqueue(l.client, l.gifState, "", 0, 1, 0, true);   // the GIF entity starts empty
 }
 
 // ---- The client's task --------------------------------------------------------------

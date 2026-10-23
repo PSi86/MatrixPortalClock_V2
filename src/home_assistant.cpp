@@ -191,11 +191,16 @@ void haBuildAnnounce() {
   // GIFs on request (haGif()): the text entity sends what is typed, the
   // button any GIF; neither takes the place of a GIF on show - an
   // automation that wants that publishes {"gif": ..., "replace": true}.
+  // The text entity has a state the clock empties after every request:
+  // without one Home Assistant keeps what was typed as its state, and its
+  // entity row sends nothing for a value equal to the state - the same
+  // keyword twice in a row came once (Peter, 2026-10-23).
   JsonDocument gif;
   gif["name"] = "GIF";
   gif["unique_id"] = String(netHostname()) + "-gif";
   gif["command_topic"] = l.gif;
   gif["command_template"] = "{\"gif\": {{ value | tojson }}}";
+  gif["state_topic"] = l.gifState;
   gif["max"] = 100;
   gif["icon"] = "mdi:file-gif-box";
   gif["availability_topic"] = l.status;
@@ -600,6 +605,11 @@ void haGif(const char *payload, uint16_t len) {
   }
   GifAnswer a = gifRequest(what, replace);
   Console.printf("Home Assistant: GIF \"%s\"%s - %s\n", what, replace ? ", replace" : "", gifAskedWords(a.how));
+  HaCmd c = {};   // the text entity GIF empty again, so the same keyword can come once more
+  c.kind = HA_CMD_SEND;
+  c.qos = 1;
+  strlcpy(c.suffix, "gif/state", sizeof(c.suffix));
+  haCommand(c);
 }
 
 // The settings for the page; never the password, only whether there is one.

@@ -780,8 +780,9 @@ Setting it up:
 3. The clock shows up in Home Assistant as the device *Matrix Clock xxxxxx*, by
    MQTT discovery, with an entity **Message** (notify), the text entity **GIF**
    and the button **Play GIF** ([GIFs on request](#gifs-on-request): a name or a
-   keyword typed into **GIF** plays that GIF or one it finds, the button any
-   GIF; neither replaces a GIF on show), with a BH1750 a sensor **Light** (lux),
+   keyword typed into **GIF** plays that GIF or one it finds, and the clock
+   empties the field again, so the same keyword can be sent once more; the
+   button any GIF; neither replaces a GIF on show), with a BH1750 a sensor **Light** (lux),
    and on the wall clock the sensors **Temperature** (°C) and **Humidity** (%)
    from its board's SHTC3.
 4. **Values to Home Assistant** in the same section: a sensor's value goes out
@@ -801,6 +802,7 @@ the card shows its topics.
 | `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required), and optionally `severity`, `intensity`, `chance`, `short`; an empty payload takes the item away |
 | `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600), and optionally `severity`, `intensity`, `chance` |
 | `mpclock/<id>/gif` | Home Assistant to the clock, not retained (a retained one is not played) | JSON `gif` (a GIF's name or a keyword) and `replace` (`true`: in place of a GIF on show), or the name or keyword alone; empty or `{}`: any GIF ([GIFs on request](#gifs-on-request)) |
+| `mpclock/<id>/gif/state` | the clock to Home Assistant | the text entity **GIF**'s state: empty, at the connect and after every request on `mpclock/<id>/gif` (Home Assistant's entity row sends nothing for a value equal to the state) |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux (the filtered light the brightness follows), as set under step 4 |
 | `mpclock/<id>/temperature`, `mpclock/<id>/humidity` | the clock to Home Assistant (wall clock) | °C with one decimal, % whole, as set under step 4 |
