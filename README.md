@@ -199,7 +199,9 @@ dropped before the web server and WiFi work that followed.
 - Recovery: the config hotspot is in the menu from the first second, also
   without the home WiFi; holding UP during boot opens it as well
 - **GIFs**: now and then a GIF takes the panel for a few seconds, and holding
-  UP on the face plays one at once (see [GIF playback](#gif-playback))
+  UP on the face plays one at once (see [GIF playback](#gif-playback)); one
+  asked for by its name or a keyword from the web app's search or Home
+  Assistant (see [GIFs on request](#gifs-on-request))
 - **Gesture sensor (optional):** with a PAJ7620U2 on the I2C bus, swipes and
   push work the menu next to the buttons, or instead of them (see
   [Gesture sensor](#gesture-sensor-paj7620u2))
@@ -543,7 +545,8 @@ while one with GIFs is in, and from its pack otherwise.
   the card") or the GIF library's `card.py`. It
   copies the GIFs chosen for the clock, reads each one back, deletes only what it
   put there itself, and writes the index `gifs/.index` (size, width, height, loop,
-  frames, SHA-1, name per GIF). It writes only to a card that carries the mark
+  frames, SHA-1, name per GIF) and the meta index `gifs/.meta` (see [GIFs on
+  request](#gifs-on-request)). It writes only to a card that carries the mark
   `gifs/.matrixclock`. GIFs put into `gifs` by hand play as well.
 - **The clock never writes to the card**, so a power cut cannot damage it. It
   mounts the card at start-up in the background (about 0.4 s for 966 GIFs: the
@@ -624,7 +627,85 @@ stands, leaves out second copies, and puts them in smallest first while there
 is room. Each GIF is kept as it is or deflated, whichever is smaller (deflating
 saves about a fifth on typical pixel-art GIFs). The clock reads the pack's index
 at start-up, checks a GIF's CRC each time it is about to play, and inflates a
-deflated one into PSRAM with the inflate in the chip's ROM before it plays.
+deflated one into PSRAM with the inflate in the chip's ROM before it plays. A
+folder's `gif_meta.txt` goes into the pack too, as its meta index (below).
+
+### GIFs on request
+
+A GIF can be asked for by its **name**, or by a **keyword**: then one of the GIFs
+the keyword finds plays, drawn at random. The web app, Home Assistant and the
+console ask for them; what a keyword finds comes from the **meta index**, the GIF
+library's description of each GIF.
+
+**The meta index** is a text file, UTF-8, a line per GIF with seven fields apart
+by tabs - file name, title, franchise, category, era, style, motif - between a
+first and a last line:
+
+    MATRIXCLOCK GIF META 1
+    nyan-cat-128.gif<TAB>Nyan Cat<TAB><TAB>meme<TAB>2010s 10s<TAB>pixel-art<TAB>pixel Nyan Cat with a rainbow
+    ...
+    END <the number of GIF lines>
+
+A field may be empty, and a line may end before its last fields. A file without
+its `END` line, or with another count, is taken as cut off and not used. The GIF
+library writes one with every choice (`gif_meta.txt` in the folder of the GIFs;
+the era with its short form, `1980s 80s`), and a hand-written one works the same.
+`scripts/gif_pack.py` puts the lines of the GIFs it packs into the pack, after
+the GIFs, in the order of the pack's index (its header says where: see the
+layout in the script); the library's `card.py` copies it onto the card as
+`gifs/.meta`. A GIF the meta index has no line for, and every GIF of a pack or a
+card from before it, is found by its name alone. A clock from before the meta
+index takes such a pack and such a card as before.
+
+**What a request finds** - one rule for everything that asks:
+
+1. Case does not count, `é` counts as `e` (the Latin-1 letters as their base
+   letters), and every other character only separates words: `Star-Wars`,
+   `star wars` and `starwars` are the same.
+2. A request that is a GIF's file name (with or without `.gif`) finds that GIF.
+   The pack keeps a name of its own of 31 characters; a pack with a meta index
+   finds a GIF by its full file name.
+3. Otherwise it is a keyword. A GIF where it stands as **whole words** in any
+   field (a plural `s` or `es` with it) is a find. Only when no GIF has it so,
+   the GIFs where it **begins a word** are: `pika` finds Pikachu, while `rain`
+   finds the rain but not every rainbow, and `car` not the category
+   `cartoon-anime`.
+4. Several keywords apart by commas find what any of them finds:
+   `christmas, santa, snow`.
+5. Of the finds, those that fit the panel as it is held count; one of them plays,
+   not the one shown last while another fits. An empty request asks for any GIF,
+   as **Play a GIF now** does.
+
+The search is one pass over the clock's GIFs, with every GIF's text made once
+when its index is read.
+
+**When it plays:** over the face only, as **Play a GIF now** - also during the
+time's change and into it (what the user asks for is granted), never over the
+menu, a notice, the hotspot or the gesture test, and now or not at all. A GIF on
+show stays, and the request goes, unless the request says **replace**: then it
+takes the GIF's place at once. It plays for **Seconds a GIF plays**, in whole
+loops. On the wall clock a GIF that is not read ahead is read from the card
+first (about 0.1 to 1 s): it plays once it is read, if the face is free then; a
+newer request takes the place of one being read, and after 3 s one goes.
+
+**Who asks:**
+
+- **Web app**, GIFs: the field **Find a GIF** searches as you type (the clock's
+  answer shows how many GIFs match and the first 50 by title, with franchise,
+  category, era and size; one that does not fit the panel as it stands is
+  greyed). A tap plays that GIF, **Play one of them** one of the finds; both
+  replace a GIF on show.
+- **HTTP:** `POST /api/gif` with `gif=<name or keyword>` and `replace=1`; without
+  `gif` any GIF. The answer: `result` (`plays`, `reading`, `gifOnShow`,
+  `notOnFace`, `noMatch`, `noneFits`, `notOpened`), `matches`, `fit`, `byName`,
+  and `name` and `title` of the GIF chosen. `POST /api/gifs` with `find=` gives
+  the list the web app shows: `count`, `fit`, `byName`, `total`, `meta` (GIFs
+  the meta index knows), and `gifs` (up to 50: `name`, `title`, `franchise`,
+  `category`, `era`, `w`, `h`, `fits`).
+- **Home Assistant:** the topic `mpclock/<id>/gif`, and the entities **GIF** and
+  **Play GIF** (see [Home Assistant link](#home-assistant-link)).
+- **Console** (debug build): `gif <name or keyword>`, `gif! ...` with replace,
+  `gifs <name or keyword>` lists what it finds.
 
 ## Info band data
 
@@ -697,9 +778,12 @@ Setting it up:
    a stored home WiFi and **continuous network access** (Network section);
    the card says what is missing.
 3. The clock shows up in Home Assistant as the device *Matrix Clock xxxxxx*, by
-   MQTT discovery, with an entity **Message** (notify), with a BH1750 a sensor
-   **Light** (lux), and on the wall clock the sensors **Temperature** (°C) and
-   **Humidity** (%) from its board's SHTC3.
+   MQTT discovery, with an entity **Message** (notify), the text entity **GIF**
+   and the button **Play GIF** ([GIFs on request](#gifs-on-request): a name or a
+   keyword typed into **GIF** plays that GIF or one it finds, the button any
+   GIF; neither replaces a GIF on show), with a BH1750 a sensor **Light** (lux),
+   and on the wall clock the sensors **Temperature** (°C) and **Humidity** (%)
+   from its board's SHTC3.
 4. **Values to Home Assistant** in the same section: a sensor's value goes out
    when it changed - the light by 10 % (at least 1 lx), the temperature by
    0.2 °C, the humidity by 1 % - but at most every *At most every* seconds
@@ -716,10 +800,11 @@ the card shows its topics.
 |---|---|---|
 | `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required), and optionally `severity`, `intensity`, `chance`, `short`; an empty payload takes the item away |
 | `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600), and optionally `severity`, `intensity`, `chance` |
+| `mpclock/<id>/gif` | Home Assistant to the clock, not retained (a retained one is not played) | JSON `gif` (a GIF's name or a keyword) and `replace` (`true`: in place of a GIF on show), or the name or keyword alone; empty or `{}`: any GIF ([GIFs on request](#gifs-on-request)) |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux (the filtered light the brightness follows), as set under step 4 |
 | `mpclock/<id>/temperature`, `mpclock/<id>/humidity` | the clock to Home Assistant (wall clock) | °C with one decimal, % whole, as set under step 4 |
-| `homeassistant/notify/<id>/message/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back |
+| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back |
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
@@ -755,6 +840,27 @@ data:
   payload: >-
     {"text": "Paper bin | tomorrow morning", "icon": "warning",
      "until": {{ (now() + timedelta(hours=12)).timestamp() | int }}}
+```
+
+A GIF from an automation - the doorbell's, in place of a GIF on show (a keyword
+works the same; with `"replace": false`, or without it, a GIF on show stays):
+
+```yaml
+action: mqtt.publish
+data:
+  topic: mpclock/06c16c/gif
+  payload: '{"gif": "doorbell", "replace": true}'
+```
+
+Through the entity **GIF**, here one of the Christmas GIFs (the entity's id is
+the one Home Assistant gave it, shown on the device's page):
+
+```yaml
+action: text.set_value
+target:
+  entity_id: text.matrix_clock_06c16c_gif
+data:
+  value: christmas, santa, snow
 ```
 
 ### Example: public holidays
@@ -2119,7 +2225,7 @@ reach.
 | `notices.h/.cpp` | the items on the 64x32 clock: notices, info cards, the info round, the icons drawn |
 | `info_band.h/.cpp` | the info band on the wall clock |
 | `panel_rules.h/.cpp` | who takes the panel and when, and the faces' extras |
-| `gif_player.h/.cpp` | GIFs on the panel, the GIF pack, the wall clock's microSD card |
+| `gif_player.h/.cpp`, `gif_find.h` | GIFs on the panel, the GIF pack, the wall clock's microSD card; GIFs on request and their search (plain C++, tested on the PC) |
 | `input.h/.cpp` | the buttons, the gesture sensor and its test, the face shortcuts, the press indicator |
 | `menu.h/.cpp` | the on-screen menu, its editors, the banners |
 | `hotspot.h/.cpp` | the clock's own access point, its captive portal and its screens |

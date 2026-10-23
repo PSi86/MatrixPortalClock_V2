@@ -13,6 +13,9 @@
                                payload takes it away
      mpclock/<id>/message      Home Assistant to the clock: JSON text, title,
                                level, icon, seconds
+     mpclock/<id>/gif          Home Assistant to the clock: a GIF by its name
+                               or a keyword, JSON gif and replace, or the
+                               text alone; empty or {} any GIF
      mpclock/<id>/status       the clock to Home Assistant, retained: online,
                                or offline as the last will
      mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux
@@ -82,7 +85,9 @@ struct HaCmd {
 
 // What the worker and the client's task read while the client exists: the
 // loop sets it before HA_CMD_START and leaves it alone until HA_IN_STOPPED.
-const uint8_t HA_ANNOUNCE_MAX = 4;   // discovery configs: the message entity, the light, the room's temperature and humidity
+// Discovery configs: the message entity, the light, the room's temperature
+// and humidity, the GIF entity and the button for any GIF.
+const uint8_t HA_ANNOUNCE_MAX = 6;
 struct HaLink {
   esp_mqtt_client_handle_t client = nullptr;   // only the worker touches it
   QueueHandle_t in = nullptr;                  // to the loop
@@ -93,6 +98,7 @@ struct HaLink {
   char     status[40] = "";           // the status topic
   char     items[40] = "";            // the items' filter, "mpclock/06c16c/item/+"
   char     message[40] = "";          // the message topic
+  char     gif[40] = "";              // the topic for GIFs on request
   char     announceTopic[HA_ANNOUNCE_MAX][64] = {};
   String   announce[HA_ANNOUNCE_MAX];  // empty takes a config back (a sensor no longer found)
   std::atomic<uint32_t> lost{0};       // what the loop did not take in time
@@ -106,6 +112,7 @@ inline void haTopics(const char *id) {
   snprintf(l.status, sizeof(l.status), "%sstatus", l.prefix);
   snprintf(l.items, sizeof(l.items), "%sitem/+", l.prefix);
   snprintf(l.message, sizeof(l.message), "%smessage", l.prefix);
+  snprintf(l.gif, sizeof(l.gif), "%sgif", l.prefix);
 }
 
 // Waits up to a second for the loop, which empties the queue on every pass;
@@ -142,6 +149,7 @@ inline void haEvent(void *, esp_event_base_t, int32_t id, void *data) {
       haPost(m);   // first: the loop clears the old items before the retained ones come again
       esp_mqtt_client_subscribe(e->client, l.items, 1);
       esp_mqtt_client_subscribe(e->client, l.message, 1);
+      esp_mqtt_client_subscribe(e->client, l.gif, 1);
       esp_mqtt_client_subscribe(e->client, "homeassistant/status", 1);
       haAnnounce();
       break;

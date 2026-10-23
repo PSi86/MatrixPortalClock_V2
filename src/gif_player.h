@@ -7,6 +7,9 @@
    work in a task of its own). One plays only when it fits the panel as it
    is held: centred and unscaled, at 8 bits per colour through a gamma
    table, dimmed by the panel's brightness tables as the face is.
+   GIFs on request (2026-10-23): one asked for by its name, or one of those a
+   keyword finds in the GIF library's meta index, which the pack and the
+   card carry (gif_find.h).
 
    A module of its own since 2026-10-22 (code review of 2026-10-14, point 10).
    ------------------------------------------------------------------------- */
@@ -17,6 +20,7 @@
 #include <esp_partition.h>
 #include "board_hal.h"
 #include "settings.h"    // GIF_SECONDS_MAX
+#include "gif_find.h"    // GifMeta
 #if BOARD_WAVESHARE_WALL
 #include "gif_card.h"    // CardList
 #endif
@@ -40,6 +44,40 @@ void    gifPlayAgain();      // the last one again
 int16_t gifCount();          // the GIFs there are to play
 void    applyGifParams(const String &q);   // the web app's GIF settings (/api/save)
 
+// ---- GIFs on request ---------------------------------------------------------------
+// A GIF asked for by its name, or one of those a keyword finds (gif_find.h),
+// from the web app, Home Assistant or the console: over the face, now or not
+// at all - also into the time's change, as every GIF the user asks for. With
+// replace it takes the place of a GIF on show; without, a GIF on show stays
+// and the request goes (Peter, 2026-10-23). The wall clock reads a card GIF
+// first that is not read ahead: it plays once it is read, if the face is
+// free then.
+enum GifAsked : uint8_t {
+  GIF_ASKED_PLAYS,        // on the panel now
+  GIF_ASKED_READING,      // the wall: being read from the card, plays when it is
+  GIF_ASKED_NOT_ON_FACE,  // the menu, a notice, the hotspot ...: not now
+  GIF_ASKED_GIF_ON_SHOW,  // a GIF on show, and no replace
+  GIF_ASKED_NO_MATCH,     // the request names or finds no GIF
+  GIF_ASKED_NONE_FITS,    // it finds some, none fits the panel as it is held
+  GIF_ASKED_NOT_OPENED,   // the one chosen did not open this moment (no RAM, the card's next not read yet)
+};
+struct GifAnswer {
+  GifAsked how;
+  uint16_t matches, fit;  // GIFs the request finds, and of them those that fit the panel as it is held
+  int16_t  index;         // the GIF chosen, -1 none
+  bool     byName;        // the request was the name of the GIFs it found
+};
+GifAnswer gifRequest(const char *request, bool replace);   // "" asks for any GIF
+const char *gifAskedWords(GifAsked how);   // what came of it, in words for the console
+// Marks in hit (gifCount() bytes) the GIFs a request finds; an empty one finds
+// every GIF. Returns how many; byName as in GifAnswer.
+uint16_t       gifFind(const char *request, uint8_t *hit, bool &byName);
+const GifMeta &gifMetaOf(int16_t i);    // GIF i's name, meta fields and search text
+const char    *gifTitleOf(int16_t i);   // its title, or its name without the meta index
+bool           gifFitsNow(int16_t i);   // it fits the panel as it is held
+void           gifSizeOf(int16_t i, uint16_t &w, uint16_t &h);   // 0 x 0 for a card GIF not read yet
+uint16_t       gifMetaKnown();          // GIFs the meta index has a line for
+
 // ---- The GIF pack ----------------------------------------------------------------
 // The GIFs in the ffat partition. scripts/gif_pack.py writes them and
 // describes the layout; all numbers little-endian.
@@ -48,8 +86,10 @@ struct GifPackHeader {
   uint16_t version;           // 1
   uint16_t count;             // entries in the index right after the header
   uint32_t indexCrc;          // CRC-32 of the index
-  uint32_t size;              // header, index and GIFs, in bytes
-  uint8_t  reserved[12];
+  uint32_t size;              // header, index, GIFs and meta index, in bytes
+  uint32_t metaOffset;        // the meta index after the GIFs, from the start; 0 = none
+  uint32_t metaSize;          // its bytes (once 12 bytes zero: a pack from before it has none)
+  uint32_t metaCrc;           // CRC-32 of them
 };
 struct GifPackEntry {
   char     name[32];          // NUL-terminated
@@ -70,6 +110,7 @@ extern const esp_partition_t *gifPackPart;
 extern GifPackEntry *gifPack;        // the index, in PSRAM when there is some
 extern uint16_t      gifPackCount;
 void gifPackLoad();                  // what the partition holds: a pack, a damaged one, or none
+void gifPackForget();                // no pack: its index and meta index go (before a new one is written)
 bool gifPackCrcOk(const GifPackEntry &e);
 
 #if BOARD_WAVESHARE_WALL
