@@ -16,10 +16,17 @@
      mpclock/<id>/gif          Home Assistant to the clock: a GIF by its name
                                or a keyword, JSON gif and replace, or the
                                text alone; empty or {} any GIF
-     mpclock/<id>/gif/state    the clock to Home Assistant: the text entity
-                               GIF's state - what came of the last request
-                               ("spongebob → SpongeBob dance"), empty at the
-                               connect
+     mpclock/<id>/gif/search   Home Assistant to the clock: the search field's
+                               text, kept by the clock (in its flash)
+     mpclock/<id>/gif/search/state
+                               the clock to Home Assistant, retained: the
+                               search field's text as the clock keeps it
+     mpclock/<id>/gif/play     Home Assistant to the clock: Play GIF, a GIF the
+                               search field finds (any GIF when it is empty)
+     mpclock/<id>/gif/again    Home Assistant to the clock: GIF again
+     mpclock/<id>/gif/matches  the clock to Home Assistant, retained: the
+                               GIFs the search field finds, JSON count and
+                               the first of them
      mpclock/<id>/status       the clock to Home Assistant, retained: online,
                                or offline as the last will
      mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux
@@ -81,8 +88,9 @@ struct HaCmd {
   uint8_t qos;            // HA_CMD_SEND
   uint8_t retain;         // HA_CMD_SEND
   uint8_t connected;      // HA_CMD_STOP: connected, so it says goodbye first
-  char    suffix[16];     // HA_CMD_SEND: the topic past the clock's prefix
-  char    payload[256];   // HA_CMD_SEND: a value, or the GIF entity's state (Home Assistant takes 255 characters)
+  char    suffix[20];     // HA_CMD_SEND: the topic past the clock's prefix
+  char    payload[32];    // HA_CMD_SEND: a value
+  char   *text;           // HA_CMD_SEND: a longer payload instead, from heap_caps_malloc(); the worker frees it
 };
 
 // ---- The link ----------------------------------------------------------------------
@@ -90,8 +98,9 @@ struct HaCmd {
 // What the worker and the client's task read while the client exists: the
 // loop sets it before HA_CMD_START and leaves it alone until HA_IN_STOPPED.
 // Discovery configs: the message entity, the light, the room's temperature
-// and humidity, the GIF entity and the button for any GIF.
-const uint8_t HA_ANNOUNCE_MAX = 6;
+// and humidity, and for GIFs on request the search field, the buttons Play
+// GIF and GIF again, and the matches.
+const uint8_t HA_ANNOUNCE_MAX = 8;
 struct HaLink {
   esp_mqtt_client_handle_t client = nullptr;   // only the worker touches it
   QueueHandle_t in = nullptr;                  // to the loop
@@ -102,8 +111,10 @@ struct HaLink {
   char     status[40] = "";           // the status topic
   char     items[40] = "";            // the items' filter, "mpclock/06c16c/item/+"
   char     message[40] = "";          // the message topic
-  char     gif[40] = "";              // the topic for GIFs on request
-  char     gifState[48] = "";         // the text entity GIF's state
+  char     gif[40] = "";              // GIFs on request: a request of an automation's
+  char     gifSearch[48] = "";        // the search field's text, to the clock
+  char     gifPlay[48] = "";          // the button Play GIF
+  char     gifAgain[48] = "";         // the button GIF again
   char     announceTopic[HA_ANNOUNCE_MAX][64] = {};
   String   announce[HA_ANNOUNCE_MAX];  // empty takes a config back (a sensor no longer found)
   std::atomic<uint32_t> lost{0};       // what the loop did not take in time
@@ -118,7 +129,9 @@ inline void haTopics(const char *id) {
   snprintf(l.items, sizeof(l.items), "%sitem/+", l.prefix);
   snprintf(l.message, sizeof(l.message), "%smessage", l.prefix);
   snprintf(l.gif, sizeof(l.gif), "%sgif", l.prefix);
-  snprintf(l.gifState, sizeof(l.gifState), "%sgif/state", l.prefix);
+  snprintf(l.gifSearch, sizeof(l.gifSearch), "%sgif/search", l.prefix);
+  snprintf(l.gifPlay, sizeof(l.gifPlay), "%sgif/play", l.prefix);
+  snprintf(l.gifAgain, sizeof(l.gifAgain), "%sgif/again", l.prefix);
 }
 
 // Waits up to a second for the loop, which empties the queue on every pass;
@@ -140,7 +153,6 @@ inline void haAnnounce() {
     if (!l.announceTopic[i][0]) { continue; }
     esp_mqtt_client_enqueue(l.client, l.announceTopic[i], l.announce[i].c_str(), (int)l.announce[i].length(), 1, 1, true);
   }
-  esp_mqtt_client_enqueue(l.client, l.gifState, "", 0, 1, 0, true);   // the GIF entity starts empty
 }
 
 // ---- The client's task --------------------------------------------------------------
@@ -157,6 +169,9 @@ inline void haEvent(void *, esp_event_base_t, int32_t id, void *data) {
       esp_mqtt_client_subscribe(e->client, l.items, 1);
       esp_mqtt_client_subscribe(e->client, l.message, 1);
       esp_mqtt_client_subscribe(e->client, l.gif, 1);
+      esp_mqtt_client_subscribe(e->client, l.gifSearch, 1);
+      esp_mqtt_client_subscribe(e->client, l.gifPlay, 1);
+      esp_mqtt_client_subscribe(e->client, l.gifAgain, 1);
       esp_mqtt_client_subscribe(e->client, "homeassistant/status", 1);
       haAnnounce();
       break;
@@ -230,7 +245,7 @@ inline bool haClientStart() {
   cfg.session.keepalive        = 60;      // the broker calls the clock offline about 90 s after it went
   cfg.network.timeout_ms       = 5000;
   cfg.network.reconnect_timeout_ms = 10000;
-  cfg.outbox.limit             = 8192;    // what waits for a connection, in bytes
+  cfg.outbox.limit             = 16384;   // what waits for a connection, in bytes (the GIF matches take up to about 4 KB)
   l.client = esp_mqtt_client_init(&cfg);
   if (!l.client) { return false; }
   esp_mqtt_client_register_event(l.client, MQTT_EVENT_ANY, haEvent, nullptr);
@@ -276,8 +291,9 @@ inline void haWorker(void *) {
         if (l.client) {
           char topic[64];
           snprintf(topic, sizeof(topic), "%s%s", l.prefix, c.suffix);
-          esp_mqtt_client_enqueue(l.client, topic, c.payload, 0, c.qos, c.retain, true);
+          esp_mqtt_client_enqueue(l.client, topic, c.text ? c.text : c.payload, 0, c.qos, c.retain, true);
         }
+        heap_caps_free(c.text);   // the outbox has its own copy
         break;
       case HA_CMD_ANNOUNCE:
         haAnnounce();
@@ -300,7 +316,7 @@ inline bool haBegin() {
   if (!l.in) { l.in = xQueueCreateWithCaps(HA_IN_DEPTH, sizeof(HaIn), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
   if (!l.in) { l.in = xQueueCreate(HA_IN_DEPTH, sizeof(HaIn)); }
   if (!l.in) { return false; }
-  l.cmd = xQueueCreate(4, sizeof(HaCmd));   // before the worker, which waits on it at once
+  l.cmd = xQueueCreate(8, sizeof(HaCmd));   // before the worker, which waits on it at once
   if (!l.cmd) { return false; }
   if (xTaskCreatePinnedToCoreWithCaps(haWorker, "ha", HA_WORKER_STACK, nullptr, 2, nullptr, 0,
                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS ||

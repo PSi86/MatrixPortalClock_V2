@@ -593,29 +593,18 @@ static const uint16_t GIF_LIST_MAX = 50;
 
 static void apiGifs(Print &c, const String &body) {
   String find = getParam(body, "find");
-  uint16_t count = (uint16_t)gifCount();
-  uint8_t *hit = count ? (uint8_t *)heap_caps_malloc(count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+  uint16_t count = (uint16_t)gifCount(), fit = 0;
   int16_t *order = count ? (int16_t *)heap_caps_malloc(count * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
-  if (count && (!hit || !order)) {
-    heap_caps_free(hit);
+  bool byName = false;
+  uint32_t t0 = micros();
+  int32_t n = order || !count ? gifFindByTitle(find.c_str(), order, fit, byName) : -1;
+  uint32_t us = micros() - t0;
+  if (n < 0) {
     heap_caps_free(order);
     sendJsonError(c, 500, "The clock has no RAM to search now.");
     return;
   }
-  bool byName = false;
-  uint32_t t0 = micros();
-  uint16_t found = count ? gifFind(find.c_str(), hit, byName) : 0, n = 0, fit = 0;
-  for (uint16_t i = 0; i < count; i++) {
-    if (!hit[i]) { continue; }
-    order[n++] = (int16_t)i;
-    fit += gifFitsNow((int16_t)i);
-  }
-  qsort(order, n, sizeof(int16_t), [](const void *a, const void *b) {
-    int16_t x = *(const int16_t *)a, y = *(const int16_t *)b;
-    int r = strcasecmp(gifTitleOf(x), gifTitleOf(y));
-    return r ? r : strcmp(gifMetaOf(x).field[GIF_META_NAME], gifMetaOf(y).field[GIF_META_NAME]);
-  });
-  uint32_t us = micros() - t0;
+  uint16_t found = (uint16_t)n;
   JsonDocument d;
   d["count"] = found;
   d["fit"] = fit;
@@ -624,7 +613,7 @@ static void apiGifs(Print &c, const String &body) {
   d["meta"] = gifMetaKnown();   // GIFs the meta index has a line for; the rest are found by name
   d["us"] = us;
   JsonArray list = d["gifs"].to<JsonArray>();
-  for (uint16_t k = 0; k < n && k < GIF_LIST_MAX; k++) {
+  for (uint16_t k = 0; k < found && k < GIF_LIST_MAX; k++) {
     int16_t i = order[k];
     const GifMeta &m = gifMetaOf(i);
     JsonObject o = list.add<JsonObject>();
@@ -639,7 +628,6 @@ static void apiGifs(Print &c, const String &body) {
     o["h"] = h;
     o["fits"] = gifFitsNow(i);
   }
-  heap_caps_free(hit);
   heap_caps_free(order);
   sendJson(c, d);
 }

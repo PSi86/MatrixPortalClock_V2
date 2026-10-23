@@ -68,10 +68,16 @@ struct GifAnswer {
   bool     byName;        // the request was the name of the GIFs it found
 };
 GifAnswer gifRequest(const char *request, bool replace);   // "" asks for any GIF
+GifAnswer gifAgain(bool replace);   // the last GIF shown once more (a random one when there is none)
 const char *gifAskedWords(GifAsked how);   // what came of it, in words for the console
 // Marks in hit (gifCount() bytes) the GIFs a request finds; an empty one finds
 // every GIF. Returns how many; byName as in GifAnswer.
 uint16_t       gifFind(const char *request, uint8_t *hit, bool &byName);
+// The GIFs a request finds, sorted by title, into order (room for gifCount()
+// of them); fit gets how many fit the panel as it is held. Returns how many,
+// or -1 without RAM to search.
+int32_t        gifFindByTitle(const char *request, int16_t *order, uint16_t &fit, bool &byName);
+uint32_t       gifListGeneration();     // counts up whenever the GIFs to play change (a pack, the card)
 const GifMeta &gifMetaOf(int16_t i);    // GIF i's name, meta fields and search text
 const char    *gifTitleOf(int16_t i);   // its title, or its name without the meta index
 bool           gifFitsNow(int16_t i);   // it fits the panel as it is held

@@ -32,8 +32,10 @@ static void haIconLook(JsonDocument &doc, BandItem &it);
 static void haItem(const char *name, const char *payload, uint16_t len);
 static void haMessage(const char *payload, uint16_t len);
 static void haGif(const char *payload, uint16_t len);
-static void haUtf8Cut(char *s, size_t n);
-static void haGifState(const char *what, const GifAnswer &a);
+static void haGifSearchSet(const char *payload, uint16_t len);
+static void haGifSend();
+static bool haGifSendText(const char *suffix, char *text, bool retain);
+static char *haGifMatches();
 static const char *haBlocked();
 
 // The Home Assistant link ------------------------------------------------------------
@@ -58,6 +60,19 @@ static SettingsStore<HaSettings> haStore;
 const uint16_t HA_PORT_DEFAULT = 1883;
 const uint8_t  HA_MIN_S_DEFAULT = 60, HA_MAX_MIN_DEFAULT = 15;   // Peter, 2026-10-22
 const uint8_t  HA_MIN_S_LOW = 5;   // the shortest the web app takes
+
+// GIFs on request from Home Assistant: the search field's text, which the
+// clock keeps in a blob of its own (NVS key "hagif"), so after a restart the
+// field shows it still and Play GIF plays from it; and what is still to be
+// sent to Home Assistant about it.
+const uint8_t  HA_GIF_SEARCH_MAX = 100;   // characters of the field
+const uint8_t  HA_GIF_MATCHES_MAX = 30;   // GIFs the sensor GIF matches lists (about 4 KB)
+struct HaGifSearch { char text[HA_GIF_SEARCH_MAX * 2 + 4]; };   // UTF-8: room for 100 characters of two bytes
+static HaGifSearch haGifSearch;
+static SettingsStore<HaGifSearch> haGifStore;
+static bool     haGifSearchDue = false, haGifMatchesDue = false;   // to Home Assistant at the next chance
+static uint32_t haGifListSeen = 0;      // gifListGeneration() as the matches last went out
+static uint8_t  haGifTurnSeen = 0xFF;   // and the panel's rotation
 
 // What the link does, for the config page.
 enum HaState : uint8_t {
@@ -102,7 +117,6 @@ static HaValue haValues[HA_VALUE_COUNT] = {
 const unsigned long HA_RETRY_MS = 60UL * 1000UL;   // after the client failed to start
 const unsigned long HA_STOP_WAIT_MS = 2000;        // the hotspot waits this long for the goodbye
 const uint8_t  HA_MESSAGES_MAX = 4;      // messages kept at a time, as items "*msg1" ... (no item name has a '*')
-static char    haGifShown[256] = "";     // the GIF entity's state as last sent (haGifState())
 const uint16_t HA_MESSAGE_S = 3600;      // how long a message counts when it does not say
 
 /* ----------------------------------------------------------------------
@@ -128,6 +142,9 @@ void loadHaSettings() {
   if (haSettings.minS < HA_MIN_S_LOW) { haSettings.minS = HA_MIN_S_DEFAULT; }
   if (haSettings.maxMin == 0)         { haSettings.maxMin = HA_MAX_MIN_DEFAULT; }
   haTopics(haId());
+  haGifStore.begin("hagif");
+  haGifStore.read(haGifSearch);   // none stored: zeroed, the field empty
+  haGifSearch.text[sizeof(haGifSearch.text) - 1] = '\0';
   if (haSettings.on) {
     Console.printf("Home Assistant: on, broker %s:%u, topics %s...\n", haSettings.host, haSettings.port, haLink().prefix);
   }
@@ -191,42 +208,56 @@ void haBuildAnnounce() {
   }
 #endif
 
-  // GIFs on request (haGif()): the text entity sends what is typed, the
-  // button any GIF; neither takes the place of a GIF on show - an
-  // automation that wants that publishes {"gif": ..., "replace": true}.
-  // The text entity's state is set by the clock, to what came of each
-  // request (haGifState()): without a state topic Home Assistant keeps what
-  // was typed as the state, and its entity row sends nothing for a value
-  // equal to the state - the same keyword twice in a row came once (Peter,
-  // 2026-10-23). max is Home Assistant's longest state: it refuses a state
-  // longer than the entity's max.
-  JsonDocument gif;
-  gif["name"] = "GIF";
-  gif["unique_id"] = String(netHostname()) + "-gif";
-  gif["command_topic"] = l.gif;
-  gif["command_template"] = "{\"gif\": {{ value | tojson }}}";
-  gif["state_topic"] = l.gifState;
-  gif["max"] = 255;
-  gif["icon"] = "mdi:file-gif-box";
-  gif["availability_topic"] = l.status;
-  gif["qos"] = 1;
-  gif["device"] = dev;
+  // GIFs on request (Peter, 2026-10-23): a search field that keeps its text,
+  // which the clock keeps too (haGifSearchSet()); the button Play GIF plays
+  // one of the GIFs it finds, any GIF when it is empty, and GIF again the last
+  // GIF shown; the sensor GIF matches counts what the field finds and lists
+  // the first of them (haGifMatches()). Its unit keeps it out of Home
+  // Assistant's logbook, which leaves out sensors with one. (An automation can
+  // still ask for a GIF on mpclock/<id>/gif.)
+  JsonDocument search;
+  search["name"] = "GIF search";
+  search["unique_id"] = String(netHostname()) + "-gif";   // the entity GIF of before, so it keeps its id
+  search["command_topic"] = l.gifSearch;
+  search["state_topic"] = String(l.prefix) + "gif/search/state";
+  search["max"] = HA_GIF_SEARCH_MAX;
+  search["icon"] = "mdi:file-search-outline";
+  search["availability_topic"] = l.status;
+  search["qos"] = 1;
+  search["device"] = dev;
   snprintf(l.announceTopic[4], sizeof(l.announceTopic[4]), "homeassistant/text/%s/gif/config", id);
   l.announce[4] = "";
-  serializeJson(gif, l.announce[4]);
+  serializeJson(search, l.announce[4]);
 
-  JsonDocument play;
-  play["name"] = "Play GIF";
-  play["unique_id"] = String(netHostname()) + "-play-gif";
-  play["command_topic"] = l.gif;
-  play["payload_press"] = "{}";
-  play["icon"] = "mdi:play-box-outline";
-  play["availability_topic"] = l.status;
-  play["qos"] = 1;
-  play["device"] = dev;
-  snprintf(l.announceTopic[5], sizeof(l.announceTopic[5]), "homeassistant/button/%s/gif/config", id);
-  l.announce[5] = "";
-  serializeJson(play, l.announce[5]);
+  auto button = [&](uint8_t slot, const char *name, const char *uid, const char *topic, const char *icon, const char *object) {
+    JsonDocument b;
+    b["name"] = name;
+    b["unique_id"] = String(netHostname()) + uid;
+    b["command_topic"] = topic;
+    b["icon"] = icon;
+    b["availability_topic"] = l.status;
+    b["qos"] = 1;
+    b["device"] = dev;
+    snprintf(l.announceTopic[slot], sizeof(l.announceTopic[slot]), "homeassistant/button/%s/%s/config", id, object);
+    l.announce[slot] = "";
+    serializeJson(b, l.announce[slot]);
+  };
+  button(5, "Play GIF", "-play-gif", l.gifPlay, "mdi:play-box-outline", "gif");
+  button(6, "GIF again", "-gif-again", l.gifAgain, "mdi:replay", "gif_again");
+
+  JsonDocument matches;
+  matches["name"] = "GIF matches";
+  matches["unique_id"] = String(netHostname()) + "-gif-matches";
+  matches["state_topic"] = String(l.prefix) + "gif/matches";
+  matches["value_template"] = "{{ value_json.count }}";
+  matches["json_attributes_topic"] = String(l.prefix) + "gif/matches";
+  matches["unit_of_measurement"] = "GIFs";
+  matches["icon"] = "mdi:magnify";
+  matches["availability_topic"] = l.status;
+  matches["device"] = dev;
+  snprintf(l.announceTopic[7], sizeof(l.announceTopic[7]), "homeassistant/sensor/%s/gif_matches/config", id);
+  l.announce[7] = "";
+  serializeJson(matches, l.announce[7]);
 }
 
 // A sensor's discovery config: its name, its topic past the clock's prefix
@@ -366,6 +397,7 @@ void haUpdate() {
       haStopLink(false);
     } else if (haState == HA_UP) {
       haSendValues();
+      haGifSend();
     }
     return;
   }
@@ -399,11 +431,11 @@ void haApply(const HaIn &m) {
   if ((haPhase != HA_PHASE_STARTING && haPhase != HA_PHASE_RUNNING) || haChanged) { return; }
   switch (m.kind) {
     case HA_IN_CONNECTED:
-      haGifShown[0] = '\0';   // haAnnounce() empties the GIF entity at the connect
       haState   = HA_UP;
       haUpSince = clockIsSet() ? clockNow() : 0;
       haError[0] = '\0';
       haValuesAgain();
+      haGifSearchDue = haGifMatchesDue = true;
       haDropItems();   // the broker sends the retained ones anew at once
       Console.printf("Home Assistant: connected to %s:%u\n", haSettings.host, haSettings.port);
       break;
@@ -428,6 +460,7 @@ void haApply(const HaIn &m) {
           c.kind = HA_CMD_ANNOUNCE;
           haCommand(c);
           haValuesAgain();
+          haGifSearchDue = haGifMatchesDue = true;
         }
       } else if (strncmp(m.topic, "item/", 5) == 0) {
         haItem(m.topic + 5, m.payload, m.len);
@@ -442,6 +475,17 @@ void haApply(const HaIn &m) {
         // The same for a GIF asked for: it was played, or not, when it came.
         if (m.retained) { Console.println("Home Assistant: a GIF request kept by the broker is not played again"); }
         else            { haGif(m.payload, m.len); }
+      } else if (strcmp(m.topic, "gif/search") == 0) {
+        if (!m.retained) { haGifSearchSet(m.payload, m.len); }
+      } else if (strcmp(m.topic, "gif/play") == 0 || strcmp(m.topic, "gif/again") == 0) {
+        // The buttons take the place of a GIF on show: what is pressed is
+        // played, also while a GIF of its own accord is on.
+        if (m.retained) { break; }
+        bool again = m.topic[4] == 'a';
+        GifAnswer a = again ? gifAgain(true) : gifRequest(haGifSearch.text, true);
+        const char *name = a.index >= 0 ? gifMetaOf(a.index).field[GIF_META_NAME] : "-";
+        if (again) { Console.printf("Home Assistant: GIF again - %s, %s\n", gifAskedWords(a.how), name); }
+        else       { Console.printf("Home Assistant: Play GIF for \"%s\" - %s, %s\n", haGifSearch.text, gifAskedWords(a.how), name); }
       }
       break;
     default:
@@ -611,40 +655,95 @@ void haGif(const char *payload, uint16_t len) {
   }
   GifAnswer a = gifRequest(what, replace);
   Console.printf("Home Assistant: GIF \"%s\"%s - %s\n", what, replace ? ", replace" : "", gifAskedWords(a.how));
-  haGifState(what, a);
 }
 
-// s cut to at most n bytes, not in the middle of a UTF-8 character.
-void haUtf8Cut(char *s, size_t n) {
-  if (strlen(s) <= n) { return; }
-  while (n > 0 && ((uint8_t)s[n] & 0xC0) == 0x80) { n--; }   // s[n] continues a character begun before it
-  s[n] = '\0';
+// mpclock/<id>/gif/search: the search field's new text. The clock keeps it
+// (in its flash, so a restart keeps it too), gives it back as the field's
+// state, and counts and lists what it finds. Nothing plays: Play GIF does.
+void haGifSearchSet(const char *payload, uint16_t len) {
+  HaGifSearch next = {};
+  size_t n = len;
+  if (n > sizeof(next.text) - 1) {   // cut to its room, not in the middle of a UTF-8 character
+    n = sizeof(next.text) - 1;
+    while (n > 0 && ((uint8_t)payload[n] & 0xC0) == 0x80) { n--; }
+  }
+  while (n > 0 && (payload[n - 1] == ' ' || payload[n - 1] == '\r' || payload[n - 1] == '\n' || payload[n - 1] == '\t')) { n--; }
+  memcpy(next.text, payload, n);
+  haGifSearchDue = haGifMatchesDue = true;   // both again, also for the same text: Home Assistant waits for its state
+  if (strcmp(next.text, haGifSearch.text) == 0) { return; }
+  haGifSearch = next;
+  bool stored = haGifStore.write(haGifSearch);
+  Console.printf("Home Assistant: GIF search \"%s\"%s\n", haGifSearch.text, stored ? "" : " (not stored: the flash could not be written)");
 }
 
-// The text entity GIF's state after a request: what came of it - what was
-// asked and the title of the GIF that plays, or why none does ("spongebob ->
-// SpongeBob dance", "xyz -> no GIF found", with an arrow). Home Assistant's
-// logbook shows each, and the field never holds the keyword alone, so the
-// same keyword can come again: its entity row sends nothing for a value
-// equal to the state (Peter, 2026-10-23). The same text twice in a row would
-// be no change for Home Assistant and its logbook: the state goes empty
-// in between then. Home Assistant takes 255 characters.
-void haGifState(const char *what, const GifAnswer &a) {
-  static char text[512];
-  static HaCmd c;
-  char asked[96];
-  strlcpy(asked, what[0] ? what : "any GIF", sizeof(asked));
-  haUtf8Cut(asked, 80);
-  bool plays = (a.how == GIF_ASKED_PLAYS || a.how == GIF_ASKED_READING) && a.index >= 0;
-  snprintf(text, sizeof(text), "%s \xE2\x86\x92 %s", asked, plays ? gifTitleOf(a.index) : gifAskedWords(a.how));
-  haUtf8Cut(text, 255);
-  c = {};
+// The GIFs the search field finds, for the sensor GIF matches: how many, how
+// many of them fit the panel as it is held, and the first HA_GIF_MATCHES_MAX
+// by title with their file names, as JSON in a block from the heap (nullptr
+// without RAM). An empty field finds every GIF, and lists none.
+char *haGifMatches() {
+  uint16_t count = (uint16_t)gifCount(), fit = 0;
+  int16_t *order = count ? (int16_t *)heap_caps_malloc(count * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+  if (count && !order) { return nullptr; }
+  bool byName = false;
+  int32_t n = gifFindByTitle(haGifSearch.text, order, fit, byName);
+  if (n < 0) { heap_caps_free(order); return nullptr; }
+  JsonDocument d;
+  d["count"] = n;
+  d["fit"] = fit;
+  d["search"] = haGifSearch.text;
+  d["by_name"] = byName;
+  JsonArray list = d["gifs"].to<JsonArray>();
+  if (haGifSearch.text[0]) {
+    for (int32_t k = 0; k < n && k < HA_GIF_MATCHES_MAX; k++) {
+      JsonObject o = list.add<JsonObject>();
+      o["title"] = gifTitleOf(order[k]);
+      o["name"] = gifMetaOf(order[k]).field[GIF_META_NAME];
+      o["fits"] = gifFitsNow(order[k]);
+    }
+    if (n > HA_GIF_MATCHES_MAX) { d["more"] = n - HA_GIF_MATCHES_MAX; }
+  }
+  heap_caps_free(order);
+  size_t bytes = measureJson(d) + 1;
+  char *out = (char *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (out) { serializeJson(d, out, bytes); }
+  return out;
+}
+
+// A payload of any length to mpclock/<id>/<suffix>, through the worker, which
+// frees it; false when its queue is full (text is freed here then).
+bool haGifSendText(const char *suffix, char *text, bool retain) {
+  HaCmd c = {};
   c.kind = HA_CMD_SEND;
   c.qos = 1;
-  strlcpy(c.suffix, "gif/state", sizeof(c.suffix));
-  if (strcmp(text, haGifShown) == 0) { haCommand(c); }   // empty first
-  strlcpy(c.payload, text, sizeof(c.payload));
-  if (haCommand(c)) { strlcpy(haGifShown, text, sizeof(haGifShown)); }
+  c.retain = retain ? 1 : 0;
+  c.text = text;
+  strlcpy(c.suffix, suffix, sizeof(c.suffix));
+  if (haCommand(c)) { return true; }
+  heap_caps_free(text);
+  return false;
+}
+
+// While connected, on every pass: the search field's text and the matches
+// when they are due - after a connect, a new text, a new set of GIFs, the
+// panel turned. Both retained, so Home Assistant has them as soon as it
+// subscribes, also after its own start.
+void haGifSend() {
+  uint8_t turn = matrix.getRotation();
+  if (gifListGeneration() != haGifListSeen || turn != haGifTurnSeen) { haGifMatchesDue = true; }
+  if (haGifSearchDue) {
+    char *text = (char *)heap_caps_malloc(sizeof(haGifSearch.text), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!text) { return; }
+    strlcpy(text, haGifSearch.text, sizeof(haGifSearch.text));
+    if (!haGifSendText("gif/search/state", text, true)) { return; }   // on a later pass
+    haGifSearchDue = false;
+  }
+  if (haGifMatchesDue) {
+    char *json = haGifMatches();
+    if (!json || !haGifSendText("gif/matches", json, true)) { return; }
+    haGifMatchesDue = false;
+    haGifListSeen = gifListGeneration();
+    haGifTurnSeen = turn;
+  }
 }
 
 // The settings for the page; never the password, only whether there is one.
