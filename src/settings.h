@@ -31,7 +31,7 @@
 struct Settings {
   uint16_t magic;        // validity marker
   uint8_t  settingsRev;  // layout revision, see SETTINGS_REV (was padding in rev 0)
-  uint8_t  watchface;    // WATCHFACE_CLASSIC, WATCHFACE_TETRIS_ID, WATCHFACE_MUNCHER_ID or WATCHFACE_ALIENS_ID
+  uint8_t  watchface;    // WATCHFACE_CLASSIC, WATCHFACE_TETRIS_ID, WATCHFACE_MUNCHER_ID, WATCHFACE_ALIENS_ID or WATCHFACE_SNAKE_ID
   int32_t  tzOffset;     // base UTC offset in seconds, WITHOUT daylight saving (CET = 3600)
   uint8_t  dst;          // daylight saving mode: DST_WINTER, DST_SUMMER (fixed) or DST_AUTO
   uint8_t  brightness;   // 0..255 master intensity (scales all drawn colors)
@@ -60,7 +60,8 @@ const uint8_t WATCHFACE_CLASSIC    = 0;  // six flying GFX-font digits, HH MM SS
 const uint8_t WATCHFACE_TETRIS_ID  = 1;  // HH:MM built from falling tetromino blocks
 const uint8_t WATCHFACE_MUNCHER_ID = 2;  // HH:MM in dots, eaten and laid anew by a muncher
 const uint8_t WATCHFACE_ALIENS_ID  = 3;  // HH:MM of aliens, shot and marching in anew
-const uint8_t WATCHFACE_COUNT      = 4;
+const uint8_t WATCHFACE_SNAKE_ID   = 4;  // HH:MM of snakes, each crawling away as a new one comes
+const uint8_t WATCHFACE_COUNT      = 5;
 
 // Daylight saving modes (Settings::dst). 0 and 1 keep the meaning the byte had
 // before the automatic mode existed, so stored settings stay valid.

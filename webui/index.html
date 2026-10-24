@@ -252,6 +252,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <button class="face" type="button" data-face="1"><canvas width="128" height="64" data-mini="tetris"></canvas><span><b>Tetris</b><small>HH:MM of falling blocks</small></span></button>
           <button class="face" type="button" data-face="2" id="faceMuncher"><canvas width="128" height="64" data-mini="muncher"></canvas><span><b>Muncher</b><small>HH:MM of dots, eaten anew</small></span></button>
           <button class="face" type="button" data-face="3" id="faceAliens"><canvas width="128" height="64" data-mini="aliens"></canvas><span><b>Aliens</b><small>HH:MM of blocks that wake as aliens</small></span></button>
+          <button class="face" type="button" data-face="4" id="faceSnake"><canvas width="128" height="64" data-mini="snake"></canvas><span><b>Snake</b><small>HH:MM of snakes, a new one for each new digit</small></span></button>
         </div>
       </div>
       <!-- Each face's settings in the same groups (Peter, 2026-10-20): Change - how its time changes -, Look,
@@ -334,10 +335,50 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div class="seg" id="akn" role="group" aria-label="Watchface animation"></div>
         </div>
       </div>
+      <div class="card" data-for-face="4">
+        <div class="group-title">Change</div>
+        <div class="row">
+          <div><div class="lbl">Hour change</div><div class="hint">At every change the old snake crawls out over the nearer side and a new one eats the dots on the new digit, growing into it. At a full hour all four go: as one train out to the left with the new four behind it, or each to its own side at once. Choosing one plays it once now.</div></div>
+          <div class="seg" id="shr" role="group" aria-label="Hour change"></div>
+        </div>
+      </div>
+      <div class="card" data-for-face="4">
+        <div class="group-title">Look</div>
+        <div class="row">
+          <div><div class="lbl">Snakes</div><div class="hint">Solid 2 px bodies, or each body as a line of single LEDs. In the coils solid snakes side by side touch; a line, or thin digits, keep them apart.</div></div>
+          <div class="seg" id="slk" role="group" aria-label="Snakes"></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">Digits</div><div class="hint">Spaced: digits on a grid of their own, with a gap everywhere, also where a snake doubles back. Coils: the snake coils through strokes two cells wide. Lines and narrower lines: thin strokes with a gap, so a solid snake still shows as one long snake; where it doubles back, its two parts touch. With thin digits (all but the coils) only a 0 or 1 can chase its tail, and the apple needs a head at the bottom; the tongue comes only where a head has room straight ahead.</div></div>
+          <div class="seg" id="sdg" role="group" aria-label="Digits"></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">Pattern</div><div class="hint">The pattern lies on the body and moves with it, so it shows how a snake crawls: colour 1 alone, stripes of colour 1 and 2, a gradient from colour 1 at the head to colour 2 at the tail, or the rainbow, coral (red, grey, yellow) or a run from yellow at the head to blue at the tail.</div></div>
+          <div class="seg" id="scol" role="group" aria-label="Pattern"></div>
+        </div>
+        <div class="row stack" id="snakeRowA"><div class="lbl">Colour 1</div><div class="swatches" id="swSnakeA"></div></div>
+        <div class="row stack" id="snakeRowB"><div class="lbl">Colour 2</div><div class="swatches" id="swSnakeB"></div></div>
+        <div class="row" id="snakeRowWA">
+          <div><label class="lbl" for="scw">Width 1</label><div class="hint">Cells each stripe of colour 1 is long, counted along the body from the head; also each band of the rainbow and of coral.</div></div>
+          <div class="range"><input type="range" id="scw"><output for="scw"></output></div>
+        </div>
+        <div class="row" id="snakeRowWB">
+          <div><label class="lbl" for="scv">Width 2</label><div class="hint">Cells each stripe of colour 2 is long.</div></div>
+          <div class="range"><input type="range" id="scv"><output for="scv"></output></div>
+        </div>
+        <div class="row stack"><div class="lbl">Head</div><div class="swatches" id="swSnakeH"></div></div>
+      </div>
+      <div class="card" data-for-face="4">
+        <div class="group-title">Watchface animation</div>
+        <div class="row">
+          <div><div class="lbl">Plays</div><div class="hint">What the input action “trigger watchface animation” plays - a knock, unless the Inputs page says otherwise.</div></div>
+          <div class="seg" id="skn" role="group" aria-label="Watchface animation"></div>
+        </div>
+      </div>
       <div class="card" id="extrasCard" hidden>
         <div class="group-title">Now and then</div>
         <div class="row">
-          <div><label class="lbl" for="dxr">How often</label><div class="hint">The face's own scenes between changes - the Aliens' saucer, an alien shooting back, a waking block; the Muncher's fruit - shared by the faces. Never around the time's change; one that has no room when it is due is left out. None in the quiet hours set under GIFs.</div></div>
+          <div><label class="lbl" for="dxr">How often</label><div class="hint">The face's own scenes between changes - the Aliens' saucer, an alien shooting back, a waking block; the Muncher's fruit; a snake's tongue or tail chase - shared by the faces. Never around the time's change; one that has no room when it is due is left out. None in the quiet hours set under GIFs.</div></div>
           <div class="range"><input type="range" id="dxr"><output for="dxr"></output></div>
         </div>
         <div class="row" id="anapRow">
@@ -773,8 +814,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }
     if (after) { after(); }
   }
-  function setSeg(el, key, pv) {
-    var show = function () { $$('button', el).forEach(function (b) { b.setAttribute('aria-pressed', +b.dataset.v === cur[key] ? 'true' : 'false'); }); };
+  function setSeg(el, key, pv, after) {
+    var show = function () { $$('button', el).forEach(function (b) { b.setAttribute('aria-pressed', +b.dataset.v === cur[key] ? 'true' : 'false'); }); if (after) { after(); } };
     if (!el.dataset.bound) {
       el.dataset.bound = 1;
       $$('button', el).forEach(function (b) {
@@ -783,10 +824,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }
     show();
   }
-  function setSwatches(id, key) {
+  function setSwatches(id, key, pal) {
     var box = document.getElementById(id);
     if (!box.children.length) {
-      PAL.forEach(function (c) {
+      (pal || PAL).forEach(function (c) {
         var b = document.createElement('button');
         b.type = 'button'; b.className = 'sw'; b.style.background = c; b.dataset.c = c; b.setAttribute('aria-label', 'Colour ' + c);
         b.addEventListener('click', function () { cur[key] = c; show(); changed(); if (isLive(key)) { sendLive(false); } });
@@ -818,8 +859,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   function showFace() {
     $$('.face').forEach(function (b) { b.setAttribute('aria-pressed', +b.dataset.face === cur.wf ? 'true' : 'false'); });
     $$('[data-for-face]').forEach(function (c) { c.hidden = +c.dataset.forFace !== cur.wf; });
-    // The extras' pace, shared by the faces that have extras: the Muncher, the Aliens.
-    $('#extrasCard').hidden = !(has('dxr') && (cur.wf === 2 || cur.wf === 3));
+    // The extras' pace, shared by the faces that have extras: the Muncher, the Aliens, the Snake.
+    $('#extrasCard').hidden = !(has('dxr') && (cur.wf === 2 || cur.wf === 3 || cur.wf === 4));
     $('#anapRow').hidden = cur.wf !== 3;   // the Aliens' own extra
   }
   function showAuto() {
@@ -913,7 +954,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#facePick').hidden = !S.hw.tetris;
     $('#faceMuncher').hidden = !S.hw.muncher;
     $('#faceAliens').hidden = !S.hw.aliens;
-    if (!S.hw.tetris || (cur.wf === 2 && !S.hw.muncher) || (cur.wf === 3 && !S.hw.aliens)) { cur.wf = 0; }
+    $('#faceSnake').hidden = !S.hw.snake;
+    if (!S.hw.tetris || (cur.wf === 2 && !S.hw.muncher) || (cur.wf === 3 && !S.hw.aliens) || (cur.wf === 4 && !S.hw.snake)) { cur.wf = 0; }
     buildNav();
     // Face
     $$('.face').forEach(function (b) {
@@ -950,6 +992,29 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         if (!el.children.length) { S.lists[m[0]].forEach(function (t, v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = t; el.appendChild(b); }); }
         setSeg(el, m[0], m[1]);
       });
+    }
+    if (S.hw.snake) {
+      // The look shows at once; a new hour change plays the full hour once, a new knock its scene (the clock
+      // sees the new value). The values in the order shown: the hour change's random first, though it is stored
+      // as 2, the digits' spaced first (3), the default, and the animation's tongue (4) before random (3).
+      // The pattern (scol): only the rows it uses - colour 1 for one colour, stripes and the gradient, colour 2
+      // for the last two, width 1 for stripes, rainbow and coral, width 2 for stripes. The head always.
+      var pattern = function () {
+        var p = cur.scol;
+        $('#snakeRowA').hidden = !(p === 0 || p === 1 || p === 2);
+        $('#snakeRowB').hidden = !(p === 1 || p === 2);
+        $('#snakeRowWA').hidden = !(p === 1 || p === 3 || p === 4);
+        $('#snakeRowWB').hidden = p !== 1;
+      };
+      [['shr', false, [2, 0, 1]], ['slk', false, [0, 1]], ['sdg', false, [3, 0, 1, 2]], ['scol', false, [0, 1, 2, 3, 4, 5], pattern], ['skn', false, [0, 1, 2, 4, 3]]].forEach(function (m) {
+        var el = $('#' + m[0]);
+        if (!el.children.length) { m[2].forEach(function (v) { if (S.lists[m[0]][v] === undefined) { return; } var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists[m[0]][v]; el.appendChild(b); }); }
+        setSeg(el, m[0], m[1], m[3]);
+      });
+      var SNAKE_PAL = PAL.concat(['#000000', '#404040', '#006000', '#600000', '#000060']);
+      setSwatches('swSnakeA', 'sca', SNAKE_PAL); setSwatches('swSnakeB', 'scb', SNAKE_PAL); setSwatches('swSnakeH', 'sch', SNAKE_PAL);
+      var cells = function (v) { return v + (v === 1 ? ' cell' : ' cells'); };
+      setRange('scw', 'scw', '', cells); setRange('scv', 'scv', '', cells);
     }
     // The knock's sensitivity: an input setting, kept with the Tetris settings.
     $('#shkRow').hidden = !S.hw.knock;
@@ -1299,7 +1364,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       c.beginPath(); c.arc((i % lw) * cell + cell / 2, Math.floor(i / lw) * cell + cell / 2, cell * 0.38, 0, 6.283); c.fill();
     }
   }
-  // The pictures of the two faces in the picker: drawings of what each looks like, not the panel.
+  // The pictures of the faces in the picker: drawings of what each looks like, not the panel.
   function drawMinis() {
     $$('canvas[data-mini]').forEach(function (cv) {
       var off = document.createElement('canvas'); off.width = 64; off.height = 32;
@@ -1307,6 +1372,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       o.fillStyle = '#fff'; o.textAlign = 'center'; o.textBaseline = 'middle';
       var tet = cv.dataset.mini === 'tetris', mun = cv.dataset.mini === 'muncher', ali = cv.dataset.mini === 'aliens';
       if (ali) { drawAliensMini(cv, d.getHours(), d.getMinutes()); return; }
+      if (cv.dataset.mini === 'snake') { drawSnakeMini(cv, d.getHours(), d.getMinutes()); return; }
       o.font = (tet ? '900 22px ' : mun ? '900 19px ' : '800 13px ') + getComputedStyle(document.body).fontFamily;
       if (tet) { o.fillText(p(d.getHours()) + ':' + p(d.getMinutes()), 32, 17); }
       else if (mun) { o.fillText(p(d.getHours()) + ':' + p(d.getMinutes()), 32, 12); }
@@ -1352,6 +1418,90 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     led(31, 15, '#ebebeb'); led(32, 15, '#ebebeb'); led(31, 16, '#ebebeb'); led(32, 16, '#ebebeb');
     ['..#..', '.###.', '#####'].forEach(function (row, j) { for (var x = 0; x < 5; x++) { if (row[x] === '#') { led(56 + x, 29 + j, '#28e63c'); } } });
     led(58, 25, '#ebebeb'); led(58, 26, '#ebebeb');
+  }
+
+  // The Snake face in the picker, as the clock shows it at rest in its settings: the digits' family (sdg), the look
+  // (slk) and the colours (scol, sca, scb, scw, scv, sch), drawn as src/snake.h's drawSnake() and face_snake.h's
+  // snakeColour() draw them, on snake.h's LANDSCAPE or SPACED_LANDSCAPE grid. The paths are snake_paths.h's, two
+  // hex digits a cell (row, column), tail first, the dash last; scripts/gen_snake_paths.py writes them here.
+  // BEGIN SNAKE_PATHS - written by scripts/gen_snake_paths.py, do not edit by hand
+  var SNAKE_PATHS = [
+    ['908070605040302010000102030405152535455565758595949392828384746454443424141312112131415161718191', '9484746454443424140405152535455565758595', '9080706050404142434434241413121110000102030405152535455554535251617181828384859594939291', '9080818283847464545352515040414243443424141312111000010203040515253545556575859594939291', '948474645453525150403020100001112131414243443424140405152535455565758595', '9080818283847464545352515040302010000102030405151413121121314142434445556575859594939291', '908070605040302010000102030405151413121121314151617181828384746454535242434445556575859594939291', '94847464544434241413121110000102030405152535455565758595', '90807060504030201000010203040515253545556575859594939282838474645444342414131211213141424353525161718191', '908081828384746454443424141312112131414243535251504030201000010203040515253545556575859594939291', '504041424344455554535251'],   // coils
+    ['80706050403020100001020304051525354555657585959493929190', '9484746454443424140405152535455565758595', '00010203040515253545444342414050607080909192939495', '00010203040515253545444342415152535455657585959493929190', '001020304050515253546474849495857565554535251505', '05040302010010203040414243444555657585959493929190', '0504030201001020304050607080909192939495857565554544434241', '000102030405152535455565758595', '3020100001020304051525354544434241405060708090919293949585756555', '5453525150403020100001020304051525354555657585959493929190', '404142434445'],   // lines
+    ['8171615141312111010203040515253545556575859594939291', '9484746454443424140405152535455565758595', '01020304051525354544434241516171819192939495', '010203040515253545444342525354556575859594939291', '0111213141515253546474849495857565554535251505', '05040302011121314142434445556575859594939291', '0504030201112131415161718191929394958575655545444342', '0102030405152535455565758595', '3121110102030405152535454443424151617181919293949585756555', '5453525141312111010203040515253545556575859594939291', '4142434445'],   // narrow
+    ['504030201000010203132333435363626160', '6252423222120203132333435363', '00010203132333323130405060616263', '0001020313232221313233435363626160', '00102030313242526263534333231303', '03020100102030313233435363626160', '030201001020304050606162635343333231', '00010203132333435363', '2010000102031323333231304050606162635343', '323130201000010203132333435363626160', '30313233'],   // spaced
+  ];
+  var SNAKE_PITCH = [2, 2, 2, 3];
+  // END SNAKE_PATHS
+  var SNAKE_GRIDS = {   // by pitch: the digits' columns and their row (in cells), the colon's two cells (row, column)
+    2: { places: [1, 8, 17, 24], row: 1, colon: [[4, 15], [7, 15]] },
+    3: { places: [0, 5, 12, 17], row: 0, colon: [[2, 10], [4, 10]] }
+  };
+  var SNAKE_RAINBOW = [[255, 0, 0], [255, 110, 0], [255, 220, 0], [0, 220, 0], [0, 200, 230], [30, 60, 255], [200, 0, 255]];
+  var SNAKE_CORAL = [[255, 25, 20], [50, 50, 60], [255, 210, 0], [50, 50, 60]];
+  var SNAKE_RUN = [[255, 220, 0], [0, 220, 40], [0, 180, 255], [40, 40, 255]];
+  function snakeRgb(hex, dflt) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(hex || ''), v = parseInt(m ? m[1] : dflt, 16);
+    return [v >> 16, (v >> 8) & 255, v & 255];
+  }
+  // The colour along stops spread evenly from the head (h 0) to the tail (face_snake.h snakeRun()).
+  function snakeRun(stops, h, n) {
+    var spans = stops.length - 1, at = n > 1 ? Math.floor(h * spans * 256 / (n - 1)) : 0;
+    var k = at >= spans * 256 ? spans - 1 : Math.floor(at / 256), f = at >= spans * 256 ? 255 : at % 256;
+    return [0, 1, 2].map(function (j) { return stops[k][j] + Math.trunc((stops[k + 1][j] - stops[k][j]) * f / 255); });
+  }
+  // The colour of a snake's cell i of n (the tail 0), the pattern counted from the head (snakeColour()).
+  function snakeColour(s, i, n) {
+    var h = n - 1 - i, wa = Math.max(1, s.scw), wb = Math.max(1, s.scv);
+    switch (s.scol) {
+      case 1: return h % (wa + wb) < wa ? s.a : s.b;
+      case 2: return snakeRun([s.a, s.b], h, n);
+      case 3: return SNAKE_RAINBOW[Math.floor(h / wa) % 7];
+      case 4: return SNAKE_CORAL[Math.floor(h / wa) % 4];
+      case 5: return snakeRun(SNAKE_RUN, h, n);
+      default: return s.a;
+    }
+  }
+  function drawSnakeMini(cv, hh, mm) {
+    var c = cv.getContext('2d'), cell = cv.width / 64;
+    var num = function (k, d, lo, hi) { var v = cur && typeof cur[k] === 'number' ? cur[k] : d; return v < lo || v > hi ? d : v; };
+    var fam = num('sdg', 3, 0, SNAKE_PATHS.length - 1), solid = num('slk', 0, 0, 1) === 0;   // the defaults: spaced, solid
+    var s = { scol: num('scol', 0, 0, 5), scw: num('scw', 2, 1, 8), scv: num('scv', 2, 1, 8),
+              a: snakeRgb(cur && cur.sca, '28dc3c'), b: snakeRgb(cur && cur.scb, 'ffdc00') };
+    var head = snakeRgb(cur && cur.sch, 'ffffff');
+    var p = SNAKE_PITCH[fam], g = SNAKE_GRIDS[p];
+    var t = [Math.floor(hh / 10), hh % 10, Math.floor(mm / 10), mm % 10], px = {};   // 'x,y': [r, g, b], or null: the eye
+    var put = function (x, y, rgb) { px[x + ',' + y] = rgb; };
+    t.forEach(function (d, k) {
+      var path = SNAKE_PATHS[fam][d], n = path.length / 2, cells = [];
+      for (var i = 0; i < n; i++) {
+        cells.push([1 + p * (g.row + parseInt(path[2 * i], 16)), 1 + p * (g.places[k] + parseInt(path[2 * i + 1], 16))]);
+      }
+      // a pixel at a time along the path, each cell's corner and those between two cells; the head lighter
+      var total = p * (n - 1) + 1, headFrom = total - (solid ? 1 : 2), thick = solid ? 2 : 1, hy = 0, hx = 0, py = 0, pq = 0;
+      for (var q = 0; q < total; q++) {
+        var ci = Math.floor(q / p), sub = q % p, y = cells[ci][0], x = cells[ci][1];
+        if (sub) { y += (cells[ci + 1][0] - y) * sub / p; x += (cells[ci + 1][1] - x) * sub / p; }
+        var col = q >= headFrom ? head : snakeColour(s, ci, n);
+        for (var dy = 0; dy < thick; dy++) { for (var dx = 0; dx < thick; dx++) { put(x + dx, y + dy, col); } }
+        py = hy; pq = hx; hy = y; hx = x;
+      }
+      if (solid) {   // the eye: in the head's 2 x 2, the pixel ahead on its left
+        var ddy = hy - py, ddx = hx - pq;
+        put(ddy === 0 ? hx + (ddx > 0 ? 1 : 0) : hx + (ddy > 0 ? 1 : 0), ddx === 0 ? hy + (ddy > 0 ? 1 : 0) : hy, null);
+      }
+    });
+    g.colon.forEach(function (rc) {
+      for (var i = 0; i < 4; i++) { put(1 + p * rc[1] + (i & 1), 1 + p * rc[0] + (i >> 1), [235, 235, 235]); }
+    });
+    c.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() || '#07090c';
+    c.fillRect(0, 0, cv.width, cv.height);
+    Object.keys(px).forEach(function (key) {
+      var rgb = px[key], xy = key.split(',');
+      if (!rgb || rgb[0] + rgb[1] + rgb[2] === 0) { return; }   // the eye, or black: off on the panel
+      c.fillStyle = 'rgb(' + rgb.join(',') + ')';
+      c.beginPath(); c.arc(+xy[0] * cell + cell / 2, +xy[1] * cell + cell / 2, cell * 0.4, 0, 6.283); c.fill();
+    });
   }
 
   // ---- actions ---------------------------------------------------------------------------------------------
