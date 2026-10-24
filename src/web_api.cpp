@@ -428,6 +428,7 @@ static void apiState(Print &c) {
   hw["tetris"] = true;    // every board has every face (the web app still asks)
   hw["muncher"] = true;
   hw["aliens"] = true;
+  hw["snake"] = true;
   hw["accel"] = accelOK;
   hw["knock"] = knockOK;   // as the knock's row on the Inputs page
   hw["buttons"] = BOARD_BUTTON_COUNT;

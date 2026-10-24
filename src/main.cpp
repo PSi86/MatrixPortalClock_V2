@@ -55,6 +55,7 @@ const GFXfont &fontPicopixel = Picopixel;   // for the modules (clock_state.h)
 #include "knock.h"             // the knock on the clock, from its motion sensor
 #include "face_muncher.h"      // the Muncher watchface
 #include "face_aliens.h"       // the Aliens watchface
+#include "face_snake.h"        // the Snake watchface
 
 #include <Wire.h>              // I2C for the onboard accelerometer and the sensors
 #include <Adafruit_Sensor.h>   // sensor base class
@@ -236,6 +237,8 @@ void knockFollowSetting();
 void muncherSelfTest();
 // Aliens watchface
 void aliensSelfTest();
+// Snake watchface
+void snakeSelfTest(uint8_t digits);
 void testFaceReset();
 void testPlanRun();
 void testPlanParse(const String &plan);
@@ -466,6 +469,11 @@ void loop(void) {
 #if defined(CLOCK_DEBUG)
   static bool aliensTested = false;
   if (!aliensTested && millisNow > 10000) { aliensTested = true; aliensSelfTest(); }
+#endif
+#if defined(CLOCK_DEBUG)
+  // a family of digits every 5 s, each about 4 s of planning
+  static uint8_t snakeTested = 0;
+  if (snakeTested < snake::DIGITS_COUNT && millisNow > 10000UL + 5000UL * snakeTested) { snakeSelfTest(snakeTested++); }
 #endif
 #if defined(CLOCK_DEBUG)
   static bool warningIconsTested = false;
@@ -991,6 +999,61 @@ void aliensSelfTest() {
 }
 #endif
 
+/* ======================================================================
+   Snake watchface (face_snake.h): its settings, stored in a blob of their
+   own, and the face.
+   ====================================================================== */
+SnakeSettings snakeSettings;
+FaceBlob snakeBlob = { "snake", SNAKE_SETTINGS_MAGIC, SNAKE_SETTINGS_REV, WATCHFACE_SNAKE_ID, sizeof(SnakeSettings),
+                       SETTING_TABLE(snakeSettings, SNAKE_DEFAULTS, SNAKE_PARAMS), nullptr };
+SnakeFace snakeFace(snakeSettings);
+
+#if defined(CLOCK_DEBUG)
+// The planner on the clock itself: every minute change of a day in both
+// orientations must be planned, every full hour both ways, and a sample of
+// them checked from scratch (snake::planRight, about 10 ms each here). Every
+// plan was compared with the Python planner on the PC
+// (tools.local/game_faces/host/compare.py); this is to see the same on the board.
+void snakeSelfTest(uint8_t digits) {
+  snake::Plan *p = new (std::nothrow) snake::Plan();
+  if (!p) { Console.println("Snake self-test: no memory"); return; }
+  unsigned long t0 = millis(), worstMs = 0;
+  uint16_t plans = 0, failed = 0, checked = 0;
+  uint32_t longest = 0, longestHour = 0;
+  for (uint8_t up = 0; up < 2; up++) {
+    for (uint16_t m = 0; m < 1440; m++) {
+      uint8_t from[4] = { (uint8_t)(m / 600), (uint8_t)(m / 60 % 10), (uint8_t)(m % 60 / 10), (uint8_t)(m % 10) };
+      uint16_t n = (m + 1) % 1440;
+      uint8_t to[4] = { (uint8_t)(n / 600), (uint8_t)(n / 60 % 10), (uint8_t)(n % 60 / 10), (uint8_t)(n % 10) };
+      bool hour = n % 60 == 0;
+      for (uint8_t mode = 0; mode < (hour ? 2 : 1); mode++) {
+        unsigned long t = millis();
+        bool ok = snake::planChange(*p, up, from, to, hour, (snake::HourMode)mode, digits);
+        if (millis() - t > worstMs) { worstMs = millis() - t; }
+        plans++;
+        if (ok && (hour || m % 60 == 7)) { checked++; ok = snake::planRight(*p); }
+        if (!ok) {
+          if (!failed) {
+            Console.printf("Snake self-test (%s): %s %u -> %u failed\n", SNAKE_SDG_LABELS[digits],
+                           up ? "upright" : "landscape", m, n);
+          }
+          failed++;
+          continue;
+        }
+        uint32_t ms = (uint32_t)p->stands * p->L->stepMs();
+        if (hour) { if (ms > longestHour) { longestHour = ms; } }
+        else if (ms > longest) { longest = ms; }
+      }
+    }
+  }
+  delete p;
+  Console.printf("Snake self-test (%s): %s, %u plans (%u checked from scratch), longest minute change %lu ms, "
+                 "longest hour %lu ms, slowest plan %lu ms, %lu ms in all\n", SNAKE_SDG_LABELS[digits],
+                 failed ? "FAILED" : "all right", plans, checked, (unsigned long)longest, (unsigned long)longestHour,
+                 worstMs, millis() - t0);
+}
+#endif
+
 #if defined(FACE_FRAME_LOG)
 /* Test builds: a scene of tools.local/refactor starts with the face shown
    afresh, as on a turn of the panel - the time at once, nothing running,
@@ -1001,6 +1064,7 @@ void testFaceReset() {
   tetrisFace.testReset();
   muncherFace.testReset();
   aliensFace.testReset();
+  snakeFace.testReset();
   panelDirty = true;
 }
 
@@ -1088,6 +1152,7 @@ FaceBlob *const FACE_BLOBS[] = {
   &tetrisBlob,
   &muncherBlob,
   &aliensBlob,
+  &snakeBlob,
 };
 const uint8_t FACE_BLOB_COUNT = sizeof(FACE_BLOBS) / sizeof(FACE_BLOBS[0]);
 SettingsBlobStore faceStores[FACE_BLOB_COUNT];
@@ -1095,7 +1160,7 @@ SettingsBlobStore faceStores[FACE_BLOB_COUNT];
 // Every table of settings (settings_table.h), for /api/state: the values, the
 // names of the choices and what the web app needs to send them back.
 SettingsTable *const SETTINGS_TABLES[] = {
-  &clockTable, &tetrisBlob.table, &muncherBlob.table, &aliensBlob.table, &uiTable, &gifTable, &decorTable, &feedTable,
+  &clockTable, &tetrisBlob.table, &muncherBlob.table, &aliensBlob.table, &snakeBlob.table, &uiTable, &gifTable, &decorTable, &feedTable,
 #if BOARD_WAVESHARE_WALL
   &sensorTable,
 #endif
@@ -1188,6 +1253,7 @@ Watchface &faceFor(uint8_t id) {
     case WATCHFACE_TETRIS_ID:  return tetrisFace;
     case WATCHFACE_MUNCHER_ID: return muncherFace;
     case WATCHFACE_ALIENS_ID:  return aliensFace;
+    case WATCHFACE_SNAKE_ID:   return snakeFace;
     default:                   return classicFace;
   }
 }
@@ -1217,8 +1283,8 @@ void faceShow() {
 // choice live), and only the visible face is stepped, so whichever takes over is
 // resynchronised here: the panel turned as it is held and the classic face
 // up to the time (faceCatchUp()), and the face chosen told so - the Tetris
-// one rebuilds its layout and drops its digits again, the Muncher and the
-// Aliens show the time at once.
+// one rebuilds its layout and drops its digits again, the Muncher, the
+// Aliens and the Snake show the time at once.
 uint8_t activeWatchface() {
   static uint8_t shown = 0xFF;
   if (settings.watchface == shown) { return shown; }
