@@ -450,7 +450,10 @@ InputFunction handleInput(InputEvent ev, uint8_t steps) {
     if (closesBanner(ev)) { closeScreen(); }
   } else if (screen == SCREEN_BANNER || screen == SCREEN_GIF) {
     // A GIF takes it the same way: the hold that started one does not end it.
-    if (closesBanner(ev)) { closeScreen(); }
+    // A GIF ends on a knock too, a single one as a series (Peter, 2026-10-24:
+    // the wall clock has no buttons). One knock is one event (KNOCK_BURST_MS),
+    // so the knock that started a GIF does not end it.
+    if (closesBanner(ev) || (ev == EV_KNOCK && screen == SCREEN_GIF)) { closeScreen(); }
     return FN_NONE;
   }
   InputFunction fn = mappedFunction(ev, inputContext());
