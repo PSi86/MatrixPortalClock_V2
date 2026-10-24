@@ -498,8 +498,10 @@ and the frames follow the file's own timeline, so a frame drawn a few ms late do
 not stretch the loop. A GIF whose single loop runs longer than a minute is ended
 after a minute. A GIF of its own accord comes only over the plain face, and when
 it is due it plays at once or not at all - it never waits (see [Who takes the
-panel](#who-takes-the-panel)). Any button press ends it early and does nothing
-else; the hold that started it does not end it.
+panel](#who-takes-the-panel)). Any button press, gesture or knock ends it early
+and does nothing else (the knock since 2026-10-24, Peter: the wall clock has no
+buttons); the hold that started it does not end it, nor does the knock that
+started it - its edges within 150 ms are one knock.
 
 A GIF plays at its own size, centred, unscaled, and only where it fits the panel
 as it is held: 64x32 GIFs in landscape, 32x64 upright, 32x32 either way. Turning
@@ -691,25 +693,41 @@ loops. On the wall clock a GIF that is not read ahead is read from the card
 first (about 0.1 to 1 s): it plays once it is read, if the face is free then; a
 newer request takes the place of one being read, and after 3 s one goes.
 
+**All of them, one after another** (Peter, 2026-10-24): a request can also ask
+for every GIF it finds that fits - a **series**. They play in a shuffled order,
+each once (one loop), cut hard from one to the next: the last frame of one
+stands until the next one's first is drawn, the face never between them. On
+the wall clock the card's task reads the next GIF while one plays (otherwise it
+reads only while no GIF plays); one not read within 5 s, or that does not
+open, is passed over. A series replaces a GIF on show and runs into the time's
+change as every GIF asked for; a button, a gesture or a knock, another GIF
+asked for (**Play GIF**, **GIF again**, a tap in the web app) or the panel
+turned ends it, as it ends a single GIF, and the face comes back after the
+last one. An empty request plays no series: it would be all
+GIFs, for hours.
+
 **Who asks:**
 
 - **Web app**, GIFs: the field **Find a GIF** searches as you type (the clock's
   answer shows how many GIFs match and the first 50 by title, with franchise,
   category, era and size; one that does not fit the panel as it stands is
-  greyed). A tap plays that GIF, **Play one of them** one of the finds; both
-  replace a GIF on show.
+  greyed). A tap plays that GIF, **Play one of them** one of the finds, **Play
+  all** all of them as a series; each replaces a GIF on show.
 - **HTTP:** `POST /api/gif` with `gif=<name or keyword>` and `replace=1`; without
-  `gif` any GIF. The answer: `result` (`plays`, `reading`, `gifOnShow`,
-  `notOnFace`, `noMatch`, `noneFits`, `notOpened`), `matches`, `fit`, `byName`,
-  and `name` and `title` of the GIF chosen. `POST /api/gifs` with `find=` gives
+  `gif` any GIF; with `all=1` all it finds as a series. The answer: `result`
+  (`plays`, `reading`, `gifOnShow`, `notOnFace`, `noMatch`, `noneFits`,
+  `notOpened`, and for a series without `gif` `noSearch`), `series`, `matches`,
+  `fit` (a series' length), `byName`, and `name` and `title` of the GIF chosen
+  (of a series the first). `POST /api/gifs` with `find=` gives
   the list the web app shows: `count`, `fit`, `byName`, `total`, `meta` (GIFs
   the meta index knows), and `gifs` (up to 50: `name`, `title`, `franchise`,
   `category`, `era`, `w`, `h`, `fits`).
 - **Home Assistant:** the search field **GIF search** with the buttons **Play
-  GIF** and **GIF again** and the select **GIF matches**, and the topic
+  GIF**, **GIF again** and **Play all matches** and the select **GIF matches**, and the topic
   `mpclock/<id>/gif` for automations (see [Home Assistant link](#home-assistant-link)).
 - **Console** (debug build): `gif <name or keyword>`, `gif! ...` with replace,
-  `gifs <name or keyword>` lists what it finds.
+  `gif* ...` all it finds as a series (with replace), `gifs <name or keyword>`
+  lists what it finds.
 
 ## Info band data
 
@@ -795,7 +813,9 @@ Setting it up:
      the field empty any GIF.
    - **GIF again**: the last GIF shown, whatever brought it (a random one when
      none has played yet).
-   - Both buttons take the place of a GIF on show.
+   - **Play all matches**: every GIF the search finds, one after another as a
+     series ([GIFs on request](#gifs-on-request)); with the field empty none.
+   - The buttons take the place of a GIF on show.
    - **GIF matches**, a select: its list holds what the search finds - first
      a line that says it (`15 matches for "mario"`, `no GIF found for "xyz"`,
      `all 241 GIFs - type a search`), then the GIFs found as `title (file
@@ -821,17 +841,17 @@ the card shows its topics.
 |---|---|---|
 | `mpclock/<id>/item/<name>` | Home Assistant to the clock, **retained** | JSON `text`, `icon`, `level` (`info` or `alert`), `until` (Unix time, required), and optionally `severity`, `intensity`, `chance`, `short`; an empty payload takes the item away |
 | `mpclock/<id>/message` | Home Assistant to the clock, best not retained | JSON `text`, `title`, `level`, `icon`, `seconds` (3600 unless given, 5 to 3600), and optionally `severity`, `intensity`, `chance` |
-| `mpclock/<id>/gif` | Home Assistant to the clock, not retained (a retained one is not played) | JSON `gif` (a GIF's name or a keyword) and `replace` (`true`: in place of a GIF on show), or the name or keyword alone; empty or `{}`: any GIF ([GIFs on request](#gifs-on-request)) |
+| `mpclock/<id>/gif` | Home Assistant to the clock, not retained (a retained one is not played) | JSON `gif` (a GIF's name or a keyword), `replace` (`true`: in place of a GIF on show) and `all` (`true`: every GIF it finds, as a series), or the name or keyword alone; empty or `{}`: any GIF ([GIFs on request](#gifs-on-request)) |
 | `mpclock/<id>/gif/search` | Home Assistant to the clock | the search field's text (up to 100 characters); the clock keeps it in its flash |
 | `mpclock/<id>/gif/search/state` | the clock to Home Assistant, retained | the search field's text as the clock keeps it |
-| `mpclock/<id>/gif/play`, `mpclock/<id>/gif/again` | Home Assistant to the clock | the buttons **Play GIF** and **GIF again** (any payload) |
+| `mpclock/<id>/gif/play`, `mpclock/<id>/gif/again`, `mpclock/<id>/gif/all` | Home Assistant to the clock | the buttons **Play GIF**, **GIF again** and **Play all matches** (any payload) |
 | `mpclock/<id>/gif/matches` | the clock to Home Assistant, retained | the select **GIF matches**' state: the first line of its list, what the search finds |
 | `mpclock/<id>/gif/pick` | Home Assistant to the clock | a line of **GIF matches** picked: the GIF of the file name in its last brackets plays |
 | `homeassistant/select/<id>/gif_matches/config` | the clock to Home Assistant, retained | **GIF matches**' discovery config with its list (`options`), sent anew after a new search text, a connect, a new pack or card, the panel turned |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux (the filtered light the brightness follows), as set under step 4 |
 | `mpclock/<id>/temperature`, `mpclock/<id>/humidity` | the clock to Home Assistant (wall clock) | °C with one decimal, % whole, as set under step 4 |
-| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/button/<id>/gif_again/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back (as does `homeassistant/sensor/<id>/gif_matches/config`, a sensor of a test build) |
+| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/button/<id>/gif_again/config`, `homeassistant/button/<id>/gif_all/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back (as does `homeassistant/sensor/<id>/gif_matches/config`, a sensor of a test build) |
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
