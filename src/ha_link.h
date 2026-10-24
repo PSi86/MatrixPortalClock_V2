@@ -104,8 +104,8 @@ struct HaCmd {
 // loop sets it before HA_CMD_START and leaves it alone until HA_IN_STOPPED.
 // Discovery configs: the message entity, the light, the room's temperature
 // and humidity, and for GIFs on request the search field, the buttons Play
-// GIF and GIF again, and the matches.
-const uint8_t HA_ANNOUNCE_MAX = 8;
+// GIF and GIF again, the matches, and the button Play all matches.
+const uint8_t HA_ANNOUNCE_MAX = 9;
 struct HaLink {
   esp_mqtt_client_handle_t client = nullptr;   // only the worker touches it
   QueueHandle_t in = nullptr;                  // to the loop
@@ -120,6 +120,7 @@ struct HaLink {
   char     gifSearch[48] = "";        // the search field's text, to the clock
   char     gifPlay[48] = "";          // the button Play GIF
   char     gifAgain[48] = "";         // the button GIF again
+  char     gifAll[48] = "";           // the button Play all matches
   char     gifPick[48] = "";          // a GIF picked from the matches
   char     announceTopic[HA_ANNOUNCE_MAX][64] = {};
   String   announce[HA_ANNOUNCE_MAX];  // empty takes a config back (a sensor no longer found)
@@ -138,6 +139,7 @@ inline void haTopics(const char *id) {
   snprintf(l.gifSearch, sizeof(l.gifSearch), "%sgif/search", l.prefix);
   snprintf(l.gifPlay, sizeof(l.gifPlay), "%sgif/play", l.prefix);
   snprintf(l.gifAgain, sizeof(l.gifAgain), "%sgif/again", l.prefix);
+  snprintf(l.gifAll, sizeof(l.gifAll), "%sgif/all", l.prefix);
   snprintf(l.gifPick, sizeof(l.gifPick), "%sgif/pick", l.prefix);
 }
 
@@ -179,6 +181,7 @@ inline void haEvent(void *, esp_event_base_t, int32_t id, void *data) {
       esp_mqtt_client_subscribe(e->client, l.gifSearch, 1);
       esp_mqtt_client_subscribe(e->client, l.gifPlay, 1);
       esp_mqtt_client_subscribe(e->client, l.gifAgain, 1);
+      esp_mqtt_client_subscribe(e->client, l.gifAll, 1);
       esp_mqtt_client_subscribe(e->client, l.gifPick, 1);
       esp_mqtt_client_subscribe(e->client, "homeassistant/status", 1);
       haAnnounce();

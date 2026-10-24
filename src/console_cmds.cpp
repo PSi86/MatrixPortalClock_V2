@@ -7,6 +7,7 @@
 #include "console.h"
 #include "feeds.h"
 #include "gif_player.h"
+#include "input.h"        // the console's "knock"
 #include "lan_access.h"
 #if BOARD_WAVESHARE_WALL
 #include <mbedtls/sha256.h>    // the "crypto" test of the panel output beside the crypto DMA
@@ -34,7 +35,9 @@ static void wallCryptoTest(bool external);
 // - "lan on" / "lan off" switch the web app on the home network, as its
 //   switch on the hotspot's page does (with the password set there).
 // - "gif <name or keyword>" asks for a GIF as the web app does (gifRequest();
-//   "gif! ..." with replace), "gifs <name or keyword>" lists what it finds.
+//   "gif! ..." with replace), "gif* ..." for all it finds, one after another
+//   (gifSeriesRequest(), with replace), "gifs <name or keyword>" lists them.
+// - "knock" is a knock that counts, as the sensor's would (handleInput()).
 // On the wall clock also its own (wallCommand()).
 static void gifCommand(const char *line);
 
@@ -63,6 +66,10 @@ void consoleCommands() {
       lanSwitch(lanOn);
       Console.printf("Web app on the home network: %s\n", lanOn ? "on" : "off");
     }
+    if (strcmp(line, "knock") == 0) {
+      Console.println("Knock (from the console)");
+      handleInput(EV_KNOCK, 1);
+    }
     gifCommand(line);
 #if BOARD_WAVESHARE_WALL
     wallCommand(line);
@@ -70,8 +77,13 @@ void consoleCommands() {
   }
 }
 
-// "gif ...", "gif! ..." and "gifs ..." (consoleCommands()).
+// "gif ...", "gif! ...", "gif* ..." and "gifs ..." (consoleCommands()).
 static void gifCommand(const char *line) {
+  if (strncmp(line, "gif* ", 5) == 0) {
+    GifAnswer a = gifSeriesRequest(line + 5, true);
+    Console.printf("GIF series asked for: %s (%u found, %u fit)\n", gifAskedWords(a.how), a.matches, a.fit);
+    return;
+  }
   if (strncmp(line, "gifs ", 5) == 0 || strcmp(line, "gifs") == 0) {
     uint16_t count = (uint16_t)gifCount();
     uint8_t *hit = count ? (uint8_t *)heap_caps_malloc(count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;

@@ -582,6 +582,7 @@ static const char *gifAskedCode(GifAsked how) {
     case GIF_ASKED_GIF_ON_SHOW: return "gifOnShow";
     case GIF_ASKED_NO_MATCH:    return "noMatch";
     case GIF_ASKED_NONE_FITS:   return "noneFits";
+    case GIF_ASKED_NO_SEARCH:   return "noSearch";
     default:                    return "notOpened";
   }
 }
@@ -935,12 +936,17 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     // A GIF over the face, now or not at all, also during or into the time's
     // change (gifRequest()): gif=<its name or a keyword>, without it any GIF
     // (the button "Play a GIF now"); replace=1 takes the place of a GIF on
-    // show. The answer says what came of it (result: gifAskedCode()), how
-    // many GIFs the request finds and how many of them fit, and the one
-    // chosen.
-    GifAnswer a = gifRequest(getParam(body, "gif").c_str(), getParam(body, "replace") == "1");
+    // show; all=1 plays every GIF it finds, one after another
+    // (gifSeriesRequest()). The answer says what came of it (result:
+    // gifAskedCode()), how many GIFs the request finds and how many of them
+    // fit, and the one chosen - of a series the first.
+    bool all = getParam(body, "all") == "1";
+    String gif = getParam(body, "gif");
+    bool replace = getParam(body, "replace") == "1";
+    GifAnswer a = all ? gifSeriesRequest(gif.c_str(), replace) : gifRequest(gif.c_str(), replace);
     JsonDocument d;
     d["result"] = gifAskedCode(a.how);
+    d["series"] = all;
     d["playing"] = a.how == GIF_ASKED_PLAYS;
     d["reading"] = a.how == GIF_ASKED_READING;   // the wall: read from the card first, plays in a moment
     d["busy"] = a.how == GIF_ASKED_NOT_OPENED;   // could not be opened this moment (no RAM, the card's next not read yet)

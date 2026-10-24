@@ -219,8 +219,9 @@ void haBuildAnnounce() {
 
   // GIFs on request (Peter, 2026-10-23): a search field that keeps its text,
   // which the clock keeps too (haGifSearchSet()); the button Play GIF plays
-  // one of the GIFs it finds, any GIF when it is empty, and GIF again the last
-  // GIF shown; the select GIF matches lists what the field finds
+  // one of the GIFs it finds, any GIF when it is empty, GIF again the last
+  // GIF shown, and Play all matches every GIF it finds, one after another
+  // (none when it is empty); the select GIF matches lists what the field finds
   // (haGifMatches(), sent by the loop). (An automation can still ask for a
   // GIF on mpclock/<id>/gif.)
   JsonDocument search;
@@ -252,6 +253,8 @@ void haBuildAnnounce() {
   };
   button(5, "Play GIF", "-play-gif", l.gifPlay, "mdi:play-box-outline", "gif");
   button(6, "GIF again", "-gif-again", l.gifAgain, "mdi:replay", "gif_again");
+  // Every GIF the search field finds, one after another (Peter, 2026-10-24).
+  button(8, "Play all matches", "-gif-all", l.gifAll, "mdi:play-box-multiple-outline", "gif_all");
 
   // The matches are a select entity (haGifMatches()), whose config changes
   // with each search: the loop sends it, not this list. A sensor GIF
@@ -486,6 +489,12 @@ void haApply(const HaIn &m) {
         const char *name = a.index >= 0 ? gifMetaOf(a.index).field[GIF_META_NAME] : "-";
         if (again) { Console.printf("Home Assistant: GIF again - %s, %s\n", gifAskedWords(a.how), name); }
         else       { Console.printf("Home Assistant: Play GIF for \"%s\" - %s, %s\n", haGifSearch.text, gifAskedWords(a.how), name); }
+      } else if (strcmp(m.topic, "gif/all") == 0) {
+        // Play all matches: every GIF the search field finds, one after another.
+        if (m.retained) { break; }
+        GifAnswer a = gifSeriesRequest(haGifSearch.text, true);
+        Console.printf("Home Assistant: Play all matches for \"%s\" - %s, %u GIFs\n", haGifSearch.text, gifAskedWords(a.how),
+                      a.how == GIF_ASKED_PLAYS || a.how == GIF_ASKED_READING ? a.fit : 0);
       } else if (strcmp(m.topic, "gif/pick") == 0) {
         if (!m.retained) { haGifPick(m.payload); }
       }
@@ -634,11 +643,16 @@ void haMessage(const char *payload, uint16_t len) {
 }
 
 // mpclock/<id>/gif: a GIF by its name or a keyword (gifRequest()), as JSON -
-// gif, and replace (true) to take the place of a GIF on show - or as the
-// text alone; empty, or JSON without gif, asks for any GIF.
+// gif, replace (true) to take the place of a GIF on show, and all (true) for
+// every GIF it finds, one after another (gifSeriesRequest()) - or as the text
+// alone; empty, or JSON without gif, asks for any GIF.
 void haGif(const char *payload, uint16_t len) {
   char what[HA_PAYLOAD_MAX + 1];
-  bool replace = false;
+  bool replace = false, all = false;
+  auto truthy = [](JsonVariant v) {
+    return v.is<bool>() ? v.as<bool>() : v.is<long>() ? v.as<long>() != 0
+         : v.is<const char *>() && (strcmp(v.as<const char *>(), "true") == 0 || strcmp(v.as<const char *>(), "1") == 0);
+  };
   const char *p = payload;
   while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') { p++; }
   if (*p == '{') {
@@ -649,14 +663,14 @@ void haGif(const char *payload, uint16_t len) {
       return;
     }
     strlcpy(what, doc["gif"] | "", sizeof(what));
-    JsonVariant r = doc["replace"];
-    replace = r.is<bool>() ? r.as<bool>() : r.is<long>() ? r.as<long>() != 0
-            : r.is<const char *>() && (strcmp(r.as<const char *>(), "true") == 0 || strcmp(r.as<const char *>(), "1") == 0);
+    replace = truthy(doc["replace"]);
+    all = truthy(doc["all"]);
   } else {
     strlcpy(what, p, sizeof(what));
   }
-  GifAnswer a = gifRequest(what, replace);
-  Console.printf("Home Assistant: GIF \"%s\"%s - %s\n", what, replace ? ", replace" : "", gifAskedWords(a.how));
+  GifAnswer a = all ? gifSeriesRequest(what, replace) : gifRequest(what, replace);
+  Console.printf("Home Assistant: GIF \"%s\"%s%s - %s\n", what, replace ? ", replace" : "", all ? ", all" : "",
+                gifAskedWords(a.how));
 }
 
 // mpclock/<id>/gif/search: the search field's new text. The clock keeps it

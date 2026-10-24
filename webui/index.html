@@ -446,8 +446,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div class="ctl"><button class="btn" type="button" id="gifNow">Play a GIF now</button><span class="note" id="gifNowNote"></span></div>
         </div>
         <div class="row stack" id="gifFindRow">
-          <div><label class="lbl" for="gifFind">Find a GIF</label><div class="hint">By its name or a keyword - title, franchise, category, era or motif; commas: any of them. Tap a GIF to play it in place of one on show. <span id="gifMetaNote"></span></div></div>
-          <div class="ctl find"><input type="text" id="gifFind" placeholder="e.g. mario, star wars, christmas" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-describedby="gifFindNote"><button class="btn" type="button" id="gifFindPlay" disabled>Play one of them</button></div>
+          <div><label class="lbl" for="gifFind">Find a GIF</label><div class="hint">By its name or a keyword - title, franchise, category, era or motif; commas: any of them. Tap a GIF to play it in place of one on show; Play all plays every one that fits, each once, one after another without the clock between them - until an input or another GIF ends it. <span id="gifMetaNote"></span></div></div>
+          <div class="ctl find"><input type="text" id="gifFind" placeholder="e.g. mario, star wars, christmas" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-describedby="gifFindNote"><button class="btn" type="button" id="gifFindPlay" disabled>Play one of them</button><button class="btn" type="button" id="gifFindAll" disabled>Play all</button></div>
           <div class="note" id="gifFindNote" aria-live="polite"></div>
           <ul class="giflist" id="gifFindList"></ul>
         </div>
@@ -1580,6 +1580,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   // A GIF asked for (POST /api/gif), and what came of it.
   function gifAnswerText(r) {
     var what = r.title ? '“' + r.title + '”' : 'a GIF';
+    if (r.series && r.result === 'plays') { return 'The clock plays all ' + r.fit + ', one after another, from ' + what + '.'; }
+    if (r.series && r.result === 'reading') { return 'Reading the first of ' + r.fit + ' from the card – they play in a moment.'; }
     switch (r.result) {
       case 'plays': return 'The clock plays ' + what + (r.byName || r.fit <= 1 ? '' : ', one of ' + r.fit) + '.';
       case 'reading': return 'Reading ' + what + ' from the card – it plays in a moment.';
@@ -1587,6 +1589,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       case 'noMatch': return 'No GIF matches.';
       case 'noneFits': return (r.matches === 1 ? '1 GIF matches' : r.matches + ' GIFs match') + ', none fits the panel as the clock stands.';
       case 'notOnFace': return 'Not now: a GIF plays only over the face, not over the menu, a message or the hotspot.';
+      case 'noSearch': return 'Type a search first: Play all plays the GIFs it finds.';
       default: return 'Not now: the clock could not open a GIF this moment. Try again in a moment.';
     }
   }
@@ -1596,12 +1599,12 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   $('#gifNow').addEventListener('click', function () { gifAsk(''); });
   // The search: the clock looks into its meta index 250 ms after the last
   // key (POST /api/gifs), so the list shows what a request draws from; only
-  // the newest answer counts. A tap plays that GIF, the button one of them at
+  // the newest answer counts. A tap plays that GIF, Play all every one of them (a series), the button one of them at
   // random, each in place of a GIF on show.
   var findSeq = 0;
   function findGifs() {
     var q = $('#gifFind').value.trim(), seq = ++findSeq, list = $('#gifFindList'), note = $('#gifFindNote');
-    if (!q) { list.textContent = ''; note.textContent = ''; $('#gifFindPlay').disabled = true; return; }
+    if (!q) { list.textContent = ''; note.textContent = ''; $('#gifFindPlay').disabled = $('#gifFindAll').disabled = true; return; }
     api('/api/gifs', enc({ find: q })).then(function (r) {
       if (seq !== findSeq) { return; }
       list.textContent = '';
@@ -1623,7 +1626,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         : (r.byName ? 'The GIF of that name' : (r.count === 1 ? '1 GIF matches' : r.count + ' GIFs match'))
           + (r.fit < r.count ? ' – ' + (r.fit ? r.fit + ' of them fit' : 'none fits') + ' the panel as the clock stands' : '')
           + (r.count > r.gifs.length ? '; the first ' + r.gifs.length + ' by title, type more to narrow it down.' : '.');
-      $('#gifFindPlay').disabled = !r.fit;
+      $('#gifFindPlay').disabled = $('#gifFindAll').disabled = !r.fit;
     }).catch(function (e) { if (seq === findSeq) { note.textContent = e.message || 'The clock did not answer.'; } });
   }
   $('#gifFind').addEventListener('input', function () { clearTimeout(findGifs.t); findGifs.t = setTimeout(findGifs, 250); });
@@ -1631,6 +1634,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     if (e.key === 'Enter') { e.preventDefault(); if (!$('#gifFindPlay').disabled) { $('#gifFindPlay').click(); } }
   });
   $('#gifFindPlay').addEventListener('click', function () { gifAsk(enc({ gif: $('#gifFind').value.trim(), replace: 1 })); });
+  $('#gifFindAll').addEventListener('click', function () { gifAsk(enc({ gif: $('#gifFind').value.trim(), replace: 1, all: 1 })); });
   $('#ssid').addEventListener('input', markNet);
   $('#wifiSave').addEventListener('click', function () {
     var err = $('#wifiErr'); err.hidden = true;
