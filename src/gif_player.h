@@ -9,7 +9,7 @@
    table, dimmed by the panel's brightness tables as the face is.
    GIFs on request (2026-10-23): one asked for by its name, or one of those a
    keyword finds in the GIF library's meta index, which the pack and the
-   card carry (gif_find.h).
+   card carry (gif_find.h); or all of them, one after another (2026-10-24).
 
    A module of its own since 2026-10-22 (code review of 2026-10-14, point 10).
    ------------------------------------------------------------------------- */
@@ -60,6 +60,7 @@ enum GifAsked : uint8_t {
   GIF_ASKED_NO_MATCH,     // the request names or finds no GIF
   GIF_ASKED_NONE_FITS,    // it finds some, none fits the panel as it is held
   GIF_ASKED_NOT_OPENED,   // the one chosen did not open this moment (no RAM, the card's next not read yet)
+  GIF_ASKED_NO_SEARCH,    // a series asked for without a search: it would be all GIFs
 };
 struct GifAnswer {
   GifAsked how;
@@ -68,6 +69,12 @@ struct GifAnswer {
   bool     byName;        // the request was the name of the GIFs it found
 };
 GifAnswer gifRequest(const char *request, bool replace);   // "" asks for any GIF
+// A series (Peter, 2026-10-24): every GIF a request finds that fits, one
+// after another in a shuffled order, each once, cut hard from one to the
+// next without the face between them; into the time's change, as every GIF
+// the user asks for. An input or another GIF asked for ends it. matches and
+// fit as in gifRequest() - fit is the series' length -, index its first GIF.
+GifAnswer gifSeriesRequest(const char *request, bool replace);
 GifAnswer gifAgain(bool replace);   // the last GIF shown once more (a random one when there is none)
 const char *gifAskedWords(GifAsked how);   // what came of it, in words for the console
 // Marks in hit (gifCount() bytes) the GIFs a request finds; an empty one finds

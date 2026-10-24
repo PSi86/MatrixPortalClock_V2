@@ -20,6 +20,10 @@ static bool gifFits(int16_t i);
 static int16_t gifPick();
 static void gifDrawLine(GIFDRAW *d);
 static bool gifStart(int16_t i, bool ownAccord);
+static bool gifOpen(int16_t i, bool ownAccord, bool once);
+static void gifSeriesClear();
+static void gifSeriesEndOne();
+static void gifSeriesStep();
 static int16_t gifNext();
 static void gifSourceClose(uint8_t how);
 static void gifDispose();
@@ -41,6 +45,8 @@ static bool gifCardOpen(int16_t i, const uint8_t *&data, uint32_t &size);
 static void gifCardClose(uint8_t how);
 static void gifCardRemount();
 static void gifCardResult();
+static void gifCardSeriesAhead();
+static void gifSeriesWantNext();
 #endif
 
 // GIF playback state (the section "GIF playback" below).
@@ -68,6 +74,15 @@ static uint32_t      gifLoopTime = 0;               // one loop by its frame del
 static uint16_t      gifFrames = 0, gifFrame = 0;   // frames of a loop (0 if unknown), of this loop shown so far
 struct GifArea { int16_t x, y, w, h; uint8_t disposal; bool valid; };
 static GifArea       gifPrev;                       // the last frame's area, for its disposal
+// A series of GIFs (gifSeriesRequest()): the GIFs of it in their shuffled
+// order (PSRAM), how many, and the next to play; between two, the one that
+// ended stands while the next is not open yet.
+static int16_t      *gifSeries = nullptr;
+static uint16_t      gifSeriesCount = 0, gifSeriesAt = 0;
+static bool          gifSeriesWaiting = false;
+static unsigned long gifSeriesWaitFrom = 0;
+// The next one not ready after this long (a card GIF not read) is passed over.
+static const unsigned long GIF_SERIES_WAIT_MS = 5000;
 
 // The GIF pack (section "GIF pack" below; its layout in gif_player.h).
 static const uint32_t GIF_PACK_GIF_MAX = 614400;    // the largest GIF it may inflate to
@@ -224,8 +239,18 @@ void gifDrawLine(GIFDRAW *d) {
   }
 }
 
-// Shows GIF i over the face; false when it does not open.
+// Shows GIF i over the face; false when it does not open. A GIF of a series
+// plays once.
 bool gifStart(int16_t i, bool ownAccord) {
+  if (!gifOpen(i, ownAccord, gifSeries != nullptr)) { return false; }
+  openScreen(SCREEN_GIF);
+  return true;
+}
+
+// GIF i's bytes and the decoder on them, ready for its first frame - a
+// decoder there already is taken for it (a series); false when it does not
+// open. Once: one loop, else as many as fit into gifSettings.seconds.
+bool gifOpen(int16_t i, bool ownAccord, bool once) {
   if (i < 0 || i >= gifCount()) { return false; }
   const char *name;
   uint16_t w, h;
@@ -247,7 +272,7 @@ bool gifStart(int16_t i, bool ownAccord) {
     h = e.height;
     if (!gifPackOpen(e, data, size)) { return false; }
   }
-  gifPlayer = new (std::nothrow) GifPlayer;
+  if (!gifPlayer) { gifPlayer = new (std::nothrow) GifPlayer; }
   if (!gifPlayer) { Console.println("GIF: no RAM for the decoder"); gifSourceClose(GIF_CLOSE_NOT_NOW); return false; }
   gifPlayer->decoder.begin(GIF_PALETTE_RGB888);   // gifDrawLine() reads the palette as RGB888
   if (!gifPlayer->decoder.open((uint8_t *)data, size, gifDrawLine)) {
@@ -259,7 +284,7 @@ bool gifStart(int16_t i, bool ownAccord) {
   }
   gifLoopTime = gifLoopMs(data, size, gifFrames);
   uint32_t playMs = gifSettings.seconds * 1000UL;
-  gifLoopsPlanned = (gifLoopTime > 0 && gifLoopTime <= playMs) ? (uint16_t)(playMs / gifLoopTime) : 1;
+  gifLoopsPlanned = (!once && gifLoopTime > 0 && gifLoopTime <= playMs) ? (uint16_t)(playMs / gifLoopTime) : 1;
   // Of its own accord, its whole loops end before the time's next change and
   // ROUND_GIF_GAP_MS before an info round, or it does not start. Checked
   // once, against what it plays (K6 of the face refactor: until 2026-10-20 a
@@ -289,9 +314,10 @@ bool gifStart(int16_t i, bool ownAccord) {
   gifRotation = matrix.getRotation();
   gifShownAt = millisNow;
   gifNextFrameAt = millisNow;
-  Console.printf("GIF: %s (%ux%u), %u x %lu ms, brightness %u (clock %u)\n", name, w, h,
+  Console.printf("GIF: %s (%ux%u), %u x %lu ms, brightness %u (clock %u)", name, w, h,
                 gifLoopsPlanned, (unsigned long)gifLoopTime, panelBrightness(), effectiveBrightness);
-  openScreen(SCREEN_GIF);
+  if (once) { Console.printf(", %u of a series of %u", gifSeriesAt, gifSeriesCount); }
+  Console.println();
   return true;
 }
 
@@ -329,6 +355,7 @@ GifAnswer gifAgain(bool replace) {
   if (screen != SCREEN_FACE && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   if (onShow && !replace) { a.how = GIF_ASKED_GIF_ON_SHOW; return a; }
   if (gifCount() == 0) { return a; }
+  gifSeriesClear();                // a series waiting for its first GIF goes too
   if (onShow) { closeScreen(); }   // the GIF on show becomes the last one
   if (screen != SCREEN_FACE) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   bool last = gifLast >= 0 && gifFits(gifLast);
@@ -353,7 +380,8 @@ GifAnswer gifAgain(bool replace) {
 
 const char *gifAskedWords(GifAsked how) {
   static const char *const WORDS[] = { "plays", "being read from the card", "not over the face", "a GIF on show",
-                                       "no GIF found", "none fits the panel as it is held", "could not be opened now" };
+                                       "no GIF found", "none fits the panel as it is held", "could not be opened now",
+                                       "no search: a series plays only what one finds" };
   return how < sizeof(WORDS) / sizeof(WORDS[0]) ? WORDS[how] : "?";
 }
 
@@ -503,6 +531,7 @@ GifAnswer gifRequest(const char *request, bool replace) {
   }
   if (!a.matches) { a.how = GIF_ASKED_NO_MATCH; return a; }
   if (!a.fit) { a.how = GIF_ASKED_NONE_FITS; return a; }
+  gifSeriesClear();                                   // a series waiting for its first GIF goes too
   if (onShow) { closeScreen(); }                      // replace: the GIF on show goes
   if (screen != SCREEN_FACE) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   if (any) { pick = gifNext(); }
@@ -523,13 +552,134 @@ GifAnswer gifRequest(const char *request, bool replace) {
   return a;
 }
 
+/* ----------------------------------------------------------------------
+   A series (Peter, 2026-10-24): every GIF a request finds that fits the
+   panel as it is held, one after another in a shuffled order, each played
+   once and cut hard to the next: the last frame of one stands until the
+   next one's first is drawn, the face never between them. Asked for by Home
+   Assistant's button Play all matches (or "all" in its gif topic), the web
+   app's Play all, and the console's "gif* ...", each in place of a GIF on
+   show. Like every GIF the user asks for it runs into the time's change; an
+   input, another GIF asked for, or the panel turned ends it, as they end a
+   GIF (gifEnd()). An empty request plays none: it would be all GIFs, for
+   hours. On the wall the card's task reads the next GIF while one plays.
+   ---------------------------------------------------------------------- */
+GifAnswer gifSeriesRequest(const char *request, bool replace) {
+  GifAnswer a = { GIF_ASKED_NO_MATCH, 0, 0, -1, false };
+  bool onShow = screen == SCREEN_GIF;
+  if (screen != SCREEN_FACE && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (onShow && !replace) {
+    Console.printf("GIF series \"%s\": a GIF is on show, and no replace - dropped\n", request);
+    a.how = GIF_ASKED_GIF_ON_SHOW;
+    return a;
+  }
+  GifQuery q;
+  gifQueryParse(request, q);
+  if (!q.name[0] && !q.keys) { a.how = GIF_ASKED_NO_SEARCH; return a; }
+  uint16_t count = (uint16_t)gifCount();
+  if (!count) { return a; }
+  uint8_t *hit = (uint8_t *)heap_caps_malloc(count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  int16_t *list = (int16_t *)heap_caps_malloc(count * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!hit || !list) {
+    heap_caps_free(hit);
+    heap_caps_free(list);
+    Console.println("GIF series: no RAM for it");
+    a.how = GIF_ASKED_NOT_OPENED;
+    return a;
+  }
+  a.matches = gifFindQuery(q, hit, a.byName);
+  for (uint16_t i = 0; i < count; i++) { if (hit[i] && gifFits((int16_t)i)) { list[a.fit++] = (int16_t)i; } }
+  heap_caps_free(hit);
+  Console.printf("GIF series \"%s\"%s: %u found, %u fit\n", request, replace ? " (replace)" : "", a.matches, a.fit);
+  if (!a.matches || !a.fit) {
+    heap_caps_free(list);
+    a.how = a.matches ? GIF_ASKED_NONE_FITS : GIF_ASKED_NO_MATCH;
+    return a;
+  }
+  for (uint16_t k = a.fit - 1; k > 0; k--) {   // shuffled, each once
+    uint16_t j = esp_random() % (k + 1);
+    int16_t t = list[k]; list[k] = list[j]; list[j] = t;
+  }
+  if (onShow) { closeScreen(); }   // the GIF or series on show goes
+  gifSeriesClear();                // a series waiting for its first GIF too
+  if (screen != SCREEN_FACE) { heap_caps_free(list); a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  gifSeries = list;
+  gifSeriesCount = a.fit;
+  gifSeriesAt = 0;
+  // The first that opens; on the wall one not read ahead is read first and
+  // the series starts once it is (gifCardWantUpdate()).
+  while (gifSeriesAt < gifSeriesCount) {
+    a.index = gifSeries[gifSeriesAt++];
+#if BOARD_WAVESHARE_WALL
+    if (gifFromCard) {
+      a.how = gifCardWant(a.index);
+      if (a.how == GIF_ASKED_PLAYS || a.how == GIF_ASKED_READING) { return a; }
+      continue;
+    }
+#endif
+    if (gifStart(a.index, false)) { a.how = GIF_ASKED_PLAYS; return a; }
+  }
+  gifSeriesClear();
+  a.how = GIF_ASKED_NOT_OPENED;
+  return a;
+}
+
+// The series' state let go of: at its end, when its screen closes, or when
+// another GIF is asked for.
+void gifSeriesClear() {
+  heap_caps_free(gifSeries);
+  gifSeries = nullptr;
+  gifSeriesCount = gifSeriesAt = 0;
+  gifSeriesWaiting = false;
+}
+
+// A GIF of the series has played its loop: its decoder and its bytes go,
+// its last frame stays on the panel, the screen stays.
+void gifSeriesEndOne() {
+  gifPlayer->decoder.close();
+  gifSourceClose(GIF_CLOSE_PLAYED);
+  gifLast = gifIndex;
+  gifIndex = -1;
+  gifSeriesWaiting = true;
+  gifSeriesWaitFrom = millisNow;
+  gifShownAt = millisNow;   // the GIF screen's own time limit counts from here
+}
+
+// The series' next GIF in place of the one that ended, once it is ready:
+// passed over when it cannot be read or opened, or is not read in
+// GIF_SERIES_WAIT_MS; after the last the screen closes.
+void gifSeriesStep() {
+  while (gifSeriesAt < gifSeriesCount) {
+    int16_t i = gifSeries[gifSeriesAt];
+#if BOARD_WAVESHARE_WALL
+    if (gifFromCard) {
+      bool ready = false;
+      for (uint8_t s = 0; s < 2; s++) { ready |= cardSlot[s].state == CARD_SLOT_READY && cardSlot[s].index == i; }
+      if (!ready) {
+        bool late = (long)(millisNow - gifSeriesWaitFrom) > (long)GIF_SERIES_WAIT_MS;
+        if (!cardList.gifs[i].bad && !late) { return; }   // still being read: the last frame stands
+        Console.printf("GIF series: %s %s - passed over\n", cardList.gifs[i].name, late ? "not read in time" : "does not play");
+        gifSeriesAt++;
+        gifSeriesWaitFrom = millisNow;
+        continue;
+      }
+    }
+#endif
+    gifSeriesAt++;
+    if (gifOpen(i, false, true)) { gifSeriesWaiting = false; return; }
+    gifSeriesWaitFrom = millisNow;
+  }
+  Console.printf("GIF series: all %u played\n", gifSeriesCount);
+  closeScreen();
+}
+
 // A GIF of its own accord once it is due: now, or not at all when the panel
 // is not free for it (decorFree()) - it does not wait (Peter, 2026-10-12);
 // GIFs that waited all came at once when the wait ended, right after the
 // time's change. What does not depend on its length is looked at before it
 // is opened; its whole loops when they are known (gifStart()).
 void gifUpdate() {
-  if (screen == SCREEN_GIF) { return; }   // one on show; the next is drawn at its end
+  if (screen == SCREEN_GIF || gifSeries) { return; }   // one on show (the next is drawn at its end), or a series to come
   if (!gifSettings.randomOn || gifCount() == 0) { return; }
   if ((long)(millisNow - gifDueAt) < 0) { return; }
   if (screen != SCREEN_FACE || !decorFree(0, true)) {
@@ -559,8 +709,9 @@ void gifEnd() {
   }
   gifSourceClose(GIF_CLOSE_PLAYED);
   matrix.setBrightness(panelBrightness());     // back to the clock's
-  gifLast = gifIndex;
+  if (gifIndex >= 0) { gifLast = gifIndex; }   // between two of a series it is set already
   gifIndex = -1;
+  gifSeriesClear();                            // the screen closed: a series ends with it
   matrix.forgetHeld();
   gifScheduleNext();
 }
@@ -645,6 +796,11 @@ void gifRender() {
 // The GIF screen: the next frame when it is due. Turning the panel ends it,
 // since the GIF no longer stands upright, or may no longer fit.
 void drawGif() {
+  if (gifSeriesWaiting) {   // a series between two GIFs: the next once it is ready
+    if (matrix.getRotation() != gifRotation) { closeScreen(); return; }
+    gifSeriesStep();
+    if (gifSeriesWaiting || screen != SCREEN_GIF) { return; }
+  }
   if (!gifPlayer || matrix.getRotation() != gifRotation) { closeScreen(); return; }
   if ((long)(millisNow - gifNextFrameAt) < 0) { return; }
   if (gifRestartDue) {
@@ -654,6 +810,12 @@ void drawGif() {
     if (gifLoops >= gifLoopsPlanned) {
       Console.printf("GIF: %u whole loops of %lu ms in %lu ms\n", gifLoops, (unsigned long)gifLoopTime,
                     millisNow - gifShownAt);
+      if (gifSeries) {   // the next of the series, cut hard: this last frame stands until it is ready
+        gifSeriesEndOne();
+        gifSeriesStep();
+        if (screen == SCREEN_GIF && !gifSeriesWaiting) { drawGif(); }
+        return;
+      }
       closeScreen();
       return;
     }
@@ -1031,8 +1193,10 @@ void gifCardWantUpdate() {
       cardWant = -1;
       if (screen != SCREEN_FACE) {
         Console.printf("Card: %s read, the face is not free now - dropped\n", g.name);
+        gifSeriesClear();
       } else if (!gifStart(i, false)) {
         gifScheduleNext();
+        gifSeriesWantNext();
       }
       return;
     }
@@ -1040,9 +1204,40 @@ void gifCardWantUpdate() {
   if (g.bad) {
     Console.printf("Card: %s asked for does not play - dropped\n", g.name);
     cardWant = -1;
+    gifSeriesWantNext();
   } else if ((long)(millisNow - cardWantAt) > (long)CARD_WANT_MS) {
     Console.printf("Card: %s not read in %lu ms - dropped\n", g.name, CARD_WANT_MS);
     cardWant = -1;
+    gifSeriesWantNext();
+  }
+}
+
+// A series' first GIF did not come (gifSeriesRequest()): the one after it
+// is asked for, or the series goes when none is left.
+void gifSeriesWantNext() {
+  if (!gifSeries || screen == SCREEN_GIF) { return; }
+  while (gifSeriesAt < gifSeriesCount) {
+    GifAsked how = gifCardWant(gifSeries[gifSeriesAt++]);
+    if (how == GIF_ASKED_PLAYS || how == GIF_ASKED_READING) { return; }
+  }
+  gifSeriesClear();
+}
+
+// While a series is on (on show, or covered by a notice): its next GIF read
+// into the slot that is not on show, in place of what it holds.
+void gifCardSeriesAhead() {
+  if (gifSeriesAt >= gifSeriesCount) { return; }
+  int16_t want = gifSeries[gifSeriesAt];
+  if (cardList.gifs[want].bad) { return; }   // gifSeriesStep() passes over it
+  for (uint8_t s = 0; s < 2; s++) {
+    if (cardSlot[s].state != CARD_SLOT_EMPTY && cardSlot[s].index == want) { return; }   // read, or being read
+  }
+  for (uint8_t s = 0; s < 2; s++) {
+    if ((int8_t)s == cardPlaying || cardSlot[s].state == CARD_SLOT_FILLING) { continue; }
+    if (cardSlot[s].state == CARD_SLOT_READY) { gifCardFreeSlot(s); }
+    cardSlot[s] = { nullptr, 0, want, CARD_SLOT_FILLING };
+    gifCardSend(CARD_FETCH_JOB, want);
+    return;
   }
 }
 
@@ -1152,12 +1347,18 @@ bool gifCardSettle(unsigned long maxMs) {
 }
 
 // Every pass: the task's result, and the next job - only while no GIF plays,
-// so the card's reads do not come on top of a GIF's frames.
+// so the card's reads do not come on top of a GIF's frames; but a series
+// reads its next GIF while one plays, so that none waits for the card.
 void gifCardUpdate() {
   if (!cardResults()) { return; }
   if (cardJobBusy && xQueueReceive(cardResults(), &cardResult, 0) == pdTRUE) { gifCardResult(); }
   gifCardWantUpdate();
-  if (cardJobBusy || screen == SCREEN_GIF) { return; }
+  if (cardJobBusy) { return; }
+  if (gifSeries && screen != SCREEN_FACE) {
+    if (gifFromCard && !cardRemountWanted) { gifCardSeriesAhead(); }
+    return;
+  }
+  if (screen == SCREEN_GIF) { return; }
   if (cardRemountWanted) { cardWant = -1; gifCardRemount(); return; }
   if (!gifFromCard) { return; }
   if (cardWant >= 0) {
