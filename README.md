@@ -6,6 +6,10 @@ panels. The **Adafruit MatrixPortal M4** was supported until 2026-10-21: the las
 commit that builds for it is **ae18faf** (see [MatrixPortal M4](#matrixportal-m4)).
 Fetches the time from the local network via NTP and offers a WiFi configuration mode.
 
+**Ready-made firmware:** the [Releases](https://github.com/PSi86/MatrixPortalClock_V2/releases)
+page has images for both boards; [FLASHING.md](FLASHING.md) shows how to put
+one on a board, in the browser or with esptool, without building anything.
+
 ## Hardware targets
 
 One code base, two boards, both ESP32-S3. `src/board_hal.h` holds everything that
@@ -224,6 +228,9 @@ dropped before the web server and WiFi work that followed.
   alerts or messages, and everything can be shown again (see [Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel))
 
 ## Setup
+
+Building from source, as below. To flash a released image instead, see
+[FLASHING.md](FLASHING.md).
 
 1. Optionally, compile in the home WiFi:
    ```
