@@ -92,6 +92,7 @@ enum Screen : uint8_t {
   SCREEN_HOTSPOT_PREVIEW,  // config AP up and a client connected: the live clock
   SCREEN_GIF,              // a GIF in place of the face, over it in the stack
   SCREEN_GESTURE_TEST,     // every gesture shown instead of done, over the face (the web app's Inputs section)
+  SCREEN_OFF,              // the clock Off (rest.h): the panel black, over the face
 };
 extern Screen screen;      // the screen on top, the one on the panel
 void setScreen(Screen next);    // a screen on its own: everything open is closed

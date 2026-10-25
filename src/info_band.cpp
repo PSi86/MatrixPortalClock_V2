@@ -482,7 +482,7 @@ void bandRestart() {
 // On every pass outside the hotspot.
 void bandUpdate() {
   bandLocalUpdate();
-  if (screen == SCREEN_GIF) { return; }   // a GIF has the whole wall
+  if (screen == SCREEN_GIF || screen == SCREEN_OFF) { return; }   // a GIF has the whole wall; Off leaves it black
   bandHidden = false;
   if (bandWant.kind != TURN_NONE) {
     BandTurn w = bandWant;

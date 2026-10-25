@@ -13,6 +13,7 @@
 #include "console_cmds.h"   // wallOutputStops
 #include "notices.h"
 #include "panel_rules.h"
+#include "rest.h"
 #include "settings.h"
 
 // What only this module calls, ahead of its use.
@@ -330,6 +331,10 @@ int16_t gifNext() {
   return gifPick();
 }
 
+// Where a GIF asked for may take the panel: over the face, or over Off (the
+// clock at rest, rest.h), whose black panel comes back after it.
+static bool gifPanelFree() { return screen == SCREEN_FACE || screen == SCREEN_OFF; }
+
 // A GIF now (FN_PLAY_GIF): on the face only, now or not at all (Peter,
 // 2026-10-12) - also during the face's change or a scene of it, and into the
 // next change (Peter, 2026-10-22: what the user asks for is granted; the face
@@ -351,13 +356,15 @@ void gifPlayAgain() {
 // gifRequest().
 GifAnswer gifAgain(bool replace) {
   GifAnswer a = { GIF_ASKED_NO_MATCH, 0, 0, -1, false };
+  RestLevel rested;
+  if (restRefusesGif(rested)) { a.how = rested == REST_OFF ? GIF_ASKED_CLOCK_OFF : GIF_ASKED_CLOCK_CALM; return a; }   // rest.h
   bool onShow = screen == SCREEN_GIF;
-  if (screen != SCREEN_FACE && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (!gifPanelFree() && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   if (onShow && !replace) { a.how = GIF_ASKED_GIF_ON_SHOW; return a; }
   if (gifCount() == 0) { return a; }
   gifSeriesClear();                // a series waiting for its first GIF goes too
   if (onShow) { closeScreen(); }   // the GIF on show becomes the last one
-  if (screen != SCREEN_FACE) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (!gifPanelFree()) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   bool last = gifLast >= 0 && gifFits(gifLast);
   a.index = last ? gifLast : gifNext();
   a.matches = a.fit = 1;
@@ -381,7 +388,9 @@ GifAnswer gifAgain(bool replace) {
 const char *gifAskedWords(GifAsked how) {
   static const char *const WORDS[] = { "plays", "being read from the card", "not over the face", "a GIF on show",
                                        "no GIF found", "none fits the panel as it is held", "could not be opened now",
-                                       "no search: a series plays only what one finds" };
+                                       "no search: a series plays only what one finds",
+                                       "the clock is off, and GIFs asked for do not play then",
+                                       "the clock is calm, and GIFs asked for do not play then" };
   return how < sizeof(WORDS) / sizeof(WORDS[0]) ? WORDS[how] : "?";
 }
 
@@ -484,8 +493,10 @@ uint32_t gifListGeneration() { return gifGeneration; }
 // GIF read ahead, so it starts at once).
 GifAnswer gifRequest(const char *request, bool replace) {
   GifAnswer a = { GIF_ASKED_NO_MATCH, 0, 0, -1, false };
+  RestLevel rested;
+  if (restRefusesGif(rested)) { a.how = rested == REST_OFF ? GIF_ASKED_CLOCK_OFF : GIF_ASKED_CLOCK_CALM; return a; }   // rest.h
   bool onShow = screen == SCREEN_GIF;
-  if (screen != SCREEN_FACE && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (!gifPanelFree() && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   if (onShow && !replace) {
     Console.printf("GIF request \"%s\": a GIF is on show, and no replace - dropped\n", request);
     a.how = GIF_ASKED_GIF_ON_SHOW;
@@ -533,7 +544,7 @@ GifAnswer gifRequest(const char *request, bool replace) {
   if (!a.fit) { a.how = GIF_ASKED_NONE_FITS; return a; }
   gifSeriesClear();                                   // a series waiting for its first GIF goes too
   if (onShow) { closeScreen(); }                      // replace: the GIF on show goes
-  if (screen != SCREEN_FACE) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (!gifPanelFree()) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   if (any) { pick = gifNext(); }
   a.index = pick;
 #if BOARD_WAVESHARE_WALL
@@ -566,8 +577,10 @@ GifAnswer gifRequest(const char *request, bool replace) {
    ---------------------------------------------------------------------- */
 GifAnswer gifSeriesRequest(const char *request, bool replace) {
   GifAnswer a = { GIF_ASKED_NO_MATCH, 0, 0, -1, false };
+  RestLevel rested;
+  if (restRefusesGif(rested)) { a.how = rested == REST_OFF ? GIF_ASKED_CLOCK_OFF : GIF_ASKED_CLOCK_CALM; return a; }   // rest.h
   bool onShow = screen == SCREEN_GIF;
-  if (screen != SCREEN_FACE && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (!gifPanelFree() && !onShow) { a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   if (onShow && !replace) {
     Console.printf("GIF series \"%s\": a GIF is on show, and no replace - dropped\n", request);
     a.how = GIF_ASKED_GIF_ON_SHOW;
@@ -602,7 +615,7 @@ GifAnswer gifSeriesRequest(const char *request, bool replace) {
   }
   if (onShow) { closeScreen(); }   // the GIF or series on show goes
   gifSeriesClear();                // a series waiting for its first GIF too
-  if (screen != SCREEN_FACE) { heap_caps_free(list); a.how = GIF_ASKED_NOT_ON_FACE; return a; }
+  if (!gifPanelFree()) { heap_caps_free(list); a.how = GIF_ASKED_NOT_ON_FACE; return a; }
   gifSeries = list;
   gifSeriesCount = a.fit;
   gifSeriesAt = 0;
@@ -1191,7 +1204,7 @@ void gifCardWantUpdate() {
     if (cardSlot[s].state == CARD_SLOT_READY && cardSlot[s].index == cardWant) {
       int16_t i = cardWant;
       cardWant = -1;
-      if (screen != SCREEN_FACE) {
+      if (!gifPanelFree()) {
         Console.printf("Card: %s read, the face is not free now - dropped\n", g.name);
         gifSeriesClear();
       } else if (!gifStart(i, false)) {
@@ -1354,7 +1367,7 @@ void gifCardUpdate() {
   if (cardJobBusy && xQueueReceive(cardResults(), &cardResult, 0) == pdTRUE) { gifCardResult(); }
   gifCardWantUpdate();
   if (cardJobBusy) { return; }
-  if (gifSeries && screen != SCREEN_FACE) {
+  if (gifSeries && !gifPanelFree()) {
     if (gifFromCard && !cardRemountWanted) { gifCardSeriesAhead(); }
     return;
   }

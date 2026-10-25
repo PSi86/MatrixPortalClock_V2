@@ -405,7 +405,7 @@ class PanelCanvas : public GFXcanvas16 {
   void show() {
     if (!_dma) { return; }
     waitForBackBuffer();
-    if (_testing) { flip(); return; }   // a test picture stands (testPicture())
+    if (_testing || _off) { flip(); return; }   // a test picture stands (testPicture()), or the clock is Off (setOff())
 #if defined(CLOCK_DEBUG)
     uint32_t pushStart = micros(), pushed = 0;
 #endif
@@ -491,7 +491,7 @@ class PanelCanvas : public GFXcanvas16 {
   void retintStep() {
     if (_stale[0]) { _retint = 0; }
     if (_bandStale) { _bandRetint = 0; }
-    if (!_dma || _testing || _native || (_retint == 0 && _bandRetint == 0)) { return; }
+    if (!_dma || _testing || _native || _off || (_retint == 0 && _bandRetint == 0)) { return; }
 #if defined(CLOCK_DEBUG)
     uint32_t t0 = micros();
 #endif
@@ -557,7 +557,7 @@ class PanelCanvas : public GFXcanvas16 {
   // wrote over it. The next show() gives the wall back to the canvas and
   // darkens the rows below it.
   void wallRow(int16_t y, const uint8_t *rgb) {
-    if (!_dma || y < 0 || y >= WALL_H) { return; }
+    if (!_dma || _off || y < 0 || y >= WALL_H) { return; }
     _native = true;
     uint8_t *shown = _shown ? _shown + (size_t)y * WALL_W * 3 : nullptr;
     if (!shown || !_shownValid) {
@@ -599,7 +599,7 @@ class PanelCanvas : public GFXcanvas16 {
   // through retintStep(). Nothing while a GIF or a test picture holds the
   // wall.
   void showBand(const uint16_t *src) {
-    if (!_dma || _testing || _native || !src) { _bandStale = true; return; }
+    if (!_dma || _testing || _native || _off || !src) { _bandStale = true; return; }
     for (int16_t y = 0; y < WALL_BAND_H; y++) {
       const uint16_t *s = src + y * WALL_W;
       uint16_t *held = _bandHeld ? _bandHeld + y * WALL_W : nullptr;
@@ -670,6 +670,7 @@ class PanelCanvas : public GFXcanvas16 {
   void show() {
     if (!_dma) { return; }
     waitForBackBuffer();
+    if (_off) { _flippedAt = micros(); return; }   // the clock is Off (setOff()): both buffers stay black
 #if defined(CLOCK_DEBUG)
     uint32_t pushStart = micros(), pushed = 0;
 #endif
@@ -706,6 +707,44 @@ class PanelCanvas : public GFXcanvas16 {
 #endif
   }
 
+  // Off (rest.h): the panel black until setOff(false). Black data goes
+  // through every row first, so the panels' drivers hold nothing that could
+  // light - two rows of the last picture stayed lit on the wall clock while
+  // its bootloader ran (2026-10-25), with the panels dark only through the OE
+  // time - and then the OE time goes to 0 as well. show() and showBand()
+  // write nothing meanwhile, and a brightness asked for waits. Back on, the
+  // next shows write the whole picture again.
+  void setOff(bool off) {
+    if (!_dma || off == _off) { return; }
+#if BOARD_WAVESHARE_WALL
+    if (_heldDark) { return; }   // holdDark(): black until the next start
+#endif
+    _off = off;
+    if (off) {
+      _offBright = _bright;
+#if BOARD_WAVESHARE_WALL
+      for (int16_t y = 0; y < WALL_H; y++) { wallLine(0, y, WALL_W, 0, 0, 0); }
+      writeBackRows();
+      _native = false;
+      _shownValid = false;
+      delayMicroseconds(_periodUs + 1000);   // a refresh of it: every row latched black once
+#else
+      for (int i = 0; i < 2; i++) {          // both buffers, each shown for a refresh
+        _dma->clearScreen();
+        flip();
+        delayMicroseconds(_periodUs + 1000);
+      }
+#endif
+      _dma->setBrightness8(0);
+      _bright = 0;
+      return;
+    }
+    forgetHeld();
+    uint8_t b = _offBright;
+    _offBright = 0;
+    setBrightness(b);
+  }
+
   // Brightness of the whole panel, 0..255: 0 switches it dark (through the OE
   // time), anything else sets the light the colour values give (see above),
   // at least PANEL_BRIGHT_FLOOR. Another brightness rebuilds the tables, and
@@ -719,6 +758,7 @@ class PanelCanvas : public GFXcanvas16 {
 #if BOARD_WAVESHARE_WALL
     if (_heldDark) { return; }
 #endif
+    if (_off) { _offBright = b; return; }   // for when the clock is on again (setOff())
     if (b == 0) {
       if (_bright != 0) { _dma->setBrightness8(0); _bright = 0; }
       return;
@@ -790,12 +830,14 @@ class PanelCanvas : public GFXcanvas16 {
   // One buffer: nothing to switch, only the time the frame went out.
   void flip() { _flippedAt = micros(); }
 
-  // The panels dark (through the OE time) until the next start, whatever
-  // brightness the clock asks for afterwards: before a flash.
+  // The panels black until the next start, whatever the clock asks for
+  // afterwards: before a flash. Black data first, as for Off (setOff()):
+  // dark only through the OE time, the wall showed two lit rows of its last
+  // picture while the bootloader ran; with black data in the panels' drivers
+  // it stayed dark (both 2026-10-25).
   void holdDark() {
     if (!_dma) { return; }
-    _dma->setBrightness8(0);
-    _bright = 0;
+    setOff(true);
     _heldDark = true;
   }
 
@@ -945,6 +987,8 @@ class PanelCanvas : public GFXcanvas16 {
   bool      _stale[2] = { true, true };
   uint8_t   _back = 0;
   uint8_t   _bright = 0;          // 0 = dark
+  bool      _off = false;         // setOff(): the clock is Off, the panel black
+  uint8_t   _offBright = 0;       // ... and the brightness it gets back
 #if BOARD_WAVESHARE_WALL
   bool      _heldDark = false;    // holdDark(): dark until the next start
   bool      _testing = false;     // testPicture() stands

@@ -8,6 +8,7 @@
 #include "console.h"
 #include "face.h"
 #include "notices.h"
+#include "rest.h"
 #include "settings.h"
 
 // What only this module calls, ahead of its use.
@@ -100,15 +101,10 @@ static unsigned long panelRestMs() {
   return millisNow - since;
 }
 
-// Quiet hours, or a dark room: no decoration.
+// The clock calm, or off (rest.h: its hours, a dark room, or chosen): no
+// decoration - also not while Off shows the time for an input.
 static bool decorQuiet() {
-  const DecorSettings &d = decorSettings;
-  if (d.quietFrom != d.quietTo && clockIsSet()) {
-    uint8_t h = (uint8_t)clockHour(localTime);
-    bool in = d.quietFrom < d.quietTo ? (h >= d.quietFrom && h < d.quietTo) : (h >= d.quietFrom || h < d.quietTo);
-    if (in) { return true; }
-  }
-  return d.darkLux && luxAvg >= 0 && luxAvg < d.darkLux;
+  return restLevel() >= REST_CALM;
 }
 
 // Whether messages and new cards may come up now: the face's change over

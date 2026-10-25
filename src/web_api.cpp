@@ -18,6 +18,7 @@
 #include "lan_access.h"
 #include "notices.h"
 #include "panel_rules.h"
+#include "rest.h"
 #include "sensors.h"
 #include "settings.h"
 #include "time_sync.h"
@@ -51,6 +52,7 @@ static void packDrain(WiFiClient &client, long left);
 static void drawPackProgress(uint32_t done, uint32_t total);
 static void apiSetTime(Print &c, const String &q);
 static void apiSave(Print &c, const String &body, bool &closeHotspot);
+static void apiRest(Print &c, const String &body);
 
 // The web app's settings to be saved: the clock's, the faces' and the
 // Inputs page's profile and mount with the sync days, each as its table has
@@ -273,6 +275,7 @@ static void apiStatusInto(JsonDocument &d) {
   d["rot"] = matrix.getRotation();
   d["screen"] = (uint8_t)screen;
   d["gif"] = (screen == SCREEN_GIF);
+  restStatusInto(d["rest"].to<JsonObject>());   // Normal, Calm or Off, why, and the choice
   JsonArray feeds = d["feeds"].to<JsonArray>();
   for (uint8_t f = 0; f < FEED_COUNT; f++) {
     const FeedRun &r = feedRuns[f];
@@ -583,6 +586,8 @@ static const char *gifAskedCode(GifAsked how) {
     case GIF_ASKED_NO_MATCH:    return "noMatch";
     case GIF_ASKED_NONE_FITS:   return "noneFits";
     case GIF_ASKED_NO_SEARCH:   return "noSearch";
+    case GIF_ASKED_CLOCK_OFF:   return "clockOff";
+    case GIF_ASKED_CLOCK_CALM:  return "clockCalm";
     default:                    return "notOpened";
   }
 }
@@ -847,6 +852,8 @@ static void apiSave(Print &c, const String &body, bool &closeHotspot) {
   gifScheduleNext();          // the new times count from now
   applyDecorParams(body);
   stored &= saveDecorSettings();
+  applyRestParams(body);
+  stored &= saveRestSettings();
   applyFeedParams(body);
   stored &= saveFeedSettings();
 #if BOARD_WAVESHARE_WALL
@@ -864,6 +871,22 @@ static void apiSave(Print &c, const String &body, bool &closeHotspot) {
   d["closing"] = apActive;    // in the hotspot, saving closes it, as it always has
   sendJson(c, d);
   closeHotspot = apActive;
+}
+
+// POST /api/rest, mode=auto|normal|calm|off: the clock's own rules, or a
+// level until Automatic is chosen again - the choice Home Assistant shares
+// (rest.h), stored at once, not with Save. Answers with the state as
+// /api/status has it; Off takes the panel on the next pass.
+static void apiRest(Print &c, const String &body) {
+  int8_t mode = restModeByLabel(getParam(body, "mode").c_str());
+  if (mode < 0) { sendJsonError(c, 400, "mode is auto, normal, calm or off."); return; }
+  if (!restSetMode((uint8_t)mode, REST_BY_WEB)) {
+    sendJsonError(c, 500, "Not stored: the clock could not write its flash. The choice holds until the next restart.");
+    return;
+  }
+  JsonDocument d;
+  restStatusInto(d["rest"].to<JsonObject>());
+  sendJson(c, d);
 }
 
 void webApi(Print &c, const String &path, bool isPost, const String &body,
@@ -893,6 +916,8 @@ void webApi(Print &c, const String &path, bool isPost, const String &body,
     sendPreviewOutcome(c, applyLiveParams(body));
   } else if (path == "/api/save") {
     apiSave(c, body, closeHotspot);
+  } else if (path == "/api/rest") {
+    apiRest(c, body);
   } else if (path == "/api/sensor-forget") {
     // id=<sensor>: one this clock no longer has is no longer missing.
     if (sensorForget(getParam(body, "id"))) { sendNoContent(c); } else { sendJsonError(c, 400, "No such sensor."); }

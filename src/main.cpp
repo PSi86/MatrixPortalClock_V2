@@ -34,6 +34,7 @@ Todo Concept:
 #include "notices.h"        // the items on the 64x32 clock: notices and info cards
 #include "info_band.h"      // the info band on the wall clock
 #include "panel_rules.h"    // who takes the panel, and when
+#include "rest.h"           // the clock at rest: Normal, Calm and Off
 #include "home_assistant.h" // the link to Home Assistant
 #include "gif_player.h"     // GIFs on the panel, the GIF pack, the wall clock's card
 #include "lan_access.h"     // the web app on the home network
@@ -289,6 +290,7 @@ void setup(void) {
   loadUiSettings();
   loadGifSettings();
   loadDecorSettings();
+  loadRestSettings();
   gifPackLoad();
 #if BOARD_WAVESHARE_WALL
   gifCardBegin();         // its task reads the card; until then the pack plays
@@ -542,6 +544,7 @@ void loop(void) {
   climateUpdate();      // the room's temperature and humidity
 #endif
   updateScreenTimeouts();
+  restUpdate();         // Normal, Calm or Off; Off takes the panel from the plain face, and gives it back
   panelWatch();         // when the face's change ends, for who takes the panel next
   noticesUpdate();      // a new alert or message comes up, before a GIF that is due
 #if BOARD_WAVESHARE_WALL
@@ -562,7 +565,7 @@ void loop(void) {
       break;
     case SCREEN_EDITOR: if (panelDirty || editorMoving()) { drawEditor(); } break;
     case SCREEN_GESTURE_TEST: gestureTestUpdate(); if (panelDirty) { drawGestureTest(); } break;
-    default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
+    default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay(); Off draws nothing
   }
 #if BAND_ON_PANEL
   bandUpdate();         // the wall's info band below the face
@@ -601,6 +604,8 @@ void showScreen(Screen next) {
   screen = next;
   panelDirty = true;
   DEBUG_LOG("screen %u -> %u (%u beneath)\n", (unsigned)prev, (unsigned)next, (unsigned)screenUnderCount);
+  // Off is the panel black (rest.h); any other screen on top lights it again.
+  matrix.setOff(next == SCREEN_OFF);
   // The hotspot screens leave the panel in a rotation of their own (the info
   // screen is always landscape), so whatever comes next starts again from how
   // the panel is actually held.
@@ -611,6 +616,11 @@ void showScreen(Screen next) {
   if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
   // A face that was hidden is not stepped, so it catches up before it is drawn.
   if (!screenShowsFace(prev) && screenShowsFace(next)) { faceCatchUp(); }
+  // After Off - an input's few seconds, or the night - everything afresh, as
+  // when the face was chosen: the Muncher, the Aliens and the Snake show the
+  // time at once instead of first changing to it from the time they showed,
+  // the Tetris digits drop in.
+  if (prev == SCREEN_OFF && screenShowsFace(next)) { faceFor(settings.watchface).enter(faceMoment(), ENTER_CHOSEN); }
   if (next == SCREEN_FACE) { panelFaceSince = millisNow; }   // the plain face's rest starts over
   // Between the list and an editor the picture slides; any other change clears
   // a slide that was asked for but never drawn (the editor closing straight
@@ -1160,7 +1170,7 @@ SettingsBlobStore faceStores[FACE_BLOB_COUNT];
 // Every table of settings (settings_table.h), for /api/state: the values, the
 // names of the choices and what the web app needs to send them back.
 SettingsTable *const SETTINGS_TABLES[] = {
-  &clockTable, &tetrisBlob.table, &muncherBlob.table, &aliensBlob.table, &snakeBlob.table, &uiTable, &gifTable, &decorTable, &feedTable,
+  &clockTable, &tetrisBlob.table, &muncherBlob.table, &aliensBlob.table, &snakeBlob.table, &uiTable, &gifTable, &decorTable, &restTable, &feedTable,
 #if BOARD_WAVESHARE_WALL
   &sensorTable,
 #endif

@@ -276,7 +276,7 @@ class SnakeFace : public PlannedFace {
   FaceSpan changeSpan(const FaceNow &now, time_t minute) const override {
     FaceSpan s = { 0, 0 };
     if (!now.set) { return s; }
-    bool hour = clockMinute(minute) == 0;
+    bool hour = faceHourShows(minute);
     if (_plannedFor == minute && _plannedStand) {
       s.lead = _plannedStand;
       return s;
@@ -472,7 +472,7 @@ class SnakeFace : public PlannedFace {
     if (_plannedFor != next) {
       uint8_t to[4];
       faceDigits(next, now.set, to, snake::NO_DIGIT);
-      bool hour = clockMinute(next) == 0;
+      bool hour = faceHourShows(next);   // in Calm, as an option, the places that change, as at a minute
       _plannedMode = hourMode();
       _plannedStand = snake::planChange(_plan, _upright, _shown, to, hour, _plannedMode, _digits)
                     ? (uint32_t)_plan.stands * _plan.L->stepMs() : 0;

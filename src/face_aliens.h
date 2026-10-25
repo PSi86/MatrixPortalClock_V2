@@ -229,7 +229,7 @@ class AliensFace : public PlannedFace {
   FaceSpan changeSpan(const FaceNow &now, time_t minute) const override {
     FaceSpan s = { 0, 0 };
     if (!now.set) { return s; }
-    bool hour = clockMinute(minute) == 0;
+    bool hour = faceHourShows(minute);
     if (_plannedFor == minute && _plannedStand) {
       s.lead = _plannedStand;
       return s;
@@ -356,7 +356,7 @@ class AliensFace : public PlannedFace {
     if (_plannedFor != next) {
       uint8_t to[4];
       faceDigits(next, now.set, to, aliens::NO_DIGIT);
-      _plannedStand = _a.planChange(to, _s.style, 0, clockMinute(next) == 0);
+      _plannedStand = _a.planChange(to, _s.style, 0, faceHourShows(next));   // the full hour's wave, unless Calm plays it plainly
       _plannedFor = next;
     }
     _startAt = nextMinuteAt(now) - _plannedStand;

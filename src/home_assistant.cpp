@@ -13,6 +13,7 @@
 #include "ha_link.h"
 #include "item_icons.h"
 #include "lan_access.h"
+#include "rest.h"
 #include "wifi_station.h"
 
 // What only this module calls, ahead of its use.
@@ -34,7 +35,8 @@ static void haMessage(const char *payload, uint16_t len);
 static void haGif(const char *payload, uint16_t len);
 static void haGifSearchSet(const char *payload, uint16_t len);
 static void haGifSend();
-static bool haGifSendText(const char *topic, char *text, bool retain, bool whole);
+static bool haSendText(const char *topic, char *text, bool retain, bool whole);
+static void haRestSend();
 static bool haGifMatches(char *&config);
 static void haGifPick(const char *option);
 static void haUtf8Cut(char *s, size_t n);
@@ -77,6 +79,10 @@ static bool     haGifSearchDue = false, haGifMatchesDue = false, haGifSummaryDue
 static char     haGifSummary[256] = "";   // GIF matches' first option and state (haGifMatches())
 static uint32_t haGifListSeen = 0;      // gifListGeneration() as the matches last went out
 static uint8_t  haGifTurnSeen = 0xFF;   // and the panel's rotation
+// The display at rest (rest.h): its mode, level and why go to Home Assistant
+// when they change, and again after a connect.
+static bool     haRestDue = false;
+static uint32_t haRestSeen = 0;         // restChanges() as they last went out
 
 // What the link does, for the config page.
 enum HaState : uint8_t {
@@ -256,6 +262,42 @@ void haBuildAnnounce() {
   // Every GIF the search field finds, one after another (Peter, 2026-10-24).
   button(8, "Play all matches", "-gif-all", l.gifAll, "mdi:play-box-multiple-outline", "gif_all");
 
+  // The display at rest (rest.h, Peter 2026-10-25): the choice the web app
+  // shares - Automatic, or Normal, Calm or Off until Automatic again - the
+  // level it is at, with why in its attributes, and a button that shows the
+  // time for a while while it is Off.
+  JsonDocument mode;
+  mode["name"] = "Display mode";
+  mode["unique_id"] = String(netHostname()) + "-display-mode";
+  mode["command_topic"] = l.displaySet;
+  mode["state_topic"] = String(l.prefix) + "display/mode";
+  JsonArray modes = mode["options"].to<JsonArray>();
+  for (uint8_t m = 0; m < REST_MODE_COUNT; m++) { modes.add(restModeLabel(m)); }
+  mode["icon"] = "mdi:theme-light-dark";
+  mode["availability_topic"] = l.status;
+  mode["qos"] = 1;
+  mode["device"] = dev;
+  snprintf(l.announceTopic[9], sizeof(l.announceTopic[9]), "homeassistant/select/%s/display_mode/config", id);
+  l.announce[9] = "";
+  serializeJson(mode, l.announce[9]);
+
+  JsonDocument level;
+  level["name"] = "Display";
+  level["unique_id"] = String(netHostname()) + "-display";
+  level["state_topic"] = String(l.prefix) + "display/state";
+  level["json_attributes_topic"] = String(l.prefix) + "display/attributes";
+  level["device_class"] = "enum";
+  JsonArray levels = level["options"].to<JsonArray>();
+  for (uint8_t v = REST_NORMAL; v <= REST_OFF; v++) { levels.add(restLevelLabel((RestLevel)v)); }
+  level["icon"] = "mdi:monitor";
+  level["availability_topic"] = l.status;
+  level["device"] = dev;
+  snprintf(l.announceTopic[10], sizeof(l.announceTopic[10]), "homeassistant/sensor/%s/display/config", id);
+  l.announce[10] = "";
+  serializeJson(level, l.announce[10]);
+
+  button(11, "Wake display", "-display-wake", l.displayWake, "mdi:gesture-tap", "display_wake");
+
   // The matches are a select entity (haGifMatches()), whose config changes
   // with each search: the loop sends it, not this list. A sensor GIF
   // matches of a test build of 2026-10-23 is taken back here.
@@ -401,6 +443,7 @@ void haUpdate() {
     } else if (haState == HA_UP) {
       haSendValues();
       haGifSend();
+      haRestSend();
     }
     return;
   }
@@ -439,6 +482,7 @@ void haApply(const HaIn &m) {
       haError[0] = '\0';
       haValuesAgain();
       haGifSearchDue = haGifMatchesDue = true;
+      haRestDue = true;
       haDropItems();   // the broker sends the retained ones anew at once
       Console.printf("Home Assistant: connected to %s:%u\n", haSettings.host, haSettings.port);
       break;
@@ -464,6 +508,7 @@ void haApply(const HaIn &m) {
           haCommand(c);
           haValuesAgain();
           haGifSearchDue = haGifMatchesDue = true;
+          haRestDue = true;
         }
       } else if (strncmp(m.topic, "item/", 5) == 0) {
         haItem(m.topic + 5, m.payload, m.len);
@@ -497,6 +542,19 @@ void haApply(const HaIn &m) {
                       a.how == GIF_ASKED_PLAYS || a.how == GIF_ASKED_READING ? a.fit : 0);
       } else if (strcmp(m.topic, "gif/pick") == 0) {
         if (!m.retained) { haGifPick(m.payload); }
+      } else if (strcmp(m.topic, "display/set") == 0) {
+        // The select Display mode: the choice counts at once and is kept, the
+        // same again too - Home Assistant waits for its state either way.
+        if (m.retained) { Console.println("Home Assistant: a display mode kept by the broker is not taken"); break; }
+        int8_t mode = restModeByLabel(m.payload);
+        if (mode < 0) {
+          Console.printf("Home Assistant: display mode \"%s\" - none of Automatic, Normal, Calm, Off\n", m.payload);
+          haRestDue = true;   // the state as it is goes back
+          break;
+        }
+        restSetMode((uint8_t)mode, REST_BY_HA);
+      } else if (strcmp(m.topic, "display/wake") == 0) {
+        if (!m.retained) { restWake(REST_BY_HA); }   // nothing unless the clock is Off
       }
       break;
     default:
@@ -783,7 +841,7 @@ void haGifPick(const char *option) {
 // A payload of any length to mpclock/<id>/<topic>, or to the whole topic,
 // through the worker, which frees it; false when its queue is full (text is
 // freed here then).
-bool haGifSendText(const char *topic, char *text, bool retain, bool whole) {
+bool haSendText(const char *topic, char *text, bool retain, bool whole) {
   HaCmd c = {};
   c.kind = HA_CMD_SEND;
   c.qos = 1;
@@ -796,7 +854,7 @@ bool haGifSendText(const char *topic, char *text, bool retain, bool whole) {
   return false;
 }
 
-// A copy of s in a block from the heap, for haGifSendText(); nullptr without RAM.
+// A copy of s in a block from the heap, for haSendText(); nullptr without RAM.
 static char *haCopy(const char *s) {
   size_t n = strlen(s) + 1;
   char *out = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -813,14 +871,14 @@ void haGifSend() {
   if (gifListGeneration() != haGifListSeen || turn != haGifTurnSeen) { haGifMatchesDue = true; }
   if (haGifSearchDue) {
     char *text = haCopy(haGifSearch.text);
-    if (!text || !haGifSendText("gif/search/state", text, true, false)) { return; }   // on a later pass
+    if (!text || !haSendText("gif/search/state", text, true, false)) { return; }   // on a later pass
     haGifSearchDue = false;
   }
   if (haGifMatchesDue) {
     char *config = nullptr, topic[64];
     if (!haGifMatches(config)) { return; }
     snprintf(topic, sizeof(topic), "homeassistant/select/%s/gif_matches/config", haId());
-    if (!haGifSendText(topic, config, true, true)) { return; }
+    if (!haSendText(topic, config, true, true)) { return; }
     haGifMatchesDue = false;
     haGifSummaryDue = true;
     haGifListSeen = gifListGeneration();
@@ -828,9 +886,40 @@ void haGifSend() {
   }
   if (haGifSummaryDue) {
     char *text = haCopy(haGifSummary);
-    if (!text || !haGifSendText("gif/matches", text, true, false)) { return; }
+    if (!text || !haSendText("gif/matches", text, true, false)) { return; }
     haGifSummaryDue = false;
   }
+}
+
+// While connected, on every pass: the display's mode, level and attributes,
+// when they changed (restChanges()) or after a connect; all retained. One the
+// worker's queue has no room for goes on a later pass, with the rest again.
+void haRestSend() {
+  uint32_t changes = restChanges();
+  if (!haRestDue && changes == haRestSeen) { return; }
+  HaCmd c = {};
+  c.kind = HA_CMD_SEND;
+  c.qos = 1;
+  c.retain = 1;
+  strlcpy(c.suffix, "display/mode", sizeof(c.suffix));
+  strlcpy(c.payload, restModeLabel(restSettings.mode), sizeof(c.payload));
+  if (!haCommand(c)) { return; }
+  strlcpy(c.suffix, "display/state", sizeof(c.suffix));
+  strlcpy(c.payload, restLevelLabel(restLevel()), sizeof(c.payload));
+  if (!haCommand(c)) { return; }
+  JsonDocument a;
+  const char *why = restWhyCode(), *by = restByName();
+  a["reason"] = !strcmp(why, "hours") ? "the hours" : !strcmp(why, "dark") ? "a dark room"
+              : !strcmp(why, "set") ? (!strcmp(by, "ha") ? "chosen in Home Assistant" : !strcmp(by, "web") ? "chosen in the web app" : "chosen")
+              : "none";
+  a["lit"] = restLit();   // the panel shows something: not the black of Off
+  size_t bytes = measureJson(a) + 1;
+  char *text = (char *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!text) { return; }
+  serializeJson(a, text, bytes);
+  if (!haSendText("display/attributes", text, true, false)) { return; }
+  haRestDue = false;
+  haRestSeen = changes;
 }
 
 // The settings for the page; never the password, only whether there is one.

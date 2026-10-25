@@ -89,9 +89,13 @@ in the wall's own 192x128 LEDs.
   within a few percent. Whether the warmth stays the same with the panels'
   brightness and the time of day is to be seen in Home Assistant.
 - **Panels dark before an upload:** `POST /api/black` (the web app's
-  interface, in every build) switches the panels dark until the next start -
-  before every upload, since the ROM bootloader leaves the last row pair lit at
-  full duty. The debug build's console has it as `black`.
+  interface, in every build) switches the panels black until the next start -
+  black data through every row, then dark through the OE time, as for Off
+  ([Calm and off](#calm-and-off)) - before every upload: while the ROM
+  bootloader runs nothing drives the panels, and whatever their drivers
+  latched last lights at full duty. Dark through the OE time alone, as until
+  2026-10-25, two rows of the last picture stayed lit; with black data the
+  wall stayed dark. The debug build's console has it as `black`.
 - **Console** (debug build only, see [Console](#console); USB, 115200 baud,
   DTR and RTS low): `black`, `test <panel> <brightness>` and
   `test off` a panel in white to measure the current; `bus <divider>` the panel
@@ -157,6 +161,10 @@ dropped before the web server and WiFi work that followed.
   positions)
 - **Automatic brightness** via an external BH1750 light sensor: a configurable
   lux → brightness mapping fades the clock to the room's light within seconds
+- **Calm and off**: hours and a dark room for a calm clock (no GIFs and no
+  extras of their own accord) and for one that is off (the panel black; an
+  input shows the time for a while), or the level chosen in the web app or in
+  Home Assistant; see [Calm and off](#calm-and-off)
 - NTP time synchronization with a daily resync. The WiFi is switched on one
   minute before the sync time and off again after the sync, unless the info band
   data still needs it. A sync that has not worked out after a minute, on a clock
@@ -475,12 +483,62 @@ because whatever waited took the panel the moment it was free.
   Muncher's fruit, and a snake's tongue or tail chase come - never, or about every 60, 30, 15, 10, 5 (the
   default) or 2 minutes, at a random time from half to one and a half times
   that.
-- **Quiet** (the GIF section): **quiet hours** from one hour to another, and a
-  **dark room** below a light level in lux (the light sensor's filtered light) -
-  no GIFs and no extras of their own accord then. Both are off by default; what
-  an input asks for still plays.
+- **Calm and off** ([Calm and off](#calm-and-off)): while the clock is calm or
+  off, no GIFs and no extras of their own accord; what an input asks for still
+  plays.
 
-The settings for extras and quiet are a blob of their own (NVS key `deco`).
+The settings for the extras are a blob of their own (NVS key `deco`), which also
+keeps Calm's hours and dark room, as it kept the quiet's before.
+
+## Calm and off
+
+Three levels for the clock at rest (decided by Peter on 2026-10-25), in the
+web app's section **Calm and off**:
+
+- **Normal**: everything as described above.
+- **Calm**: no GIFs and no extras of their own accord. The time and its
+  changes, alerts, messages, info cards and what an input asks for still come
+  (GIFs asked for as **GIFs asked for** below says).
+  As an option (**Full hours like a minute**), every full hour changes like a
+  minute while the clock is calm: no Tetris effect, no Muncher four ghosts and
+  hour show, no Aliens wave, no Snake train. Whether it is calm is reckoned for
+  the full hour itself, so Calm hours from 22:00 play 22:00 plainly.
+- **Off**: the panel black - black data through every row first, then dark
+  through the OE time, so the panels' drivers hold nothing that could light.
+  Alerts, messages and info cards wait until Off is over (those still valid
+  come then), and no GIF and no extra comes of its own accord. An input at the
+  clock - a button, a knock, a gesture - shows the time for **Time on show**
+  (10 s unless set, 3 to 120) and does nothing else; while the time shows,
+  inputs work as always and keep it on show. The hotspot's screens go first.
+- **GIFs asked for** - from the web app, Home Assistant or an input set to play
+  a GIF: **Always** (the default), **Not while off** or **Not while calm or
+  off**. One that plays while the clock is off plays over the black panel,
+  which is black again after it, without the time in between; one refused is
+  answered `clockOff` or `clockCalm` (the web app says so). An automation that
+  should not light a dark room can ask the sensor **Display** first.
+
+**When**: Calm and Off each have **hours** (from one time to another, minutes
+included; the same time twice: none) and a **dark room** (lux, the light
+sensor's filtered light). The strictest level that holds wins. Off by the dark
+room begins once the room has been darker than its line for 10 s and ends once
+it is twice as bright (at least 1 lx more) for 3 s. The panel's own light reaches
+the sensor, so the line must lie above what the sensor reads in the dark room
+with the panel on; while the panel is lit within Off, and for 6 s after it lit
+or went black, the light counts for nothing. Calm by the dark room follows the
+light at once, as the quiet did. All of it is off by default.
+
+**Chosen**: **Automatic** follows those rules; **Normal**, **Calm** or **Off**
+hold until Automatic is chosen again - in the web app (at once, without Save;
+`POST /api/rest`) or in Home Assistant (the select **Display mode**, see [Home
+Assistant link](#home-assistant-link)). The choice is kept over a restart, in a
+blob of its own (NVS key `rest`, with Off's times and dark room, the minutes of
+Calm's hours, the time on show, the option for the full hours and GIFs asked
+for; Calm's hours and dark room stay in `deco`). The section's first line says the level now and
+why - its hours, the room is dark, chosen here or in Home Assistant - and
+whether the panel is black or lit for an input.
+
+Code: `src/rest.h/.cpp` (the level, waking, the choice), `PanelCanvas::setOff()`
+(the black panel), the screen `SCREEN_OFF` over the face.
 
 In the web app every face's settings come in the same groups (Peter,
 2026-10-20): **Change** - how its time changes: the Tetris break-up effect and
@@ -832,6 +890,14 @@ Setting it up:
      of its database by itself, so the names are never stored; only the first
      line, the select's state, is, once per search. The clock sends the list
      with the select's discovery config, anew with each search.
+
+   For [Calm and off](#calm-and-off): **Display mode**, a select - Automatic,
+   Normal, Calm or Off, the choice the web app shares; **Display**, a sensor
+   with the level - Normal, Calm or Off - and as attributes why (`reason`) and
+   whether the panel is lit (`lit`); **Wake display**, a button that shows the
+   time for a while while the clock is off. An automation can set the mode -
+   Off when nobody is home and Automatic again when someone comes back, or Calm
+   while the TV is on.
 4. **Values to Home Assistant** in the same section: a sensor's value goes out
    when it changed - the light by 10 % (at least 1 lx), the temperature by
    0.2 °C, the humidity by 1 % - but at most every *At most every* seconds
@@ -855,10 +921,15 @@ the card shows its topics.
 | `mpclock/<id>/gif/matches` | the clock to Home Assistant, retained | the select **GIF matches**' state: the first line of its list, what the search finds |
 | `mpclock/<id>/gif/pick` | Home Assistant to the clock | a line of **GIF matches** picked: the GIF of the file name in its last brackets plays |
 | `homeassistant/select/<id>/gif_matches/config` | the clock to Home Assistant, retained | **GIF matches**' discovery config with its list (`options`), sent anew after a new search text, a connect, a new pack or card, the panel turned |
+| `mpclock/<id>/display/set` | Home Assistant to the clock, not retained (a retained one is not taken) | the select **Display mode**: `Automatic`, `Normal`, `Calm` or `Off` ([Calm and off](#calm-and-off)) |
+| `mpclock/<id>/display/mode` | the clock to Home Assistant, retained | the choice as the clock keeps it |
+| `mpclock/<id>/display/state` | the clock to Home Assistant, retained | the sensor **Display**: `Normal`, `Calm` or `Off` |
+| `mpclock/<id>/display/attributes` | the clock to Home Assistant, retained | JSON `reason` (`the hours`, `a dark room`, `chosen in Home Assistant`, `chosen in the web app`, `chosen`, `none`) and `lit` (the panel shows something) |
+| `mpclock/<id>/display/wake` | Home Assistant to the clock | the button **Wake display** (any payload): the time for a while, if the clock is off |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux (the filtered light the brightness follows), as set under step 4 |
 | `mpclock/<id>/temperature`, `mpclock/<id>/humidity` | the clock to Home Assistant (wall clock) | °C with one decimal, % whole, as set under step 4 |
-| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/button/<id>/gif_again/config`, `homeassistant/button/<id>/gif_all/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back (as does `homeassistant/sensor/<id>/gif_matches/config`, a sensor of a test build) |
+| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/button/<id>/gif_again/config`, `homeassistant/button/<id>/gif_all/config`, `homeassistant/select/<id>/display_mode/config`, `homeassistant/sensor/<id>/display/config`, `homeassistant/button/<id>/display_wake/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back (as does `homeassistant/sensor/<id>/gif_matches/config`, a sensor of a test build) |
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
@@ -1362,11 +1433,12 @@ form-encoded POSTs, answers are JSON:
 | Request | What it does |
 |---|---|
 | `GET /api/state` | settings, the lists the page offers, hardware found (with `hw.sensors`: every sensor the board supports, found on which try, missing), WiFi, system |
-| `GET /api/status` | brightness, light, time and its source, rotation, screen, the info band's sources and items, the Home Assistant link (the page asks every 2 s) |
+| `GET /api/status` | brightness, light, time and its source, rotation, screen, Normal, Calm or Off and why (`rest`), the info band's sources and items, the Home Assistant link (the page asks every 2 s) |
 | `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
 | `POST /api/live` | tries settings live, in RAM only; when a preview was asked for (`pv=1`, or a new watchface animation), `{"preview": "played"}` or `"refused"` - it plays now or not at all |
 | `POST /api/save` | stores everything the page shows |
 | `POST /api/discard` | puts the stored settings back, and the face shows them as a preview (the same answer) |
+| `POST /api/rest` | `mode=auto`, `normal`, `calm` or `off`: the level chosen until Automatic again, stored at once ([Calm and off](#calm-and-off)) |
 | `POST /api/black` | the wall clock: its panels dark until the next start, before an upload |
 | `POST /api/time` | sets the time, from the phone or typed |
 | `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
@@ -1841,8 +1913,8 @@ intermission - a ghost chases the muncher out to the left, and a giant muncher
 right. About 9 s.
 
 **Bonus fruit**: now and then, at the pace of the extras the faces share (the
-**How often** slider under **Now and then**, about every 5 min by default; none in quiet hours or a dark
-room), a fruit appears in the corridor at its drawn time, outside the slot around
+**How often** slider under **Now and then**, about every 5 min by default; none while the clock is calm
+or off), a fruit appears in the corridor at its drawn time, outside the slot around
 the change - a cherry, a strawberry, an orange or an apple, 7 × 7 px - and lies
 still until the next change, whose muncher eats it on its way along (`Muncher: a
 bonus fruit (now and then)`, then `Muncher: a bonus fruit eaten` on the console).
@@ -2133,13 +2205,13 @@ web app's key, where it sits in the face's blob, its kind and range), through
 which one piece of code loads, checks, takes from the web app and reports them
 all. Since 2026-10-22 the clock's own settings go through such tables too
 (`CLOCK_PARAMS`, `UI_PARAMS`, `GIF_PARAMS`, `DECOR_PARAMS`, `FEED_PARAMS` in
-`src/settings.cpp`), and `/api/state` tells the web app, under `lists.form`, how to
+`src/settings.cpp`, `REST_PARAMS` in `src/rest.cpp`), and `/api/state` tells the web app, under `lists.form`, how to
 send each one back (see [Settings: one table per blob](#settings-one-table-per-blob)).
 
 The same rules for every face: an animation asked for plays at once or not at
 all, and not when it would not end 3 s before the face's next change; after one,
-the next waits 1 s; now and then, the core first looks at quiet hours, a dark
-room, the face at rest and information waiting, and the face then at the length
+the next waits 1 s; now and then, the core first looks whether the clock is
+calm or off, at the face at rest and information waiting, and the face then at the length
 of its extra; a preview in the web app plays now or the page says it cannot.
 
 A **test build** (the release env with `-DFACE_FRAME_LOG`) logs every frame a
@@ -2431,6 +2503,7 @@ reach.
 | `notices.h/.cpp` | the items on the 64x32 clock: notices, info cards, the info round, the icons drawn |
 | `info_band.h/.cpp` | the info band on the wall clock |
 | `panel_rules.h/.cpp` | who takes the panel and when, and the faces' extras |
+| `rest.h/.cpp` | Calm and off: the level, its hours and dark rooms, waking from Off, the choice shared with Home Assistant |
 | `gif_player.h/.cpp`, `gif_find.h` | GIFs on the panel, the GIF pack, the wall clock's microSD card; GIFs on request and their search (plain C++, tested on the PC) |
 | `input.h/.cpp` | the buttons, the gesture sensor and its test, the face shortcuts, the press indicator |
 | `menu.h/.cpp` | the on-screen menu, its editors, the banners |

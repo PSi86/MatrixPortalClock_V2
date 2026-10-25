@@ -11,6 +11,7 @@
 #include "gif_player.h"
 #include "menu.h"
 #include "notices.h"
+#include "rest.h"
 #include "sensors.h"
 #include "settings.h"
 
@@ -431,6 +432,9 @@ static void holdEnd(InputFunction fn) {
 // up, since it was meant for a screen the banner hid. With the Classic clicks
 // profile a click sequence that ran something is confirmed by blinks.
 InputFunction handleInput(InputEvent ev, uint8_t steps) {
+  // While the clock is Off, the first input shows the time and does nothing
+  // else; the next ones keep it on show and do what they do (rest.h).
+  if (restTakesInput()) { return FN_NONE; }
   if (screen == SCREEN_GESTURE_TEST) {   // the gestures go to the test itself; a button ends it
     if (closesBanner(ev)) { gestureTestStop(); }
     return FN_NONE;

@@ -146,7 +146,7 @@ class TetrisFace : public Watchface {
     // The change to a full hour, on the pass that began the hour and before
     // pushTime() would start the plain change: all four digits come apart.
     // Only digits that stand can: a face that is just building plays none.
-    if (now.hourTick && now.set && now.minute == 0 && _s.hourAnim != HOUR_OFF && !breakingUp() && allStanding()) {
+    if (now.hourTick && now.set && faceHourShows(now.local) && _s.hourAnim != HOUR_OFF && !breakingUp() && allStanding()) {
       startHour(now, pickHour());
     }
 
@@ -291,15 +291,16 @@ class TetrisFace : public Watchface {
   FaceSpan changeSpan(const FaceNow &now, time_t minute) const override {
     FaceSpan s = { 0, 0 };
     if (!now.set) { return s; }
-    if (minute != _spanFor || _s.dropMs != _spanDrop || _rotation != _spanTurn || _s.hourAnim != _spanHour) {
+    uint8_t hourAnim = faceHourShows(minute) ? _s.hourAnim : HOUR_OFF;   // a minute, or the hour plainly
+    if (minute != _spanFor || _s.dropMs != _spanDrop || _rotation != _spanTurn || hourAnim != _spanHour) {
       uint8_t from[4], to[4];
       faceDigits(minute - 60, true, from, 0xFF);
       faceDigits(minute, true, to, 0xFF);
-      if (clockMinute(minute) == 0 && _s.hourAnim != HOUR_OFF) {
+      if (hourAnim != HOUR_OFF) {
         unsigned long build = (unsigned long)buildSteps(to, nullptr) * _s.dropMs;
         _spanTail = 0;
         for (uint8_t style = 0; style < HOUR_RANDOM; style++) {
-          if (_s.hourAnim != HOUR_RANDOM && _s.hourAnim != style) { continue; }
+          if (hourAnim != HOUR_RANDOM && hourAnim != style) { continue; }
           unsigned long t = hourLength(style, build);
           if (t > _spanTail) { _spanTail = t; }
         }
@@ -309,7 +310,7 @@ class TetrisFace : public Watchface {
       _spanFor = minute;
       _spanDrop = _s.dropMs;
       _spanTurn = _rotation;
-      _spanHour = _s.hourAnim;
+      _spanHour = hourAnim;
     }
     s.tail = _spanTail;
     return s;
