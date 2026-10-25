@@ -378,7 +378,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       <div class="card" id="extrasCard" hidden>
         <div class="group-title">Now and then</div>
         <div class="row">
-          <div><label class="lbl" for="dxr">How often</label><div class="hint">The face's own scenes between changes - the Aliens' saucer, an alien shooting back, a waking block; the Muncher's fruit; a snake's tongue or tail chase - shared by the faces. Never around the time's change; one that has no room when it is due is left out. None in the quiet hours set under GIFs.</div></div>
+          <div><label class="lbl" for="dxr">How often</label><div class="hint">The face's own scenes between changes - the Aliens' saucer, an alien shooting back, a waking block; the Muncher's fruit; a snake's tongue or tail chase - shared by the faces. Never around the time's change; one that has no room when it is due is left out. None while the clock is calm or off (Calm and off).</div></div>
           <div class="range"><input type="range" id="dxr"><output for="dxr"></output></div>
         </div>
         <div class="row" id="anapRow">
@@ -408,6 +408,55 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
             <div><div class="lbl">Panel brightness</div><div class="hint">At the dark and the bright end.</div></div>
             <div class="pair"><label>At least<input type="number" id="brmin"></label><label>At most<input type="number" id="brmax"></label></div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="rest" data-title="Calm and off" hidden>
+      <div class="sec-head"><h2>Calm and off</h2><p>Calm: the clock shows no GIFs and no face scenes by itself. Off: the panel is black. Each at set times, in a dark room, or whenever you choose.</p></div>
+      <div class="card">
+        <div class="row stack">
+          <div><div class="lbl">Now</div><div class="hint" id="restNow" aria-live="polite">–</div></div>
+          <div class="seg" id="restMode" role="group" aria-label="Normal, calm or off"><button type="button" data-m="auto">Automatic</button><button type="button" data-m="normal">Normal</button><button type="button" data-m="calm">Calm</button><button type="button" data-m="off">Off</button></div>
+          <div class="hint">Automatic follows the times and the room's light set below. Normal, Calm or Off hold until Automatic is chosen again, here or in Home Assistant; a choice counts at once, without Save.</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="group-title">Calm</div>
+        <div class="row stack"><div class="note">The clock shows no GIFs and no face scenes by itself. The time and its changes, alerts, messages and anything asked for still come; GIFs asked for as set below.</div></div>
+        <div class="row">
+          <div><div class="lbl">Hours</div><div class="hint">From the first time to the second; the same time twice: none.</div></div>
+          <div class="pair"><label>From<input type="time" id="calmFrom"></label><label>To<input type="time" id="calmTo"></label></div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="ddk">Dark room</label><div class="hint">Calm while the room is darker than this, in lux (the light sensor's filtered light, a few seconds behind); 0: off.</div></div>
+          <input type="number" id="ddk">
+        </div>
+        <div class="row row-switch">
+          <div><div class="lbl">Full hours like a minute</div><div class="hint">While calm, every full hour changes like a minute: no Tetris effect, no Muncher hour show, no Aliens wave, no Snake train.</div></div>
+          <label class="switch"><input type="checkbox" id="dph" aria-label="Full hours like a minute"><span></span></label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="group-title">Off</div>
+        <div class="row stack"><div class="note">The panel black; alerts, messages and info cards wait until Off is over. A button, a knock or a gesture shows the time for a while and does nothing else; while the time shows, inputs work as always. GIFs asked for as set below.</div></div>
+        <div class="row">
+          <div><div class="lbl">Hours</div><div class="hint">From the first time to the second; the same time twice: none. Where Off and Calm meet, Off wins.</div></div>
+          <div class="pair"><label>From<input type="time" id="offFrom"></label><label>To<input type="time" id="offTo"></label></div>
+        </div>
+        <div class="row" id="dokRow">
+          <div><label class="lbl" for="dok">Dark room</label><div class="hint">Off once the room has been darker than this for 10 s, in lux; on again once it is twice as bright for 3 s. The panel's own light reaches the sensor: set this above what it reads in the dark room with the panel on. 0: off.</div></div>
+          <input type="number" id="dok">
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="dws">Time on show</label><div class="hint">How long an input shows the time while Off, in seconds.</div></div>
+          <input type="number" id="dws">
+        </div>
+      </div>
+      <div class="card">
+        <div class="row stack">
+          <div><div class="lbl">GIFs asked for</div><div class="hint">From this page, Home Assistant or an input set to play a GIF. Always: they play while calm, and while off too, the panel black again after them. The GIFs the clock shows by itself never come while it is calm or off.</div></div>
+          <div class="seg" id="dga" role="group" aria-label="GIFs asked for"></div>
         </div>
       </div>
     </section>
@@ -450,17 +499,6 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div class="ctl find"><input type="text" id="gifFind" placeholder="e.g. mario, star wars, christmas" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-describedby="gifFindNote"><button class="btn" type="button" id="gifFindPlay" disabled>Play one of them</button><button class="btn" type="button" id="gifFindAll" disabled>Play all</button></div>
           <div class="note" id="gifFindNote" aria-live="polite"></div>
           <ul class="giflist" id="gifFindList"></ul>
-        </div>
-      </div>
-      <div class="card" id="quietCard">
-        <div class="group-title">Quiet</div>
-        <div class="row">
-          <div><div class="lbl">Quiet hours</div><div class="hint">No GIFs and no extras of their own accord from the first hour to the second; the same hour twice: none. What an input asks for still plays.</div></div>
-          <div class="pair"><label>From<select id="dqf"></select></label><label>To<select id="dqt"></select></label></div>
-        </div>
-        <div class="row">
-          <div><label class="lbl" for="ddk">Dark room</label><div class="hint">No GIFs and no extras of their own accord while the room is darker than this, in lux (the light sensor's filtered light, a few seconds behind); 0: off.</div></div>
-          <input type="number" id="ddk">
         </div>
       </div>
     </section>
@@ -805,6 +843,53 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       el.addEventListener('change', function () { if (isLive(key)) { sendLive(false); } });
     }
   }
+  // A time of day: Off's are minutes of the day, Calm's an hour with its minutes (the clock kept Calm's hours
+  // before they had minutes). A time field cleared goes back to the time it had.
+  function hhmm(m) { var two = function (n) { return (n < 10 ? '0' : '') + n; }; return two(Math.floor(m / 60)) + ':' + two(m % 60); }
+  function timeOf(el) { var t = /^(\d{1,2}):(\d{2})/.exec(el.value); return t ? [+t[1], +t[2]] : null; }
+  function setMinuteOfDay(id, key) {
+    var el = document.getElementById(id);
+    el.value = hhmm(cur[key]);
+    if (!el.dataset.bound) {
+      el.dataset.bound = 1;
+      el.addEventListener('change', function () { var t = timeOf(el); if (!t) { el.value = hhmm(cur[key]); return; } cur[key] = t[0] * 60 + t[1]; changed(); });
+    }
+  }
+  function setHourMinute(id, hKey, mKey) {
+    var el = document.getElementById(id);
+    el.value = hhmm(cur[hKey] * 60 + cur[mKey]);
+    if (!el.dataset.bound) {
+      el.dataset.bound = 1;
+      el.addEventListener('change', function () {
+        var t = timeOf(el);
+        if (!t) { el.value = hhmm(cur[hKey] * 60 + cur[mKey]); return; }
+        cur[hKey] = t[0]; cur[mKey] = t[1]; changed();
+      });
+    }
+  }
+  // Normal, Calm or Off as the clock is now, and why (rest in /api/status); the choice it shares with Home
+  // Assistant goes to it at once (POST /api/rest), not with Save.
+  function showRest(r) {
+    if (!r) { return; }
+    $$('#restMode button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.m === r.mode ? 'true' : 'false'); });
+    var t = { normal: 'Normal', calm: 'Calm', off: 'Off' }[r.level] || r.level;
+    if (r.why === 'hours') { t += ' - its hours'; }
+    else if (r.why === 'dark') { t += ' - the room is dark'; }
+    else if (r.why === 'set') { t += ' - chosen ' + (r.by === 'ha' ? 'in Home Assistant' : r.by === 'web' ? 'here' : 'before the clock last started'); }
+    t += '.';
+    if (r.level === 'off') { t += r.lit ? ' The panel is lit for an input now.' : ' The panel is black.'; }
+    $('#restNow').textContent = t;
+  }
+  function bindRestMode() {
+    $$('#restMode button').forEach(function (b) {
+      if (b.dataset.bound) { return; }
+      b.dataset.bound = 1;
+      b.addEventListener('click', function () {
+        api('/api/rest', enc({ mode: b.dataset.m })).then(function (j) { showRest(j.rest); })
+          .catch(function (e) { toast(e.message || 'The clock did not answer.'); });
+      });
+    });
+  }
   function setCheck(id, key, after, pv) {
     var el = document.getElementById(id);
     el.checked = !!cur[key];
@@ -951,6 +1036,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#gifs').hidden = !has('gifr');
     $('#band').hidden = !has('lat');
     $('#ha').hidden = !S.ha;
+    $('#rest').hidden = !has('dof');
     $('#facePick').hidden = !S.hw.tetris;
     $('#faceMuncher').hidden = !S.hw.muncher;
     $('#faceAliens').hidden = !S.hw.aliens;
@@ -1055,17 +1141,21 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       $('#gifNowNote').textContent = S.mode === 'ap' ? 'GIFs play over the face, not while the hotspot is open.' : '';
       $('#gifFindRow').hidden = S.mode === 'ap';
     }
-    // Extras and quiet
-    $('#quietCard').hidden = !has('dxr');
-    if (has('dxr')) {
-      setRange('dxr', 'dxr', '', function (v) { return S.lists.dxr[v]; });
-      ['dqf', 'dqt'].forEach(function (k) {
-        var sel = $('#' + k);
-        if (!sel.children.length) { for (var h = 0; h < 24; h++) { var o = document.createElement('option'); o.value = h; o.textContent = pad(h) + ':00'; sel.appendChild(o); } }
-        sel.value = cur[k];
-        if (!sel.dataset.bound) { sel.dataset.bound = 1; sel.addEventListener('change', function () { cur[k] = +sel.value; changed(); }); }
-      });
+    // The faces' extras
+    if (has('dxr')) { setRange('dxr', 'dxr', '', function (v) { return S.lists.dxr[v]; }); }
+    // Calm and off
+    if (has('dof')) {
+      setHourMinute('calmFrom', 'dqf', 'dqfm'); setHourMinute('calmTo', 'dqt', 'dqtm');
       setNumber('ddk', 'ddk');
+      setCheck('dph', 'dph');
+      setMinuteOfDay('offFrom', 'dof'); setMinuteOfDay('offTo', 'dot');
+      setNumber('dok', 'dok');
+      setNumber('dws', 'dws');
+      var dga = $('#dga');   // when GIFs asked for play, by value (lists.dga)
+      if (!dga.children.length) { S.lists.dga.forEach(function (t, v) { var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = t; dga.appendChild(b); }); }
+      setSeg(dga, 'dga', false);
+      bindRestMode();
+      showRest(S.rest);
     }
     // Info band
     if (has('lat')) { setNumber('lat', 'lat'); setNumber('lon', 'lon'); setCheck('feedw', 'feedw', showNeeds); setCheck('feeda', 'feeda', showNeeds); setCheck('feedq', 'feedq', showNeeds); }
@@ -1278,6 +1368,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#timeLine').textContent = st.timeLine;
     $('#timeDot').className = 'dot ' + (st.clockSet ? 'ok' : 'warn');
     rot = st.rot; screenGif = st.gif;
+    if (st.rest && S && has('dof')) { showRest(st.rest); }
     var note = $('#screenNote');
     note.hidden = !st.gif;
     note.textContent = 'A GIF is playing; it is drawn past this picture.';
@@ -1590,6 +1681,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       case 'noneFits': return (r.matches === 1 ? '1 GIF matches' : r.matches + ' GIFs match') + ', none fits the panel as the clock stands.';
       case 'notOnFace': return 'Not now: a GIF plays only over the face, not over the menu, a message or the hotspot.';
       case 'noSearch': return 'Type a search first: Play all plays the GIFs it finds.';
+      case 'clockOff': return 'Not now: the clock is off, and GIFs asked for do not play then (Calm and off).';
+      case 'clockCalm': return 'Not now: the clock is calm, and GIFs asked for do not play then (Calm and off).';
       default: return 'Not now: the clock could not open a GIF this moment. Try again in a moment.';
     }
   }

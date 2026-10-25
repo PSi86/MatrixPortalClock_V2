@@ -11,6 +11,7 @@
 #include "item_icons.h"   // the icons and their pictures (only this file draws them)
 #include "menu.h"
 #include "panel_rules.h"
+#include "rest.h"
 #include "settings.h"
 
 // What only this module calls, ahead of its use.
@@ -585,6 +586,7 @@ void noticesUpdate() {
   noticesPending = false;
   if (noticeStepCount) { return; }                                // items on the panel
   if (screen != SCREEN_FACE && screen != SCREEN_GIF) { return; }  // waits for the face
+  if (restLevel() == REST_OFF) { return; }                        // and for the end of Off: an input shows the time alone
   if (newAny) {
     // An alert at once, over everything but the person at the clock;
     // messages at the minute's place for them, after a GIF's end - on the

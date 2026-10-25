@@ -31,6 +31,18 @@
                                discovery config, sent anew with each search
      mpclock/<id>/gif/pick     Home Assistant to the clock: a GIF picked from
                                the matches (an option of GIF matches)
+     mpclock/<id>/display/set  Home Assistant to the clock: the select Display
+                               mode - Automatic, Normal, Calm or Off (rest.h)
+     mpclock/<id>/display/mode the clock to Home Assistant, retained: the
+                               choice as the clock keeps it
+     mpclock/<id>/display/state
+                               the clock to Home Assistant, retained: the
+                               level, Normal, Calm or Off
+     mpclock/<id>/display/attributes
+                               the clock to Home Assistant, retained: why it is
+                               at that level, and whether the panel is lit
+     mpclock/<id>/display/wake Home Assistant to the clock: the button Wake
+                               display, the time for a while while Off
      mpclock/<id>/status       the clock to Home Assistant, retained: online,
                                or offline as the last will
      mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux
@@ -103,9 +115,10 @@ struct HaCmd {
 // What the worker and the client's task read while the client exists: the
 // loop sets it before HA_CMD_START and leaves it alone until HA_IN_STOPPED.
 // Discovery configs: the message entity, the light, the room's temperature
-// and humidity, and for GIFs on request the search field, the buttons Play
-// GIF and GIF again, the matches, and the button Play all matches.
-const uint8_t HA_ANNOUNCE_MAX = 9;
+// and humidity, for GIFs on request the search field, the buttons Play GIF
+// and GIF again, the matches, and the button Play all matches; and the
+// display's mode, its state and the button Wake display.
+const uint8_t HA_ANNOUNCE_MAX = 12;
 struct HaLink {
   esp_mqtt_client_handle_t client = nullptr;   // only the worker touches it
   QueueHandle_t in = nullptr;                  // to the loop
@@ -122,6 +135,8 @@ struct HaLink {
   char     gifAgain[48] = "";         // the button GIF again
   char     gifAll[48] = "";           // the button Play all matches
   char     gifPick[48] = "";          // a GIF picked from the matches
+  char     displaySet[48] = "";       // the select Display mode
+  char     displayWake[48] = "";      // the button Wake display
   char     announceTopic[HA_ANNOUNCE_MAX][64] = {};
   String   announce[HA_ANNOUNCE_MAX];  // empty takes a config back (a sensor no longer found)
   std::atomic<uint32_t> lost{0};       // what the loop did not take in time
@@ -141,6 +156,8 @@ inline void haTopics(const char *id) {
   snprintf(l.gifAgain, sizeof(l.gifAgain), "%sgif/again", l.prefix);
   snprintf(l.gifAll, sizeof(l.gifAll), "%sgif/all", l.prefix);
   snprintf(l.gifPick, sizeof(l.gifPick), "%sgif/pick", l.prefix);
+  snprintf(l.displaySet, sizeof(l.displaySet), "%sdisplay/set", l.prefix);
+  snprintf(l.displayWake, sizeof(l.displayWake), "%sdisplay/wake", l.prefix);
 }
 
 // Waits up to a second for the loop, which empties the queue on every pass;
@@ -183,6 +200,8 @@ inline void haEvent(void *, esp_event_base_t, int32_t id, void *data) {
       esp_mqtt_client_subscribe(e->client, l.gifAgain, 1);
       esp_mqtt_client_subscribe(e->client, l.gifAll, 1);
       esp_mqtt_client_subscribe(e->client, l.gifPick, 1);
+      esp_mqtt_client_subscribe(e->client, l.displaySet, 1);
+      esp_mqtt_client_subscribe(e->client, l.displayWake, 1);
       esp_mqtt_client_subscribe(e->client, "homeassistant/status", 1);
       haAnnounce();
       break;

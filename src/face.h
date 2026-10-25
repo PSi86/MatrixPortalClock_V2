@@ -44,6 +44,16 @@ inline bool faceFits(unsigned long startAt, unsigned long now, unsigned long len
   return (long)(startAt - now) >= (long)(len + guard);
 }
 
+// Whether the change to `minute` plays a full hour like a minute, without the
+// face's show (rest.cpp: Calm's option, with the clock calm at that minute).
+bool restPlainHourAt(time_t minute);
+// Whether the change to `minute` is a full hour with its show: the Tetris
+// effect, the Muncher's four ghosts and hour show, the Aliens' wave, the
+// Snake's train or all four at once.
+inline bool faceHourShows(time_t minute) {
+  return clockMinute(minute) == 0 && !restPlainHourAt(minute);
+}
+
 // The four digits HH MM of a moment, d[0] the tens of the hours; `none` in
 // every place while the clock has no time, so a face shows dashes rather than
 // a time counted up from midnight.

@@ -274,7 +274,7 @@ class MuncherFace : public PlannedFace {
   FaceSpan changeSpan(const FaceNow &now, time_t minute) const override {
     FaceSpan s = { 0, 0 };
     if (!now.set) { return s; }
-    bool hour = clockMinute(minute) == 0;
+    bool hour = faceHourShows(minute);
     if (_plannedFor == minute && _plannedDone) {
       s.lead = (unsigned long)_plannedDone * _s.paceMs;
     } else {
@@ -418,10 +418,10 @@ class MuncherFace : public PlannedFace {
     time_t next = nextMinute(now);
     if (_plannedFor != next) {
       // To a full hour four ghosts follow the muncher, and the hour show
-      // comes after.
+      // comes after (in Calm, as an option, neither: faceHourShows()).
       uint8_t to[4];
       faceDigits(next, now.set, to, muncher::NO_DIGIT);
-      bool hour = clockMinute(next) == 0;
+      bool hour = faceHourShows(next);
       _plannedDone = _m.planChange(to, _s.style, 0, hour ? 4 : 2);
       _plannedAfter = hour ? AFTER_HOUR : AFTER_NOTHING;
       _plannedFor = next;

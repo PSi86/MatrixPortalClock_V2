@@ -61,6 +61,8 @@ enum GifAsked : uint8_t {
   GIF_ASKED_NONE_FITS,    // it finds some, none fits the panel as it is held
   GIF_ASKED_NOT_OPENED,   // the one chosen did not open this moment (no RAM, the card's next not read yet)
   GIF_ASKED_NO_SEARCH,    // a series asked for without a search: it would be all GIFs
+  GIF_ASKED_CLOCK_OFF,    // the clock is Off, and GIFs asked for do not play then (rest.h)
+  GIF_ASKED_CLOCK_CALM,   // the clock is Calm, and GIFs asked for do not play then
 };
 struct GifAnswer {
   GifAsked how;
