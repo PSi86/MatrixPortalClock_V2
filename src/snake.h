@@ -535,12 +535,11 @@ void drawSnake(G &g, const Layout &L, CellOf cellOf, uint16_t n, uint8_t sub, Ce
       x = (int16_t)(x + (L.pxX(b) - x) * k / p);
     }
     uint16_t c;
-    uint8_t t = thick;
     if (q >= headFrom) { c = col.head; }
-    else if (bulge >= 0 && (int16_t)cell == bulge) { c = col.bulge; t = 2; }   // 2 px thick on a line too: seen
+    else if (bulge >= 0 && (int16_t)cell == bulge) { c = col.bulge; }   // as thick as the snake, its colour shows it
     else { c = col.shade(col.ctx, look, cell, n); }
-    for (uint8_t dy = 0; dy < t; dy++) {
-      for (uint8_t dx = 0; dx < t; dx++) { g.drawPixel(x + dx, y + dy, c); }
+    for (uint8_t dy = 0; dy < thick; dy++) {
+      for (uint8_t dx = 0; dx < thick; dx++) { g.drawPixel(x + dx, y + dy, c); }
     }
     py = hy; px = hx;
     hy = y; hx = x;
