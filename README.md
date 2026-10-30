@@ -65,13 +65,16 @@ in the wall's own 192x128 LEDs.
   counts as the input that has to open the menu on this clock without
   buttons, so it does not stop the web app from saving. The chip's tap engine
   answers its commands but reports nothing on this board.
-- **Inputs:** no buttons, and no gesture sensor yet; the clock is set up in
-  the web app, which is on the home network from the start (on clocks without
-  buttons). The hotspot opens
+- **Inputs:** no buttons, and a PAJ7620U2 gesture sensor if one is on the GPIO
+  header; the clock is set up in the web app, which is on the home network from
+  the start (on clocks without buttons). The hotspot opens
   by itself when no home WiFi is stored, and stays open; and when a stored one
   has not joined for 2 minutes, for 5 minutes, after which the clock tries the
-  WiFi again. The I2C sensors (DS3231, BH1750, PAJ7620) go on IO45/IO46 (SDA,
-  SCL) and are not tried on this board yet.
+  WiFi again. The I2C sensors (DS3231, BH1750, PAJ7620) go on the GPIO header's
+  connector: SDA IO46, SCL IO45. Tested on the wall on 2026-10-30 with the
+  three of the table clock: all found at the first try, the gestures and the
+  auto-brightness working, the DS3231 the time source; uploads over USB work
+  with them plugged in.
 - **Real-time clock:** the board's own PCF85063, with a coin cell in its socket
   J4 if wanted, and a DS3231 on the GPIO header before it (see
   [The wall clock's own real-time clock](#the-wall-clocks-own-real-time-clock-pcf85063)).

@@ -4,9 +4,11 @@
 // Waveshare ESP32-S3-RGB-Matrix as the wall clock (board
 // waveshare_esp32s3_rgb_matrix_clock). A copy of the core's generic esp32s3
 // variant with two changes:
-// - SDA/SCL are IO45/IO46 on the GPIO header, the bus for the clock's own
-//   sensors (DS3231, BH1750, PAJ7620U2). The generic variant's 8/9 are the
-//   HUB75 lines B and E on this board.
+// - SDA is IO46 and SCL IO45 on the GPIO header, the bus for the clock's own
+//   sensors (DS3231, BH1750, PAJ7620U2): the board's connector has IO45 on
+//   its clock line and IO46 on its data line (2026-10-30; the other way round
+//   no sensor answered). The generic variant's 8/9 are the HUB75 lines B and
+//   E on this board.
 // - No LED_BUILTIN: the board has no user LED, and the generic variant's
 //   (an RGB LED on GPIO48) is the clock line of the board's own I2C bus.
 // The other pins of the board: HUB75 R1 4, G1 5, B1 6, R2 7, G2 15, B2 16,
@@ -23,8 +25,8 @@
 static const uint8_t TX = 43;
 static const uint8_t RX = 44;
 
-static const uint8_t SDA = 45;
-static const uint8_t SCL = 46;
+static const uint8_t SDA = 46;
+static const uint8_t SCL = 45;
 
 static const uint8_t SS = 10;
 static const uint8_t MOSI = 11;
