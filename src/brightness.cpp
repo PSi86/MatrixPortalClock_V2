@@ -12,11 +12,13 @@
 #include "gif_player.h"  // gifPlaying()
 #include "sensors.h"
 #include "settings.h"
+#include "veml7700.h"
 #if BOARD_WAVESHARE_WALL
 #include "shtc3.h"
 #endif
 
 // What only this module calls, ahead of its use.
+static bool luxRead(float &lux);
 static uint8_t mapLuxToBrightness(float lux);
 static float luxMedian();
 static uint8_t levelBrightness(uint8_t level);
@@ -32,8 +34,9 @@ static int8_t      fadeDir   = -1;
 static unsigned long fadeLastMs = 0;
 
 // Ambient light sensor -----------------------------------------------------
-// External BH1750 on I2C (default address 0x23). When enabled it drives the
-// master brightness via a configurable lux->brightness mapping.
+// An external BH1750 (address 0x23) or VEML7700 (0x10, veml7700.h) on I2C.
+// When enabled it drives the master brightness via a configurable
+// lux->brightness mapping.
 //
 // Until 2026-10-21 a 10 s moving average of one reading a second set the
 // target: a lamp switched on showed half its change after about 5 s and 90 %
@@ -43,15 +46,23 @@ static unsigned long fadeLastMs = 0;
 // about 1.2 s (a gesture) changes nothing, a real change shows half after
 // 1.6 to 2.7 s and 90 % after 2.3 to 4.1 s, the same on and off.
 static BH1750FVI     lightMeter(BH1750FVI_DEFAULT_ADDRESS); // I2C address 0x23 (ADDR pin low)
-bool          luxOK = false;     // true once the BH1750 was found on I2C
+static Veml7700      veml;
+bool          luxOK = false;     // true once a light sensor was found on I2C
+SensorId      luxSensor = SENSOR_COUNT;   // the one the brightness follows; SENSOR_COUNT: none
 static unsigned long luxLast = 0;       // last light-sensor poll
 static unsigned long luxPrintedAt = 0;  // last Lux console line (one a second)
 float         lastLux = -1.0f;   // most recent UNFILTERED lux reading (web UI), -1 = none yet
 float         luxAvg = -1.0f;    // the filtered light (below), -1 = none yet (the dark room)
-static const unsigned long LUX_READ_MS = 200;     // the sensor has a new value every ~120 ms (setContHighRes())
+// The BH1750 has a new value every ~120 ms (setContHighRes()), the VEML7700
+// every 100 ms.
+static const unsigned long LUX_READ_MS = 200;
 static const uint8_t LUX_MEDIAN = 13;             // readings in the median: 2.6 s
 static const float   LUX_TAU_MS = 1000.0f;        // the median's log, filtered with this time constant
-static const float   LUX_LN_FLOOR = 0.5f;         // lx: 0 has no log; the sensor's steps are 0.83 lx
+// lx: 0 has no log. The BH1750's steps are 0.83 lx; the VEML7700's below
+// 100 lx are 0.0336 lx, but its light is floored here as well, so the filter
+// takes as long out of a dark room with either (a deeper floor would add log
+// units for the filter to cover). Unfiltered, the web app shows its own.
+static const float   LUX_LN_FLOOR = 0.5f;
 static float         luxRecent[LUX_MEDIAN];       // ring buffer of the last readings
 static uint8_t       luxRecentIdx = 0;            // next write position
 static uint8_t       luxRecentCount = 0;          // valid readings (ramps up to LUX_MEDIAN)
@@ -101,24 +112,46 @@ static const float   CLIMATE_TAU_MS = 30000.0f;
 #endif
 
 /* ======================================================================
-   Auto-brightness: BH1750 ambient light sensor drives the master brightness
+   Auto-brightness: the ambient light sensor drives the master brightness
    ====================================================================== */
 
-// External BH1750 ambient light sensor -> auto-brightness. Shares the I2C bus
-// (default address 0x23). If absent, brightness stays under manual control.
+// The external light sensors on the shared I2C bus: a VEML7700 (0x10) and a
+// BH1750 (0x23). Both are looked for, so the sensor record knows each one
+// fitted. With both found the VEML7700 sets the brightness - its steps are
+// finer (0.0336 lx below 100 lx against 0.83 lx) - and the BH1750 is left
+// unread. With neither, the brightness stays under manual control.
 void lightSensorBegin() {
+  sensorTries[SENSOR_LIGHT_VEML] = sensorBegin(SENSOR_LIGHT_VEML, []() { return veml.begin(Wire); });
   sensorTries[SENSOR_LIGHT] = sensorBegin(SENSOR_LIGHT, []() {
     if (!lightMeter.begin()) { return false; }   // true if the sensor answers on I2C
     lightMeter.powerOn();
     lightMeter.setContHighRes();       // 1 lx resolution, a new value every ~120 ms
     return lightMeter.getError() == BH1750FVI_OK;
   });
-  luxOK = sensorTries[SENSOR_LIGHT] != 0;
-  if (luxOK) {
-    Console.println("BH1750 found");
-  } else {
-    Console.println("BH1750 not found - auto-brightness disabled");
+  luxSensor = sensorTries[SENSOR_LIGHT_VEML] ? SENSOR_LIGHT_VEML
+            : sensorTries[SENSOR_LIGHT]      ? SENSOR_LIGHT : SENSOR_COUNT;
+  luxOK = luxSensor != SENSOR_COUNT;
+  if (sensorTries[SENSOR_LIGHT_VEML]) { Console.printf("VEML7700 found, ID 0x%04X\n", veml.id()); }
+  if (sensorTries[SENSOR_LIGHT]) {
+    Console.println(luxSensor == SENSOR_LIGHT ? "BH1750 found" : "BH1750 found, not used: the VEML7700 sets the brightness");
   }
+  if (!luxOK) { Console.println("No light sensor found - auto-brightness disabled"); }
+}
+
+// A reading of the light sensor in use; false when there is none this time
+// (a failed I2C read, the VEML7700 changing its range or setting itself up
+// again).
+bool luxRead(float &lux) {
+  if (luxSensor == SENSOR_LIGHT_VEML) {
+    uint16_t restored = veml.restored();
+    bool ok = veml.read(lux);
+    if (veml.restored() != restored && veml.restored() <= 10) {
+      Console.println("VEML7700: its setting was lost (power dip?) - set again");
+    }
+    return ok;
+  }
+  lux = lightMeter.getLux();
+  return lightMeter.getError() == BH1750FVI_OK;
 }
 
 #if BOARD_WAVESHARE_WALL
@@ -172,8 +205,8 @@ void updateBrightness() {
   // auto mode the same reading also feeds the filter and the mapping.
   if (luxOK && (luxLast == 0 || millisNow - luxLast >= LUX_READ_MS)) {
     luxLast = millisNow;
-    float lux = lightMeter.getLux();
-    if (lightMeter.getError() == BH1750FVI_OK) {     // skip failed I2C reads
+    float lux;
+    if (luxRead(lux)) {                              // skip failed I2C reads
       lastLux = lux;                                 // unfiltered reading shown in the web UI
       luxRecent[luxRecentIdx] = lux;
       luxRecentIdx = (luxRecentIdx + 1) % LUX_MEDIAN;
@@ -191,7 +224,11 @@ void updateBrightness() {
         luxPrintedAt = millisNow;
         Console.print("Lux "); Console.print(lux); Console.print(" avg "); Console.print(luxAvg);
         Console.print(" -> sensor "); Console.print(autoBrightTarget);
-        Console.print(" now "); Console.println(effectiveBrightness);
+        Console.print(" now "); Console.print(effectiveBrightness);
+        if (luxSensor == SENSOR_LIGHT_VEML) {
+          Console.printf(" (VEML7700 gain %s, %u counts)", veml.gainText(), (unsigned)veml.counts());
+        }
+        Console.println();
       }
     }
   }

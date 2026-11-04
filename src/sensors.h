@@ -30,6 +30,7 @@ enum SensorId : uint8_t {
   SENSOR_BOARD_RTC,  // PCF85063, on the wall clock's board
   SENSOR_MOTION,     // QMI8658, on the wall clock's board
   SENSOR_CLIMATE,    // SHTC3, on the wall clock's board
+  SENSOR_LIGHT_VEML, // VEML7700 (the sensor record keeps a bit per id: new ones go last)
   SENSOR_COUNT
 };
 
@@ -49,11 +50,12 @@ inline const SensorKind SENSOR_KINDS[SENSOR_COUNT] = {
   { "boardRtc", "PCF85063",  "real-time clock",     0x51, true },
   { "motion",   "QMI8658",   "knock",               0x6B, true },
   { "climate",  "SHTC3",     "room temperature, humidity", 0x70, true },
+  { "lightVeml", "VEML7700", "auto-brightness",     0x10, false },
 };
 
 // The sensors this board's firmware works with.
 inline uint16_t sensorsSupported() {
-  uint16_t m = (1 << SENSOR_LIGHT) | (1 << SENSOR_RTC) | (1 << SENSOR_GESTURE);
+  uint16_t m = (1 << SENSOR_LIGHT) | (1 << SENSOR_LIGHT_VEML) | (1 << SENSOR_RTC) | (1 << SENSOR_GESTURE);
 #if BOARD_HAS_ACCEL
   m |= 1 << SENSOR_ACCEL;
 #endif

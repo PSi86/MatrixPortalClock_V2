@@ -811,7 +811,7 @@ void cycleDstMode() {
   Console.print("DST mode -> "); Console.println(settings.dst);
 }
 
-// Toggle the BH1750 auto-brightness on/off and save it.
+// Toggle the light sensor's auto-brightness on/off and save it.
 static void toggleAutoBright() {
   settings.autoBright = settings.autoBright ? 0 : 1;
   saveSettings();

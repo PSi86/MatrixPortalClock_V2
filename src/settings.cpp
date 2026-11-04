@@ -18,7 +18,7 @@ const Settings DEFAULTS = {
     255, 255, 255, // fly-in trail (full color; dimmed relative to brightness at render time)
     {3, 1, 3, 1, 1, 1} },
   5, 11,           // original sync time 05:11
-  1,               // auto-brightness on (BH1750)
+  1,               // auto-brightness on (light sensor)
   1, 400,          // lux mapping range: 1 lux (dark) .. 400 lux (bright)
   8, 255           // brightness 8 (dark) .. 255 (bright)
 };

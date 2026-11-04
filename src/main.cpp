@@ -327,7 +327,7 @@ void setup(void) {
 #endif
   }
 
-  lightSensorBegin();     // the BH1750 for the auto-brightness, on the same bus
+  lightSensorBegin();     // a VEML7700 or BH1750 for the auto-brightness, on the same bus
 
 #if BOARD_WAVESHARE_WALL
   // The board's own bus, for its PCF85063 (and its motion sensor).

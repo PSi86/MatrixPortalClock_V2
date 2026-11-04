@@ -70,7 +70,7 @@ in the wall's own 192x128 LEDs.
   the start (on clocks without buttons). The hotspot opens
   by itself when no home WiFi is stored, and stays open; and when a stored one
   has not joined for 2 minutes, for 5 minutes, after which the clock tries the
-  WiFi again. The I2C sensors (DS3231, BH1750, PAJ7620) go on the GPIO header's
+  WiFi again. The I2C sensors (DS3231, BH1750 or VEML7700, PAJ7620) go on the GPIO header's
   connector: SDA IO46, SCL IO45. Tested on the wall on 2026-10-30 with the
   three of the table clock: all found at the first try, the gestures and the
   auto-brightness working, the DS3231 the time source; uploads over USB work
@@ -162,7 +162,7 @@ dropped before the web server and WiFi work that followed.
 - **Automatic orientation** via the onboard accelerometer: the display rotates in
   90° steps to match how the panel is held (both portrait and both landscape
   positions)
-- **Automatic brightness** via an external BH1750 light sensor: a configurable
+- **Automatic brightness** via an external BH1750 or VEML7700 light sensor: a configurable
   lux → brightness mapping fades the clock to the room's light within seconds
 - **Calm and off**: hours and a dark room for a calm clock (no GIFs and no
   extras of their own accord) and for one that is off (the panel black; an
@@ -190,7 +190,7 @@ dropped before the web server and WiFi work that followed.
   It is red as well while a sensor found at an earlier start is missing (see
   below), until the sensor is back or the web app forgets it
 - **Sensors looked for at every start**, each up to 3 times, 50 ms apart: the
-  LIS3DH (orientation, knock; MatrixPortals), BH1750 (light), DS3231
+  LIS3DH (orientation, knock; MatrixPortals), BH1750 and VEML7700 (light), DS3231
   (real-time clock), PAJ7620U2 (gestures), and on the wall clock its board's
   PCF85063 (real-time clock), QMI8658 (knock) and SHTC3 (room temperature and
   humidity). The clock remembers which it
@@ -869,7 +869,7 @@ Setting it up:
    the card says what is missing.
 3. The clock shows up in Home Assistant as the device *Matrix Clock xxxxxx*, by
    MQTT discovery, with an entity **Message** (notify), the GIF entities below,
-   with a BH1750 a sensor **Light** (lux), and on the wall clock the sensors
+   with a light sensor a sensor **Light** (lux), and on the wall clock the sensors
    **Temperature** (°C) and **Humidity** (%) from its board's SHTC3.
    [GIFs on request](#gifs-on-request):
    - **GIF search**, a text field that keeps what was typed into it - a GIF's
@@ -1596,12 +1596,30 @@ screen is up, so leaving it always returns to how the panel is held — also whe
 the panel lies flat or has no accelerometer, where the clock used to come back
 in the info screen's landscape rotation.
 
-## Auto-brightness (BH1750 light sensor)
+## Auto-brightness (light sensor)
 
-An external **BH1750** ambient light sensor (I²C, default address `0x23`) can
-drive the master brightness automatically. Wire it to the board's I²C pins
-(SDA/SCL, 3V3, GND — e.g. via the STEMMA QT connector); it shares the bus with
-the accelerometer.
+An external ambient light sensor on I²C can drive the master brightness
+automatically: a **BH1750** (default address `0x23`) or a **VEML7700**
+(`0x10`). Wire it to the board's I²C pins (SDA/SCL, 3V3, GND — e.g. via the
+STEMMA QT connector, on the wall clock the GPIO header's); it shares the bus
+with the other sensors. Both are looked for at every start; with both fitted
+the VEML7700 sets the brightness, and the web app's System section lists the
+BH1750 as found, not used.
+
+The **VEML7700** (`src/veml7700.h`, after Vishay's datasheet 84286 Rev. 1.8 and
+application note 84323 of 06-Mar-2025) measures for 100 ms at a time and
+chooses one of three gains by its own reading: ×2 up to 100 lx (0.0336 lx a
+step), ×1/4 from 50 lx to 16 klx (0.27 lx), ×1/8 above that (0.54 lx, up to
+35 klx counted). At ×1/4 and ×1/8 Vishay's correction formula for high light
+is applied. A change of gain costs no reading at five a second (the first one
+with the new gain is there within about 133 ms); only a reading at the very top
+of a gain is left out. Every second the clock reads the sensor's setting back
+and sets it again should a dip in its supply have reset it: at most four stale
+readings, which the median below lets pass. With `log 2` the console's Lux line
+adds its gain and counts. Its
+finer steps show in the web app's live lux (two decimals below 10 lx); the
+filter below still floors the light at 0.5 lx, so the brightness takes as long
+out of a dark room as with a BH1750.
 
 The sensor is read **five times a second**. The median of the last 13 readings
 (2.6 s) is filtered in log units with 1 s, so a hand in front of the sensor for
@@ -2515,7 +2533,7 @@ reach.
 | `lan_access.h/.cpp`, `home_assistant.h/.cpp` | the web app on the home network; the Home Assistant link |
 | `console_cmds.h/.cpp`, `debug_stats.h/.cpp` | the console's commands; the debug build's running figures |
 | `face*.h`, `muncher.h`, `aliens.h`, `snake.h`, `tetris_digits.h`, `snake_paths.h` | the watchfaces |
-| `board_hal.h`, `knock.h`, `ha_link.h`, `band_data.h`, `gif_card.h`, ... | drivers and clients, header-only |
+| `board_hal.h`, `knock.h`, `veml7700.h`, `ha_link.h`, `band_data.h`, `gif_card.h`, ... | drivers and clients, header-only |
 
 A module that needs something of another includes that one's header; what
 it needs of `main.cpp` is in `clock_state.h`. Every header compiles on its
@@ -2531,6 +2549,7 @@ Resolved automatically by PlatformIO from `platformio.ini`.
 Both clocks: Adafruit GFX, Adafruit BusIO, Adafruit LIS3DH, Adafruit Unified
 Sensor, BH1750FVI_RT (Rob Tillaart), RTClib (Adafruit, for the DS3231), RevEng
 PAJ7620 (Aaron S. Crandall, for the gesture sensor). All versions are pinned.
+The VEML7700 needs no library (`src/veml7700.h`).
 
 Panel driver: ESP32-HUB75-MatrixPanel-DMA (mrfaptastic) on the MatrixPortal S3,
 built with `NO_CIE1931` so colours and brightness stay linear as before; on the

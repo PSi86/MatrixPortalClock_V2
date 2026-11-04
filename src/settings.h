@@ -38,7 +38,7 @@ struct Settings {
   ClassicSettings classic;   // the classic face's fly-in time, colours and fly-in sides (face_classic.h)
   uint8_t  syncHour;     // hour of daily NTP resync
   uint8_t  syncMinute;   // minute of daily NTP resync
-  uint8_t  autoBright;   // 1 = BH1750 light sensor controls the master brightness
+  uint8_t  autoBright;   // 1 = the light sensor (BH1750 or VEML7700) controls the master brightness
   uint16_t luxDark;      // lux at/below which brightness = brightMin
   uint16_t luxBright;    // lux at/above which brightness = brightMax
   uint8_t  brightMin;    // master brightness in darkness

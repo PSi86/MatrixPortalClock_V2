@@ -1247,7 +1247,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         b.addEventListener('click', function () { forgetSensor(s); });
         row(name, 'bad', 'missing - found at an earlier start' + where, b);
       } else if (s.tries) {
-        row(name, s.tries > 1 ? 'warn' : 'ok', (s.tries > 1 ? 'found on try ' + s.tries + ' of ' + n : 'found') + where);
+        row(name, s.tries > 1 ? 'warn' : 'ok', (s.tries > 1 ? 'found on try ' + s.tries + ' of ' + n : 'found')
+          + (s.unused ? ', not used: ' + s.unused : '') + where);
       } else {
         row(name, '', 'not fitted' + where);
       }
