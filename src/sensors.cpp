@@ -24,9 +24,10 @@ SettingsTable sensorTable = SETTING_TABLE(sensorWarmth, SENSOR_WARMTH_NONE, SENS
 #endif
 static SettingsStore<SensorRecord> sensorStore;
 
-// The onboard LIS3DH (0x19), a BH1750 (0x23), a DS3231 (0x68; many of its
-// modules carry an EEPROM at 0x57 as well), a PAJ7620U2 (0x73). A sensor that
-// is not found can so be told from one the bus does not see at all.
+// The onboard LIS3DH (0x19), a VEML7700 (0x10), a BH1750 (0x23), a DS3231
+// (0x68; many of its modules carry an EEPROM at 0x57 as well), a PAJ7620U2
+// (0x73). A sensor that is not found can so be told from one the bus does
+// not see at all.
 void i2cScan() {
   Console.print("I2C bus:");
   uint8_t n = 0;

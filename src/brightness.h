@@ -1,7 +1,8 @@
 /* -------------------------------------------------------------------------
-   brightness.h - the panel's brightness: the BH1750 light sensor and the
-   brightness it sets, the manual levels and the auto-brightness trims the
-   menu steps through, the brightness while a GIF plays, the perceptual fade
+   brightness.h - the panel's brightness: the light sensor (a BH1750 or a
+   VEML7700) and the brightness it sets, the manual levels and the
+   auto-brightness trims the menu steps through, the brightness while a GIF
+   plays, the perceptual fade
    (Classic clicks: UP held) - and, on the wall clock, the room's temperature
    and humidity from the SHTC3 beside the sensor.
 
@@ -12,9 +13,11 @@
 
 #include <Arduino.h>
 #include "board_hal.h"
+#include "sensors.h"     // SensorId
 
 // ---- The light sensor and the brightness ----------------------------------------
-extern bool    luxOK;                 // true once the BH1750 was found on I2C
+extern bool    luxOK;                 // true once a light sensor was found on I2C
+extern SensorId luxSensor;            // the one in use: SENSOR_LIGHT_VEML or SENSOR_LIGHT; SENSOR_COUNT: none
 extern float   lastLux;               // most recent UNFILTERED lux reading (web UI), -1 = none yet
 extern float   luxAvg;                // the filtered light, -1 = none yet (the dark room)
 // Brightness actually used for rendering. In manual mode it equals
@@ -23,7 +26,7 @@ extern float   luxAvg;                // the filtered light, -1 = none yet (the 
 // darker, 255 = much brighter) and effectiveBrightness is the result.
 extern uint8_t effectiveBrightness;
 
-void lightSensorBegin();   // at start-up: the BH1750, if there is one
+void lightSensorBegin();   // at start-up: a VEML7700 or BH1750, if there is one
 // Resolve the brightness used for ALL rendering (clock, boot, AP info, banner)
 // with one shared rule. Call once per frame in every path.
 void updateBrightness();

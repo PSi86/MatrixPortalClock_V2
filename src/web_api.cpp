@@ -254,7 +254,8 @@ static const char *timeSourceText() {
 // info band's sources and items. Polled by the page.
 static void apiStatusInto(JsonDocument &d) {
   d["bright"] = effectiveBrightness;
-  if (lastLux >= 0) { d["lux"] = serialized(String(lastLux, 1)); } else { d["lux"] = nullptr; }
+  // Below 10 lx two decimals: the VEML7700's steps there are 0.0336 lx.
+  if (lastLux >= 0) { d["lux"] = serialized(String(lastLux, lastLux < 10.0f ? 2 : 1)); } else { d["lux"] = nullptr; }
 #if BOARD_WAVESHARE_WALL
   if (roomValid) {   // the room's, filtered and corrected; absent without the sensor
     d["temp"] = serialized(String(roomTempNow(), 1));
@@ -481,6 +482,10 @@ static void apiState(Print &c) {
     o["tries"] = sensorTries[i];                     // 0: not found at this start
     o["seen"] = (sensorsSeen & (1 << i)) != 0;       // found at an earlier start, not forgotten
     o["missing"] = (sensorsMissing & (1 << i)) != 0;
+    // A light sensor found beside the one the brightness follows: why it rests.
+    if (sensorTries[i] && (i == SENSOR_LIGHT || i == SENSOR_LIGHT_VEML) && i != luxSensor) {
+      o["unused"] = String("the ") + SENSOR_KINDS[luxSensor].chip + " sets the brightness";
+    }
   }
 
   JsonObject gifs = d["gifs"].to<JsonObject>();
