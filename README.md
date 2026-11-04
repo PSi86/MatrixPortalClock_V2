@@ -172,6 +172,9 @@ dropped before the web server and WiFi work that followed.
   minute before the sync time and off again after the sync, unless the info band
   data still needs it. A sync that has not worked out after a minute, on a clock
   that already has a time, gives up the radio and tries again 10 minutes later
+- **Firmware updates over the web**: a new `firmware.bin` installed from the
+  web app, written beside the running firmware; one that does not prove itself
+  gives way to the one before; see [Firmware updates over the web](#firmware-updates-over-the-web)
 - **Time from a phone** on the config page, or typed in, for a clock without
   WiFi
 - **Real-time clock (optional):** with a DS3231 on the I2C bus the clock has its
@@ -2530,6 +2533,7 @@ reach.
 | `menu.h/.cpp` | the on-screen menu, its editors, the banners |
 | `hotspot.h/.cpp` | the clock's own access point, its captive portal and its screens |
 | `web_server.h/.cpp`, `web_api.h/.cpp` | the web server beside the loop; the web app and its JSON interface |
+| `fw_update.h/.cpp` | a new firmware over the web: the upload, its checks, the trial and the confirmation |
 | `lan_access.h/.cpp`, `home_assistant.h/.cpp` | the web app on the home network; the Home Assistant link |
 | `console_cmds.h/.cpp`, `debug_stats.h/.cpp` | the console's commands; the debug build's running figures |
 | `face*.h`, `muncher.h`, `aliens.h`, `snake.h`, `tetris_digits.h`, `snake_paths.h` | the watchfaces |
@@ -2572,6 +2576,59 @@ writing: exact coverage of the glyph, no overlaps, every piece droppable from
 above in the stored order, and a proper colouring within the palette. It refuses
 to write anything if a check fails.
 
+## Firmware updates over the web
+
+A clock that already runs this firmware takes a new one in its web app:
+**System → Firmware update**, a `firmware.bin` built for its board (a
+release's `...-update.bin`, or `.pio/build/<env>/firmware.bin`), then
+**Install** (tap twice). Settings, WiFi and GIFs stay. The same from the
+command line:
+
+```
+curl -u clock:<password> -H "Content-Type: application/octet-stream" --data-binary @firmware.bin http://matrixclock-xxxxxx.local/api/firmware
+```
+
+How it goes (`src/fw_update.cpp`):
+
+- Both boards have two program slots, `app0` and `app1`, and `otadata`, which
+  says which one starts. The new firmware goes into the slot the clock does
+  not run from; the running one stays untouched until the clock has chosen
+  the new one. The panel shows `UPDATE` and how far it is.
+- Before anything is written the clock checks the file's start: an ESP32-S3
+  program with its app description, so a full image or a GIF pack is refused.
+  While the rest arrives it looks for the board's mark - every firmware
+  carries `MatrixClock firmware for <board>` - so the other board's
+  `firmware.bin` is refused once it is in. At the end ESP-IDF checks the whole
+  image against its own SHA-256. A refused or broken-off upload leaves the
+  clock as it was, and it does not restart.
+- Then the clock restarts with the new firmware, which starts **on trial**: it
+  confirms itself once it has run a minute with the home WiFi joined or the
+  hotspot open, so the web app can reach it for the next update. One that
+  crashes, hangs or does not reach the network before the next start gives
+  way: the bootloader starts the firmware before it again (ESP-IDF's app
+  rollback; the core would confirm every new firmware as it starts, which
+  `verifyRollbackLater()` leaves to the clock), and the web app's System
+  section says that an update did not prove itself. An upload to a firmware
+  still on trial confirms it first: it has just shown that it takes one.
+- The System section shows the slot the clock runs from and whether its
+  firmware is on trial.
+- Measured on 2026-11-04: an upload of about 1.5 MB takes 11 to 15 s, the
+  clock answers again 9 s (S3) or 15 s (wall clock) after it, and confirms the
+  new firmware at 60 to 63 s of its run. Tested on both boards: a random
+  file, a full image, the other board's firmware and an upload cut off at
+  40 % refused without a restart; a firmware that never confirms itself and
+  one that crashes at its start each gave way to the one before.
+
+A firmware from before the web update (v1.0.0 and older) has neither the
+update nor the board's mark: such a clock gets its first update over USB, and
+the web refuses to install one of those old firmwares.
+
+**USB after a web update:** the clock may then run from `app1`.
+`pio run -t upload` and the project's flashing tools write `otadata` as well
+(`boot_app0.bin`), so the clock starts what was just written; esptool with
+only the app at `0x10000` would leave it starting `app1`. See
+[FLASHING.md](FLASHING.md) for the way with the release files.
+
 ## Flash layout (S3)
 
 The MatrixPortal S3 comes with Adafruit's TinyUF2 layout: two app slots of 2 MB,
@@ -2585,7 +2642,7 @@ since 2026-10-09 the clock has a layout of its own, `partitions_clock_s3.csv`:
 | `nvs` | 0x9000 | 20 KB | the settings - where TinyUF2's table had them, so they survive the change |
 | `otadata` | 0xE000 | 8 KB | which app slot boots |
 | `app0` | 0x10000 | 1792 KB | the firmware |
-| `app1` | 0x1D0000 | 1792 KB | for updates over WiFi (to come) |
+| `app1` | 0x1D0000 | 1792 KB | the other slot: an update over the web goes into the one not running ([Firmware updates over the web](#firmware-updates-over-the-web)) |
 | `ffat` | 0x390000 | 4544 KB | the GIF pack, all the clock's GIFs |
 
 No GIFs are built into the firmware, and there is no TinyUF2: uploads go over

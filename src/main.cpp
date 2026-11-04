@@ -45,6 +45,7 @@ Todo Concept:
 #include "console_cmds.h"   // the console's commands, the wall clock's panel output watch
 #include "web_server.h"     // the web server beside the loop, and its answers
 #include "web_api.h"        // the web app and its JSON interface
+#include "fw_update.h"      // a new firmware over the web, and its trial
 #include "debug_stats.h"    // the debug build's running figures (empty in a release build)
 #include "face.h"           // what the watchfaces share
 #include "face_classic.h"   // the classic watchface, on every board
@@ -372,6 +373,7 @@ void setup(void) {
   // normal power-up or reset button, so a crash is visible without a console
   // (e.g. while the clock runs on a power supply).
   Console.print("Reset reason: "); Console.println(boardResetReasonText());
+  fwTrialBegin();   // a firmware new by an update is on trial until it proves itself
   if (!boardResetWasNormal()) {
     bootStatus(boardResetReasonText());
     delay(2000);
@@ -493,6 +495,7 @@ void loop(void) {
   updatePanelRate();
   // Ran fine for 15 s: clear the breadcrumb, so only a real early death leaves one.
   if (!bootStageCleared && millisNow > 15000) { bootStageCleared = true; boardBootStageWrite(BOOT_STAGE_CLEAR); }
+  fwTrialUpdate();   // a new firmware confirmed once it has run a minute with the network
 #if defined(CLOCK_DEBUG)
   static bool dstTested = false;
   if (!dstTested && millisNow > 10000) { dstTested = true; dstSelfTest(); }
