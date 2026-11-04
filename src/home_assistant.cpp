@@ -11,6 +11,7 @@
 #include "hotspot.h"
 #include "clock_time.h"
 #include "ha_link.h"
+#include "info_band.h"   // bandLocalDone: the band's room anew
 #include "item_icons.h"
 #include "lan_access.h"
 #include "rest.h"
@@ -31,6 +32,9 @@ static void haErrorText(const HaIn &m);
 static bool haNameOk(const char *name);
 static void haIconLook(JsonDocument &doc, BandItem &it);
 static void haItem(const char *name, const char *payload, uint16_t len);
+static void haRoom(const char *payload, uint16_t len);
+static bool haRoomValue(JsonVariant v, float lo, float hi, float &out);
+static void haRoomSet(const HaRoom *r, time_t until);
 static void haMessage(const char *payload, uint16_t len);
 static void haGif(const char *payload, uint16_t len);
 static void haGifSearchSet(const char *payload, uint16_t len);
@@ -109,9 +113,10 @@ static uint32_t      haLostSeen = 0;         // haLink().lost as last reported
 // out when it moved by its step since it was last sent, at most every
 // haSettings.minS, and unchanged still every haSettings.maxMin, so Home
 // Assistant sees the sensor alive (haSendValues()). Inside the clock they are
-// read as often as they need: the light five times a second, the room every
-// 5 s.
-enum HaValueId : uint8_t { HA_VALUE_LIGHT, HA_VALUE_TEMP, HA_VALUE_HUM, HA_VALUE_COUNT };
+// read as often as they need: the light five times a second. (Until
+// 2026-11-04 also the wall clock board's temperature and humidity, from its
+// SHTC3, which the board warmed too much.)
+enum HaValueId : uint8_t { HA_VALUE_LIGHT, HA_VALUE_COUNT };
 struct HaValue {
   const char *suffix;   // its topic past the clock's prefix
   float step;           // what it must move by to count as changed
@@ -121,8 +126,6 @@ struct HaValue {
 };
 static HaValue haValues[HA_VALUE_COUNT] = {
   { "light",       0.10f, true,  0, 0 },   // 10 %, at least 1 lx (Peter, 2026-10-22)
-  { "temperature", 0.20f, false, 0, 0 },   // 0.2 C
-  { "humidity",    1.00f, false, 0, 0 },   // 1 %
 };
 const unsigned long HA_RETRY_MS = 60UL * 1000UL;   // after the client failed to start
 const unsigned long HA_STOP_WAIT_MS = 2000;        // the hotspot waits this long for the goodbye
@@ -211,16 +214,14 @@ void haBuildAnnounce() {
   l.announce[1] = "";
   if (luxOK) { haSensorConfig(l.announce[1], dev, "Light", "light", "illuminance", "lx", -1); }
 #if BOARD_WAVESHARE_WALL
-  // The room's temperature and humidity, from the board's SHTC3. A board
-  // without one announces neither (no topic).
+  // Until 2026-11-04 the wall clock announced the sensors Temperature and
+  // Humidity, from its board's SHTC3, which the board warmed too much. Their
+  // configs are taken back (an empty retained config), so Home Assistant
+  // drops the entities; the room now comes from Home Assistant (haRoom()).
   snprintf(l.announceTopic[2], sizeof(l.announceTopic[2]), "homeassistant/sensor/%s/temperature/config", id);
   snprintf(l.announceTopic[3], sizeof(l.announceTopic[3]), "homeassistant/sensor/%s/humidity/config", id);
   l.announce[2] = "";
   l.announce[3] = "";
-  if (climateOK) {
-    haSensorConfig(l.announce[2], dev, "Temperature", "temperature", "temperature", "°C", 1);
-    haSensorConfig(l.announce[3], dev, "Humidity", "humidity", "humidity", "%", 0);
-  }
 #endif
 
   // GIFs on request (Peter, 2026-10-23): a search field that keeps its text,
@@ -379,20 +380,6 @@ bool haValueNow(uint8_t i, float &v, char *payload, size_t size) {
       v = luxAvg;   // the filtered light the brightness follows
       snprintf(payload, size, "%ld", lroundf(v));
       return true;
-#if BOARD_WAVESHARE_WALL
-    case HA_VALUE_TEMP: {
-      if (!roomValid) { return false; }
-      v = roomTempNow();
-      long t = lroundf(v * 10.0f);   // tenths, without the C library's float printing
-      snprintf(payload, size, "%s%ld.%ld", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10);
-      return true;
-    }
-    case HA_VALUE_HUM:
-      if (!roomValid) { return false; }
-      v = roomHumNow();
-      snprintf(payload, size, "%ld", lroundf(v));
-      return true;
-#endif
     default:
       return false;
   }
@@ -484,6 +471,7 @@ void haApply(const HaIn &m) {
       haGifSearchDue = haGifMatchesDue = true;
       haRestDue = true;
       haDropItems();   // the broker sends the retained ones anew at once
+      haRoomSet(nullptr, 0);   // and the room's
       Console.printf("Home Assistant: connected to %s:%u\n", haSettings.host, haSettings.port);
       break;
     case HA_IN_DISCONNECTED:
@@ -512,6 +500,8 @@ void haApply(const HaIn &m) {
         }
       } else if (strncmp(m.topic, "item/", 5) == 0) {
         haItem(m.topic + 5, m.payload, m.len);
+      } else if (strcmp(m.topic, "room") == 0) {
+        haRoom(m.payload, m.len);
       } else if (strcmp(m.topic, "message") == 0) {
         // The broker sets the retain flag only on a kept message it hands out
         // at a (re)connect, never on one it passes on live: such a message
@@ -657,6 +647,92 @@ void haItem(const char *name, const char *payload, uint16_t len) {
   it.until = (time_t)until;
   it.tag   = itemTag(name);   // a new text keeps the alert; switched from info to alert it comes up again
   bandPut(it);
+}
+
+// The room's climate from Home Assistant: what came last, and until when it
+// counts (0: none).
+static HaRoom haRoomIs = {};
+static time_t haRoomUntil = 0;
+
+// mpclock/<id>/room, retained: JSON temperature (C), humidity (%) and until
+// (Unix time). until is required, as an item's: a retained message says
+// nothing of its age, and a clock started after Home Assistant had gone
+// would show the last values for ever. A value that is no number - null
+// from a template, "unavailable", or none - or out of its range is left out;
+// with neither left, or an empty payload, the room is shown no more.
+void haRoom(const char *payload, uint16_t len) {
+  if (len == 0) { haRoomSet(nullptr, 0); return; }
+  JsonDocument doc;
+  DeserializationError e = deserializeJson(doc, payload, len);
+  if (e || !doc.is<JsonObject>()) {
+    Console.printf("Home Assistant: the room is no JSON object (%s)\n", e ? e.c_str() : "another JSON value");
+    return;
+  }
+  long long until = doc["until"].as<long long>();
+  if (until <= 0) {
+    Console.println("Home Assistant: the room has no until (Unix time) - not taken");
+    return;
+  }
+  HaRoom r = {};
+  r.hasTemp = haRoomValue(doc["temperature"], -40.0f, 85.0f, r.temp);
+  r.hasHum  = haRoomValue(doc["humidity"], 0.0f, 100.0f, r.hum);
+  if (!r.hasTemp && !r.hasHum) {
+    Console.println("Home Assistant: the room has neither a temperature nor a humidity");
+    haRoomSet(nullptr, 0);
+    return;
+  }
+  if (clockIsSet() && (time_t)until <= clockNow()) { haRoomSet(nullptr, 0); return; }
+  haRoomSet(&r, (time_t)until);
+}
+
+// A number, or a string that is one (a template that quoted the state),
+// within lo..hi.
+bool haRoomValue(JsonVariant v, float lo, float hi, float &out) {
+  float x;
+  if (v.is<float>()) {
+    x = v.as<float>();
+  } else if (v.is<const char *>()) {
+    const char *s = v.as<const char *>();
+    char *end = nullptr;
+    x = strtof(s, &end);
+    if (end == s || *end != '\0') { return false; }
+  } else {
+    return false;
+  }
+  if (!(x >= lo && x <= hi)) { return false; }   // NaN too
+  out = x;
+  return true;
+}
+
+// The room as it now stands (nullptr: none), the band's turn anew when it
+// changed, and a console line when it came or went.
+void haRoomSet(const HaRoom *r, time_t until) {
+  bool had = haRoomUntil != 0;
+  bool same = r && had && r->hasTemp == haRoomIs.hasTemp && r->hasHum == haRoomIs.hasHum &&
+              (!r->hasTemp || lroundf(r->temp * 10.0f) == lroundf(haRoomIs.temp * 10.0f)) &&
+              (!r->hasHum || lroundf(r->hum) == lroundf(haRoomIs.hum));
+  if (r) { haRoomIs = *r; }
+  haRoomUntil = r ? until : 0;
+  if (!r && had) { Console.println("Home Assistant: no room any more"); }
+  if (r && (!had || consoleLevel >= 2)) {
+    Console.printf("Home Assistant: the room %s%.1f C, %s%.0f %%\n", r->hasTemp ? "" : "(no) ", r->hasTemp ? r->temp : 0.0f,
+                   r->hasHum ? "" : "(no) ", r->hasHum ? r->hum : 0.0f);
+  }
+#if BAND_ON_PANEL
+  if (!same) { bandLocalDone = false; }   // the band's room anew, not at the next minute
+#else
+  (void)same;
+#endif
+}
+
+bool haRoomNow(HaRoom &r) {
+  if (haRoomUntil == 0) { return false; }
+  if (clockIsSet() && haRoomUntil <= clockNow()) {
+    haRoomSet(nullptr, 0);   // its until has passed: Home Assistant has not sent it again
+    return false;
+  }
+  r = haRoomIs;
+  return true;
 }
 
 // mpclock/<id>/message: for `seconds` (HA_MESSAGE_S unless it says, 5 to

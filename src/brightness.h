@@ -2,9 +2,10 @@
    brightness.h - the panel's brightness: the light sensor (a BH1750 or a
    VEML7700) and the brightness it sets, the manual levels and the
    auto-brightness trims the menu steps through, the brightness while a GIF
-   plays, the perceptual fade
-   (Classic clicks: UP held) - and, on the wall clock, the room's temperature
-   and humidity from the SHTC3 beside the sensor.
+   plays, the perceptual fade (Classic clicks: UP held). (Until 2026-11-04 also
+   the room's temperature and humidity from the wall clock board's SHTC3,
+   which the board warmed too much; the room now comes from Home Assistant,
+   home_assistant.h.)
 
    A module of its own since 2026-10-22 (code review of 2026-10-14, point 10).
    ------------------------------------------------------------------------- */
@@ -50,20 +51,5 @@ void    brightnessStep(int delta);   // by whole levels, or trims with auto brig
 // The perceptually linear fade (UP held in the profile "Classic clicks").
 void fadeStart();
 void fadeStep();
-
-#if BOARD_WAVESHARE_WALL
-// ---- The room climate (the wall clock's SHTC3) -------------------------------------
-extern bool  climateOK;   // found at start-up
-extern bool  roomValid;   // a reading came
-extern float roomTemp;    // degrees Celsius, filtered (the sensor's own, the board's warmth not taken off)
-extern float roomHum;     // percent relative humidity, filtered (the sensor's own)
-void  climateBegin();     // at start-up: the SHTC3
-void  climateUpdate();    // on every pass: a measurement started, or its reading taken
-float roomTempNow();      // the room's temperature: the sensor's less the board's warmth
-float roomHumNow();       // the room's humidity, worked out for the room's temperature
-// The web app's Sensors section: the SHTC3's warmth. Says whether it is
-// stored, or nothing changed.
-bool  applySensorParams(const String &q);
-#endif
 
 #endif  // BRIGHTNESS_H

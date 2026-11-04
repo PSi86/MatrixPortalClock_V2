@@ -11,17 +11,6 @@ uint8_t i2cBoardFound[16];
 uint8_t  sensorTries[SENSOR_COUNT] = {};
 uint16_t sensorsSeen    = 0;
 uint16_t sensorsMissing = 0;
-uint16_t sensorWarmth   = 0;
-#if BOARD_WAVESHARE_WALL
-// The web app's key for it (settings_table.h): degrees with one decimal from
-// the web app, tenths in /api/state. A stored one is checked where the
-// record is read (sensorsCheck()).
-static const uint16_t SENSOR_WARMTH_NONE = 0;
-static const SettingParam SENSOR_PARAMS[] = {
-  { "toff", 0, 2, PARAM_TENTHS, 0, 0, SENSOR_WARMTH_MAX, LOAD_KEEP, nullptr },
-};
-SettingsTable sensorTable = SETTING_TABLE(sensorWarmth, SENSOR_WARMTH_NONE, SENSOR_PARAMS);
-#endif
 static SettingsStore<SensorRecord> sensorStore;
 
 // The onboard LIS3DH (0x19), a VEML7700 (0x10), a BH1750 (0x23), a DS3231
@@ -43,7 +32,7 @@ void i2cScan() {
 
 #if BOARD_WAVESHARE_WALL
 // Which of its parts answer - the codecs 0x18 and 0x40, the PCF85063 0x51,
-// the QMI8658 0x6B, the SHTC3 0x70.
+// the QMI8658 0x6B, the SHTC3 0x70 (not used).
 void boardBusScan() {
   Console.print("Board I2C bus:");
   uint8_t n = 0;
@@ -63,9 +52,9 @@ void boardBusScan() {
 }
 #endif
 
-// The record: the sensors seen and the SHTC3's warmth.
+// The record: the sensors seen.
 bool saveSensorRecord() {
-  SensorRecord rec = { SENSOR_RECORD_MAGIC, sensorsSeen, sensorWarmth };
+  SensorRecord rec = { SENSOR_RECORD_MAGIC, sensorsSeen, 0 };
   return sensorStore.write(rec);
 }
 
@@ -74,7 +63,6 @@ void sensorsCheck() {
   SensorRecord rec = { SENSOR_RECORD_MAGIC, 0, 0 };
   sensorStore.begin("sensors");
   if (!sensorStore.read(rec) || rec.magic != SENSOR_RECORD_MAGIC) { rec = { SENSOR_RECORD_MAGIC, 0, 0 }; }
-  sensorWarmth = rec.warmth <= SENSOR_WARMTH_MAX ? rec.warmth : 0;
   uint16_t supported = sensorsSupported(), found = 0;
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     if (sensorTries[i]) { found |= (uint16_t)(1 << i); }

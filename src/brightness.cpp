@@ -1,21 +1,15 @@
 // The panel's brightness: the light sensor, the brightness it sets, the
-// manual levels and trims, the perceptual fade - and the wall clock's room
-// climate, from the sensor beside it (brightness.h).
+// manual levels and trims, the perceptual fade (brightness.h).
 #include "brightness.h"
 
 #include <math.h>
 #include <BH1750FVI.h>
 #include "clock_state.h"
-#include "web_server.h"
-#include "info_band.h"
 #include "face.h"        // FADE_GAMMA
 #include "gif_player.h"  // gifPlaying()
 #include "sensors.h"
 #include "settings.h"
 #include "veml7700.h"
-#if BOARD_WAVESHARE_WALL
-#include "shtc3.h"
-#endif
 
 // What only this module calls, ahead of its use.
 static bool luxRead(float &lux);
@@ -23,9 +17,6 @@ static uint8_t mapLuxToBrightness(float lux);
 static float luxMedian();
 static uint8_t levelBrightness(uint8_t level);
 static uint8_t trimBrightness(int8_t trim);
-#if BOARD_WAVESHARE_WALL
-static float saturationHpa(float t);
-#endif
 
 // Perceptual brightness fade (Classic clicks: UP held) ----------------------
 static const float FADE_PERIOD_MS = 2500.0f; // time for a full 0..1 perceptual sweep (FADE_GAMMA: face.h)
@@ -93,24 +84,6 @@ static const unsigned long AUTOBRIGHT_STEP_MS = 40; // the panel's new value at 
 // darker, 255 = much brighter) and effectiveBrightness is the result.
 uint8_t       effectiveBrightness = 128;
 
-#if BOARD_WAVESHARE_WALL
-// The room's temperature and humidity: the board's SHTC3 (shtc3.h), read
-// every CLIMATE_READ_MS - room air changes slowly, and the chip sleeps in
-// between, so it hardly warms itself - and filtered over CLIMATE_TAU_MS, so
-// the band and Home Assistant do not follow the sensor's last digit.
-static Shtc3         climate;
-bool          climateOK = false;         // found at start-up
-bool          roomValid = false;         // a reading came
-float         roomTemp = 0.0f;           // degrees Celsius, filtered
-float         roomHum = 0.0f;            // percent relative humidity, filtered
-static unsigned long roomAt = 0;                // millis() of the last reading
-static unsigned long climateStartedAt = 0;      // millis() a measurement was started; 0 = none under way
-static unsigned long climateDueAt = 0;          // millis() the last one was due
-static uint16_t      climateFailures = 0;       // readings that did not come, since start-up
-static const unsigned long CLIMATE_READ_MS = 5000;
-static const float   CLIMATE_TAU_MS = 30000.0f;
-#endif
-
 /* ======================================================================
    Auto-brightness: the ambient light sensor drives the master brightness
    ====================================================================== */
@@ -153,15 +126,6 @@ bool luxRead(float &lux) {
   lux = lightMeter.getLux();
   return lightMeter.getError() == BH1750FVI_OK;
 }
-
-#if BOARD_WAVESHARE_WALL
-// The board's SHTC3, the room's temperature and humidity, on its own bus.
-void climateBegin() {
-  sensorTries[SENSOR_CLIMATE] = sensorBegin(SENSOR_CLIMATE, []() { return climate.begin(Wire1); });
-  climateOK = sensorTries[SENSOR_CLIMATE] != 0;
-  if (climateOK) { Console.printf("SHTC3 found, ID 0x%04X\n", climate.id()); }
-}
-#endif
 
 // Map a measured lux value to a master brightness using the configurable
 // endpoints: lux <= luxDark -> brightMin, lux >= luxBright -> brightMax, linear
@@ -280,80 +244,6 @@ void updateBrightness() {
   matrix.retintStep();   // a new brightness reaches the wall's rows a few at a time
 #endif
 }
-
-#if BOARD_WAVESHARE_WALL
-// On every pass: every CLIMATE_READ_MS a measurement started, and read
-// Shtc3::MEASURE_MS later, so the loop never waits for it.
-void climateUpdate() {
-  if (!climateOK) { return; }
-  if (climateStartedAt != 0) {
-    if (millisNow - climateStartedAt < Shtc3::MEASURE_MS) { return; }
-    climateStartedAt = 0;
-    float t, h;
-    if (!climate.read(t, h)) {
-      if (++climateFailures <= 10) { Console.println("SHTC3: no reading"); }
-      return;
-    }
-    if (!roomValid) {
-      roomTemp = t;
-      roomHum = h;
-      roomValid = true;
-      Console.printf("SHTC3: %.1f C, %.0f %% humidity\n", t, h);
-    } else {
-      float a = 1.0f - expf(-(float)(millisNow - roomAt) / CLIMATE_TAU_MS);
-      roomTemp += (t - roomTemp) * a;
-      roomHum += (h - roomHum) * a;
-    }
-    roomAt = millisNow;
-    if (consoleLevel >= 2) {   // a running figure (console.h)
-      Console.printf("Room %.2f C %.1f %% -> %.2f C %.1f %%\n", t, h, roomTemp, roomHum);
-    }
-    return;
-  }
-  if (climateDueAt != 0 && millisNow - climateDueAt < CLIMATE_READ_MS) { return; }
-  climateDueAt = millisNow ? millisNow : 1;
-  if (climate.start()) {
-    climateStartedAt = millisNow ? millisNow : 1;
-  } else if (++climateFailures <= 10) {
-    Console.println("SHTC3: did not start a measurement");
-  }
-}
-
-// The web app's Sensors section: the SHTC3's warmth (toff, degrees with one
-// decimal, 0 to 20); absent keeps it. Says whether it is stored, or nothing
-// changed.
-bool applySensorParams(const String &q) {
-  uint16_t was = sensorWarmth;
-  settingsApply(sensorTable, [&q](const char *key) { return getParam(q, key); }, false);   // SENSOR_PARAMS
-  if (sensorWarmth == was) { return true; }
-  bandLocalDone = false;   // the band's room anew
-  Console.printf("SHTC3: %u.%u C warmer than the room\n", sensorWarmth / 10, sensorWarmth % 10);
-  return saveSensorRecord();
-}
-
-// Water's saturation vapour pressure at t degrees Celsius, in hPa (Magnus,
-// over water).
-float saturationHpa(float t) {
-  return 6.112f * expf(17.62f * t / (243.12f + t));
-}
-
-// The room's temperature: the SHTC3's, filtered, less the board's warmth
-// (sensorWarmth).
-float roomTempNow() {
-  return roomTemp - sensorWarmth / 10.0f;
-}
-
-// The room's humidity. The air at the sensor holds as much water as the
-// room's, but it is warmer there, so its relative humidity is lower: worked
-// out for the room's temperature through the saturation vapour pressure - a
-// fixed share off would be wrong. The conversion also scales the sensor's
-// own error (about x1.8 from 34 to 24 C). At most 100 %.
-float roomHumNow() {
-  if (sensorWarmth == 0) { return roomHum; }
-  float h = roomHum * saturationHpa(roomTemp) / saturationHpa(roomTempNow());
-  return h > 100.0f ? 100.0f : h;
-}
-#endif
 
 // The brightness the panel runs at: the clock's, and while a GIF plays the
 // higher of the GIFs' own lowest (gifSettings.minBright) and a multiple of the

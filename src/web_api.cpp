@@ -255,14 +255,11 @@ static void apiStatusInto(JsonDocument &d) {
   d["fwTrial"] = fwOnTrial;   // a new firmware's trial ends while the page is open
   // Below 10 lx two decimals: the VEML7700's steps there are 0.0336 lx.
   if (lastLux >= 0) { d["lux"] = serialized(String(lastLux, lastLux < 10.0f ? 2 : 1)); } else { d["lux"] = nullptr; }
-#if BOARD_WAVESHARE_WALL
-  if (roomValid) {   // the room's, filtered and corrected; absent without the sensor
-    d["temp"] = serialized(String(roomTempNow(), 1));
-    d["hum"] = lroundf(roomHumNow());
-    d["tempSensor"] = serialized(String(roomTemp, 1));   // as the sensor reads, for its warmth
-    d["humSensor"] = lroundf(roomHum);
+  HaRoom room;
+  if (haRoomNow(room)) {   // the room's, from Home Assistant; each absent without it
+    if (room.hasTemp) { d["temp"] = serialized(String(room.temp, 1)); }
+    if (room.hasHum)  { d["hum"] = lroundf(room.hum); }
   }
-#endif
   d["clockSet"] = clockIsSet();
   if (clockIsSet()) {
     time_t local = clockNow() + tzTotalOffset();
@@ -334,7 +331,7 @@ static void apiState(Print &c) {
   panel.add(BOARD_PANEL_H);
 
   JsonObject s = d["settings"].to<JsonObject>();
-  for (uint8_t i = 0; i < SETTINGS_TABLE_COUNT; i++) { settingsJson(*SETTINGS_TABLES[i], s); }   // each as its table has it: wf .. toff
+  for (uint8_t i = 0; i < SETTINGS_TABLE_COUNT; i++) { settingsJson(*SETTINGS_TABLES[i], s); }   // each as its table has it
   s["tz"] = settings.tzOffset;
   JsonArray dirs = s["dirs"].to<JsonArray>();
   for (uint8_t i = 0; i < 6; i++) { dirs.add(settings.classic.dir[i]); }
@@ -868,9 +865,6 @@ static void apiSave(Print &c, const String &body, bool &closeHotspot) {
   stored &= saveRestSettings();
   applyFeedParams(body);
   stored &= saveFeedSettings();
-#if BOARD_WAVESHARE_WALL
-  stored &= applySensorParams(body);
-#endif
   if (!stored) {
     Console.println("Settings from the web app: NOT all stored, the flash could not be written");
     sendJsonError(c, 500, "Not saved in full: the clock could not write its flash. The settings work now; "

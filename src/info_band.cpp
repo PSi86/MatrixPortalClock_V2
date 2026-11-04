@@ -7,6 +7,7 @@
 #include "clock_state.h"
 #include "clock_time.h"
 #include "console.h"
+#include "home_assistant.h"   // the room's climate (haRoomNow())
 #include "item_icons.h"   // ICON_SIZE and the icons' names
 #include "notices.h"
 #include "sensors.h"
@@ -361,16 +362,22 @@ static void bandLocalUpdate() {
   bandRoomLines(bandLocal[TURN_ROOM - BAND_LOCAL_FIRST]);
 }
 
-// The room's temperature and humidity from the board's SHTC3, filtered and
-// corrected for its warmth: "Indoor 22.4°C | humidity 48%". Off until it gave
-// a reading.
+// The room's temperature and humidity, from a sensor of Home Assistant's
+// (haRoomNow()): "Indoor 22.4°C | humidity 48%", or the part it sent. Off
+// while none is current. (Until 2026-11-04 from the board's SHTC3, which the
+// board warmed too much.)
 static void bandRoomLines(BandLocal &l) {
-  l.on = roomValid;
+  HaRoom r;
+  l.on = haRoomNow(r);
   l.icon = ICON_INDOOR;
-  if (!roomValid) { l.text[0] = '\0'; return; }
-  long t = lroundf(roomTempNow() * 10.0f);   // tenths, without the C library's float printing
-  snprintf(l.text, sizeof(l.text), "Indoor %s%ld.%ld°C | humidity %ld%%", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10,
-           lroundf(roomHumNow()));
+  if (!l.on) { l.text[0] = '\0'; return; }
+  char temp[16] = "", hum[24] = "";
+  if (r.hasTemp) {
+    long t = lroundf(r.temp * 10.0f);   // tenths, without the C library's float printing
+    snprintf(temp, sizeof(temp), " %s%ld.%ld°C", t < 0 ? "-" : "", labs(t) / 10, labs(t) % 10);
+  }
+  if (r.hasHum) { snprintf(hum, sizeof(hum), " | humidity %ld%%", lroundf(r.hum)); }
+  snprintf(l.text, sizeof(l.text), "Indoor%s%s", temp, hum);
 }
 
 // The band's picture as the turn stands, onto the wall.

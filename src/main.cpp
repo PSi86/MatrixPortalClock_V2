@@ -28,7 +28,7 @@ Todo Concept:
 #include "settings.h"       // the clock's stored settings
 #include "wifi_station.h"   // the home WiFi and the station joined to it
 #include "time_sync.h"      // where the time comes from, and the zone it is shown in
-#include "brightness.h"     // the panel's brightness, the light sensor, the room climate
+#include "brightness.h"     // the panel's brightness and the light sensor
 #include "band_items.h"     // the info band's items, from every source
 #include "feeds.h"          // when the info band's own sources are fetched
 #include "notices.h"        // the items on the 64x32 clock: notices and info cards
@@ -147,7 +147,7 @@ uint8_t orientStable = 0;         // consecutive polls the candidate has held
 const unsigned long ORIENT_POLL_MS = 250; // ~4 Hz orientation polling
 const uint8_t ORIENT_DEBOUNCE = 3;        // polls a new orientation must persist
 
-// (The light sensor, the brightness it sets and the room climate: brightness.h.)
+// (The light sensor and the brightness it sets: brightness.h.)
 
 //Time Related Variables
 uint16_t panelHz = 0;            // measured panel refresh rate, 0 until the first measurement
@@ -346,7 +346,6 @@ void setup(void) {
   // the board's QMI8658; before loadFaceKeys(), which asks what was found
   sensorTries[SENSOR_MOTION] = sensorBegin(SENSOR_MOTION, []() { return knock.imuBegin(Wire1); });
   knock.begin(Wire1, sensorTries[SENSOR_MOTION] != 0);
-  climateBegin();         // and its SHTC3, the room's temperature and humidity
 #endif
   sensorsCheck();         // which of those found before are missing now
   loadFaceKeys();         // needs to know which sensors were found
@@ -517,9 +516,6 @@ void loop(void) {
 #endif
     updateOrientation();// the info screen and the preview follow the panel as well
     updateBrightness();// same brightness logic during AP (info screen + clock preview)
-#if BOARD_WAVESHARE_WALL
-    climateUpdate();   // the room's temperature and humidity, for the web app
-#endif
     updateApDisplay(); // AP-info screen until a client connects, then a live clock preview
 #if BAND_ON_PANEL
     bandHide();        // no band beside the hotspot's screens
@@ -543,9 +539,6 @@ void loop(void) {
   updateOrientation();  // rotate the display to match how the panel is held
   updateKnock();        // a knock does what the Inputs page maps it to
   updateBrightness();   // resolve the brightness for every screen (manual or auto)
-#if BOARD_WAVESHARE_WALL
-  climateUpdate();      // the room's temperature and humidity
-#endif
   updateScreenTimeouts();
   restUpdate();         // Normal, Calm or Off; Off takes the panel from the plain face, and gives it back
   panelWatch();         // when the face's change ends, for who takes the panel next
@@ -1174,9 +1167,6 @@ SettingsBlobStore faceStores[FACE_BLOB_COUNT];
 // names of the choices and what the web app needs to send them back.
 SettingsTable *const SETTINGS_TABLES[] = {
   &clockTable, &tetrisBlob.table, &muncherBlob.table, &aliensBlob.table, &snakeBlob.table, &uiTable, &gifTable, &decorTable, &restTable, &feedTable,
-#if BOARD_WAVESHARE_WALL
-  &sensorTable,
-#endif
 };
 const uint8_t SETTINGS_TABLE_COUNT = sizeof(SETTINGS_TABLES) / sizeof(SETTINGS_TABLES[0]);
 

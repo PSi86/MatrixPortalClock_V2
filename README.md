@@ -78,19 +78,14 @@ in the wall's own 192x128 LEDs.
 - **Real-time clock:** the board's own PCF85063, with a coin cell in its socket
   J4 if wanted, and a DS3231 on the GPIO header before it (see
   [The wall clock's own real-time clock](#the-wall-clocks-own-real-time-clock-pcf85063)).
-- **Room temperature and humidity:** the board's Sensirion SHTC3 (0x70 on its
-  own bus), read every 5 s and filtered over 30 s; shown in the web app under
-  the panel's preview, in the info band, and sent to Home Assistant. It sits on
-  the board beside the ESP32-S3 and its regulators, which warm it: on
-  2026-10-22 it read 34.5 °C and 27 % in a room of about 24 °C and 50 %.
-  **Board warmth** (System section, under the sensors; 0 to 20.0 °C, 10.5 on
-  the wall since then) is taken off its temperature, and the humidity is worked
-  out for the room's temperature through the saturation vapour pressure
-  (Magnus) - the air at the sensor holds as much water as the room's, only
-  warmer: 34.5 °C / 27 % became 24.0 °C / 49 %. The conversion also scales the
-  sensor's own error, about x1.8 from 34 to 24 °C, so the humidity is a guide
-  within a few percent. Whether the warmth stays the same with the panels'
-  brightness and the time of day is to be seen in Home Assistant.
+- **Room temperature and humidity** from Home Assistant: one of its sensors,
+  handed to the clock by an automation, in the info band and in the web app
+  under the panel's preview (see
+  [Example: the room's temperature and humidity](#example-the-rooms-temperature-and-humidity-wall-clock)).
+  The board's own Sensirion SHTC3 (0x70 on its bus) is not used since
+  2026-11-04: it sits beside the ESP32-S3 and its regulators, which warm it -
+  34.5 °C and 27 % in a room of about 24 °C and 50 % (2026-10-22) - and even
+  with a correction for that warmth its values were too far off.
 - **Panels dark before an upload:** `POST /api/black` (the web app's
   interface, in every build) switches the panels black until the next start -
   black data through every row, then dark through the OE time, as for Off
@@ -195,8 +190,7 @@ dropped before the web server and WiFi work that followed.
 - **Sensors looked for at every start**, each up to 3 times, 50 ms apart: the
   LIS3DH (orientation, knock; MatrixPortals), BH1750 and VEML7700 (light), DS3231
   (real-time clock), PAJ7620U2 (gestures), and on the wall clock its board's
-  PCF85063 (real-time clock), QMI8658 (knock) and SHTC3 (room temperature and
-  humidity). The clock remembers which it
+  PCF85063 (real-time clock) and QMI8658 (knock). The clock remembers which it
   had; one of those missing at a start makes the panel say `SENSOR` for 2 s
   and turns the status pixel red. The web app's System section lists every
   sensor - found, found on a later try, missing, or not fitted - with its
@@ -872,8 +866,12 @@ Setting it up:
    the card says what is missing.
 3. The clock shows up in Home Assistant as the device *Matrix Clock xxxxxx*, by
    MQTT discovery, with an entity **Message** (notify), the GIF entities below,
-   with a light sensor a sensor **Light** (lux), and on the wall clock the sensors
-   **Temperature** (°C) and **Humidity** (%) from its board's SHTC3.
+   with a light sensor a sensor **Light** (lux). (Until 2026-11-04 the wall
+   clock also had the sensors **Temperature** and **Humidity**, from its
+   board's SHTC3; it takes their configs back, so Home Assistant removes the
+   entities, and their history stays in its database. The room now comes the
+   other way, from Home Assistant to the clock - see
+   [the example](#example-the-rooms-temperature-and-humidity-wall-clock).)
    [GIFs on request](#gifs-on-request):
    - **GIF search**, a text field that keeps what was typed into it - a GIF's
      name, a keyword, several keywords apart by commas, or nothing. The clock
@@ -904,14 +902,12 @@ Setting it up:
    time for a while while the clock is off. An automation can set the mode -
    Off when nobody is home and Automatic again when someone comes back, or Calm
    while the TV is on.
-4. **Values to Home Assistant** in the same section: a sensor's value goes out
-   when it changed - the light by 10 % (at least 1 lx), the temperature by
-   0.2 °C, the humidity by 1 % - but at most every *At most every* seconds
-   (60 unless set, 5 to 255), and unchanged still every *At least every*
-   minutes (15 unless set, 1 to 255), so Home Assistant sees the sensor
-   alive. Inside the clock the sensors are read as often as they need (the
-   light five times a second, the room every 5 s). Saving them does not start
-   the link anew.
+4. **Values to Home Assistant** in the same section: the light goes out when
+   it changed by 10 % (at least 1 lx), but at most every *At most every*
+   seconds (60 unless set, 5 to 255), and unchanged still every *At least
+   every* minutes (15 unless set, 1 to 255), so Home Assistant sees the
+   sensor alive. Inside the clock the light is read five times a second.
+   Saving them does not start the link anew.
 
 `xxxxxx` is the end of the clock's host name, the last three bytes of its MAC;
 the card shows its topics.
@@ -934,8 +930,8 @@ the card shows its topics.
 | `mpclock/<id>/display/wake` | Home Assistant to the clock | the button **Wake display** (any payload): the time for a while, if the clock is off |
 | `mpclock/<id>/status` | the clock to Home Assistant, retained | `online`, or `offline` (also as the last will) |
 | `mpclock/<id>/light` | the clock to Home Assistant | lux (the filtered light the brightness follows), as set under step 4 |
-| `mpclock/<id>/temperature`, `mpclock/<id>/humidity` | the clock to Home Assistant (wall clock) | °C with one decimal, % whole, as set under step 4 |
-| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/button/<id>/gif_again/config`, `homeassistant/button/<id>/gif_all/config`, `homeassistant/select/<id>/display_mode/config`, `homeassistant/sensor/<id>/display/config`, `homeassistant/button/<id>/display_wake/config`, `homeassistant/sensor/<id>/light/config`, `.../temperature/config`, `.../humidity/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back (as does `homeassistant/sensor/<id>/gif_matches/config`, a sensor of a test build) |
+| `mpclock/<id>/room` | Home Assistant to the clock, **retained** | JSON `temperature` (°C), `humidity` (%) and `until` (Unix time, required, as an item's); either value may be missing or `null`; an empty payload takes it away ([the example](#example-the-rooms-temperature-and-humidity-wall-clock)) |
+| `homeassistant/notify/<id>/message/config`, `homeassistant/text/<id>/gif/config`, `homeassistant/button/<id>/gif/config`, `homeassistant/button/<id>/gif_again/config`, `homeassistant/button/<id>/gif_all/config`, `homeassistant/select/<id>/display_mode/config`, `homeassistant/sensor/<id>/display/config`, `homeassistant/button/<id>/display_wake/config`, `homeassistant/sensor/<id>/light/config` | the clock to Home Assistant, retained | MQTT discovery; a sensor not found at start-up takes its config back (as do `.../temperature/config` and `.../humidity/config`, the wall clock's sensors until 2026-11-04, and `homeassistant/sensor/<id>/gif_matches/config`, a sensor of a test build) |
 
 `<name>` is 1 to 23 of `a-z A-Z 0-9 _ -`. The icons: `clear-day`, `clear-night`,
 `partly-day`, `partly-night`, `cloudy`, `fog`, `drizzle`, `rain`, `snow`,
@@ -1010,6 +1006,57 @@ content: |
   - {{ o }}
   {% endfor %}
 ```
+
+### Example: the room's temperature and humidity (wall clock)
+
+The wall clock shows the room's temperature and humidity in its band
+("Indoor 22.4°C | humidity 48%") and in the web app, from a sensor Home
+Assistant has - a thermometer somewhere in the room, away from the clock's
+own warmth. (Its board's SHTC3 read too far off: beside the ESP32-S3 and its
+regulators, some 10 °C above the room.)
+
+1. In Home Assistant, note the entity IDs of the sensor's temperature and
+   humidity (the sensor's device page lists them).
+2. On the clock: the Home Assistant link as above, nothing else.
+3. A new automation in YAML, with your entity IDs (in the trigger and in the
+   payload) and your clock's topic:
+
+```yaml
+alias: "Matrix Clock: the room"
+description: "The room's temperature and humidity for the wall clock"
+triggers:
+  - trigger: state
+    entity_id:
+      - sensor.living_room_temperature   # your sensor's entity IDs
+      - sensor.living_room_humidity
+    to: null                             # a new value, not an attribute alone
+  - trigger: time_pattern
+    minutes: "/10"
+  - trigger: homeassistant
+    event: start
+actions:
+  - action: mqtt.publish
+    data:
+      topic: mpclock/cc6414/room   # your clock's id in place of cc6414
+      retain: true
+      payload: >-
+        {{ {"temperature": states('sensor.living_room_temperature') | float(none),
+            "humidity": states('sensor.living_room_humidity') | float(none),
+            "until": (now() + timedelta(minutes=30)).timestamp() | int} | to_json }}
+mode: queued
+```
+
+The clock takes the message whenever it comes, and at every connect from the
+broker, which keeps it (retained). `until` is required, as for an item: a
+kept message says nothing of its age, so without it a clock started after
+Home Assistant had gone would show the last values for ever. The automation
+sends at least every 10 minutes, so with 30 minutes the values stay; when
+Home Assistant stops, the clock shows no room 30 minutes later at the
+latest. A sensor that is unavailable gives `null` (`float(none)`), and the
+clock leaves that value out; with both left out it shows no room. Either
+value alone works as well - a sensor without humidity shows "Indoor 22.4°C".
+Values outside -40 to 85 °C or 0 to 100 % count as missing. An empty retained
+payload on the topic takes the room away.
 
 ### Example: public holidays
 
@@ -1358,8 +1405,10 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
   - **the moon**: its phase and how much of it is lit, and the next full or new
     moon, whichever comes first ("First quarter | 53% lit" / "Full moon Mon 26 Oct"),
     from its longitude, within about half an hour (`src/sky.h`);
-  - **the room**: "Indoor 22.4°C" / "humidity 48%" from the board's SHTC3,
-    with a thermometer in a house, once it gave a reading.
+  - **the room**: "Indoor 22.4°C" / "humidity 48%", or the part it has, from
+    a sensor of Home Assistant's
+    ([the example](#example-the-rooms-temperature-and-humidity-wall-clock)),
+    with a thermometer in a house, while its `until` has not passed.
 - **Turns:** each stands 6 s, one that runs through as long as that takes.
 - **Lines** (one rule for every text in the band, Peter's of 2026-10-18): a
   text's parts are set apart by ` | ` - the clock's own, those it puts together
@@ -2522,7 +2571,7 @@ reach.
 | `time_sync.h/.cpp` | NTP, the real-time clocks, the clock's daylight saving, the sync's state |
 | `wifi_station.h/.cpp` | the home WiFi's credentials and the station joined to it |
 | `sensors.h/.cpp` | the sensors found at the start and remembered, and the ones missing now |
-| `brightness.h/.cpp` | the light sensor, the auto-brightness, the fade, the room climate |
+| `brightness.h/.cpp` | the light sensor, the auto-brightness, the fade |
 | `feeds.h/.cpp`, `band_items.h/.cpp` | when the info band's own sources are fetched; the items from every source |
 | `notices.h/.cpp` | the items on the 64x32 clock: notices, info cards, the info round, the icons drawn |
 | `info_band.h/.cpp` | the info band on the wall clock |
@@ -2534,7 +2583,7 @@ reach.
 | `hotspot.h/.cpp` | the clock's own access point, its captive portal and its screens |
 | `web_server.h/.cpp`, `web_api.h/.cpp` | the web server beside the loop; the web app and its JSON interface |
 | `fw_update.h/.cpp` | a new firmware over the web: the upload, its checks, the trial and the confirmation |
-| `lan_access.h/.cpp`, `home_assistant.h/.cpp` | the web app on the home network; the Home Assistant link |
+| `lan_access.h/.cpp`, `home_assistant.h/.cpp` | the web app on the home network; the Home Assistant link, and the room's climate it brings |
 | `console_cmds.h/.cpp`, `debug_stats.h/.cpp` | the console's commands; the debug build's running figures |
 | `face*.h`, `muncher.h`, `aliens.h`, `snake.h`, `tetris_digits.h`, `snake_paths.h` | the watchfaces |
 | `board_hal.h`, `knock.h`, `veml7700.h`, `ha_link.h`, `band_data.h`, `gif_card.h`, ... | drivers and clients, header-only |
