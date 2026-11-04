@@ -20,7 +20,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "board_hal.h"   // which board: the sensors it supports
-#include "settings_table.h"
 
 enum SensorId : uint8_t {
   SENSOR_ACCEL,      // LIS3DH, on the MatrixPortals' board
@@ -29,7 +28,7 @@ enum SensorId : uint8_t {
   SENSOR_GESTURE,    // PAJ7620U2
   SENSOR_BOARD_RTC,  // PCF85063, on the wall clock's board
   SENSOR_MOTION,     // QMI8658, on the wall clock's board
-  SENSOR_CLIMATE,    // SHTC3, on the wall clock's board
+  SENSOR_CLIMATE,    // SHTC3, on the wall clock's board - no longer used (2026-11-04), its id kept for the record
   SENSOR_LIGHT_VEML, // VEML7700 (the sensor record keeps a bit per id: new ones go last)
   SENSOR_COUNT
 };
@@ -49,7 +48,7 @@ inline const SensorKind SENSOR_KINDS[SENSOR_COUNT] = {
   { "gesture",  "PAJ7620U2", "gestures",            0x73, false },
   { "boardRtc", "PCF85063",  "real-time clock",     0x51, true },
   { "motion",   "QMI8658",   "knock",               0x6B, true },
-  { "climate",  "SHTC3",     "room temperature, humidity", 0x70, true },
+  { "climate",  "SHTC3",     "not used",            0x70, true },   // never listed: not supported
   { "lightVeml", "VEML7700", "auto-brightness",     0x10, false },
 };
 
@@ -62,7 +61,9 @@ inline uint16_t sensorsSupported() {
 #if BOARD_WAVESHARE_WALL
   m |= 1 << SENSOR_BOARD_RTC;
   m |= 1 << SENSOR_MOTION;
-  m |= 1 << SENSOR_CLIMATE;
+  // Not the board's SHTC3 any more (2026-11-04): beside the ESP32-S3 and its
+  // regulators it read some 10 C above the room (2026-10-22), and with a
+  // correction for that still too far off. The room comes from Home Assistant.
 #endif
   return m;
 }
@@ -111,13 +112,12 @@ inline uint8_t sensorBegin(SensorId id, bool (*begin)()) {
 }
 
 // What the sketch keeps from start to start: the sensors found at an earlier
-// start and not forgotten, one bit each by SensorId; and how much warmer the
-// wall clock's SHTC3 is than the room, which the web app sets.
+// start and not forgotten, one bit each by SensorId.
 const uint32_t SENSOR_RECORD_MAGIC = 0x534E5352UL;   // "SNSR"
 struct SensorRecord {
   uint32_t magic;
   uint16_t seen;
-  uint16_t warmth;   // tenths of a degree taken off the SHTC3's temperature (was unused, 0)
+  uint16_t reserved;   // 0; until 2026-11-04 the SHTC3's warmth, which the web app set
 };
 
 // ---- At this start and from start to start (sensors.cpp) ---------------------
@@ -131,15 +131,6 @@ extern uint8_t i2cBoardFound[16];   // the same on the board's own bus (boardBus
 extern uint8_t  sensorTries[SENSOR_COUNT];
 extern uint16_t sensorsSeen;
 extern uint16_t sensorsMissing;
-// How much warmer the wall clock's SHTC3 is than the room, in tenths of a
-// degree, as the web app sets it: the board around it warms it (34.3 C and
-// 31 % in a room of about 24 C and 50 %, 2026-10-22). Taken off its
-// temperature, and its humidity worked out for the room's (roomTempNow()).
-extern uint16_t sensorWarmth;
-const uint16_t SENSOR_WARMTH_MAX = 200;   // 20.0 C
-#if BOARD_WAVESHARE_WALL
-extern SettingsTable sensorTable;   // the web app's key for it (settings_table.h)
-#endif
 
 // At boot: which addresses answer on the I2C bus, for the console and the
 // config page's system section.

@@ -1,8 +1,8 @@
 /* -------------------------------------------------------------------------
    home_assistant.h - the Home Assistant link: when the MQTT client
    (ha_link.h, beside the loop) runs, what arrives - items for the info
-   band, messages - and what the clock sends: its sensors' values, its
-   discovery. Its settings - the broker's address, the clock's login there,
+   band, messages, the room's climate - and what the clock sends: its light
+   sensor's value, its discovery. Its settings - the broker's address, the clock's login there,
    how often values go out - in a blob of its own (NVS key "ha"); the
    password is kept as typed, as the home WiFi's is: the broker needs it so.
    Like every source that is pushed to the clock it needs a stored home WiFi
@@ -28,5 +28,16 @@ void haStopLink(bool wait);
 void haSettingsInto(JsonObject o);   // the settings, for /api/state (the password never)
 void haStatusInto(JsonObject o);     // what the link does, for /api/status
 void apiHa(Print &c, const String &body);   // /api/ha: on or off, broker, port, user, password, intervals
+
+// The room's temperature and humidity, from a sensor of Home Assistant's
+// (mpclock/<id>/room): for the wall clock's band and the web app. Either may
+// be missing. haRoomNow() is false while none is current - none came since
+// the link connected, or its until has passed.
+struct HaRoom {
+  bool  hasTemp, hasHum;
+  float temp;   // degrees Celsius
+  float hum;    // percent relative humidity
+};
+bool haRoomNow(HaRoom &r);
 
 #endif  // HOME_ASSISTANT_H

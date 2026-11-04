@@ -13,6 +13,10 @@
                                payload takes it away
      mpclock/<id>/message      Home Assistant to the clock: JSON text, title,
                                level, icon, seconds
+     mpclock/<id>/room         Home Assistant to the clock, retained: the room's
+                               temperature and humidity from one of its
+                               sensors, JSON temperature, humidity and until
+                               (required, as an item's); empty: none
      mpclock/<id>/gif          Home Assistant to the clock: a GIF by its name
                                or a keyword, JSON gif and replace, or the
                                text alone; empty or {} any GIF
@@ -45,11 +49,12 @@
                                display, the time for a while while Off
      mpclock/<id>/status       the clock to Home Assistant, retained: online,
                                or offline as the last will
-     mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux
-     mpclock/<id>/temperature  and the room's temperature (C) and humidity (%),
-     mpclock/<id>/humidity     on the wall clock (its board's SHTC3); each value
+     mpclock/<id>/light        the clock to Home Assistant: the light sensor's lux,
                                when it changed, at most and at least as often
-                               as the web app sets
+                               as the web app sets (until 2026-11-04 also
+                               .../temperature and .../humidity from the wall
+                               clock board's SHTC3, whose configs it now takes
+                               back)
      homeassistant/<component>/<id>/<object>/config
                                the clock to Home Assistant, retained: MQTT
                                discovery, so the clock is a device without YAML
@@ -114,8 +119,8 @@ struct HaCmd {
 
 // What the worker and the client's task read while the client exists: the
 // loop sets it before HA_CMD_START and leaves it alone until HA_IN_STOPPED.
-// Discovery configs: the message entity, the light, the room's temperature
-// and humidity, for GIFs on request the search field, the buttons Play GIF
+// Discovery configs: the message entity, the light, the wall clock's former
+// temperature and humidity (taken back), for GIFs on request the search field, the buttons Play GIF
 // and GIF again, the matches, and the button Play all matches; and the
 // display's mode, its state and the button Wake display.
 const uint8_t HA_ANNOUNCE_MAX = 12;
@@ -129,6 +134,7 @@ struct HaLink {
   char     status[40] = "";           // the status topic
   char     items[40] = "";            // the items' filter, "mpclock/06c16c/item/+"
   char     message[40] = "";          // the message topic
+  char     room[40] = "";             // the room's climate, from Home Assistant
   char     gif[40] = "";              // GIFs on request: a request of an automation's
   char     gifSearch[48] = "";        // the search field's text, to the clock
   char     gifPlay[48] = "";          // the button Play GIF
@@ -150,6 +156,7 @@ inline void haTopics(const char *id) {
   snprintf(l.status, sizeof(l.status), "%sstatus", l.prefix);
   snprintf(l.items, sizeof(l.items), "%sitem/+", l.prefix);
   snprintf(l.message, sizeof(l.message), "%smessage", l.prefix);
+  snprintf(l.room, sizeof(l.room), "%sroom", l.prefix);
   snprintf(l.gif, sizeof(l.gif), "%sgif", l.prefix);
   snprintf(l.gifSearch, sizeof(l.gifSearch), "%sgif/search", l.prefix);
   snprintf(l.gifPlay, sizeof(l.gifPlay), "%sgif/play", l.prefix);
@@ -194,6 +201,7 @@ inline void haEvent(void *, esp_event_base_t, int32_t id, void *data) {
       haPost(m);   // first: the loop clears the old items before the retained ones come again
       esp_mqtt_client_subscribe(e->client, l.items, 1);
       esp_mqtt_client_subscribe(e->client, l.message, 1);
+      esp_mqtt_client_subscribe(e->client, l.room, 1);
       esp_mqtt_client_subscribe(e->client, l.gif, 1);
       esp_mqtt_client_subscribe(e->client, l.gifSearch, 1);
       esp_mqtt_client_subscribe(e->client, l.gifPlay, 1);

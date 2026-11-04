@@ -237,7 +237,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="meta"><div class="meta-k">Brightness</div><div class="meta-v" id="mBright">–</div></div>
         <div class="meta"><div class="meta-k">Light</div><div class="meta-v" id="mLux">–</div></div>
         <div class="meta"><div class="meta-k">Time</div><div class="meta-v" id="mTime">–</div></div>
-        <div class="meta wide" id="mRoomBox" hidden><div class="meta-k">Room</div><div class="meta-v" id="mRoom">–</div></div>
+        <div class="meta wide" id="mRoomBox" hidden><div class="meta-k">Room, from Home Assistant</div><div class="meta-v" id="mRoom">–</div></div>
       </div>
       <div class="preview-note">The panel as the clock draws it now, shown at full strength. What you change shows on the clock at once; Save keeps it.</div>
     </div>
@@ -644,7 +644,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         <div class="row"><label class="lbl" for="haUser">User</label><input type="text" id="haUser" maxlength="63" autocomplete="off"></div>
         <div class="row"><div><label class="lbl" for="haPw">Password</label><div class="hint">Of the Home Assistant user for the clock.</div></div><input type="password" id="haPw" maxlength="63" autocomplete="new-password"></div>
         <div class="row">
-          <div><div class="lbl">Values to Home Assistant</div><div class="hint">The light in lux, and on the wall clock the room’s temperature and humidity. A change goes out at most this often; an unchanged value still at least this often, so Home Assistant sees the sensor alive.</div></div>
+          <div><div class="lbl">Values to Home Assistant</div><div class="hint">The light in lux. A change goes out at most this often; an unchanged value still at least this often, so Home Assistant sees the sensor alive.</div></div>
           <div class="pair"><label>At most every (s)<input type="number" id="haMin" min="5" max="255"></label><label>At least every (min)<input type="number" id="haMax" min="1" max="255"></label></div>
         </div>
         <div class="row stack"><div class="note" id="haTopics"></div></div>
@@ -667,10 +667,6 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       </div>
       <div class="card">
         <div class="row stack"><div><div class="lbl">Sensors</div><div class="hint" id="sensorHint"></div></div><dl class="kv" id="sensorKv"></dl></div>
-        <div class="row" id="toffRow" hidden>
-          <div><label class="lbl" for="toff">Board warmth</label><div class="hint">How much warmer the SHTC3 is than the room, in °C: the board around it warms it. Taken off its temperature, and its humidity worked out for the room’s. <span id="toffNow"></span></div></div>
-          <input type="number" id="toff" step="0.1">
-        </div>
       </div>
     </section>
   </main>
@@ -1269,8 +1265,6 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     });
     row('I2C bus', '', S.hw.i2c.length ? S.hw.i2c.join(' ') : 'nothing answers');
     if (S.hw.i2cBoard) { row('Board’s bus', '', S.hw.i2cBoard.length ? S.hw.i2cBoard.join(' ') : 'nothing answers'); }
-    $('#toffRow').hidden = !has('toff');
-    if (has('toff')) { setNumber('toff', 'toff', 10); }
   }
   function forgetSensor(s) {
     api('/api/sensor-forget', 'id=' + encodeURIComponent(s.id)).then(function () { return load(); })
@@ -1380,9 +1374,11 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }
     $('#mBright').textContent = st.bright; $('#effB').textContent = st.bright;
     $('#mLux').textContent = st.lux === null || st.lux === undefined ? 'no sensor' : st.lux + ' lux';
-    $('#mRoomBox').hidden = st.temp === undefined;
-    if (st.temp !== undefined) { $('#mRoom').textContent = st.temp + ' °C · ' + st.hum + ' %'; }
-    $('#toffNow').textContent = st.tempSensor === undefined ? '' : 'The sensor itself reads ' + st.tempSensor + ' °C and ' + st.humSensor + ' % now.';
+    var room = [];
+    if (st.temp !== undefined) { room.push(st.temp + ' °C'); }
+    if (st.hum !== undefined) { room.push(st.hum + ' %'); }
+    $('#mRoomBox').hidden = !room.length;
+    $('#mRoom').textContent = room.join(' · ') || '–';
     $('#mTime').textContent = st.clockSet ? st.clock + ' · ' + st.src : 'not set';
     $('#timeLine').textContent = st.timeLine;
     $('#timeDot').className = 'dot ' + (st.clockSet ? 'ok' : 'warn');
