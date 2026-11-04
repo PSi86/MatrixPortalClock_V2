@@ -39,5 +39,10 @@ struct HaRoom {
   float hum;    // percent relative humidity
 };
 bool haRoomNow(HaRoom &r);
+// The web app's switch for what Home Assistant sends (feedShown(SHOW_HA))
+// changed: off, its items, messages and room go from the panel, and what
+// comes is not taken; on again, the broker sends the retained items and
+// room anew. The link itself - its entities, GIFs, the display - runs on.
+void haShownChanged();
 
 #endif  // HOME_ASSISTANT_H

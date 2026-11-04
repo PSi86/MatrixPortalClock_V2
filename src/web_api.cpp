@@ -315,6 +315,9 @@ static void apiStatusInto(JsonDocument &d) {
     o["shows"] = itemShowsHere(bandItems[i]);
     o["ha"] = bandItems[i].feed == SOURCE_HA;
   }
+#if BAND_ON_PANEL
+  bandTurnsInto(d["turns"].to<JsonArray>());   // what the band takes in turn, from every source (the web app's list)
+#endif
   haStatusInto(d["haStatus"].to<JsonObject>());
 }
 

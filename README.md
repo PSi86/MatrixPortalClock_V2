@@ -267,6 +267,12 @@ Building from source, as below. To flash a released image instead, see
    [Flash layout](#flash-layout-s3)); a board still on Adafruit's TinyUF2 layout
    is moved over once, as described there.
 
+   **Without a cable:** a clock that runs this firmware takes the next one
+   over the home network - `.pio/build/<env>/firmware.bin` in the web app's
+   System section, or by `curl` (see
+   [Firmware updates over the web](#firmware-updates-over-the-web)); the wall
+   clock, once hung, takes its updates only this way.
+
    **Console:** only the debug builds have one (`adafruit_matrixportal_s3_debug`,
    `waveshare_wallclock_debug`, and the `..._verbose` ones) and the test builds;
    the release builds write nothing and take no commands (since 2026-10-21), not
@@ -800,8 +806,13 @@ The wall clock shows these items in its info band below the face (see
 [The info band on the wall clock](#the-info-band-on-the-wall-clock)); the
 MatrixPortal S3, which has no room for a band, shows them over its face (see
 [Alerts, messages and info on the panel](#alerts-messages-and-info-on-the-panel)).
-The web app's section **Info** lists what the clock knows, and the console what
-was fetched.
+The web app's section **Info** switches each source on and off - the three the
+clock fetches, what Home Assistant sends (its items, messages and the room; the
+link itself runs on), and on the wall clock the band's own turns - and lists
+what the panel shows from all of them: on the wall clock **Now on the info
+screen**, every turn of the band in its order with where it comes from, the one
+on show marked; on the MatrixPortal S3 **Now on the cards**. The console says
+what was fetched.
 
 The clock fetches only a few key-free sources that are likely to last, and
 everything else is to come through Home Assistant:
@@ -908,6 +919,13 @@ Setting it up:
    every* minutes (15 unless set, 1 to 255), so Home Assistant sees the
    sensor alive. Inside the clock the light is read five times a second.
    Saving them does not start the link anew.
+5. **Home Assistant** in the web app's section **Info**, beside the clock's
+   other sources: whether what Home Assistant sends shows on the panel - its
+   items, messages and the room. Off, they go from the panel at once, and what
+   comes meanwhile is not taken (a message is not kept for later); on again,
+   the clock subscribes anew and the broker sends the retained items and the
+   room once more. The link itself - its entities, GIFs on request, the
+   display mode - runs on either way.
 
 `xxxxxx` is the end of the clock's host name, the last three bytes of its MAC;
 the card shows its topics.
@@ -1387,7 +1405,10 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
 - **Order:** the alerts first, then the messages, each in the order they came,
   then the information as on the 64x32 clock's cards (DWD warnings, rain soon,
   the weather, the air quality, Home Assistant's items), then the clock's own,
-  worked out on the clock once a minute without the internet:
+  worked out on the clock once a minute without the internet. The web app's
+  section **Info** switches the clock change, the date, the sun and the moon
+  off and on, the room with what Home Assistant sends; the status has no
+  switch:
   - **the clock's status**, only while its status pixel is red: a new home WiFi
     that does not join ("Home WiFi does not join" / its name), or a time sync
     that keeps failing ("Time sync is failing" / "last good 18 Oct 03:00"),
@@ -1478,9 +1499,9 @@ status every 2 s - as the longest time between two passes of the loop in each
 the page. Before, when every request held the loop until it was answered, it
 was 32.5 and 42 ms, with 113 gaps over 20 ms in a minute. On the wall clock
 (its GIFs and extras held back) 5.3 and 9.4 ms, against 3.3 and 9.1 ms without
-the page and 39.6 and 60.5 ms before, with 161 gaps over 20 ms. Only a GIF
-pack's upload still holds the loop while it is written, with its progress on
-the panel.
+the page and 39.6 and 60.5 ms before, with 161 gaps over 20 ms. Only an
+upload - a GIF pack, a firmware - still holds the loop while it is written,
+with its progress on the panel.
 
 **The interface** — the page uses nothing else, so tools can too. Writes are
 form-encoded POSTs, answers are JSON:
@@ -1488,7 +1509,7 @@ form-encoded POSTs, answers are JSON:
 | Request | What it does |
 |---|---|
 | `GET /api/state` | settings, the lists the page offers, hardware found (with `hw.sensors`: every sensor the board supports, found on which try, missing), WiFi, system |
-| `GET /api/status` | brightness, light, time and its source, rotation, screen, Normal, Calm or Off and why (`rest`), the info band's sources and items, the Home Assistant link (the page asks every 2 s) |
+| `GET /api/status` | brightness, light, time and its source, rotation, screen, Normal, Calm or Off and why (`rest`), the room from Home Assistant (`temp`, `hum`, each only when it has one), the info band's sources and items, on the wall clock the band's turns as it takes them (`turns`: text, icon, `from`, `until`, `alert`, `now`), the Home Assistant link (`haStatus`, with `shown`: the Info section's switch), whether a new firmware is on trial (`fwTrial`) (the page asks every 2 s) |
 | `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
 | `POST /api/live` | tries settings live, in RAM only; when a preview was asked for (`pv=1`, or a new watchface animation), `{"preview": "played"}` or `"refused"` - it plays now or not at all |
 | `POST /api/save` | stores everything the page shows |
@@ -1497,10 +1518,11 @@ form-encoded POSTs, answers are JSON:
 | `POST /api/black` | the wall clock: its panels dark until the next start, before an upload |
 | `POST /api/time` | sets the time, from the phone or typed |
 | `POST /api/wifi`, `/api/forget` | stores or deletes the home WiFi |
-| `POST /api/sensor-forget` | `id=<sensor>` (`accel`, `light`, `rtc`, `gesture`, `boardRtc`, `motion`, as `hw.sensors` in `/api/state` lists them): a sensor this clock no longer has is no longer reported missing |
+| `POST /api/sensor-forget` | `id=<sensor>` (`accel`, `light`, `lightVeml`, `rtc`, `gesture`, `boardRtc`, `motion`, as `hw.sensors` in `/api/state` lists them): a sensor this clock no longer has is no longer reported missing |
 | `POST /api/gif` | plays a GIF now (on the face) |
 | `POST /api/card` | the wall clock: reads its microSD card again, as soon as no GIF plays |
 | `POST /api/pack` | a GIF pack as the body (`application/octet-stream`), written into the ffat partition (see [GIF pack](#gif-pack)) |
+| `POST /api/firmware` | a `firmware.bin` as the body (`application/octet-stream`), written into the program slot the clock does not run from; it restarts with it on trial (see [Firmware updates over the web](#firmware-updates-over-the-web)) |
 | `POST /api/lan` | continuous network access on or off, a new password |
 | `POST /api/ha` | the Home Assistant link: on or off, broker, port, user, password (empty keeps the stored one) |
 | `POST /api/restart` | restarts the clock |

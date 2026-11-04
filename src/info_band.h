@@ -12,6 +12,7 @@
 #define INFO_BAND_H
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include "board_hal.h"   // BAND_ON_PANEL
 
 #if BAND_ON_PANEL
@@ -26,6 +27,10 @@ extern unsigned long bandStatusTestAt;   // millis() the console showed the cloc
 void bandUpdate();    // on every pass outside the hotspot: the turn on show, the next when it is due
 void bandRestart();   // the band starts again at its first turn
 void bandHide();      // while the hotspot has the panel: the band dark, once
+// The turns as the band takes them, in its order, for the web app's list
+// "Now on the info screen": each one's text, icon, where it comes from,
+// until when (an item's), whether it is an alert, whether it is on show now.
+void bandTurnsInto(JsonArray a);
 #if defined(CLOCK_DEBUG)
 void bandSelfTest();
 #endif

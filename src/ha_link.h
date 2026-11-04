@@ -102,7 +102,7 @@ struct HaIn {
 
 // ---- From the loop ---------------------------------------------------------------
 
-enum HaCmdKind : uint8_t { HA_CMD_START, HA_CMD_STOP, HA_CMD_SEND, HA_CMD_ANNOUNCE };
+enum HaCmdKind : uint8_t { HA_CMD_START, HA_CMD_STOP, HA_CMD_SEND, HA_CMD_ANNOUNCE, HA_CMD_RESUBSCRIBE };
 
 struct HaCmd {
   uint8_t kind;           // HaCmdKind
@@ -335,6 +335,14 @@ inline void haWorker(void *) {
         break;
       case HA_CMD_ANNOUNCE:
         haAnnounce();
+        break;
+      case HA_CMD_RESUBSCRIBE:
+        // A subscription asked for again: the broker sends what it keeps for
+        // it (MQTT 3.1.1, 3.8.4), the items and the room shown again.
+        if (l.client) {
+          esp_mqtt_client_subscribe(l.client, l.items, 1);
+          esp_mqtt_client_subscribe(l.client, l.room, 1);
+        }
         break;
     }
   }

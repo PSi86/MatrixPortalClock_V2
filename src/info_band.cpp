@@ -197,7 +197,7 @@ const char *const BAND_DAYS[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "T
 const char *const BAND_MONTHS[] = { "January", "February", "March", "April", "May", "June", "July",
                                     "August", "September", "October", "November", "December" };
 
-// The date in the clock's language: "Sunday 18 October" and "2026, week 42".
+// The date in the clock's language: "Sunday 18 October 2026" and "week 42".
 static void bandDateLines(BandLocal &l) {
   l.on = clockIsSet();
   l.icon = ICON_CALENDAR;
@@ -359,7 +359,15 @@ static void bandLocalUpdate() {
   bandDateLines(bandLocal[TURN_DATE - BAND_LOCAL_FIRST]);
   bandSunLines(bandLocal[TURN_SUN - BAND_LOCAL_FIRST]);
   bandMoonLines(bandLocal[TURN_MOON - BAND_LOCAL_FIRST]);
-  bandRoomLines(bandLocal[TURN_ROOM - BAND_LOCAL_FIRST]);
+  bandRoomLines(bandLocal[TURN_ROOM - BAND_LOCAL_FIRST]);   // with what Home Assistant sends (its switch: haShownChanged())
+  // Switched off in the web app's Info section (feedShown()). The status
+  // line has no switch: it says what is wrong.
+  static const struct { uint8_t turn, bit; } SWITCHED[] = {
+    { TURN_SHIFT, SHOW_SHIFT }, { TURN_DATE, SHOW_DATE }, { TURN_SUN, SHOW_SUN }, { TURN_MOON, SHOW_MOON },
+  };
+  for (const auto &s : SWITCHED) {
+    if (!feedShown(s.bit)) { bandLocal[s.turn - BAND_LOCAL_FIRST].on = false; }
+  }
 }
 
 // The room's temperature and humidity, from a sensor of Home Assistant's
@@ -481,6 +489,33 @@ static void bandNext() {
 }
 
 // Show notifications: the band again from its first item.
+void bandTurnsInto(JsonArray a) {
+  BandTurn list[BAND_ITEMS_MAX + BAND_LOCAL_COUNT];
+  uint8_t n = bandTurnList(list);
+  for (uint8_t k = 0; k < n; k++) {
+    const BandLocal *own = bandLocalOf(list[k]);
+    int8_t i = bandItemOf(list[k]);
+    if (!own && i < 0) { continue; }
+    JsonObject o = a.add<JsonObject>();
+    o["now"] = bandTurnSame(list[k], bandTurn);
+    if (own) {
+      o["text"] = own->text;
+      o["icon"] = own->icon;
+      o["from"] = list[k].kind == TURN_ROOM ? "Home Assistant" : "the clock";
+      continue;
+    }
+    const BandItem &it = bandItems[i];
+    char until[16];
+    bandWhen(until, sizeof(until), it.until);
+    o["text"] = it.text;
+    o["icon"] = bandIconOf(it);
+    o["alert"] = it.level == LEVEL_ALERT;
+    o["until"] = until;
+    o["from"] = it.feed == SOURCE_HA ? (isMessage(it) ? "Home Assistant, a message" : "Home Assistant")
+              : it.feed == FEED_WEATHER ? "weather" : it.feed == FEED_WARNINGS ? "DWD" : "air quality";
+  }
+}
+
 void bandRestart() {
   bandTurn   = { TURN_NONE, 0, 0 };
   bandTurnAt = 0;

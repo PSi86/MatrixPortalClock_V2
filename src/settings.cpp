@@ -178,7 +178,8 @@ bool saveDecorSettings() {
 // ---- The info band's sources ---------------------------------------------------------------
 
 const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
-                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS) | (1 << FEED_AIR)), 0, 0, 0, 1, 15, 0 };
+                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS) | (1 << FEED_AIR)), 0, 0, 0, 1, 15,
+                                     (uint8_t)((1 << SHOW_COUNT) - 1) };   // everything shown
 FeedSettings feedSettings;
 SettingsStore<FeedSettings> feedStore;
 // The web app's keys for them (settings_table.h). The place and the info
@@ -188,6 +189,13 @@ static const SettingParam FEED_PARAMS[] = {
   { "feedw",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_WEATHER,  0, LOAD_KEEP, nullptr },
   { "feeda",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_WARNINGS, 0, LOAD_KEEP, nullptr },
   { "feedq",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_AIR,      0, LOAD_KEEP, nullptr },
+  { "feedh",  SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_HA,       0, LOAD_KEEP, nullptr },   // what Home Assistant sends
+#if BAND_ON_PANEL
+  { "bdate",  SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_DATE,     0, LOAD_KEEP, nullptr },   // the band's own turns
+  { "bsun",   SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_SUN,      0, LOAD_KEEP, nullptr },
+  { "bmoon",  SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_MOON,     0, LOAD_KEEP, nullptr },
+  { "bshift", SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_SHIFT,    0, LOAD_KEEP, nullptr },
+#endif
   { "afr",    SETTING_FIELD(FeedSettings, frames), PARAM_CHECKBOX, 0, 0,             1, LOAD_KEEP, nullptr },
   { "lat",    0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },   // degrees, "" for none
   { "lon",    0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },

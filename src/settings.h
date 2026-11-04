@@ -151,7 +151,7 @@ bool saveDecorSettings();
 // sources are on. The sources and the items are in band_data.h, their
 // scheduling in feeds.h.
 #define FEED_SETTINGS_MAGIC 0xFEED
-#define FEED_SETTINGS_REV   3          // 1 = before frames, 2 = before the info round
+#define FEED_SETTINGS_REV   4          // 1 = before frames, 2 = before the info round, 3 = before shown
 struct FeedSettings {
   uint16_t magic;
   uint8_t  rev;
@@ -160,8 +160,12 @@ struct FeedSettings {
   uint8_t  located;     // 1 once a place is set; nothing is fetched before
   uint8_t  frames;      // 1: an alert's banner has a frame in its level's colour (rev 2)
   uint8_t  roundMinutes;   // minutes between info rounds on a clock without a band; 0 = none (rev 3)
-  uint8_t  reserved;
+  uint8_t  shown;       // one bit per ShowBit: what shows on the panel (rev 4; was reserved)
 };
+// What the web app's Info section switches on and off for the panel, besides
+// the sources fetched (on): what Home Assistant sends - its items, messages
+// and the room - and the wall clock's own turns in its band.
+enum ShowBit : uint8_t { SHOW_HA, SHOW_DATE, SHOW_SUN, SHOW_MOON, SHOW_SHIFT, SHOW_COUNT };
 static_assert(sizeof(FeedSettings) == 16, "FeedSettings keeps the size stored blobs have");
 extern const FeedSettings FEED_DEFAULTS;
 // The info round's choices, in minutes (0 = never): each divides the hour.
@@ -170,6 +174,7 @@ bool roundChoice(long minutes);   // one of them
 extern FeedSettings feedSettings;
 extern SettingsStore<FeedSettings> feedStore;
 extern SettingsTable feedTable;
+inline bool feedShown(uint8_t bit) { return (feedSettings.shown & (1 << bit)) != 0; }
 bool saveFeedSettings();
 
 #endif  // SETTINGS_H
