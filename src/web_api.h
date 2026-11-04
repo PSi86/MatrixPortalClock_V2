@@ -20,4 +20,13 @@ void webApi(Print &c, const String &path, bool isPost, const String &body, bool 
 void sendWebApp(Print &c);   // the page itself
 void apiPackUpload(WiFiClient &client, Print &out, long length);   // POST /api/pack: read at once, its progress on the panel
 
+// For an upload read at once (the GIF pack, a firmware): up to want bytes of
+// the body, fewer when it stops; the rest of a refused one read and dropped,
+// so the answer reaches the client; a fetch under way ended before the flash
+// writes; the panel showing how far it is.
+size_t uploadRead(WiFiClient &client, uint8_t *buf, size_t want);
+void   uploadDrain(WiFiClient &client, long left);
+void   uploadSettle(const char *what);
+void   drawUploadProgress(const char *title, uint32_t done, uint32_t total);
+
 #endif  // WEB_API_H

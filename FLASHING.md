@@ -21,7 +21,9 @@ Each release has two images per board:
   settings and the Home Assistant link go back to their defaults. GIFs already
   on the board stay.
 - **Update** (written at address `0x10000`): the clock alone. Settings, WiFi
-  and GIFs stay. Only for a board that already runs this clock.
+  and GIFs stay. Only for a board that already runs this clock. A clock with a
+  firmware that has the web update takes this file in its web app, without a
+  cable: see [Update over the web](#update-over-the-web).
 
 The wall image expects the six panels chained as described in the README's
 [Wall clock](README.md#wall-clock) section: the board feeds the bottom right
@@ -56,6 +58,29 @@ connect:
 The panel may freeze or go dark while the bootloader runs; that is harmless. On an **update** the clock lets the tool reset it by itself and none
 of this is needed. Should connecting ever fail, start the bootloader by hand
 and try again.
+
+## Update over the web
+
+Firmwares newer than v1.0.0 take an update in their web app: open it (the
+address the clock shows, or `http://matrixclock-xxxxxx.local`), go to
+**System → Firmware update**, choose the board's `...-update.bin`, and tap
+**Install** twice. The clock checks the file, writes it beside the firmware it
+runs, and restarts with it; the page reloads by itself. Settings, WiFi and
+GIFs stay. A file for the other board, a full image or an upload that breaks
+off is refused, and the clock keeps its firmware. A new firmware that does not
+run properly for its first minute - with the WiFi - gives way to the one
+before at the next start, and the System section says so.
+
+**Over USB after an update over the web:** the clock may then start its second
+program slot, and an update written at `0x10000` would not run. On the command
+line, erase the slot choice first, then write the update as below:
+
+```
+esptool --chip esp32s3 --port COM5 --before default-reset --after no-reset erase-region 0xe000 0x2000
+```
+
+In the browser there is no such step: use the web app's update, or the full
+image (which clears the settings).
 
 ## Before an update of the wall clock
 

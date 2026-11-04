@@ -4,6 +4,7 @@
 #include "clock_state.h"
 #include "debug_stats.h"
 #include "console.h"
+#include "fw_update.h"
 #include "hotspot.h"
 #include "lan_access.h"
 #include "settings_table.h"   // hexVal()
@@ -46,8 +47,8 @@ static unsigned long webAfterAt = 0;   // millis() they are done; 0 = none waits
    WEB_CONNS places is free; its request is read as far as it has arrived,
    answered whole into RAM once it is in, and the answer sent as far as the
    socket takes it, at most WEB_SEND_MAX bytes a pass. So no pass waits for
-   the network. Only a GIF pack's upload is still read at once
-   (apiPackUpload()), with its progress on the panel.
+   the network. Only an upload - a GIF pack, a firmware - is still read at
+   once (apiPackUpload(), apiFirmwareUpload()), with its progress on the panel.
    ---------------------------------------------------------------------- */
 
 // One pass: a new connection if one waits (listening: the hotspot's or the
@@ -143,12 +144,13 @@ static void webReadHead(WebConn &w) {
   if (millisNow - w.acceptedAt > WEB_HEAD_MS || !w.client.connected()) { webClose(w, true); }
 }
 
-// A form's body, as far as it has arrived; then the answer. A GIF pack's
-// upload reads its own (apiPackUpload()), and a body too large for a form is
-// not read.
+// A form's body, as far as it has arrived; then the answer. An upload - a GIF
+// pack, a firmware - reads its own (apiPackUpload(), apiFirmwareUpload()), and
+// a body too large for a form is not read.
 static void webReadBody(WebConn &w) {
   HttpRequest &r = w.req;
-  bool form = r.isPost && r.path != "/api/pack" && r.contentLength > 0 && r.contentLength <= (long)HTTP_BODY_MAX;
+  bool upload = r.path == "/api/pack" || r.path == "/api/firmware";
+  bool form = r.isPost && !upload && r.contentLength > 0 && r.contentLength <= (long)HTTP_BODY_MAX;
   if (form && (long)r.body.length() < r.contentLength) {
     if (r.body.length() == 0) { r.body.reserve(r.contentLength); }
     char buf[256];
@@ -185,6 +187,7 @@ static void webAnswer(WebConn &w) {
   if (r.path.startsWith("/api/")) {
     if (!w.lan || lanAuthorized(out, r.auth)) {
       if (r.isPost && r.path == "/api/pack") { apiPackUpload(w.client, out, r.contentLength); }
+      else if (r.isPost && r.path == "/api/firmware") { apiFirmwareUpload(w.client, out, r.contentLength, restart); }
       // A form too large to read (webReadBody()) is refused, not answered as
       // an empty one: /api/save would take every checkbox as off and store it.
       else if (r.isPost && r.contentLength > (long)HTTP_BODY_MAX) {

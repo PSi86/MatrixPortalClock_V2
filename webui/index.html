@@ -658,6 +658,12 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       <div class="card">
         <div class="row stack"><dl class="kv" id="sysKv"></dl></div>
         <div class="row"><div class="lbl">Restart</div><div class="ctl"><button class="btn" type="button" id="restart">Restart the clock</button></div></div>
+        <div class="row stack" id="fwRow" hidden>
+          <div><div class="lbl">Firmware update</div><div class="hint" id="fwHint"></div></div>
+          <div class="ctl"><button class="btn" type="button" id="fwPick">Choose a file</button><input type="file" id="fwFile" accept=".bin" hidden><button class="btn" type="button" id="fwSend" disabled>Install</button></div>
+          <progress id="fwProg" max="100" value="0" hidden></progress>
+          <div class="note" id="fwNote"></div>
+        </div>
       </div>
       <div class="card">
         <div class="row stack"><div><div class="lbl">Sensors</div><div class="hint" id="sensorHint"></div></div><dl class="kv" id="sensorKv"></dl></div>
@@ -1207,13 +1213,21 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     // System
     var y = S.system, kv = $('#sysKv'), mb = function (b) { return (b / 1048576).toFixed(2) + ' MB'; }, kb = function (b) { return Math.round(b / 1024) + ' KB'; };
     var up = y.uptime, upText = Math.floor(up / 86400) + ' d ' + Math.floor(up % 86400 / 3600) + ' h ' + Math.floor(up % 3600 / 60) + ' min';
-    var rows = [['Board', S.board + ', ' + S.panel[0] + '×' + S.panel[1] + ' panel'], ['Firmware', S.fw], ['Running for', upText + ' (at load)'],
+    var rows = [['Board', S.board + ', ' + S.panel[0] + '×' + S.panel[1] + ' panel'], ['Firmware', fwLine(), 'sysFw'], ['Running for', upText + ' (at load)'],
       ['Internal RAM', kb(y.heapFree) + ' free, ' + kb(y.heapLow) + ' at the lowest'], ['PSRAM', kb(y.psramFree) + ' free'],
-      ['Program', mb(y.program) + ' of ' + mb(y.programMax) + ' (' + (100 * y.program / y.programMax).toFixed(1) + ' %)'],
+      ['Program', mb(y.program) + ' of ' + mb(y.programMax) + ' (' + (100 * y.program / y.programMax).toFixed(1) + ' %), in ' + y.slot],
       ['Last start', y.reset + (y.bootStage ? '; the run before ended early, in start stage ' + y.bootStage : '')],
       ['Real-time clock', S.hw.rtc ? S.hw.rtcChip + (S.hw.rtcLost ? ', had lost power' : '') : 'none']];
     kv.innerHTML = '';
-    rows.forEach(function (r) { var dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = r[0]; dd.textContent = r[1]; kv.appendChild(dt); kv.appendChild(dd); });
+    rows.forEach(function (r) {
+      var dt = document.createElement('dt'), dd = document.createElement('dd');
+      dt.textContent = r[0]; dd.textContent = r[1]; if (r[2]) { dd.id = r[2]; }
+      kv.appendChild(dt); kv.appendChild(dd);
+    });
+    $('#fwRow').hidden = !y.updateMax;
+    $('#fwHint').textContent = 'A firmware.bin built for this clock’s board, the ' + S.board + ': written into its other program slot while it runs, '
+      + 'then the clock restarts with it. A new firmware is on trial until it has run a minute with the WiFi; one that does not get that far '
+      + 'gives way to the one before at the next start. Settings, WiFi and GIFs stay.';
     fillSensors();
     $('#railFoot').textContent = 'Firmware ' + S.fw + '. Changes show on the clock at once and stay after Save.';
     // Context
@@ -1360,6 +1374,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   var rot = 0, screenGif = false;
   function applyStatus(st) {
     if (st.feeds) { feedsNow = st.feeds; showNeeds(); }
+    if (S && S.system && st.fwTrial !== undefined && st.fwTrial !== S.system.fwTrial) {   // confirmed while the page is open
+      S.system.fwTrial = st.fwTrial;
+      if ($('#sysFw')) { $('#sysFw').textContent = fwLine(); }
+    }
     $('#mBright').textContent = st.bright; $('#effB').textContent = st.bright;
     $('#mLux').textContent = st.lux === null || st.lux === undefined ? 'no sensor' : st.lux + ' lux';
     $('#mRoomBox').hidden = st.temp === undefined;
@@ -1804,6 +1822,66 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     x.onerror = function () { finish('The upload broke off: the clock stopped answering.'); };
     x.send(packFile);
   });
+  // The System section's firmware line: the version, and whether it is on trial or an update gave way.
+  function fwLine() {
+    var y = S.system;
+    return S.fw + (y.fwTrial ? ' - new, on trial: it stays once it has run a minute with the WiFi' : '')
+      + (y.fwGaveWay ? ' - an update after it did not prove itself, so the clock went back to this one' : '');
+  }
+  var fwFile = null;
+  $('#fwPick').addEventListener('click', function () { $('#fwFile').click(); });
+  $('#fwFile').addEventListener('change', function () {
+    var f = this.files[0], max = S.system.updateMax;
+    fwFile = null; $('#fwSend').disabled = true; $('#fwProg').hidden = true;
+    if (!f) { $('#fwNote').textContent = ''; return; }
+    if (f.size < 1024 || f.size > max) {
+      $('#fwNote').textContent = '“' + f.name + '” has ' + kb(f.size) + ' KB; a firmware for this clock has at most ' + kb(max) + ' KB.';
+      return;
+    }
+    fwFile = f; $('#fwSend').disabled = false;
+    $('#fwNote').textContent = '“' + f.name + '”, ' + kb(f.size) + ' KB. The clock checks that it is a firmware for its board before it restarts with it.';
+  });
+  twoTap($('#fwSend'), 'Install', 'Tap again to install and restart', function () {
+    if (!fwFile) { return; }
+    var x = new XMLHttpRequest(), h = headers({ 'Content-Type': 'application/octet-stream' }), done = false;
+    x.open('POST', '/api/firmware');
+    Object.keys(h).forEach(function (k) { x.setRequestHeader(k, h[k]); });
+    $('#fwSend').disabled = true; $('#fwProg').hidden = false; $('#fwProg').value = 0;
+    $('#fwNote').textContent = 'Sending: the clock writes it as it arrives and shows how far it is on its panel.';
+    x.upload.onprogress = function (e) { if (e.lengthComputable) { $('#fwProg').value = Math.round(100 * e.loaded / e.total); } };
+    function fail(text) {
+      if (done) { return; }
+      done = true; $('#fwNote').textContent = text;
+      fwFile = null; $('#fwFile').value = '';
+    }
+    x.onload = function () {
+      var j = {};
+      try { j = JSON.parse(x.responseText); } catch (e) { /* not JSON */ }
+      if (x.status !== 200) { fail(j.error || ('The clock answered HTTP ' + x.status + '.')); return; }
+      done = true;
+      if (S.mode === 'ap') {
+        bye('Updating', 'Written in ' + (j.ms / 1000).toFixed(1) + ' s. The clock restarts with the new firmware; open the hotspot again from its menu to see it here.');
+        return;
+      }
+      bye('Updating', 'Written in ' + (j.ms / 1000).toFixed(1) + ' s. The clock restarts with the new firmware; this page reloads once the clock answers again.');
+      fwWaitForClock();
+    };
+    x.onerror = function () { fail('The upload broke off: the clock stopped answering. It keeps its firmware.'); };
+    x.send(fwFile);
+  });
+  // After an update: the page loads anew once the clock answers again, so it shows the firmware that runs.
+  function fwWaitForClock() {
+    var t0 = Date.now();
+    function poll() {
+      fetch('/api/status', { headers: headers(), cache: 'no-store' })
+        .then(function (r) { if (!r.ok) { throw new Error(); } location.reload(); })
+        .catch(function () {
+          if (Date.now() - t0 > 120000) { $('#coverN').textContent = 'The clock has not answered for two minutes. Reload this page to see which firmware runs.'; return; }
+          setTimeout(poll, 2000);
+        });
+    }
+    setTimeout(poll, 4000);   // the clock answers for a moment more before it restarts
+  }
   twoTap($('#forget'), 'Forget WiFi', 'Tap again to forget', function () {
     api('/api/forget', '').then(function (r) { showWifi(r.line, false); $('#ssid').value = ''; toast('The home WiFi is forgotten.'); }).catch(function () { toast('The clock did not answer.'); });
   });

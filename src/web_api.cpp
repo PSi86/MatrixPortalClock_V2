@@ -10,6 +10,7 @@
 #include "clock_time.h"
 #include "console.h"
 #include "feeds.h"
+#include "fw_update.h"
 #include "gif_player.h"
 #include "home_assistant.h"
 #include "hotspot.h"
@@ -47,9 +48,6 @@ static void apiGestures(Print &c);
 static void apiPanel(Print &c);
 static const char *gifAskedCode(GifAsked how);
 static void apiGifs(Print &c, const String &body);
-static size_t packRead(WiFiClient &client, uint8_t *buf, size_t want);
-static void packDrain(WiFiClient &client, long left);
-static void drawPackProgress(uint32_t done, uint32_t total);
 static void apiSetTime(Print &c, const String &q);
 static void apiSave(Print &c, const String &body, bool &closeHotspot);
 static void apiRest(Print &c, const String &body);
@@ -254,6 +252,7 @@ static const char *timeSourceText() {
 // info band's sources and items. Polled by the page.
 static void apiStatusInto(JsonDocument &d) {
   d["bright"] = effectiveBrightness;
+  d["fwTrial"] = fwOnTrial;   // a new firmware's trial ends while the page is open
   // Below 10 lx two decimals: the VEML7700's steps there are 0.0336 lx.
   if (lastLux >= 0) { d["lux"] = serialized(String(lastLux, lastLux < 10.0f ? 2 : 1)); } else { d["lux"] = nullptr; }
 #if BOARD_WAVESHARE_WALL
@@ -526,6 +525,10 @@ static void apiState(Print &c) {
   sys["program"] = programSize();
   const esp_partition_t *app = esp_ota_get_running_partition();
   sys["programMax"] = app ? app->size : 0;
+  sys["slot"] = app ? app->label : "?";      // the program slot it runs from
+  sys["updateMax"] = fwUpdateMax();          // what a firmware upload may have, 0: no update
+  sys["fwTrial"] = fwOnTrial;                // new by an update, not confirmed yet
+  sys["fwGaveWay"] = fwGaveWay;              // an update after this one did not prove itself
   sys["reset"] = resetReasonText();
   sys["bootStage"] = prevBootStage;
   sys["mac"] = WiFi.macAddress();   // the board's, as esptool prints it: a tool checks it before it writes
@@ -651,35 +654,35 @@ static void apiGifs(Print &c, const String &body) {
 // pack rather than a damaged one. The loop
 // waits for it - a full partition takes about half a minute - and the panel
 // shows how far it is.
-const uint32_t PACK_ERASE_BLOCK = 65536;            // erased ahead of the data, a flash block at a time
-const unsigned long PACK_READ_TIMEOUT_MS = 5000;    // the longest gap in the upload before it counts as broken off
-const unsigned long PACK_SETTLE_MS = 20000;         // the longest wait for a fetch under way before the writes begin
+const uint32_t PACK_ERASE_BLOCK = 65536;               // erased ahead of the data, a flash block at a time
+const unsigned long UPLOAD_READ_TIMEOUT_MS = 5000;    // the longest gap in an upload before it counts as broken off
+const unsigned long UPLOAD_SETTLE_MS = 20000;         // the longest wait for a fetch under way before the writes begin
 
 void apiPackUpload(WiFiClient &client, Print &out, long length) {
   if (!gifPackPart) {
     gifPackPart = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "ffat");
   }
   if (!gifPackPart) {
-    packDrain(client, length);
+    uploadDrain(client, length);
     sendJsonError(out, 500, "This clock has no partition for a GIF pack.");
     return;
   }
   if (length < (long)sizeof(GifPackHeader) || (uint32_t)length > gifPackPart->size) {
-    packDrain(client, length);
+    uploadDrain(client, length);
     String e = "Not a GIF pack this clock holds: it takes up to " + String(gifPackPart->size / 1024) + " KB.";
     sendJsonError(out, 400, e.c_str());
     return;
   }
   unsigned long started = millis();
   GifPackHeader h;
-  if (packRead(client, (uint8_t *)&h, sizeof(h)) != sizeof(h)) {
+  if (uploadRead(client, (uint8_t *)&h, sizeof(h)) != sizeof(h)) {
     sendJsonError(out, 400, "The upload broke off before the pack's header; the old pack stays.");
     return;
   }
   uint32_t indexBytes = (uint32_t)h.count * sizeof(GifPackEntry);
   if (memcmp(h.magic, "CLKGPACK", sizeof(h.magic)) != 0 || h.version != 1 || h.count == 0
       || h.count > GIF_PACK_COUNT_MAX || h.size != (uint32_t)length || sizeof(h) + indexBytes > h.size) {
-    packDrain(client, length - (long)sizeof(h));
+    uploadDrain(client, length - (long)sizeof(h));
     sendJsonError(out, 400, "Not a GIF pack this clock reads (scripts/gif_pack.py writes them); the old pack stays.");
     return;
   }
@@ -687,20 +690,7 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   // Nothing plays from the old pack while it is overwritten.
   if (screen == SCREEN_GIF) { closeScreen(); }
   gifPackForget();
-  // And nothing computes on core 0 beside the flash writes: each of them holds
-  // core 0 as well, and with a fetch's TLS handshake there too the idle task
-  // of core 0 did not run for 5 s - the task watchdog reset the clock in the
-  // middle of the pack (2026-10-23). A fetch or a card job under way ends
-  // first; none starts while the loop is in here.
-  unsigned long settleFrom = millis();
-  bool settled = feedsSettle(PACK_SETTLE_MS);
-#if BOARD_WAVESHARE_WALL
-  settled = gifCardSettle(PACK_SETTLE_MS) && settled;
-#endif
-  if (!settled || millis() - settleFrom >= 50) {
-    Console.printf("GIF pack: waited %lu ms for a fetch under way%s\n", millis() - settleFrom,
-                  settled ? "" : " - it still runs, the pack is written anyway");
-  }
+  uploadSettle("GIF pack");
 #if BOARD_WAVESHARE_WALL
   if (!gifFromCard)   // the card's GIFs stay as they are
 #endif
@@ -710,9 +700,9 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
   uint8_t *buf = (uint8_t *)malloc(4096);
   uint32_t at = sizeof(h), erasedTo = 0, shownAt = 0;
   bool ok = buf != nullptr;
-  drawPackProgress(0, h.size);
+  drawUploadProgress("GIF PACK", 0, h.size);
   while (ok && at < h.size) {
-    size_t n = packRead(client, buf, min(h.size - at, (uint32_t)4096));
+    size_t n = uploadRead(client, buf, min(h.size - at, (uint32_t)4096));
     if (n == 0) { ok = false; break; }
     // Erase ahead of the data, a block at a time; the first block takes the
     // old header with it.
@@ -723,7 +713,7 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
     }
     if (!ok || esp_partition_write(gifPackPart, at, buf, n) != ESP_OK) { ok = false; break; }
     at += n;
-    if (at - shownAt >= PACK_ERASE_BLOCK || at == h.size) { drawPackProgress(at, h.size); shownAt = at; }
+    if (at - shownAt >= PACK_ERASE_BLOCK || at == h.size) { drawUploadProgress("GIF PACK", at, h.size); shownAt = at; }
     delay(1);   // the rest of the loop is waiting; let the idle task in
   }
   free(buf);
@@ -759,8 +749,8 @@ void apiPackUpload(WiFiClient &client, Print &out, long length) {
 }
 
 // Up to want bytes of the request body: what arrives with no gap longer than
-// PACK_READ_TIMEOUT_MS; fewer when the client stops sending.
-static size_t packRead(WiFiClient &client, uint8_t *buf, size_t want) {
+// UPLOAD_READ_TIMEOUT_MS; fewer when the client stops sending.
+size_t uploadRead(WiFiClient &client, uint8_t *buf, size_t want) {
   size_t got = 0;
   unsigned long last = millis();
   while (got < want) {
@@ -771,7 +761,7 @@ static size_t packRead(WiFiClient &client, uint8_t *buf, size_t want) {
       continue;
     }
     if (!client.connected() && client.available() == 0) { break; }
-    if (millis() - last > PACK_READ_TIMEOUT_MS) { break; }
+    if (millis() - last > UPLOAD_READ_TIMEOUT_MS) { break; }
     delay(1);
   }
   return got;
@@ -780,17 +770,34 @@ static size_t packRead(WiFiClient &client, uint8_t *buf, size_t want) {
 // Reads and drops the rest of a body that is refused, so the client gets the
 // answer: closing the socket with data unread resets the connection, and the
 // answer goes with it (seen with a file that was no pack).
-static void packDrain(WiFiClient &client, long left) {
+void uploadDrain(WiFiClient &client, long left) {
   uint8_t buf[512];
   while (left > 0) {
-    size_t n = packRead(client, buf, (size_t)min(left, (long)sizeof(buf)));
+    size_t n = uploadRead(client, buf, (size_t)min(left, (long)sizeof(buf)));
     if (n == 0) { return; }
     left -= (long)n;
   }
 }
 
-// The panel while a GIF pack is written: what happens, and how far it is.
-static void drawPackProgress(uint32_t done, uint32_t total) {
+// Before an upload's flash writes: nothing computes on core 0 beside them.
+// Each write holds core 0 as well, and with a fetch's TLS handshake there too
+// the idle task of core 0 did not run for 5 s - the task watchdog reset the
+// clock in the middle of a GIF pack (2026-10-23). A fetch or a card job under
+// way ends first; none starts while the loop is in the upload.
+void uploadSettle(const char *what) {
+  unsigned long settleFrom = millis();
+  bool settled = feedsSettle(UPLOAD_SETTLE_MS);
+#if BOARD_WAVESHARE_WALL
+  settled = gifCardSettle(UPLOAD_SETTLE_MS) && settled;
+#endif
+  if (!settled || millis() - settleFrom >= 50) {
+    Console.printf("%s: waited %lu ms for a fetch under way%s\n", what, millis() - settleFrom,
+                  settled ? "" : " - it still runs, written anyway");
+  }
+}
+
+// The panel while an upload is written: what it is, and how far.
+void drawUploadProgress(const char *title, uint32_t done, uint32_t total) {
   uint8_t percent = total ? (uint8_t)((uint64_t)done * 100 / total) : 0;
   int16_t w = matrix.width(), h = matrix.height();
   uint16_t ink = scaledColorVisible(255, 140, 0);
@@ -798,7 +805,7 @@ static void drawPackProgress(uint32_t done, uint32_t total) {
   matrix.setFont(&fontPicopixel);
   matrix.setTextColor(ink);
   matrix.setCursor(1, 7);
-  matrix.print("GIF PACK");
+  matrix.print(title);
   matrix.drawRect(1, h / 2 - 3, w - 2, 7, ink);
   matrix.fillRect(2, h / 2 - 2, (int16_t)((int32_t)(w - 4) * percent / 100), 5, ink);
   matrix.setCursor(1, h - 2);
