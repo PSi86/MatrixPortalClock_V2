@@ -15,6 +15,8 @@
 #include "item_icons.h"
 #include "lan_access.h"
 #include "rest.h"
+#include "settings.h"   // feedShown(): the Info section's switch
+#include "console.h"
 #include "wifi_station.h"
 
 // What only this module calls, ahead of its use.
@@ -498,6 +500,11 @@ void haApply(const HaIn &m) {
           haGifSearchDue = haGifMatchesDue = true;
           haRestDue = true;
         }
+      } else if (!feedShown(SHOW_HA) &&
+                 (strncmp(m.topic, "item/", 5) == 0 || strcmp(m.topic, "room") == 0 || strcmp(m.topic, "message") == 0)) {
+        // Switched off in the web app's Info section: not shown, and not kept
+        // for later either (the retained ones come again when it is on).
+        if (consoleLevel >= 2) { Console.printf("Home Assistant: %s not shown - switched off\n", m.topic); }
       } else if (strncmp(m.topic, "item/", 5) == 0) {
         haItem(m.topic + 5, m.payload, m.len);
       } else if (strcmp(m.topic, "room") == 0) {
@@ -557,6 +564,22 @@ void haDropItems() {
   for (int i = (int)bandItemCount - 1; i >= 0; i--) {
     if (bandItems[i].feed == SOURCE_HA && !isMessage(bandItems[i])) { bandRemoveAt((uint8_t)i); }
   }
+}
+
+void haShownChanged() {
+  if (!feedShown(SHOW_HA)) {
+    for (int i = (int)bandItemCount - 1; i >= 0; i--) {   // its messages too
+      if (bandItems[i].feed == SOURCE_HA) { bandRemoveAt((uint8_t)i); }
+    }
+    haRoomSet(nullptr, 0);
+    Console.println("Home Assistant: its items, messages and room no longer shown");
+    return;
+  }
+  Console.println("Home Assistant: its items, messages and room shown again");
+  if (haState != HA_UP) { return; }   // a connect brings the retained ones anyway
+  HaCmd c = {};
+  c.kind = HA_CMD_RESUBSCRIBE;
+  haCommand(c);
 }
 
 // What went wrong, in words, for the config page.
@@ -1017,6 +1040,7 @@ void haStatusInto(JsonObject o) {
   const char *blocked = haBlocked();
   if (haState == HA_BLOCKED && blocked) { o["blocked"] = blocked; }
   if (haError[0]) { o["error"] = haError; }
+  o["shown"] = feedShown(SHOW_HA);   // its items, messages and room on the panel (the Info section's switch, saved)
   if (haState == HA_UP && haUpSince) {
     char when[16];
     bandWhen(when, sizeof(when), haUpSince);

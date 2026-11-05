@@ -167,9 +167,10 @@ input[type="number"] { font-family: var(--mono); font-variant-numeric: tabular-n
 .items { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .item { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
 .item.alert { border-color: var(--bad); }
+.item.now { box-shadow: inset 3px 0 0 var(--accent); }
 .item-ico { width: 36px; height: 36px; border-radius: 8px; background: var(--panel); color: #e9edf2; display: grid; place-items: center; font-size: 18px; }
 .item-t { font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
-.item-u { font-size: 12px; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+.item-u { font-size: 12px; color: var(--muted); font-family: var(--mono); text-align: right; }
 .networks { display: grid; gap: 6px; width: 100%; }
 .net { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); cursor: pointer; text-align: left; width: 100%; }
 .net[aria-pressed="true"] { border-color: var(--accent); }
@@ -525,11 +526,39 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <label class="switch"><input type="checkbox" id="feedq" aria-label="Air quality"><span></span></label>
         </div>
         <div class="row stack" id="fNeedRow2" hidden><div class="need" id="fNeed2"></div></div>
+        <div class="row row-switch" id="hShowRow" hidden>
+          <div><div class="lbl">Home Assistant</div><div class="hint">Its items, messages and the room. Off: none of them on the panel; the link itself - set up under Home Assistant - runs on.</div><div class="status" style="margin-top:2px"><span class="dot" id="hShowDot"></span><span class="hint" style="margin:0" id="hShowLine"></span></div></div>
+          <label class="switch"><input type="checkbox" id="feedh" aria-label="What Home Assistant sends"><span></span></label>
+        </div>
+        <div id="ownRows" hidden>
+          <div class="group-title">The clock’s own</div>
+          <div class="row row-switch">
+            <div><div class="lbl">Date</div><div class="hint">“Sunday 18 October 2026” / “week 42”.</div></div>
+            <label class="switch"><input type="checkbox" id="bdate" aria-label="Date"><span></span></label>
+          </div>
+          <div class="row row-switch">
+            <div><div class="lbl">Sunrise and sunset</div><div class="hint">At the place above: today’s, after sunset tomorrow’s.</div></div>
+            <label class="switch"><input type="checkbox" id="bsun" aria-label="Sunrise and sunset"><span></span></label>
+          </div>
+          <div class="row row-switch">
+            <div><div class="lbl">Moon</div><div class="hint">Its phase and how much of it is lit, and the next full or new moon.</div></div>
+            <label class="switch"><input type="checkbox" id="bmoon" aria-label="Moon"><span></span></label>
+          </div>
+          <div class="row row-switch">
+            <div><div class="lbl">Clock change</div><div class="hint">From a day before until half a day after it: “Clocks go back 1 h”.</div></div>
+            <label class="switch"><input type="checkbox" id="bshift" aria-label="Clock change"><span></span></label>
+          </div>
+          <div class="row stack"><div class="note">When something is wrong - a sensor missing, the time sync failing - the info screen says so; that has no switch.</div></div>
+        </div>
         <div class="row stack"><div class="note">Weather data by Open-Meteo.com (CC BY 4.0). Air quality: CAMS ENSEMBLE data provider, through Open-Meteo.com. Warnings: Deutscher Wetterdienst, through Bright Sky.</div></div>
       </div>
       <div class="card" id="clockCard">
-        <div class="group-title">On this clock</div>
-        <div class="row stack"><div class="lbl">What the clock knows</div><div class="hint" id="roundLine"></div><ul class="items" id="items"></ul></div>
+        <div class="group-title" id="itemsTitle">Now on the cards</div>
+        <div class="row stack"><div class="hint" id="itemsHint"></div><div class="hint" id="roundLine"></div><ul class="items" id="items"></ul></div>
+        <div class="row" id="bsecRow" hidden>
+          <div><label class="lbl" for="bsec">Seconds per turn</label><div class="hint">How long each of the above stays before the next takes its turn. A new message stays twice as long. A text too long for its two lines runs through once instead, however long that takes.</div></div>
+          <div class="range"><input type="range" id="bsec"><output for="bsec"></output></div>
+        </div>
         <div class="row" id="roundRow">
           <div><label class="lbl" for="iround">Info round</label><div class="hint">Every card once more, one after the other, about 4 s each, on the clock’s time - every 15 min at :00, :15, :30 and :45 - 3 s after the face has shown the new time. A GIF gives way to it.</div></div>
           <select id="iround"></select>
@@ -1161,6 +1190,16 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     }
     // Info band
     if (has('lat')) { setNumber('lat', 'lat'); setNumber('lon', 'lon'); setCheck('feedw', 'feedw', showNeeds); setCheck('feeda', 'feeda', showNeeds); setCheck('feedq', 'feedq', showNeeds); }
+    $('#hShowRow').hidden = !has('feedh');
+    if (has('feedh')) { setCheck('feedh', 'feedh'); }
+    $('#ownRows').hidden = !has('bdate');
+    ['bdate', 'bsun', 'bmoon', 'bshift'].forEach(function (k) { if (has(k)) { setCheck(k, k); } });
+    $('#itemsTitle').textContent = S.band ? 'Now on the info screen' : 'Now on the cards';
+    $('#itemsHint').textContent = S.band
+      ? 'Everything that takes its turn below the face, from every source, in its order; the one on show now is marked.'
+      : 'Everything the clock shows as banners, running text and cards, from every source.';
+    $('#bsecRow').hidden = !has('bsec');   // the wall clock's band alone
+    if (has('bsec')) { setRange('bsec', 'bsec', ' s'); }
     $('#afrRow').hidden = !has('afr');
     if (has('afr')) { setCheck('afr', 'afr'); }
     $('#roundRow').hidden = !has('iround');
@@ -1403,21 +1442,37 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         if (i === 1 && st.place) { t += ' DWD place: ' + st.place + '.'; }
         line.textContent = t; dot.className = 'dot ' + cls;
       });
-      var ul = $('#items');
+      // The wall clock: the band's turns as it takes them, from every source (turns); the 64x32
+      // clock: its items, as banners, running text and cards (items).
+      var ul = $('#items'), list = st.turns || st.items;
       ul.innerHTML = '';
-      if (!st.items.length) { var li = document.createElement('li'); li.className = 'note'; li.textContent = 'Nothing yet.'; ul.appendChild(li); }
-      st.items.forEach(function (it) {
-        var li = document.createElement('li'); li.className = 'item' + (it.alert ? ' alert' : '');
+      if (!list.length) { var li = document.createElement('li'); li.className = 'note'; li.textContent = 'Nothing yet.'; ul.appendChild(li); }
+      list.forEach(function (it) {
+        var li = document.createElement('li'); li.className = 'item' + (it.alert ? ' alert' : '') + (it.now ? ' now' : '');
         var ic = document.createElement('span'); ic.className = 'item-ico'; ic.setAttribute('aria-hidden', 'true'); ic.textContent = ICONS[it.icon] || '•';
         var tx = document.createElement('span'); tx.className = 'item-t'; tx.textContent = it.text;
-        var u = document.createElement('span'); u.className = 'item-u';
-        u.textContent = (it.alert ? 'alert, ' : '') + 'until ' + it.until + (it.shows ? ' · ' + it.shows : '') + (it.ha ? ' · Home Assistant' : '');
+        var u = document.createElement('span'), meta = [];
+        u.className = 'item-u';
+        if (it.alert) { meta.push('alert'); }
+        if (it.until) { meta.push('until ' + it.until); }
+        if (st.turns) { meta.push(it.from); if (it.now) { meta.push('on show now'); } }
+        else { if (it.shows) { meta.push(it.shows); } if (it.ha) { meta.push('Home Assistant'); } }
+        u.textContent = meta.join(' · ');
         li.appendChild(ic); li.appendChild(tx); li.appendChild(u); ul.appendChild(li);
       });
       $('#roundLine').textContent = S && S.band ? '' : st.round ? 'Next info round at ' + st.round + '.' : (S && S.settings && S.settings.iround === 0 ? 'No info round: the cards come only when something is new.' : '');
     }
     if (st.haStatus && S && S.ha) {
-      var h = st.haStatus, at = S.ha.host + ':' + S.ha.port, ht, hc = 'warn';
+      var hl = haLineOf(st.haStatus);
+      $('#haLine').textContent = hl[0]; $('#haDot').className = 'dot ' + hl[1];
+      var shown = st.haStatus.shown !== false;   // as the clock has it (saved), not the switch before Save
+      $('#hShowLine').textContent = !shown ? 'Not shown on the panel.' : st.haStatus.state === 'off' ? 'The link is off - see Home Assistant.' : hl[0];
+      $('#hShowDot').className = 'dot ' + (shown ? hl[1] : '');
+    }
+  }
+  // What the Home Assistant link does, in a line, and the dot's class.
+  function haLineOf(h) {
+      var at = S.ha.host + ':' + S.ha.port, ht, hc = 'warn';
       if (h.state === 'off') { ht = 'Off.'; hc = ''; }
       else if (h.state === 'hotspot') { ht = 'Paused while the hotspot is open.'; }
       else if (h.state === 'blocked') {
@@ -1428,8 +1483,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       else if (h.state === 'stopping') { ht = 'Stopping the link…'; }
       else if (h.state === 'connecting') { ht = 'Connecting to ' + at + '…' + (h.error ? ' Last try: ' + h.error + '.' : ''); if (h.error) { hc = 'bad'; } }
       else { ht = 'Connected to ' + at + (h.since ? ' since ' + h.since : '') + '; ' + h.items + (h.items === 1 ? ' item' : ' items') + ' from Home Assistant.'; hc = 'ok'; }
-      $('#haLine').textContent = ht; $('#haDot').className = 'dot ' + hc;
-    }
+      return [ht, hc];
   }
   var statusBusy = false, panelBusy = false;
   function pollStatus() {

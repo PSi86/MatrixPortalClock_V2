@@ -300,6 +300,9 @@ void setup(void) {
   gifScheduleNext();
   loadWifiCreds();
   loadFeedSettings();
+#if BAND_ON_PANEL
+  loadBandSettings();   // how long the band's turns stand
+#endif
   loadLanSettings();
   loadHaSettings();
 
@@ -1167,6 +1170,9 @@ SettingsBlobStore faceStores[FACE_BLOB_COUNT];
 // names of the choices and what the web app needs to send them back.
 SettingsTable *const SETTINGS_TABLES[] = {
   &clockTable, &tetrisBlob.table, &muncherBlob.table, &aliensBlob.table, &snakeBlob.table, &uiTable, &gifTable, &decorTable, &restTable, &feedTable,
+#if BAND_ON_PANEL
+  &bandTable,
+#endif
 };
 const uint8_t SETTINGS_TABLE_COUNT = sizeof(SETTINGS_TABLES) / sizeof(SETTINGS_TABLES[0]);
 

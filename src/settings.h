@@ -151,7 +151,7 @@ bool saveDecorSettings();
 // sources are on. The sources and the items are in band_data.h, their
 // scheduling in feeds.h.
 #define FEED_SETTINGS_MAGIC 0xFEED
-#define FEED_SETTINGS_REV   3          // 1 = before frames, 2 = before the info round
+#define FEED_SETTINGS_REV   4          // 1 = before frames, 2 = before the info round, 3 = before shown
 struct FeedSettings {
   uint16_t magic;
   uint8_t  rev;
@@ -160,8 +160,12 @@ struct FeedSettings {
   uint8_t  located;     // 1 once a place is set; nothing is fetched before
   uint8_t  frames;      // 1: an alert's banner has a frame in its level's colour (rev 2)
   uint8_t  roundMinutes;   // minutes between info rounds on a clock without a band; 0 = none (rev 3)
-  uint8_t  reserved;
+  uint8_t  shown;       // one bit per ShowBit: what shows on the panel (rev 4; was reserved)
 };
+// What the web app's Info section switches on and off for the panel, besides
+// the sources fetched (on): what Home Assistant sends - its items, messages
+// and the room - and the wall clock's own turns in its band.
+enum ShowBit : uint8_t { SHOW_HA, SHOW_DATE, SHOW_SUN, SHOW_MOON, SHOW_SHIFT, SHOW_COUNT };
 static_assert(sizeof(FeedSettings) == 16, "FeedSettings keeps the size stored blobs have");
 extern const FeedSettings FEED_DEFAULTS;
 // The info round's choices, in minutes (0 = never): each divides the hour.
@@ -170,6 +174,29 @@ bool roundChoice(long minutes);   // one of them
 extern FeedSettings feedSettings;
 extern SettingsStore<FeedSettings> feedStore;
 extern SettingsTable feedTable;
+inline bool feedShown(uint8_t bit) { return (feedSettings.shown & (1 << bit)) != 0; }
 bool saveFeedSettings();
+
+#if BAND_ON_PANEL
+// ---- The wall clock's info band (NVS key "band") ------------------------------------
+// How the band takes its turns. A blob of its own: the feeds' is full, and a
+// longer one would be refused by an older firmware (SettingsBlobStore::read()),
+// its place and sources lost on a downgrade; an older firmware does not read
+// this one at all. Fields added later go into the spare bytes, by revision.
+#define BAND_SETTINGS_MAGIC 0xBA4D
+#define BAND_SETTINGS_REV   1
+struct BandSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  turnSeconds;   // how long each turn stands; a text that runs through takes as long as that
+  uint8_t  reserved[4];
+};
+static_assert(sizeof(BandSettings) == 8, "the stored blob keeps its size");
+const uint8_t BAND_TURN_S_MIN = 3, BAND_TURN_S_MAX = 20, BAND_TURN_S_DEFAULT = 6;   // 6 s: the band's time until 2026-11-05
+extern BandSettings bandSettings;
+extern SettingsTable bandTable;
+void loadBandSettings();
+bool saveBandSettings();
+#endif
 
 #endif  // SETTINGS_H

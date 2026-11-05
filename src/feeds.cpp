@@ -7,6 +7,8 @@
 #include "web_server.h"
 #include "clock_time.h"
 #include "console.h"
+#include "home_assistant.h"   // haShownChanged()
+#include "info_band.h"       // bandLocalDone
 #include "lan_access.h"
 #include "notices.h"
 #include "settings.h"
@@ -54,6 +56,7 @@ void loadFeedSettings() {
   if (feedSettings.magic != FEED_SETTINGS_MAGIC) { feedSettings = FEED_DEFAULTS; }
   if (feedSettings.rev < 2) { feedSettings.frames = FEED_DEFAULTS.frames; }
   if (feedSettings.rev < 3) { feedSettings.roundMinutes = FEED_DEFAULTS.roundMinutes; }
+  if (feedSettings.rev < 4) { feedSettings.shown = FEED_DEFAULTS.shown; }   // was reserved (0): everything shows
   if (!roundChoice(feedSettings.roundMinutes)) { feedSettings.roundMinutes = FEED_DEFAULTS.roundMinutes; }
   feedTaskOK = feedBegin();
   if (!feedTaskOK) {
@@ -265,9 +268,15 @@ static bool microDegreesOf(const String &v, int32_t limit, int32_t &out) {
 // The info band section of the config page (/save). Both fields empty clear
 // the place; a place that cannot be read keeps the one stored.
 void applyFeedParams(const String &q) {
-  uint8_t wasOn = feedSettings.on;
+  uint8_t wasOn = feedSettings.on, wasShown = feedSettings.shown;
   feedSettings.on &= (uint8_t)((1 << FEED_COUNT) - 1);   // a bit for no source never stays (the form never set one)
   settingsApply(feedTable, [&q](const char *key) { return getParam(q, key); }, false);   // the sources and the frames (FEED_PARAMS)
+  feedSettings.shown &= (uint8_t)((1 << SHOW_COUNT) - 1);
+  if ((wasShown ^ feedSettings.shown) & (1 << SHOW_HA)) { haShownChanged(); }   // its items, messages and room go or come again
+#if BAND_ON_PANEL
+  if (wasShown != feedSettings.shown) { bandLocalDone = false; }   // the band's own turns anew
+  settingsApply(bandTable, [&q](const char *key) { return getParam(q, key); }, false);   // its turns' time (BAND_PARAMS)
+#endif
   String iround = getParam(q, "iround");
   if (iround.length() && roundChoice(iround.toInt()) && iround.toInt() != feedSettings.roundMinutes) {
     feedSettings.roundMinutes = (uint8_t)iround.toInt();

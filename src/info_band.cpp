@@ -52,7 +52,7 @@ struct BandLocal { bool on; uint8_t icon, severity; char text[64]; };   // its p
 unsigned long bandStatusTestAt = 0;   // millis() the console showed the clock status as a test; 0 = none
 static BandLocal bandLocal[BAND_LOCAL_COUNT];
 bool bandLocalDone = false;
-const unsigned long BAND_TURN_MS = 6000;
+const unsigned long BAND_LOOK_AGAIN_MS = 6000;   // with nothing to show, the next look
 const int16_t BAND_ICON_X = 4, BAND_ICON_Y = (WALL_BAND_H - ICON_SIZE) / 2;
 const int16_t BAND_TEXT_X = 32, BAND_TEXT_X_BARE = 4;   // beside an icon, and without one
 const int16_t BAND_LINE_Y[2] = { 6, 19 }, BAND_MID_Y = (WALL_BAND_H - 7) / 2;
@@ -60,8 +60,8 @@ static BandTurn bandTurn = { TURN_NONE, 0, 0 };   // the item on show
 BandTurn bandWant = { TURN_NONE, 0, 0 };   // one that takes the band at once (a new notice)
 uint8_t  bandWantRuns = 1;
 static unsigned long bandTurnAt = 0;       // millis() it came; 0 = the next one is due
-static unsigned long bandTurnMs = BAND_TURN_MS;   // how long it stays
-static uint8_t  bandTurnRuns = 1;          // how often its text runs through (or stands BAND_TURN_MS)
+static unsigned long bandTurnMs = BAND_LOOK_AGAIN_MS;   // how long it stays
+static uint8_t  bandTurnRuns = 1;          // how often its text runs through (or stands the turn's time)
 static uint32_t bandTurnLook = 0;          // what it showed (bandLook()), to see it change
 static char     bandLine[2][32];           // its two lines in the font's code page (CP437), or
 static char     bandRunText[sizeof(BandItem::text)];   // its text running through, when they cannot hold it
@@ -75,8 +75,9 @@ static bool     bandHidden = false;        // dark while the hotspot has the pan
    other, each with its icon and its text in two lines of the 5x7 font beside
    it (the mock-up of 2026-10-05): the alerts first, then the messages, each
    in the order they came, then the information in its order (infoOrder()),
-   then the date. An item stands BAND_TURN_MS, or, when its text does not fit
-   the two lines, as long as the text takes to run through once. An alert is
+   then the date. An item stands the time set in the web app's Info section
+   (BandSettings::turnSeconds, 3 to 20 s), or, when its text does not fit the
+   two lines, as long as the text takes to run through once. An alert is
    in its level's colour, framed when the frames are on. A new alert or
    message takes the band at once, a message's text twice (bandWant); the
    alert's banner comes over the face as on the 64x32 clock. Show
@@ -197,7 +198,7 @@ const char *const BAND_DAYS[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "T
 const char *const BAND_MONTHS[] = { "January", "February", "March", "April", "May", "June", "July",
                                     "August", "September", "October", "November", "December" };
 
-// The date in the clock's language: "Sunday 18 October" and "2026, week 42".
+// The date in the clock's language: "Sunday 18 October 2026" and "week 42".
 static void bandDateLines(BandLocal &l) {
   l.on = clockIsSet();
   l.icon = ICON_CALENDAR;
@@ -359,7 +360,15 @@ static void bandLocalUpdate() {
   bandDateLines(bandLocal[TURN_DATE - BAND_LOCAL_FIRST]);
   bandSunLines(bandLocal[TURN_SUN - BAND_LOCAL_FIRST]);
   bandMoonLines(bandLocal[TURN_MOON - BAND_LOCAL_FIRST]);
-  bandRoomLines(bandLocal[TURN_ROOM - BAND_LOCAL_FIRST]);
+  bandRoomLines(bandLocal[TURN_ROOM - BAND_LOCAL_FIRST]);   // with what Home Assistant sends (its switch: haShownChanged())
+  // Switched off in the web app's Info section (feedShown()). The status
+  // line has no switch: it says what is wrong.
+  static const struct { uint8_t turn, bit; } SWITCHED[] = {
+    { TURN_SHIFT, SHOW_SHIFT }, { TURN_DATE, SHOW_DATE }, { TURN_SUN, SHOW_SUN }, { TURN_MOON, SHOW_MOON },
+  };
+  for (const auto &s : SWITCHED) {
+    if (!feedShown(s.bit)) { bandLocal[s.turn - BAND_LOCAL_FIRST].on = false; }
+  }
 }
 
 // The room's temperature and humidity, from a sensor of Home Assistant's
@@ -432,13 +441,16 @@ static void bandDraw() {
 }
 
 // Puts a turn on the band, its text running through `runs` times - or, when
-// it fits the two lines, standing `runs` x BAND_TURN_MS.
+// it fits the two lines, standing `runs` x the turn's time. A text that runs
+// through takes as long as that, whatever the time set: cut short it could
+// not be read, and kept on after it the band would stand empty beside the
+// icon (the shortest takes 10.7 s, 27 characters beside an icon).
 static void bandStart(const BandTurn &t, uint8_t runs) {
   bandTurn     = t;
   bandTurnAt   = millisNow ? millisNow : 1;
   bandTurnRuns = runs;
   bandTurnLook = bandLook(t);
-  bandTurnMs   = BAND_TURN_MS * runs;
+  bandTurnMs   = (unsigned long)bandSettings.turnSeconds * 1000UL * runs;
   bandRunText[0] = '\0';
   bandRunLastX = INT16_MIN;
   int8_t i = bandItemOf(t);
@@ -451,8 +463,7 @@ static void bandStart(const BandTurn &t, uint8_t runs) {
     if (!bandWrap(text, (uint8_t)((WALL_W - tx - 2) / 6), bandLine)) {
       strlcpy(bandRunText, text, sizeof(bandRunText));
       bandRunWidth = (uint16_t)(strlen(bandRunText) * 6);   // 5 px a character and 1 between
-      unsigned long ms = (unsigned long)runs * (bandRunWidth + (WALL_W - tx)) * 1000UL / RUN_PX_PER_S;
-      bandTurnMs = max(ms, BAND_TURN_MS);
+      bandTurnMs = (unsigned long)runs * (bandRunWidth + (WALL_W - tx)) * 1000UL / RUN_PX_PER_S;
     }
     panelSeparators(bandLine[0]);   // broken where the bars are; shown as dots
     panelSeparators(bandLine[1]);
@@ -469,7 +480,7 @@ static void bandNext() {
   if (n == 0) {
     bandTurn   = { TURN_NONE, 0, 0 };
     bandTurnAt = millisNow ? millisNow : 1;
-    bandTurnMs = BAND_TURN_MS;
+    bandTurnMs = BAND_LOOK_AGAIN_MS;
     bandDraw();
     return;
   }
@@ -481,6 +492,33 @@ static void bandNext() {
 }
 
 // Show notifications: the band again from its first item.
+void bandTurnsInto(JsonArray a) {
+  BandTurn list[BAND_ITEMS_MAX + BAND_LOCAL_COUNT];
+  uint8_t n = bandTurnList(list);
+  for (uint8_t k = 0; k < n; k++) {
+    const BandLocal *own = bandLocalOf(list[k]);
+    int8_t i = bandItemOf(list[k]);
+    if (!own && i < 0) { continue; }
+    JsonObject o = a.add<JsonObject>();
+    o["now"] = bandTurnSame(list[k], bandTurn);
+    if (own) {
+      o["text"] = own->text;
+      o["icon"] = own->icon;
+      o["from"] = list[k].kind == TURN_ROOM ? "Home Assistant" : "the clock";
+      continue;
+    }
+    const BandItem &it = bandItems[i];
+    char until[16];
+    bandWhen(until, sizeof(until), it.until);
+    o["text"] = it.text;
+    o["icon"] = bandIconOf(it);
+    o["alert"] = it.level == LEVEL_ALERT;
+    o["until"] = until;
+    o["from"] = it.feed == SOURCE_HA ? (isMessage(it) ? "Home Assistant, a message" : "Home Assistant")
+              : it.feed == FEED_WEATHER ? "weather" : it.feed == FEED_WARNINGS ? "DWD" : "air quality";
+  }
+}
+
 void bandRestart() {
   bandTurn   = { TURN_NONE, 0, 0 };
   bandTurnAt = 0;

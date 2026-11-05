@@ -178,7 +178,8 @@ bool saveDecorSettings() {
 // ---- The info band's sources ---------------------------------------------------------------
 
 const FeedSettings FEED_DEFAULTS = { FEED_SETTINGS_MAGIC, FEED_SETTINGS_REV,
-                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS) | (1 << FEED_AIR)), 0, 0, 0, 1, 15, 0 };
+                                     (uint8_t)((1 << FEED_WEATHER) | (1 << FEED_WARNINGS) | (1 << FEED_AIR)), 0, 0, 0, 1, 15,
+                                     (uint8_t)((1 << SHOW_COUNT) - 1) };   // everything shown
 FeedSettings feedSettings;
 SettingsStore<FeedSettings> feedStore;
 // The web app's keys for them (settings_table.h). The place and the info
@@ -188,6 +189,13 @@ static const SettingParam FEED_PARAMS[] = {
   { "feedw",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_WEATHER,  0, LOAD_KEEP, nullptr },
   { "feeda",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_WARNINGS, 0, LOAD_KEEP, nullptr },
   { "feedq",  SETTING_FIELD(FeedSettings, on),     PARAM_BIT,      0, FEED_AIR,      0, LOAD_KEEP, nullptr },
+  { "feedh",  SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_HA,       0, LOAD_KEEP, nullptr },   // what Home Assistant sends
+#if BAND_ON_PANEL
+  { "bdate",  SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_DATE,     0, LOAD_KEEP, nullptr },   // the band's own turns
+  { "bsun",   SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_SUN,      0, LOAD_KEEP, nullptr },
+  { "bmoon",  SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_MOON,     0, LOAD_KEEP, nullptr },
+  { "bshift", SETTING_FIELD(FeedSettings, shown),  PARAM_BIT,      0, SHOW_SHIFT,    0, LOAD_KEEP, nullptr },
+#endif
   { "afr",    SETTING_FIELD(FeedSettings, frames), PARAM_CHECKBOX, 0, 0,             1, LOAD_KEEP, nullptr },
   { "lat",    0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },   // degrees, "" for none
   { "lon",    0, 0,                                PARAM_SPECIAL,  0, 0,             0, LOAD_KEEP, nullptr },
@@ -202,6 +210,33 @@ bool saveFeedSettings() {
   feedSettings.rev   = FEED_SETTINGS_REV;
   return feedStore.write(feedSettings);
 }
+
+#if BAND_ON_PANEL
+// ---- The wall clock's info band ----------------------------------------------------------
+
+static const BandSettings BAND_DEFAULTS = { BAND_SETTINGS_MAGIC, BAND_SETTINGS_REV, BAND_TURN_S_DEFAULT, { 0 } };
+BandSettings bandSettings;
+static SettingsStore<BandSettings> bandStore;
+// The web app's keys for them (settings_table.h); taken with the Info
+// section's (applyFeedParams()), a new time from the next turn on.
+static const SettingParam BAND_PARAMS[] = {
+  { "bsec", SETTING_FIELD(BandSettings, turnSeconds), PARAM_RANGE, 0, BAND_TURN_S_MIN, BAND_TURN_S_MAX, LOAD_DEFAULT, nullptr },
+};
+SettingsTable bandTable = SETTING_TABLE(bandSettings, BAND_DEFAULTS, BAND_PARAMS);
+
+void loadBandSettings() {
+  bandStore.begin("band");
+  bandStore.read(bandSettings);
+  if (bandSettings.magic != BAND_SETTINGS_MAGIC) { bandSettings = BAND_DEFAULTS; }   // written with the next save
+  settingsCheck(bandTable);   // the turn's seconds (BAND_PARAMS)
+}
+
+bool saveBandSettings() {
+  bandSettings.magic = BAND_SETTINGS_MAGIC;
+  bandSettings.rev   = BAND_SETTINGS_REV;
+  return bandStore.write(bandSettings);
+}
+#endif
 
 bool roundChoice(long minutes) {
   for (uint8_t c : ROUND_CHOICES) { if (c == minutes) { return true; } }

@@ -315,6 +315,9 @@ static void apiStatusInto(JsonDocument &d) {
     o["shows"] = itemShowsHere(bandItems[i]);
     o["ha"] = bandItems[i].feed == SOURCE_HA;
   }
+#if BAND_ON_PANEL
+  bandTurnsInto(d["turns"].to<JsonArray>());   // what the band takes in turn, from every source (the web app's list)
+#endif
   haStatusInto(d["haStatus"].to<JsonObject>());
 }
 
@@ -865,6 +868,9 @@ static void apiSave(Print &c, const String &body, bool &closeHotspot) {
   stored &= saveRestSettings();
   applyFeedParams(body);
   stored &= saveFeedSettings();
+#if BAND_ON_PANEL
+  stored &= saveBandSettings();   // taken with the feeds' (applyFeedParams())
+#endif
   if (!stored) {
     Console.println("Settings from the web app: NOT all stored, the flash could not be written");
     sendJsonError(c, 500, "Not saved in full: the clock could not write its flash. The settings work now; "
