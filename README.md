@@ -1430,7 +1430,11 @@ its icon on the left and its text in two lines of the 5x7 font beside it, up to
     a sensor of Home Assistant's
     ([the example](#example-the-rooms-temperature-and-humidity-wall-clock)),
     with a thermometer in a house, while its `until` has not passed.
-- **Turns:** each stands 6 s, one that runs through as long as that takes.
+- **Turns:** each stands the time set as **Seconds per turn** in the web app's
+  Info section, below the list of the turns (3 to 20 s, 6 s at first; a blob of
+  its own, NVS key `band`), one that runs through as long as that takes - at
+  five characters a second the shortest takes 10.7 s, so the time set never
+  cuts one short nor leaves the band empty after it.
 - **Lines** (one rule for every text in the band, Peter's of 2026-10-18): a
   text's parts are set apart by ` | ` - the clock's own, those it puts together
   from a source's fields (the weather "10°C overcast | 10/8°C | rain 100%", the

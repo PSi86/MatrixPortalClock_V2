@@ -275,6 +275,7 @@ void applyFeedParams(const String &q) {
   if ((wasShown ^ feedSettings.shown) & (1 << SHOW_HA)) { haShownChanged(); }   // its items, messages and room go or come again
 #if BAND_ON_PANEL
   if (wasShown != feedSettings.shown) { bandLocalDone = false; }   // the band's own turns anew
+  settingsApply(bandTable, [&q](const char *key) { return getParam(q, key); }, false);   // its turns' time (BAND_PARAMS)
 #endif
   String iround = getParam(q, "iround");
   if (iround.length() && roundChoice(iround.toInt()) && iround.toInt() != feedSettings.roundMinutes) {

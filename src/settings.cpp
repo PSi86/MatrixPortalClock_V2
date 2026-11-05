@@ -211,6 +211,33 @@ bool saveFeedSettings() {
   return feedStore.write(feedSettings);
 }
 
+#if BAND_ON_PANEL
+// ---- The wall clock's info band ----------------------------------------------------------
+
+static const BandSettings BAND_DEFAULTS = { BAND_SETTINGS_MAGIC, BAND_SETTINGS_REV, BAND_TURN_S_DEFAULT, { 0 } };
+BandSettings bandSettings;
+static SettingsStore<BandSettings> bandStore;
+// The web app's keys for them (settings_table.h); taken with the Info
+// section's (applyFeedParams()), a new time from the next turn on.
+static const SettingParam BAND_PARAMS[] = {
+  { "bsec", SETTING_FIELD(BandSettings, turnSeconds), PARAM_RANGE, 0, BAND_TURN_S_MIN, BAND_TURN_S_MAX, LOAD_DEFAULT, nullptr },
+};
+SettingsTable bandTable = SETTING_TABLE(bandSettings, BAND_DEFAULTS, BAND_PARAMS);
+
+void loadBandSettings() {
+  bandStore.begin("band");
+  bandStore.read(bandSettings);
+  if (bandSettings.magic != BAND_SETTINGS_MAGIC) { bandSettings = BAND_DEFAULTS; }   // written with the next save
+  settingsCheck(bandTable);   // the turn's seconds (BAND_PARAMS)
+}
+
+bool saveBandSettings() {
+  bandSettings.magic = BAND_SETTINGS_MAGIC;
+  bandSettings.rev   = BAND_SETTINGS_REV;
+  return bandStore.write(bandSettings);
+}
+#endif
+
 bool roundChoice(long minutes) {
   for (uint8_t c : ROUND_CHOICES) { if (c == minutes) { return true; } }
   return false;

@@ -177,4 +177,26 @@ extern SettingsTable feedTable;
 inline bool feedShown(uint8_t bit) { return (feedSettings.shown & (1 << bit)) != 0; }
 bool saveFeedSettings();
 
+#if BAND_ON_PANEL
+// ---- The wall clock's info band (NVS key "band") ------------------------------------
+// How the band takes its turns. A blob of its own: the feeds' is full, and a
+// longer one would be refused by an older firmware (SettingsBlobStore::read()),
+// its place and sources lost on a downgrade; an older firmware does not read
+// this one at all. Fields added later go into the spare bytes, by revision.
+#define BAND_SETTINGS_MAGIC 0xBA4D
+#define BAND_SETTINGS_REV   1
+struct BandSettings {
+  uint16_t magic;
+  uint8_t  rev;
+  uint8_t  turnSeconds;   // how long each turn stands; a text that runs through takes as long as that
+  uint8_t  reserved[4];
+};
+static_assert(sizeof(BandSettings) == 8, "the stored blob keeps its size");
+const uint8_t BAND_TURN_S_MIN = 3, BAND_TURN_S_MAX = 20, BAND_TURN_S_DEFAULT = 6;   // 6 s: the band's time until 2026-11-05
+extern BandSettings bandSettings;
+extern SettingsTable bandTable;
+void loadBandSettings();
+bool saveBandSettings();
+#endif
+
 #endif  // SETTINGS_H

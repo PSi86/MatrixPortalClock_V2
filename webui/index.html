@@ -555,6 +555,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       <div class="card" id="clockCard">
         <div class="group-title" id="itemsTitle">Now on the cards</div>
         <div class="row stack"><div class="hint" id="itemsHint"></div><div class="hint" id="roundLine"></div><ul class="items" id="items"></ul></div>
+        <div class="row" id="bsecRow" hidden>
+          <div><label class="lbl" for="bsec">Seconds per turn</label><div class="hint">How long each of the above stays before the next takes its turn. A new message stays twice as long. A text too long for its two lines runs through once instead, however long that takes.</div></div>
+          <div class="range"><input type="range" id="bsec"><output for="bsec"></output></div>
+        </div>
         <div class="row" id="roundRow">
           <div><label class="lbl" for="iround">Info round</label><div class="hint">Every card once more, one after the other, about 4 s each, on the clock’s time - every 15 min at :00, :15, :30 and :45 - 3 s after the face has shown the new time. A GIF gives way to it.</div></div>
           <select id="iround"></select>
@@ -1194,6 +1198,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#itemsHint').textContent = S.band
       ? 'Everything that takes its turn below the face, from every source, in its order; the one on show now is marked.'
       : 'Everything the clock shows as banners, running text and cards, from every source.';
+    $('#bsecRow').hidden = !has('bsec');   // the wall clock's band alone
+    if (has('bsec')) { setRange('bsec', 'bsec', ' s'); }
     $('#afrRow').hidden = !has('afr');
     if (has('afr')) { setCheck('afr', 'afr'); }
     $('#roundRow').hidden = !has('iround');
