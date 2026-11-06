@@ -2160,7 +2160,8 @@ panel's nearer side (the hours left, the minutes right); its body follows, so
 the old digit goes from its tail end. As the change starts, red dots appear on
 the new digit, one on every 4th cell of its path (too few to read the digit by;
 hidden where the old snake still lies). A new snake comes in from
-the same side along another lane row, about half as long as its digit, and eats
+the same side (or over the far side, see **Way in** below) along another lane
+row, about half as long as its digit, and eats
 the dots; each one makes it 2 cells longer at once - its tail stops for two
 steps while its head goes on, as in the game - so that its body becomes the
 digit (Peter, 2026-10-23: the way a digit is built should make sense, and the
@@ -2170,7 +2171,31 @@ looked like a line being drawn). Snakes crawl a pixel at a time, every 40 ms
 every 80 ms on the others'. When two digits change at once (x9 to y0), the
 place nearer the edge uses the lane rows right below the digits and the inner
 one the two under them. A change takes 3.0-7.0 s with the spaced digits
-(upright 2.6-5.9 s), 4.2-7.8 s with the coils.
+(upright 2.6-5.9 s), 4.2-7.8 s with the coils (over the far side 5.8-8.6 s).
+
+**Way in** (`sway`): *Near side* (the default, as above) or *Far side* - a
+minute's new snake comes in over the other side and crawls along a lane under
+the other digits to its own, while its old snake still leaves over the nearer
+side (Peter, 2026-11-05: on the wall, with the coils, a new snake's end lay
+beyond the side while it ate, so its growth was not seen). A snake's end is only
+ever on the panel along its way in, about 8 cells of the coils from the near
+side and about 26 from the far one, so over the far side the whole snake is on
+the panel while it eats, its end moving at half the head's pace as before (fewer
+dots with more growth each were tried on the PC first: the snake was whole
+sooner, but its end crept). When the tens and the ones change together, the
+ones' snake takes the lowest row, under the tens' one, so that the two do not
+cross. Coils: the whole new snake on the panel for 100 % of its eating at the
+minute changes (over the near side 43 %); a change of the ones alone mostly
+takes no longer, at most 1.6 s longer, x9 to y0 0.6-2.5 s longer (6.2-8.6 s);
+lines and narrow lines 100 % (95 %). It applies to
+the minute changes in landscape with the coils and both kinds of lines - the
+minutes' places are the only ones with a far lane row (`farRow` in
+`src/snake.h`) - and to *Last digit again*; upright, with the spaced digits
+(over the far side some of their changes cannot be planned), at a full hour and
+whenever an hours' digit moves too (the first time after the dashes, a jump of
+the time) the snakes come in over the near side. Choosing one in
+the web app plays a change of the minutes' ones; the row hides with the spaced
+digits.
 
 **The full hour** (`shr`): all four go. *Train* - the old four leave over the
 left side as one train along the lowest lane row, the new four come in from the
@@ -2222,7 +2247,9 @@ all of them). A colour per digit, green and black stripes (black is off on the
 panel: the time could not be read), and the looks *Darker to the tail* and
 *Rings* were tried and went - a gradient and stripes do the same. The settings
 blob is revision 5 (20 bytes); the trial builds before the face was released
-had revisions 1 to 4, which are not carried over.
+had revisions 1 to 4, which are not carried over. Its last byte was spare and
+always 0 until it took the way in (2026-11-06): stored settings read as the near
+side, and an older firmware leaves the byte alone.
 
 **Watchface animation** (`skn`): *Tail chase* (head and tail lie side by side,
 so a snake crawls once round its own digit, which stays whole), *Apple* (an
@@ -2233,7 +2260,7 @@ bottom row and whose way down, apple, hop and lane in from the right lie in the
 dark, touching no other snake and not the colon: in landscape every place,
 upright the minutes', as the hours' lane holds the colon; until 2026-10-24 only
 the minutes' ones), *Last digit again*
-(the minutes' ones crawl away and come anew), *Tongue* (a head flicks its
+(the minutes' ones crawl away and come anew, by the **Way in** set), *Tongue* (a head flicks its
 tongue, below; a choice of its own since 2026-10-24, stored as 4 after random),
 or *Random each time* (the default: one of those the digits on show allow); a
 new value plays it once. **Now and then**, at the pace the faces share, a head
@@ -2264,7 +2291,10 @@ the head down to the lane row with the shortest way, then along it over the side
 - each started at the earliest step at which it meets nobody, the movers in a
 fixed order; a cell must have been empty for a whole step before a head enters
 it, so two snakes never touch, not even half a cell on. A way out or in that
-starts at the panel's side goes straight over it. A new snake's tail stays put for two steps after each dot. When an old snake would still be on its way
+starts at the panel's side goes straight over it; a new snake's way in over the
+far side runs from its digit to the lane row its layout names for that
+(`Layout::farRow`) and along it over the other side. A new snake's tail stays
+put for two steps after each dot. When an old snake would still be on its way
 out as the new time stands, the new snake that stands last starts later, the
 least that meets nobody, so that both end together. What the face shows at
 any moment follows from the plan and the time alone. The planner was written in
@@ -2273,8 +2303,8 @@ plans for all of them, and the face was run on the PC through every minute of a
 day (see the debug build's self-test below, and `tools.local` for the PC tests,
 which are not part of the repository). The settings are in a blob of their own
 (NVS key `snake`). The debug build plans every minute change of a day in both
-orientations and every full hour both ways on the board, and checks a sample of
-them from scratch.
+orientations (in landscape over both ways in) and every full hour both ways on
+the board, and checks a sample of them from scratch.
 
 ### How the faces are built
 

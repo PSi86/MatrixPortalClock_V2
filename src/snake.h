@@ -2,9 +2,10 @@
    The Snake watchface's logic (concept doc, tab "Next game faces"): each
    digit of HH:MM is a snake lying in its digit's cells (snake_paths.h). At
    a change the old snake of a digit crawls out over the panel's nearer side
-   and a new one comes in from the same side and eats the dots on the new
-   digit, growing into it; to a full hour all four go - as one train out to
-   the left with the new four behind it, or each to its own side at once.
+   and a new one comes in from the same side (or, as set, over the far side,
+   under the other digits) and eats the dots on the new digit, growing into
+   it; to a full hour all four go - as one train out to the left with the
+   new four behind it, or each to its own side at once.
 
    A change is a plan of movers: snakes that each follow a fixed route a
    cell a step. The planner only picks when each one starts - the earliest
@@ -70,6 +71,15 @@ inline uint8_t pathLen(uint8_t f, uint8_t d) { return SNAKE_PATH_LEN[f][glyphOf(
 // has no column to spare: a free one between the hours and on each side of
 // the colon, none outside, so the snakes of a place at its side may cross it
 // at any row (`edge`), not only along their lanes.
+//
+// The way in "Far side" (Peter, 2026-11-05: on the wall, with the coils, a
+// new snake's end lay beyond the side while it ate, so its growth was not
+// seen): a new snake comes in over the other side and crawls under the other
+// digits to its own, so its end is on the panel while it eats. Its tail is
+// only ever seen along its way in, and over the near side that is about 8
+// cells of the coils; over the far one about 26. Only the minutes' places
+// have far rows, in landscape: the ones' snake along the lowest row, under
+// the tens' one, so that the two do not cross (`farRow`, -1: none).
 struct Layout {
   uint8_t gw, gh;          // the panel in cells: 31 x 15 or 15 x 31; 21 x 10 or 10 x 21
   int8_t  placeR[4], placeC[4];
@@ -80,6 +90,7 @@ struct Layout {
   uint8_t ox, oy;          // the pixel of cell (0, 0)
   uint8_t edge;            // the places at their side whose snakes may cross it at any row (bit k)
   uint8_t appleDepth;      // cells below a head the apple lies: 6 px either way
+  int8_t  farRow[4];       // the lane row a new snake comes in along over the far side; -1: not that way
 
   bool on(Cell a) const { return a.r >= 0 && a.r < gh && a.c >= 0 && a.c < gw; }
   uint16_t at(Cell a) const { return (uint16_t)(a.r * gw + a.c); }
@@ -93,27 +104,36 @@ struct Layout {
   }
 };
 const Layout LANDSCAPE      = { 31, 15, { 1, 1, 1, 1 }, { 1, 8, 17, 24 }, { { 4, 15 }, { 7, 15 } },
-                                { -1, -1, 1, 1 }, { 11, 13, 13, 11 }, { 12, 14, 14, 12 }, 2, 1, 1, 0, 3 };
+                                { -1, -1, 1, 1 }, { 11, 13, 13, 11 }, { 12, 14, 14, 12 }, 2, 1, 1, 0, 3,
+                                { -1, -1, 13, 14 } };
 const Layout PORTRAIT       = { 15, 31, { 1, 1, 13, 13 }, { 1, 8, 1, 8 }, { { 11, 6 }, { 11, 8 } },
-                                { -1, 1, -1, 1 }, { 11, 11, 23, 23 }, { 12, 12, 24, 24 }, 2, 1, 1, 0, 3 };
+                                { -1, 1, -1, 1 }, { 11, 11, 23, 23 }, { 12, 12, 24, 24 }, 2, 1, 1, 0, 3,
+                                { -1, -1, -1, -1 } };
 const Layout HOUR_LANDSCAPE = { 31, 15, { 1, 1, 1, 1 }, { 1, 8, 17, 24 }, { { 4, 15 }, { 7, 15 } },
-                                { -1, -1, -1, -1 }, { 14, 14, 14, 14 }, { 12, 12, 12, 12 }, 2, 1, 1, 0, 3 };
+                                { -1, -1, -1, -1 }, { 14, 14, 14, 14 }, { 12, 12, 12, 12 }, 2, 1, 1, 0, 3,
+                                { -1, -1, -1, -1 } };
 const Layout HOUR_PORTRAIT  = { 15, 31, { 1, 1, 13, 13 }, { 1, 8, 1, 8 }, { { 11, 6 }, { 11, 8 } },
-                                { -1, -1, -1, -1 }, { 11, 11, 23, 25 }, { 12, 12, 24, 26 }, 2, 1, 1, 0, 3 };
+                                { -1, -1, -1, -1 }, { 11, 11, 23, 25 }, { 12, 12, 24, 26 }, 2, 1, 1, 0, 3,
+                                { -1, -1, -1, -1 } };
 // The spaced digits: 4 x 7 cells of 3 px. Landscape 21 x 10 cells from (1, 1),
 // the digits in rows 0-6 at columns 0, 5, 12, 17, the colon in column 10,
 // lanes rows 7-9; upright 10 x 21 cells from (2, 1), hours in rows 0-6, the
 // colon in row 7, minutes in rows 9-15, their lanes below. The full hour
 // upright: the colon stands in row 7, so the new hours come in along row 8.
 // Lanes and edges as tools.local/game_faces/snake_thick_proto.py found them.
+// No far side: over it, some changes of the spaced digits could not be planned.
 const Layout SPACED_LANDSCAPE      = { 21, 10, { 0, 0, 0, 0 }, { 0, 5, 12, 17 }, { { 2, 10 }, { 4, 10 } },
-                                       { -1, -1, 1, 1 }, { 7, 8, 8, 7 }, { 7, 9, 9, 7 }, 3, 1, 1, 0x9, 2 };
+                                       { -1, -1, 1, 1 }, { 7, 8, 8, 7 }, { 7, 9, 9, 7 }, 3, 1, 1, 0x9, 2,
+                                       { -1, -1, -1, -1 } };
 const Layout SPACED_PORTRAIT       = { 10, 21, { 0, 0, 9, 9 }, { 0, 5, 0, 5 }, { { 7, 3 }, { 7, 5 } },
-                                       { -1, 1, -1, 1 }, { 7, 7, 16, 16 }, { 7, 7, 16, 16 }, 3, 2, 1, 0xF, 2 };
+                                       { -1, 1, -1, 1 }, { 7, 7, 16, 16 }, { 7, 7, 16, 16 }, 3, 2, 1, 0xF, 2,
+                                       { -1, -1, -1, -1 } };
 const Layout SPACED_HOUR_LANDSCAPE = { 21, 10, { 0, 0, 0, 0 }, { 0, 5, 12, 17 }, { { 2, 10 }, { 4, 10 } },
-                                       { -1, -1, -1, -1 }, { 9, 9, 9, 9 }, { 7, 7, 7, 7 }, 3, 1, 1, 0x1, 2 };
+                                       { -1, -1, -1, -1 }, { 9, 9, 9, 9 }, { 7, 7, 7, 7 }, 3, 1, 1, 0x1, 2,
+                                       { -1, -1, -1, -1 } };
 const Layout SPACED_HOUR_PORTRAIT  = { 10, 21, { 0, 0, 9, 9 }, { 0, 5, 0, 5 }, { { 7, 3 }, { 7, 5 } },
-                                       { -1, -1, -1, -1 }, { 7, 7, 16, 18 }, { 8, 8, 17, 19 }, 3, 2, 1, 0x5, 2 };
+                                       { -1, -1, -1, -1 }, { 7, 7, 16, 18 }, { 8, 8, 17, 19 }, 3, 2, 1, 0x5, 2,
+                                       { -1, -1, -1, -1 } };
 const uint16_t GRID_CELLS = 31 * 15;   // both orientations, the largest grid
 
 // A set of the panel's cells.
@@ -328,13 +348,24 @@ inline bool fitsAmong(const Plan &p, const CellIndex &x, uint8_t i, uint8_t upTo
   return true;
 }
 
+// Whether every place in `places` (bit k) has a way in over the far side.
+inline bool farFits(const Layout &L, uint8_t places) {
+  for (uint8_t k = 0; k < 4; k++) {
+    if ((places & (1 << k)) && L.farRow[k] < 0) { return false; }
+  }
+  return places != 0;
+}
+
 // The movers of a swap: for every place in `places`, its old snake out over
-// its side and its new one in. Old ones first, then new ones, each by place.
-// Then each gets the earliest start at which it meets none before it.
-// Returns false when a route cannot be found or does not fit, or a mover
-// cannot start in time - the face then shows the new time at once.
+// its side and its new one in - over the far side when `far` and the layout
+// has that way for all of them, else over the same side. Old ones first,
+// then new ones, each by place. Then each gets the earliest start at which
+// it meets none before it. Returns false when a route cannot be found or
+// does not fit, or a mover cannot start in time - the face then shows the
+// new time at once.
 inline bool planSwap(Plan &p, const Layout &L, const uint8_t from[4], const uint8_t to[4], uint8_t places,
-                     uint8_t digits) {
+                     uint8_t digits, bool far = false) {
+  far = far && farFits(L, places);
   static CellIndex x;
   p.L = &L;
   p.digits = digits;
@@ -350,7 +381,7 @@ inline bool planSwap(Plan &p, const Layout &L, const uint8_t from[4], const uint
       Mover &m = p.m[p.count];
       m.place = k;
       m.fresh = fresh;
-      m.side = L.side[k];
+      m.side = fresh && far ? (int8_t)-L.side[k] : L.side[k];
       m.start = 0;
       uint8_t d = fresh ? to[k] : from[k];
       m.len = pathLen(digits, d);
@@ -371,7 +402,8 @@ inline bool planSwap(Plan &p, const Layout &L, const uint8_t from[4], const uint
         Cell back[MAX_CELLS];
         for (uint8_t i = 1; i < m.len; i++) { blocked.add(L, L.digit(digits, k, d, i)); }
         Cell first = L.digit(digits, k, d, 0);
-        int16_t n = wayOut(L, first, L.inRow[k], (L.edge >> k) & 1, m.side, blocked, back, MAX_CELLS);
+        int16_t n = wayOut(L, first, far ? L.farRow[k] : L.inRow[k], (L.edge >> k) & 1, m.side, blocked, back,
+                           MAX_CELLS);
         if (n < 0 || 1 + n + m.len > MAX_CELLS) { return false; }
         uint8_t c = 0;
         Cell edge = { n > 0 ? back[n - 1].r : first.r, (int8_t)(m.side < 0 ? -1 : L.gw) };
@@ -439,10 +471,11 @@ inline const Layout &hourLayoutFor(bool upright, uint8_t digits) {
 }
 
 // The change from `from` to `to` in the digits of family `digits`: the
-// places that differ; to a full hour all four, by `hour`'s way. Dashes count
-// as digits.
+// places that differ, the new snakes over the far side when `far` and the
+// layout has that way for them; to a full hour all four, by `hour`'s way.
+// Dashes count as digits.
 inline bool planChange(Plan &p, bool upright, const uint8_t from[4], const uint8_t to[4], bool hour, HourMode mode,
-                       uint8_t digits) {
+                       uint8_t digits, bool far = false) {
   if (hour) {
     if (mode == HOUR_TRAIN) { return planSwap(p, hourLayoutFor(upright, digits), from, to, 0x0F, digits); }
     return planSwap(p, layoutFor(upright, digits), from, to, 0x0F, digits);
@@ -451,7 +484,7 @@ inline bool planChange(Plan &p, bool upright, const uint8_t from[4], const uint8
   for (uint8_t k = 0; k < 4; k++) { if (glyphOf(from[k]) != glyphOf(to[k])) { places |= (uint8_t)(1 << k); } }
   if (!places) { p.L = &layoutFor(upright, digits); p.count = 0; p.moving = 0; memcpy(p.from, from, 4);
                  memcpy(p.to, to, 4); p.stands = p.gone = 0; p.digits = digits; return true; }
-  return planSwap(p, layoutFor(upright, digits), from, to, places, digits);
+  return planSwap(p, layoutFor(upright, digits), from, to, places, digits, far);
 }
 
 // Check a plan from scratch, as the Python one does: no two movers clash,

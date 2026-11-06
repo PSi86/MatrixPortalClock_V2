@@ -342,6 +342,10 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
           <div><div class="lbl">Hour change</div><div class="hint">At every change the old snake crawls out over the nearer side and a new one eats the dots on the new digit, growing into it. At a full hour all four go: as one train out to the left with the new four behind it, or each to its own side at once. Choosing one plays it once now.</div></div>
           <div class="seg" id="shr" role="group" aria-label="Hour change"></div>
         </div>
+        <div class="row" id="swayRow">
+          <div><div class="lbl">Way in</div><div class="hint">Near side: a new snake comes in over the side its old one leaves by. Far side: it comes in over the other side and crawls under the other digits, so the whole snake is on the panel while it eats and grows; some changes take a second or two longer. At a minute's change in landscape; upright and at a full hour the snakes always come in over the near side. Choosing one plays a change of the minutes' ones now.</div></div>
+          <div class="seg" id="sway" role="group" aria-label="Way in"></div>
+        </div>
       </div>
       <div class="card" data-for-face="4">
         <div class="group-title">Look</div>
@@ -1116,6 +1120,9 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
       // as 2, the digits' spaced first (3), the default, and the animation's tongue (4) before random (3).
       // The pattern (scol): only the rows it uses - colour 1 for one colour, stripes and the gradient, colour 2
       // for the last two, width 1 for stripes, rainbow and coral, width 2 for stripes. The head always.
+      // The way in (sway) plays a change of the minutes' ones; with the spaced digits it has none but the near
+      // side, so its row hides.
+      var spacedOnly = function () { $('#swayRow').hidden = cur.sdg === 3; };
       var pattern = function () {
         var p = cur.scol;
         $('#snakeRowA').hidden = !(p === 0 || p === 1 || p === 2);
@@ -1123,7 +1130,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
         $('#snakeRowWA').hidden = !(p === 1 || p === 3 || p === 4);
         $('#snakeRowWB').hidden = p !== 1;
       };
-      [['shr', false, [2, 0, 1]], ['slk', false, [0, 1]], ['sdg', false, [3, 0, 1, 2]], ['scol', false, [0, 1, 2, 3, 4, 5], pattern], ['skn', false, [0, 1, 2, 4, 3]]].forEach(function (m) {
+      [['shr', false, [2, 0, 1]], ['sway', true, [0, 1]], ['slk', false, [0, 1]], ['sdg', false, [3, 0, 1, 2], spacedOnly], ['scol', false, [0, 1, 2, 3, 4, 5], pattern], ['skn', false, [0, 1, 2, 4, 3]]].forEach(function (m) {
         var el = $('#' + m[0]);
         if (!el.children.length) { m[2].forEach(function (v) { if (S.lists[m[0]][v] === undefined) { return; } var b = document.createElement('button'); b.type = 'button'; b.dataset.v = v; b.textContent = S.lists[m[0]][v]; el.appendChild(b); }); }
         setSeg(el, m[0], m[1], m[3]);
