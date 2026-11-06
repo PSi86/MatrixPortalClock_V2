@@ -1,11 +1,12 @@
 // The Snake watchface (src/snake.h, concept doc tab "Next game faces"): each
 // digit of HH:MM is a snake lying in its digit's shape. At a change the old
 // snake crawls out over the panel's nearer side and a new one comes in from
-// the same side and eats the dots on the new digit, growing into it; to a
-// full hour all four go, as one train out to the left or each to its side
-// at once. Planned backwards from the minute (PlannedFace) as the Muncher's
-// and the Aliens' changes. Between changes the snakes lie still, but for the
-// scenes now and then and those an input asks for.
+// the same side - or, as set, over the far side - and eats the dots on the
+// new digit, growing into it; to a full hour all four go, as one train out
+// to the left or each to its side at once. Planned backwards from the
+// minute (PlannedFace) as the Muncher's and the Aliens' changes. Between
+// changes the snakes lie still, but for the scenes now and then and those
+// an input asks for.
 #ifndef FACE_SNAKE_H
 #define FACE_SNAKE_H
 
@@ -34,6 +35,15 @@ const uint8_t SNAKE_HOUR_TRAIN   = 0;  // all four out to the left as one train,
 const uint8_t SNAKE_HOUR_AT_ONCE = 1;  // all four at once, each to its own side
 const uint8_t SNAKE_HOUR_RANDOM  = 2;  // one of the two, drawn each hour
 const uint8_t SNAKE_HOUR_COUNT   = 3;
+
+// The way a minute's new snakes come in (Peter, 2026-11-05: on the wall, with
+// the coils, the new snake's end lay beyond the side while it ate, so its
+// growth was not seen). Over the far side they crawl under the other digits
+// and are whole on the panel while they eat; in landscape with the coils and
+// the lines, the minutes' places (snake::Layout's farRow), else the near side.
+const uint8_t SNAKE_WAY_NEAR  = 0;     // over the side the old snake leaves by
+const uint8_t SNAKE_WAY_FAR   = 1;     // over the other side
+const uint8_t SNAKE_WAY_COUNT = 2;
 
 // The snakes' colours (Peter, 2026-10-23). In shades of one green the solid
 // look did not show how a snake moves - its coils touch and look alike; a
@@ -68,14 +78,14 @@ struct SnakeSettings {
   uint8_t  widthB;      // cells of colour 2 in the stripes
   uint8_t  head[3];     // the head's colour
   uint8_t  digits;      // snake::Digits
-  uint8_t  spare;
+  uint8_t  wayIn;       // SNAKE_WAY_* (2026-11-06; the blob's spare byte until then, always 0: the near side)
 };
 static_assert(sizeof(SnakeSettings) == 20, "the stored blob keeps its size");
 
 // Spaced digits and solid snakes by default on both clocks (Peter, 2026-10-24).
 const SnakeSettings SNAKE_DEFAULTS = {
   SNAKE_SETTINGS_MAGIC, SNAKE_SETTINGS_REV, snake::LOOK_SOLID, SNAKE_ANIM_RANDOM, SNAKE_HOUR_RANDOM, SNAKE_PATTERN_ONE,
-  { 40, 220, 60 }, { 255, 220, 0 }, 2, 2, { 255, 255, 255 }, snake::DIGITS_SPACED, 0
+  { 40, 220, 60 }, { 255, 220, 0 }, 2, 2, { 255, 255, 255 }, snake::DIGITS_SPACED, SNAKE_WAY_NEAR
 };
 
 // The Snake settings for the web app and the store (face.h).
@@ -84,11 +94,13 @@ const char *const SNAKE_SKN_LABELS[] = { "Tail chase", "Apple", "Last digit agai
 const char *const SNAKE_SHR_LABELS[] = { "Train", "All four at once", "Random each hour" };              // SNAKE_HOUR_*
 const char *const SNAKE_SCOL_LABELS[] = { "One colour", "Stripes", "Gradient", "Rainbow", "Coral", "Head to tail" };   // SNAKE_PATTERN_*
 const char *const SNAKE_SDG_LABELS[] = { "Coils", "Lines", "Narrow lines", "Spaced" };   // snake::Digits
+const char *const SNAKE_SWAY_LABELS[] = { "Near side", "Far side" };                      // SNAKE_WAY_*
 static_assert(sizeof(SNAKE_SLK_LABELS) / sizeof(SNAKE_SLK_LABELS[0]) == snake::LOOK_COUNT, "a name per look");
 static_assert(sizeof(SNAKE_SKN_LABELS) / sizeof(SNAKE_SKN_LABELS[0]) == SNAKE_ANIM_COUNT, "a name per scene");
 static_assert(sizeof(SNAKE_SHR_LABELS) / sizeof(SNAKE_SHR_LABELS[0]) == SNAKE_HOUR_COUNT, "a name per hour change");
 static_assert(sizeof(SNAKE_SCOL_LABELS) / sizeof(SNAKE_SCOL_LABELS[0]) == SNAKE_PATTERN_COUNT, "a name per pattern");
 static_assert(sizeof(SNAKE_SDG_LABELS) / sizeof(SNAKE_SDG_LABELS[0]) == snake::DIGITS_COUNT, "a name per family of digits");
+static_assert(sizeof(SNAKE_SWAY_LABELS) / sizeof(SNAKE_SWAY_LABELS[0]) == SNAKE_WAY_COUNT, "a name per way in");
 const SettingParam SNAKE_PARAMS[] = {
   { "slk",  SETTING_FIELD(SnakeSettings, look),      PARAM_CHOICE, PARAM_LIVE | PARAM_REDRAW, 0, snake::LOOK_COUNT - 1,   LOAD_DEFAULT, SNAKE_SLK_LABELS },
   { "sdg",  SETTING_FIELD(SnakeSettings, digits),    PARAM_CHOICE, PARAM_LIVE | PARAM_REDRAW, 0, snake::DIGITS_COUNT - 1, LOAD_DEFAULT, SNAKE_SDG_LABELS },
@@ -100,6 +112,7 @@ const SettingParam SNAKE_PARAMS[] = {
   { "sch",  SETTING_FIELD(SnakeSettings, head),      PARAM_COLOUR, PARAM_LIVE | PARAM_REDRAW, 0, 0,                       LOAD_KEEP,    nullptr },
   { "skn",  SETTING_FIELD(SnakeSettings, animation), PARAM_CHOICE, PARAM_LIVE | PARAM_PLAYS,  0, SNAKE_ANIM_COUNT - 1,    LOAD_DEFAULT, SNAKE_SKN_LABELS },
   { "shr",  SETTING_FIELD(SnakeSettings, hour),      PARAM_CHOICE, PARAM_LIVE | PARAM_PLAYS,  0, SNAKE_HOUR_COUNT - 1,    LOAD_DEFAULT, SNAKE_SHR_LABELS },
+  { "sway", SETTING_FIELD(SnakeSettings, wayIn),     PARAM_CHOICE, PARAM_LIVE,                0, SNAKE_WAY_COUNT - 1,     LOAD_DEFAULT, SNAKE_SWAY_LABELS },
 };
 
 // The colours of the fixed patterns, a swallowed apple's bulge, the apple
@@ -165,6 +178,10 @@ class SnakeFace : public PlannedFace {
       memcpy(_shown, d, 4);
       _plannedFor = 0;
       _dirty = true;
+    }
+    if (_s.wayIn != _seenWay) {
+      _seenWay = _s.wayIn;
+      _plannedFor = 0;                    // the next change planned anew, the new way; one under way ends as it began
     }
     if (_running) {
       long since = (long)(now.ms - _startAt);
@@ -271,7 +288,8 @@ class SnakeFace : public PlannedFace {
   // as it would be planned, on a plan of its own on the heap (2.2 KB, only
   // while it is used); a full hour drawn at random counts as the train, the
   // longer. Without the memory, the longest the self-test finds in any
-  // family of digits (a minute 7.8 s, the hour 19.9 s, both in the coils).
+  // family of digits (a minute 8.6 s over the far side, the hour 19.9 s,
+  // both in the coils).
   // The new time stands as the minute begins.
   FaceSpan changeSpan(const FaceNow &now, time_t minute) const override {
     FaceSpan s = { 0, 0 };
@@ -283,14 +301,14 @@ class SnakeFace : public PlannedFace {
     }
     snake::Plan *p = new (std::nothrow) snake::Plan();
     if (!p) {
-      s.lead = hour ? 20000UL : 8000UL;
+      s.lead = hour ? 20000UL : 9000UL;
       return s;
     }
     uint8_t from[4], to[4];
     faceDigits(minute - 60, true, from, snake::NO_DIGIT);
     faceDigits(minute, true, to, snake::NO_DIGIT);
     snake::HourMode mode = _s.hour == SNAKE_HOUR_AT_ONCE ? snake::HOUR_AT_ONCE : snake::HOUR_TRAIN;
-    if (snake::planChange(*p, _upright, from, to, hour, mode, _digits)) {
+    if (snake::planChange(*p, _upright, from, to, hour, mode, _digits, far())) {
       s.lead = (unsigned long)p->stands * p->L->stepMs();
     }
     delete p;
@@ -344,6 +362,8 @@ class SnakeFace : public PlannedFace {
 
   // The look as set, a stored value out of range as the line.
   uint8_t look() const { return _s.look < snake::LOOK_COUNT ? _s.look : snake::LOOK_LINE; }
+  // The way in set: the far side (the planner takes it where the layout has it).
+  bool far() const { return _s.wayIn == SNAKE_WAY_FAR; }
 
   // The places whose head can flick its tongue straight ahead over the digits
   // on show (bit k).
@@ -421,8 +441,8 @@ class SnakeFace : public PlannedFace {
       sc = SCENE_TONGUE;
       what = "the tongue";
     } else {
-      if (snake::planSwap(_plan, L, _shown, _shown, 1 << 3, _digits)) { len = (uint32_t)_plan.gone * L.stepMs(); }
-      what = "the minutes' ones again";
+      if (snake::planSwap(_plan, L, _shown, _shown, 1 << 3, _digits, far())) { len = (uint32_t)_plan.gone * L.stepMs(); }
+      what = far() && snake::farFits(L, 1 << 3) ? "the minutes' ones again, over the far side" : "the minutes' ones again";
     }
     _plannedFor = 0;                          // the change is planned anew afterwards
     if (len == 0 || !faceFits(plannedStart, now.ms, len, asked ? 0 : FACE_GUARD_MS)) { return false; }
@@ -458,7 +478,8 @@ class SnakeFace : public PlannedFace {
   void idle(const FaceNow &now, const uint8_t d[4]) {
     if (memcmp(_shown, d, 4) != 0) {
       bool lost = d[0] == snake::NO_DIGIT && _shown[0] != snake::NO_DIGIT;
-      if (!lost && snake::planChange(_plan, _upright, _shown, d, false, snake::HOUR_TRAIN, _digits) && _plan.gone) {
+      if (!lost && snake::planChange(_plan, _upright, _shown, d, false, snake::HOUR_TRAIN, _digits, far()) &&
+          _plan.gone) {
         startScene(now, SCENE_CHANGE, (uint32_t)_plan.gone * _plan.L->stepMs());
       } else {
         memcpy(_shown, d, 4);                 // the time lost: dashes at once
@@ -474,7 +495,7 @@ class SnakeFace : public PlannedFace {
       faceDigits(next, now.set, to, snake::NO_DIGIT);
       bool hour = faceHourShows(next);   // in Calm, as an option, the places that change, as at a minute
       _plannedMode = hourMode();
-      _plannedStand = snake::planChange(_plan, _upright, _shown, to, hour, _plannedMode, _digits)
+      _plannedStand = snake::planChange(_plan, _upright, _shown, to, hour, _plannedMode, _digits, far())
                     ? (uint32_t)_plan.stands * _plan.L->stepMs() : 0;
       _plannedHour = hour;
       _plannedFor = next;
@@ -621,6 +642,7 @@ class SnakeFace : public PlannedFace {
   snake::HourMode _plannedMode = snake::HOUR_TRAIN;
   bool     _logStand = false;           // the running scene is the time's change: log when it stands
   uint8_t  _seenHour = 0xFF;            // the hour change setting at the last pass
+  uint8_t  _seenWay = 0xFF;             // ... and the way in
   bool     _colonOn = false;
   uint32_t _key = 0;                    // what the picture depends on in this pass
   uint32_t _drawnKey = 0;               // ... and in the frame drawn last

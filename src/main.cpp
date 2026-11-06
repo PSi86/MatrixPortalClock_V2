@@ -1019,8 +1019,9 @@ SnakeFace snakeFace(snakeSettings);
 
 #if defined(CLOCK_DEBUG)
 // The planner on the clock itself: every minute change of a day in both
-// orientations must be planned, every full hour both ways, and a sample of
-// them checked from scratch (snake::planRight, about 10 ms each here). Every
+// orientations must be planned - in landscape both ways in, near and far -
+// every full hour both ways, and a sample of them checked from scratch
+// (snake::planRight, about 10 ms each here). Every
 // plan was compared with the Python planner on the PC
 // (tools.local/game_faces/host/compare.py); this is to see the same on the board.
 void snakeSelfTest(uint8_t digits) {
@@ -1035,9 +1036,11 @@ void snakeSelfTest(uint8_t digits) {
       uint16_t n = (m + 1) % 1440;
       uint8_t to[4] = { (uint8_t)(n / 600), (uint8_t)(n / 60 % 10), (uint8_t)(n % 60 / 10), (uint8_t)(n % 10) };
       bool hour = n % 60 == 0;
-      for (uint8_t mode = 0; mode < (hour ? 2 : 1); mode++) {
+      // the hour: the train and all at once; a minute in landscape: over the near and the far side
+      uint8_t ways = hour || !up ? 2 : 1;
+      for (uint8_t w = 0; w < ways; w++) {
         unsigned long t = millis();
-        bool ok = snake::planChange(*p, up, from, to, hour, (snake::HourMode)mode, digits);
+        bool ok = snake::planChange(*p, up, from, to, hour, (snake::HourMode)(hour ? w : 0), digits, !hour && w == 1);
         if (millis() - t > worstMs) { worstMs = millis() - t; }
         plans++;
         if (ok && (hour || m % 60 == 7)) { checked++; ok = snake::planRight(*p); }

@@ -2172,6 +2172,29 @@ place nearer the edge uses the lane rows right below the digits and the inner
 one the two under them. A change takes 3.0-7.0 s with the spaced digits
 (upright 2.6-5.9 s), 4.2-7.8 s with the coils.
 
+**Way in** (`sway`): *Near side* (the default, as above) or *Far side* - a
+minute's new snake comes in over the other side and crawls along a lane under
+the other digits to its own, while its old snake still leaves over the nearer
+side (Peter, 2026-11-05: on the wall, with the coils, a new snake's end lay
+beyond the side while it ate, so its growth was not seen). A snake's end is only
+ever on the panel along its way in, about 8 cells of the coils from the near
+side and about 26 from the far one, so over the far side the whole snake is on
+the panel while it eats, its end moving at half the head's pace as before (fewer
+dots with more growth each were tried on the PC first: the snake was whole
+sooner, but its end crept). When the tens and the ones change together, the
+ones' snake takes the lowest row, under the tens' one, so that the two do not
+cross. Coils: the whole new snake on the panel for 100 % of its eating at the
+minute changes (over the near side 43 %); a change of the ones alone is mostly
+no longer, at most 1.6 s, x9 to y0 0.6-2.5 s longer (6.2-8.6 s). It applies to
+the minute changes in landscape with the coils and both kinds of lines - the
+minutes' places are the only ones with a far lane row (`farRow` in
+`src/snake.h`) - and to *Last digit again*; upright, with the spaced digits
+(over the far side some of their changes cannot be planned), at a full hour and
+whenever an hours' digit moves too (the first time after the dashes, a jump of
+the time) the snakes come in over the near side. Choosing one in
+the web app plays a change of the minutes' ones; the row hides with the spaced
+digits.
+
 **The full hour** (`shr`): all four go. *Train* - the old four leave over the
 left side as one train along the lowest lane row, the new four come in from the
 left behind it, the far left first (spaced 7.6-11.8 s, upright 5.4-8.2 s; coils
@@ -2222,7 +2245,9 @@ all of them). A colour per digit, green and black stripes (black is off on the
 panel: the time could not be read), and the looks *Darker to the tail* and
 *Rings* were tried and went - a gradient and stripes do the same. The settings
 blob is revision 5 (20 bytes); the trial builds before the face was released
-had revisions 1 to 4, which are not carried over.
+had revisions 1 to 4, which are not carried over. Its last byte was spare and
+always 0 until it took the way in (2026-11-06): stored settings read as the near
+side, and an older firmware leaves the byte alone.
 
 **Watchface animation** (`skn`): *Tail chase* (head and tail lie side by side,
 so a snake crawls once round its own digit, which stays whole), *Apple* (an
