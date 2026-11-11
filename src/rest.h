@@ -18,7 +18,9 @@
    or Off; while Off one plays over the black panel, which is black again
    after it. GIFs of their own accord never come while the clock is calm or
    off. Off is a screen over the face (SCREEN_OFF), which the panel shows
-   black (PanelCanvas::setOff()); the hotspot's screens go first.
+   black (PanelCanvas::setOff()); the face goes on into the canvas beneath
+   it, so the web app's picture shows it live, with a sign that the panel is
+   off. The hotspot's screens go first.
    ------------------------------------------------------------------------- */
 #ifndef REST_H
 #define REST_H

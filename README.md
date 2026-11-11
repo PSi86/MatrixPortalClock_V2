@@ -516,6 +516,10 @@ web app's section **Calm and off**:
   clock - a button, a knock, a gesture - shows the time for **Time on show**
   (10 s unless set, 3 to 120) and does nothing else; while the time shows,
   inputs work as always and keep it on show. The hotspot's screens go first.
+  The face goes on beneath Off, drawn only into the picture the web app shows:
+  there it keeps the time and shows what a setting changes, framed, with the
+  sign **Panel off** above it and why (the room is dark, the hours set for Off,
+  chosen here or in Home Assistant), so the black panel is no riddle.
 - **GIFs asked for** - from the web app, Home Assistant or an input set to play
   a GIF: **Always** (the default), **Not while off** or **Not while calm or
   off**. One that plays while the clock is off plays over the black panel,
@@ -1514,7 +1518,7 @@ form-encoded POSTs, answers are JSON:
 |---|---|
 | `GET /api/state` | settings, the lists the page offers, hardware found (with `hw.sensors`: every sensor the board supports, found on which try, missing), WiFi, system |
 | `GET /api/status` | brightness, light, time and its source, rotation, screen, Normal, Calm or Off and why (`rest`), the room from Home Assistant (`temp`, `hum`, each only when it has one), the info band's sources and items, on the wall clock the band's turns as it takes them (`turns`: text, icon, `from`, `until`, `alert`, `now`), the Home Assistant link (`haStatus`, with `shown`: the Info section's switch), whether a new firmware is on trial (`fwTrial`) (the page asks every 2 s) |
-| `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview) |
+| `GET /api/panel` | the panel picture, 64x32 RGB565, 4096 bytes (every 200 ms for the page's preview); while Off the face as it would show, the panel itself black |
 | `POST /api/live` | tries settings live, in RAM only; when a preview was asked for (`pv=1`, or a new watchface animation), `{"preview": "played"}` or `"refused"` - it plays now or not at all |
 | `POST /api/save` | stores everything the page shows |
 | `POST /api/discard` | puts the stored settings back, and the face shows them as a preview (the same answer) |
