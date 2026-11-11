@@ -89,6 +89,14 @@ main { min-width: 0; display: grid; gap: 28px; }
 .screen canvas { width: 100%; height: auto; display: block; max-width: 100%; }
 .screen canvas.tall { width: auto; height: 260px; max-height: 60vh; }
 .screen-note { position: absolute; left: 12px; right: 12px; bottom: 10px; text-align: center; font-size: 12.5px; color: #c9d1db; text-shadow: 0 1px 2px #000; }
+/* The clock Off: its panel black, the picture goes on - framed, with the sign above it, never over it.
+   The screen is dark in both themes, so the sign keeps fixed colours. */
+.screen.is-off { box-shadow: inset 0 0 0 2px #e8a92a; gap: 10px; }
+.screen-off { display: flex; align-items: center; gap: 8px; max-width: 100%; padding: 6px 12px; border-radius: 999px;
+  background: #2a1d05; border: 1px solid #e8a92a; color: #f6e7c8; font-size: 13px; line-height: 1.35; }
+.screen-off[hidden] { display: none; }
+.screen-off svg { flex: none; width: 16px; height: 16px; color: #ffbf3f; }
+.screen-off b { color: #ffd27a; font-weight: 650; }
 .preview-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); }
 .meta { padding: 10px 12px; min-width: 0; }
 .meta + .meta { border-left: 1px solid var(--line); }
@@ -233,14 +241,14 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
 
   <div class="preview-rail">
     <div class="preview">
-      <div class="screen"><canvas id="led" width="640" height="320" role="img" aria-label="The clock's panel"></canvas><div class="screen-note" id="screenNote" hidden></div></div>
+      <div class="screen"><div class="screen-off" id="screenOff" role="status" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 3v8"/><path d="M6.6 6.6a8 8 0 1 0 10.8 0"/></svg><span><b>Panel off:</b> <span id="screenOffWhy"></span></span></div><canvas id="led" width="640" height="320" role="img" aria-label="The clock's panel"></canvas><div class="screen-note" id="screenNote" hidden></div></div>
       <div class="preview-meta">
         <div class="meta"><div class="meta-k">Brightness</div><div class="meta-v" id="mBright">–</div></div>
         <div class="meta"><div class="meta-k">Light</div><div class="meta-v" id="mLux">–</div></div>
         <div class="meta"><div class="meta-k">Time</div><div class="meta-v" id="mTime">–</div></div>
         <div class="meta wide" id="mRoomBox" hidden><div class="meta-k">Room, from Home Assistant</div><div class="meta-v" id="mRoom">–</div></div>
       </div>
-      <div class="preview-note">The panel as the clock draws it now, shown at full strength. What you change shows on the clock at once; Save keeps it.</div>
+      <div class="preview-note" id="previewNote">The panel as the clock draws it now, shown at full strength. What you change shows on the clock at once; Save keeps it.</div>
     </div>
   </div>
 
@@ -915,12 +923,29 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     if (r.level === 'off') { t += r.lit ? ' The panel is lit for an input now.' : ' The panel is black.'; }
     $('#restNow').textContent = t;
   }
+  // The clock Off with its panel black (not lit for an input, nor by a GIF over it): the picture goes on - the
+  // clock draws its face on beneath Off - framed, with a sign above it, so the black panel is no riddle and
+  // the settings can be tried as always (Peter, 2026-11-11).
+  var PREVIEW_NOTE = $('#previewNote').textContent;
+  function showPanelOff(r) {
+    var off = r.level === 'off' && !r.lit;
+    var why = r.why === 'dark' ? 'the room is dark.' : r.why === 'hours' ? 'the hours set for Off.'
+      : r.why === 'set' ? (r.by === 'ha' ? 'chosen in Home Assistant.' : r.by === 'web' ? 'chosen here.' : 'chosen before the clock last started.')
+      : 'black now.';
+    $('#screenOff').hidden = !off;
+    $('#screenOffWhy').textContent = why;
+    $('.screen').classList.toggle('is-off', off);
+    $('#led').setAttribute('aria-label', off ? 'What the clock would show; its panel is off' : 'The clock\'s panel');
+    $('#previewNote').textContent = off
+      ? 'The clock is Off and its panel black. The picture shows what it would show: what you change shows here at once, and on the panel once it is on again; Save keeps it.'
+      : PREVIEW_NOTE;
+  }
   function bindRestMode() {
     $$('#restMode button').forEach(function (b) {
       if (b.dataset.bound) { return; }
       b.dataset.bound = 1;
       b.addEventListener('click', function () {
-        api('/api/rest', enc({ mode: b.dataset.m })).then(function (j) { showRest(j.rest); })
+        api('/api/rest', enc({ mode: b.dataset.m })).then(function (j) { showRest(j.rest); showPanelOff(j.rest); })
           .catch(function (e) { toast(e.message || 'The clock did not answer.'); });
       });
     });
@@ -1430,6 +1455,7 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
     $('#timeDot').className = 'dot ' + (st.clockSet ? 'ok' : 'warn');
     rot = st.rot; screenGif = st.gif;
     if (st.rest && S && has('dof')) { showRest(st.rest); }
+    if (st.rest) { showPanelOff(st.rest); }
     var note = $('#screenNote');
     note.hidden = !st.gif;
     note.textContent = 'A GIF is playing; it is drawn past this picture.';

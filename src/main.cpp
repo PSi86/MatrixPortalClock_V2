@@ -552,10 +552,14 @@ void loop(void) {
   gifUpdate();          // a GIF of its own accord when one is due
   extrasUpdate();       // the face's extra when one is due
   switch (screen) {
+    // Off: the face goes on into the canvas alone - the panel stays black
+    // (PanelCanvas::setOff()) - so the web app's picture shows it live.
 #if defined(CLOCK_DEBUG)
-    case SCREEN_FACE: { uint32_t passStart = micros(); faceUpdate(); facePassStats(micros() - passStart); } break;
+    case SCREEN_FACE:
+    case SCREEN_OFF:  { uint32_t passStart = micros(); faceUpdate(); facePassStats(micros() - passStart); } break;
 #else
-    case SCREEN_FACE:   faceUpdate(); break;
+    case SCREEN_FACE:
+    case SCREEN_OFF:    faceUpdate(); break;
 #endif
     case SCREEN_GIF:    drawGif(); break;
     case SCREEN_MENU:   if (panelDirty) { drawMenu(); }   break;   // static: redrawn on a change only
@@ -564,7 +568,7 @@ void loop(void) {
       break;
     case SCREEN_EDITOR: if (panelDirty || editorMoving()) { drawEditor(); } break;
     case SCREEN_GESTURE_TEST: gestureTestUpdate(); if (panelDirty) { drawGestureTest(); } break;
-    default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay(); Off draws nothing
+    default:            break;   // the boot screens belong to setup(), the hotspot ones to updateApDisplay()
   }
 #if BAND_ON_PANEL
   bandUpdate();         // the wall's info band below the face
@@ -578,6 +582,12 @@ void loop(void) {
 // Whether a screen shows the clock face.
 bool screenShowsFace(Screen s) {
   return s == SCREEN_FACE || s == SCREEN_HOTSPOT_PREVIEW;
+}
+
+// Whether the face is stepped under a screen: where it shows, and while Off,
+// which draws it into the canvas alone (for the web app's picture).
+static bool screenStepsFace(Screen s) {
+  return screenShowsFace(s) || s == SCREEN_OFF;
 }
 
 // The screen beneath the one on top; the face when there is none.
@@ -613,12 +623,14 @@ void showScreen(Screen next) {
   // The info screen is static and drawn once, at once - before the slow radio
   // bring-up in startAPMode() freezes the loop.
   if (next == SCREEN_HOTSPOT_INFO) { drawAPScreen(); }
-  // A face that was hidden is not stepped, so it catches up before it is drawn.
-  if (!screenShowsFace(prev) && screenShowsFace(next)) { faceCatchUp(); }
+  // A face that was hidden is not stepped, so it catches up before it is drawn
+  // again - on the panel, or Off into the canvas (after a GIF over Off).
+  if (!screenStepsFace(prev) && screenStepsFace(next)) { faceCatchUp(); }
   // After Off - an input's few seconds, or the night - everything afresh, as
   // when the face was chosen: the Muncher, the Aliens and the Snake show the
   // time at once instead of first changing to it from the time they showed,
-  // the Tetris digits drop in.
+  // the Tetris digits drop in. (Off steps the face into the canvas, so it is
+  // up to the time; a change it was playing there ends.)
   if (prev == SCREEN_OFF && screenShowsFace(next)) { faceFor(settings.watchface).enter(faceMoment(), ENTER_CHOSEN); }
   if (next == SCREEN_FACE) { panelFaceSince = millisNow; }   // the plain face's rest starts over
   // Between the list and an editor the picture slides; any other change clears
